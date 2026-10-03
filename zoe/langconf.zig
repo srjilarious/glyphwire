@@ -24,6 +24,8 @@ const glyphwire = @import("glyphwire");
 const syntax = @import("applib").syntax;
 const themes = @import("applib").theme;
 const themeconf = @import("themeconf");
+const keybind = @import("applib").keybind;
+const actions = @import("actions.zig");
 const editor = @import("editor.zig");
 const lsp = @import("lsp.zig");
 
@@ -161,6 +163,9 @@ pub const Config = struct {
     /// probed on `PATH` at startup; one that isn't installed is simply not
     /// started (see `lsp.Pool.start`).
     lsp_servers: []const lsp.ServerConfig = &default_lsp_servers,
+    /// `config.keys`, validated, in the arena: applied over the default
+    /// bindings by `actions.Keymaps.apply`. See `readKeys`.
+    keys: []const actions.Override = &.{},
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -260,6 +265,7 @@ pub fn parseSource(
     cfg.show_whitespace = readFlag(lua, "show_whitespace", cfg.show_whitespace);
     cfg.tab_tooltip_delay_ms = readMs(lua, "tab_tooltip_delay_ms", 0, cfg.tab_tooltip_delay_ms);
     readLsp(lua, a, &cfg);
+    cfg.keys = readKeys(lua, a);
     return cfg;
 }
 
@@ -410,13 +416,110 @@ fn readLangs(lua: *Lua, a: std.mem.Allocator) []const syntax.LangDef {
         }
         lua.pop(1); // entry.extensions value (table or whatever it was)
 
+        // entry.comment (optional): the line-comment marker for Ctrl+/.
+        var comment: ?[]const u8 = null;
+        if (lua.getField(-1, "comment") == .string) {
+            if (lua.toString(-1)) |c| {
+                if (c.len > 0) comment = a.dupe(u8, c) catch null;
+            } else |_| {}
+        }
+        lua.pop(1);
+
         if (exts.items.len == 0) continue;
-        out.append(a, .{ .name = name, .extensions = exts.toOwnedSlice(a) catch continue }) catch continue;
+        out.append(a, .{
+            .name = name,
+            .extensions = exts.toOwnedSlice(a) catch continue,
+            .line_comment = comment,
+        }) catch continue;
     }
 
     if (out.items.len == 0) return &syntax.default_langs;
     out.appendSlice(a, &syntax.default_langs) catch {};
     return out.toOwnedSlice(a) catch &syntax.default_langs;
+}
+
+/// `config.keys`: per-mode tables of chord -> action name, or `false` to
+/// take a chord away (binding `.none`, which also hides the global
+/// binding when it's in a mode table):
+///
+///     keys = {
+///         global = { ["ctrl+h"] = false, ["alt+h"] = "toggleHidden" },
+///         insert = { ["ctrl+d"] = "deleteWordForward" },
+///     }
+///
+/// The tables are `global`, `normal`, `visual` and `insert`; see
+/// `actions.zig` for the action names. A chord that doesn't parse, an
+/// unknown action or an unknown table is logged and skipped.
+fn readKeys(lua: *Lua, a: std.mem.Allocator) []const actions.Override {
+    const t = lua.getField(-1, "keys");
+    defer lua.pop(1);
+    if (t != .table) {
+        if (t != .nil) std.log.warn("zoe: {s} `keys` is not a table; ignored", .{conf_name});
+        return &.{};
+    }
+
+    var out: std.ArrayList(actions.Override) = .empty;
+    lua.pushNil();
+    while (lua.next(-2)) {
+        // Key at -2, value at -1. Only read with `toString` on an actual
+        // string key: it would convert a number key in place and break
+        // `next`.
+        defer lua.pop(1);
+        if (lua.typeOf(-2) != .string) continue;
+        const name = lua.toString(-2) catch continue;
+        const scope = std.meta.stringToEnum(actions.Scope, name) orelse {
+            std.log.warn("zoe: {s} keys.{s}: not a key table (global, normal, visual, insert); ignored", .{ conf_name, name });
+            continue;
+        };
+        if (lua.typeOf(-1) != .table) {
+            std.log.warn("zoe: {s} keys.{s} is not a table; ignored", .{ conf_name, name });
+            continue;
+        }
+        readKeyTable(lua, a, scope, name, &out);
+    }
+    // Lua's table order is unspecified; sort so the same config always
+    // applies the same way (it only matters when two entries spell the
+    // same chord differently).
+    std.mem.sort(actions.Override, out.items, {}, overrideLess);
+    return out.toOwnedSlice(a) catch &.{};
+}
+
+fn overrideLess(_: void, x: actions.Override, y: actions.Override) bool {
+    if (x.scope != y.scope) return @intFromEnum(x.scope) < @intFromEnum(y.scope);
+    return std.mem.lessThan(u8, x.chord.key(), y.chord.key()) or
+        (std.mem.eql(u8, x.chord.key(), y.chord.key()) and @intFromEnum(x.action) < @intFromEnum(y.action));
+}
+
+/// One `keys.<scope>` table, on top of the stack.
+fn readKeyTable(lua: *Lua, a: std.mem.Allocator, scope: actions.Scope, scope_name: []const u8, out: *std.ArrayList(actions.Override)) void {
+    lua.pushNil();
+    while (lua.next(-2)) {
+        defer lua.pop(1);
+        if (lua.typeOf(-2) != .string) continue;
+        const text = lua.toString(-2) catch continue;
+        const chord = keybind.Chord.parse(text) catch |err| {
+            std.log.warn("zoe: {s} keys.{s}[\"{s}\"]: {t}; ignored", .{ conf_name, scope_name, text, err });
+            continue;
+        };
+        const action: actions.Action = switch (lua.typeOf(-1)) {
+            .string => blk: {
+                const name = lua.toString(-1) catch continue;
+                break :blk std.meta.stringToEnum(actions.Action, name) orelse {
+                    std.log.warn("zoe: {s} keys.{s}[\"{s}\"] = \"{s}\": unknown action; ignored", .{ conf_name, scope_name, text, name });
+                    continue;
+                };
+            },
+            .boolean => if (lua.toBoolean(-1)) {
+                std.log.warn("zoe: {s} keys.{s}[\"{s}\"] = true means nothing; use an action name or false", .{ conf_name, scope_name, text });
+                continue;
+            } else .none,
+            else => {
+                std.log.warn("zoe: {s} keys.{s}[\"{s}\"] must be an action name or false; ignored", .{ conf_name, scope_name, text });
+                continue;
+            },
+        };
+        out.append(a, .{ .scope = scope, .chord = chord, .action = action }) catch return;
+    }
 }
 
 /// `config.lsp`: the master switch and the server list, merged by name over

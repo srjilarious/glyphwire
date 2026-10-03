@@ -18,8 +18,8 @@
 -- wrong type is logged and the default stands. Any parse error is logged
 -- and whatever parsed before it is kept.
 --
--- zoe.conf.lua carries syntax-highlighting, the colour theme and the
--- editor's display settings. Keybindings and the pane layout are not
+-- zoe.conf.lua carries syntax-highlighting, the colour theme, the
+-- editor's display settings and its key bindings. The pane layout is not
 -- configurable yet.
 
 -- config = {
@@ -44,9 +44,15 @@
 --     --   bash              .sh .bash .zsh
 --     --   markdown          .md .markdown
 --     --   markdown_inline   (used via injections, no extensions)
+--     --
+--     -- `comment` sets the line-comment marker Ctrl+/ toggles. The bundled
+--     -- languages have one already (`//` for zig and c, `#` for python,
+--     -- toml and bash, `--` for lua; none for json and markdown), and an
+--     -- entry without `comment` keeps its language's.
 --     languages = {
 --         -- { name = "c",    extensions = { ".c", ".h", ".ino" } },
 --         -- { name = "toml", extensions = { ".toml", ".conf" } },
+--         -- { name = "bash", extensions = { ".envrc" }, comment = "#" },
 --     },
 --
 --     ---- Grammar search path -------------------------------------
@@ -202,5 +208,35 @@
 --     -- Named themes for `theme` and `:theme`, as in theme.lua.
 --     themes = {
 --         -- mine = { base = "nord", palette = { bg = "#262a33" } },
+--     },
+--
+--     ---- Keys ---------------------------------------------------------
+--
+--     -- Rebind any chord or named key by action name, or set one to
+--     -- `false` to take it away. Four tables: a key is looked up in the
+--     -- editor mode's table first (`normal`, `visual`, `insert`; a
+--     -- Shift+arrow selection made in insert mode reads `insert`), then
+--     -- in `global`, so `false` in a mode table also hides the global
+--     -- binding there. Entries go over the defaults; list only changes.
+--     --
+--     -- Chords are `mod+mod+key`: ctrl, alt, shift, super; keys are
+--     -- glyphwire key names (`left`, `page_down`, `backspace`, `slash`,
+--     -- `grave_accent`, `F5`) or the aliases `esc`, `del`, `pgdn`, `/`,
+--     -- `-`, ... Modifiers must match exactly: `shift+tab` is not `tab`.
+--     --
+--     -- Unmodified letters in normal and visual mode (`dd`, `gg`) are
+--     -- vim's grammar and not rebindable here, nor are Escape, the `:`
+--     -- line's editing keys, the file tree's keys and the key after
+--     -- Ctrl+W. docs/zoe-keys.md lists every action and its defaults.
+--     keys = {
+--         global = {
+--             -- ["ctrl+h"] = false,
+--             -- ["alt+h"]  = "toggleHidden",
+--         },
+--         normal = {},
+--         visual = {},
+--         insert = {
+--             -- ["ctrl+d"] = "deleteWordForward",
+--         },
 --     },
 -- }

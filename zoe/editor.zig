@@ -28,6 +28,7 @@ const buffer = @import("buffer.zig");
 const motion = @import("motion.zig");
 const display = @import("display.zig");
 const search = @import("search.zig");
+const actions = @import("actions.zig");
 
 const Buffer = buffer.Buffer;
 const Pos = buffer.Pos;
@@ -48,7 +49,11 @@ const Pos = buffer.Pos;
 /// with what you type: a `:` line is inert until Enter, while a `/` line
 /// moves the cursor on every keystroke (vim's `incsearch`) and Escape has
 /// to put it back.
-pub const Mode = enum { normal, insert, command, visual, visual_line, search };
+/// `select` is a selection made with Shift+arrows from insert mode --
+/// VSCode's kind, and vim's select mode: it covers `[anchor, cursor)`
+/// rather than the cell under the cursor, typing replaces it, and an
+/// unshifted motion drops it back into insert mode.
+pub const Mode = enum { normal, insert, command, visual, visual_line, search, select };
 
 /// Ceiling on `tab_width`, so an expanding Tab can build its run of
 /// spaces on the stack and a nonsense `:set tabwidth=9999` can't make one
@@ -288,6 +293,18 @@ pub const Editor = struct {
     /// across the round trip so `u` puts both halves back at once.
     undo_join_next: bool = false,
 
+    /// The key bindings `feedKey` looks named keys up in -- the session's,
+    /// set by `zoe/ui.zig` with `zoe.conf.lua`'s `keys` applied. Null in a
+    /// bare editor (the tests), which builds `own_keymaps` from the
+    /// defaults on its first key instead.
+    keymaps: ?*const actions.Keymaps = null,
+    own_keymaps: ?actions.Keymaps = null,
+
+    /// The language's line-comment marker (`//`, `#`), for Ctrl+/. Set by
+    /// the host from the file's extension; null where the language has
+    /// none, or for a file no language claims. Borrowed.
+    line_comment: ?[]const u8 = null,
+
     pub fn init(alloc: std.mem.Allocator) !Editor {
         return .{ .alloc = alloc, .buf = try Buffer.init(alloc) };
     }
@@ -308,6 +325,7 @@ pub const Editor = struct {
         self.yank.deinit(self.alloc);
         self.search_pat.deinit(self.alloc);
         if (self.path) |p| self.alloc.free(p);
+        if (self.own_keymaps) |*k| k.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -379,6 +397,12 @@ pub const Editor = struct {
                     try self.insertText(rest);
                     return self.takeYankPending();
                 },
+                // Typing over a selection replaces it.
+                .select => {
+                    try self.dropSelectSpan();
+                    try self.insertText(rest);
+                    return self.takeYankPending();
+                },
                 .command => {
                     _ = try self.cmdline.insert(self.alloc, rest);
                     return self.takeYankPending();
@@ -441,116 +465,12 @@ pub const Editor = struct {
         }
 
         switch (self.mode) {
-            // Visual mode moves the same way normal mode does; only the
-            // moving end (`cursor`) changes, the anchor stays put, and the
-            // selection is recomputed from the two (`selectionSpan`).
-            .normal, .visual, .visual_line => {
-                // PageDown/PageUp, and vim's Ctrl-D / Ctrl-U half-page
-                // keys, all move by `page_lines`. The Ctrl forms are
-                // normal-mode only, leaving insert-mode Ctrl-U/D free
-                // for their vim meanings if zoe grows them later.
-                // Ctrl+R is redo -- the one vim chord with no printable
-                // character to carry it, so it has to be caught here.
-                if (mods.ctrl and eq(u8, key, "r")) return self.redo();
-                if (eq(u8, key, "page_down") or (mods.ctrl and eq(u8, key, "d"))) {
-                    self.pageMove(.down, false);
-                    return .none;
-                }
-                if (eq(u8, key, "page_up") or (mods.ctrl and eq(u8, key, "u"))) {
-                    self.pageMove(.up, false);
-                    return .none;
-                }
-                // Tab / Shift+Tab: `>>` / `<<` on the cursor line, or `>` /
-                // `<` on the selection (which stays selected). A count
-                // means what it does for those: lines in normal mode,
-                // levels in visual.
-                if (eq(u8, key, "tab")) {
-                    const n = self.takeCount();
-                    self.resetPending();
-                    if (self.mode == .normal) {
-                        const line = self.buf.lineAt(self.cursor);
-                        try self.shiftLines(line, line + n - 1, !mods.shift, 1);
-                    } else {
-                        try self.visualShift(!mods.shift, n);
-                    }
-                    return .none;
-                }
-                // Alt+Up / Alt+Down: move the cursor line, or every line
-                // the selection touches, past its neighbour. With Shift,
-                // copy them above / below instead (a count is copies).
-                if (mods.alt and (eq(u8, key, "up") or eq(u8, key, "down"))) {
-                    const n = self.takeCount();
-                    self.resetPending();
-                    if (mods.shift) {
-                        try self.copyLines(eq(u8, key, "down"), n);
-                    } else {
-                        try self.moveLines(eq(u8, key, "down"), n);
-                    }
-                    return .none;
-                }
-                if (eq(u8, key, "left")) {
-                    self.moveTo(motion.left(&self.buf, self.cursor, 1), true);
-                } else if (eq(u8, key, "right")) {
-                    self.moveTo(motion.right(&self.buf, self.cursor, 1, false), true);
-                } else if (eq(u8, key, "up")) {
-                    self.moveTo(motion.up(&self.buf, self.cursor, 1, self.sticky_col, false), false);
-                } else if (eq(u8, key, "down")) {
-                    self.moveTo(motion.down(&self.buf, self.cursor, 1, self.sticky_col, false), false);
-                } else if (eq(u8, key, "home")) {
-                    self.moveTo(motion.lineStart(&self.buf, self.cursor), true);
-                } else if (eq(u8, key, "end")) {
-                    self.moveTo(motion.lineEnd(&self.buf, self.cursor, false), true);
-                }
-                return .none;
-            },
-            .insert => {
-                if (eq(u8, key, "page_down")) {
-                    self.pageMove(.down, true);
-                } else if (eq(u8, key, "page_up")) {
-                    self.pageMove(.up, true);
-                } else if (eq(u8, key, "enter")) {
-                    try self.insertText("\n");
-                } else if (eq(u8, key, "tab")) {
-                    try self.insertTab();
-                } else if (mods.alt and (eq(u8, key, "up") or eq(u8, key, "down"))) {
-                    // Its own undo step, not part of the insert session's:
-                    // `u` after typing then moving a line puts the line
-                    // back and keeps the typing. `moveLines` opens it.
-                    if (mods.shift) {
-                        try self.copyLines(eq(u8, key, "down"), 1);
-                    } else {
-                        try self.moveLines(eq(u8, key, "down"), 1);
-                    }
-                    self.buf.closeUndoGroup();
-                } else if (eq(u8, key, "backspace")) {
-                    try self.backspace();
-                } else if (eq(u8, key, "delete")) {
-                    try self.deleteForward();
-                } else if (mods.ctrl and eq(u8, key, "left")) {
-                    // vim's insert-mode <C-Left>/<C-Right>: the `b` / `w`
-                    // motions, crossing lines like they do.
-                    self.moveTo(motion.wordBackward(&self.buf, self.cursor, 1, false), true);
-                } else if (mods.ctrl and eq(u8, key, "right")) {
-                    self.moveTo(motion.wordForward(&self.buf, self.cursor, 1, false), true);
-                } else if (mods.ctrl and eq(u8, key, "home")) {
-                    self.moveTo(0, true);
-                } else if (mods.ctrl and eq(u8, key, "end")) {
-                    // Past the last character, so typing appends to the file.
-                    self.moveTo(self.buf.len(), true);
-                } else if (eq(u8, key, "left")) {
-                    self.moveTo(motion.left(&self.buf, self.cursor, 1), true);
-                } else if (eq(u8, key, "right")) {
-                    self.moveTo(motion.right(&self.buf, self.cursor, 1, true), true);
-                } else if (eq(u8, key, "up")) {
-                    self.moveTo(motion.up(&self.buf, self.cursor, 1, self.sticky_col, true), false);
-                } else if (eq(u8, key, "down")) {
-                    self.moveTo(motion.down(&self.buf, self.cursor, 1, self.sticky_col, true), false);
-                } else if (eq(u8, key, "home")) {
-                    self.moveTo(motion.lineStart(&self.buf, self.cursor), true);
-                } else if (eq(u8, key, "end")) {
-                    self.moveTo(motion.lineEnd(&self.buf, self.cursor, true), true);
-                }
-                return .none;
+            // Everything else is a binding: looked up in the mode's table
+            // and then the global one (see `actions.zig`), and run by
+            // `perform`. A key nothing binds does nothing.
+            .normal, .visual, .visual_line, .insert, .select => {
+                const action = self.lookupKey(key, mods) orelse return .none;
+                return self.perform(action);
             },
             .command => {
                 // Backspacing over the `:` itself leaves the mode, same
@@ -597,6 +517,286 @@ pub const Editor = struct {
         }
     }
 
+    /// The bindings `feedKey` reads: the session's, or the defaults when
+    /// the host never set any.
+    fn lookupKey(self: *Editor, key: []const u8, mods: Mods) ?actions.Action {
+        const km: *const actions.Keymaps = self.keymaps orelse blk: {
+            if (self.own_keymaps == null) {
+                self.own_keymaps = actions.Keymaps.initDefaults(self.alloc) catch return null;
+            }
+            break :blk &self.own_keymaps.?;
+        };
+        return km.lookup(self.keyScope(), key, mods);
+    }
+
+    /// The keymap table a key is looked up in for the current mode.
+    pub fn keyScope(self: *const Editor) actions.Scope {
+        return switch (self.mode) {
+            .normal => .normal,
+            .visual, .visual_line => .visual,
+            .insert, .select => .insert,
+            .command, .search => .global,
+        };
+    }
+
+    /// Visual, visual-line or select mode: a selection is up.
+    pub fn hasSelection(self: *const Editor) bool {
+        return self.mode == .visual or self.mode == .visual_line or self.mode == .select;
+    }
+
+    /// Runs one named action in the current mode -- what a key bound to it
+    /// does. The window-level actions (`Action.isUi`) are `zoe/ui.zig`'s
+    /// and do nothing here.
+    pub fn perform(self: *Editor, action: actions.Action) !Outcome {
+        const typing = self.mode == .insert or self.mode == .select;
+        switch (action) {
+            .none,
+            .save,
+            .findFile,
+            .toggleTree,
+            .toggleHidden,
+            .toggleShell,
+            .nextTab,
+            .prevTab,
+            .windowPrefix,
+            .focusLeft,
+            .focusRight,
+            .focusUp,
+            .focusDown,
+            .jumpBack,
+            .jumpForward,
+            .cut,
+            .paste,
+            .complete,
+            => {},
+
+            .left => self.plainMove(.left),
+            .right => self.plainMove(.right),
+            .up => self.plainMove(.up),
+            .down => self.plainMove(.down),
+            .lineStart => self.plainMove(.line_start),
+            .lineEnd => self.plainMove(.line_end),
+            .wordLeft => self.plainMove(.word_left),
+            .wordRight => self.plainMove(.word_right),
+            .fileStart => self.plainMove(.file_start),
+            .fileEnd => self.plainMove(.file_end),
+            .pageUp => self.plainMove(.page_up),
+            .pageDown => self.plainMove(.page_down),
+
+            .selectLeft => self.selectMove(.left),
+            .selectRight => self.selectMove(.right),
+            .selectUp => self.selectMove(.up),
+            .selectDown => self.selectMove(.down),
+            .selectLineStart => self.selectMove(.line_start),
+            .selectLineEnd => self.selectMove(.line_end),
+            .selectWordLeft => self.selectMove(.word_left),
+            .selectWordRight => self.selectMove(.word_right),
+            .selectFileStart => self.selectMove(.file_start),
+            .selectFileEnd => self.selectMove(.file_end),
+
+            .undo => return self.undoAction(false),
+            .redo => return self.undoAction(true),
+
+            .indent, .dedent => {
+                const right = action == .indent;
+                const n = self.takeCount();
+                self.resetPending();
+                switch (self.mode) {
+                    // A count is lines here (`3>>`) and levels on a
+                    // selection (`3>`), the same as the vim keys.
+                    .normal => {
+                        const line = self.buf.lineAt(self.cursor);
+                        try self.shiftLines(line, line + n - 1, right, 1);
+                    },
+                    .visual, .visual_line, .select => try self.visualShift(right, n),
+                    .insert => try self.shiftCaretLine(right),
+                    .command, .search => {},
+                }
+            },
+
+            // Alt+Up / Alt+Down move the cursor line, or every line the
+            // selection touches, past its neighbour; with Shift they copy
+            // them above / below instead (a count is copies). In insert
+            // mode each is its own undo step, not part of the typing's:
+            // `u` after typing then moving a line puts the line back and
+            // keeps the typing.
+            .moveLinesUp, .moveLinesDown, .copyLinesUp, .copyLinesDown => {
+                const n = self.takeCount();
+                self.resetPending();
+                const down = action == .moveLinesDown or action == .copyLinesDown;
+                if (action == .moveLinesUp or action == .moveLinesDown) {
+                    try self.moveLines(down, n);
+                } else {
+                    try self.copyLines(down, n);
+                }
+                if (typing) self.buf.closeUndoGroup();
+            },
+
+            .toggleComment => {
+                self.resetPending();
+                try self.toggleComment();
+                if (typing) self.buf.closeUndoGroup();
+            },
+
+            // The typing keys only type in insert mode; over a select-mode
+            // selection they replace it (or, for the deletes, just remove
+            // it), and in normal / visual mode they do nothing.
+            .newline => if (typing) {
+                if (self.mode == .select) try self.dropSelectSpan();
+                try self.insertText("\n");
+            },
+            // Tab over a selection indents it, as every editor's Tab does.
+            .insertTab => switch (self.mode) {
+                .insert => try self.insertTab(),
+                .select => try self.visualShift(true, 1),
+                else => {},
+            },
+            .backspace, .deleteForward, .deleteWordBack, .deleteWordForward => switch (self.mode) {
+                .select => try self.dropSelectSpan(),
+                .insert => switch (action) {
+                    .backspace => try self.backspace(),
+                    .deleteForward => try self.deleteForward(),
+                    .deleteWordBack => try self.deleteWordBack(),
+                    .deleteWordForward => try self.deleteWordForward(),
+                    else => unreachable,
+                },
+                else => {},
+            },
+        }
+        return .none;
+    }
+
+    /// The motions a named key makes. Each follows the mode's rule for the
+    /// line's end: insert and select mode may sit past the last character.
+    const Move = enum {
+        left,
+        right,
+        up,
+        down,
+        line_start,
+        line_end,
+        word_left,
+        word_right,
+        file_start,
+        file_end,
+        page_up,
+        page_down,
+    };
+
+    fn moveBy(self: *Editor, m: Move) void {
+        const eol = self.mode == .insert or self.mode == .select;
+        const buf = &self.buf;
+        switch (m) {
+            .left => self.moveTo(motion.left(buf, self.cursor, 1), true),
+            .right => self.moveTo(motion.right(buf, self.cursor, 1, eol), true),
+            .up => self.moveTo(motion.up(buf, self.cursor, 1, self.sticky_col, eol), false),
+            .down => self.moveTo(motion.down(buf, self.cursor, 1, self.sticky_col, eol), false),
+            .line_start => self.moveTo(motion.lineStart(buf, self.cursor), true),
+            .line_end => self.moveTo(motion.lineEnd(buf, self.cursor, eol), true),
+            // vim's insert-mode <C-Left>/<C-Right>: the `b` / `w` motions,
+            // crossing lines like they do.
+            .word_left => self.moveTo(motion.wordBackward(buf, self.cursor, 1, false), true),
+            .word_right => self.moveTo(motion.wordForward(buf, self.cursor, 1, false), true),
+            .file_start => self.moveTo(0, true),
+            // Past the last character in insert mode, so typing appends.
+            .file_end => self.moveTo(if (eol) buf.len() else motion.clampNormal(buf, buf.len()), true),
+            .page_up => self.pageMove(.up, eol),
+            .page_down => self.pageMove(.down, eol),
+        }
+    }
+
+    /// An unshifted motion. Visual mode extends its selection with it, as
+    /// vim's does; a select-mode selection is dropped first, back into
+    /// insert mode, with Left / Right landing on the selection's start /
+    /// end rather than stepping past it.
+    fn plainMove(self: *Editor, m: Move) void {
+        if (self.mode == .select) {
+            const span = self.selectionSpan();
+            self.select_anchor = null;
+            self.mode = .insert;
+            if (span) |sp| switch (m) {
+                .left => return self.moveTo(sp.lo, true),
+                .right => return self.moveTo(sp.hi, true),
+                else => {},
+            };
+        }
+        self.moveBy(m);
+    }
+
+    /// A Shift+motion: start a selection if there isn't one -- visual
+    /// mode from normal, select mode from insert -- and move its free end.
+    /// A select-mode selection shrunk back to nothing is dropped.
+    fn selectMove(self: *Editor, m: Move) void {
+        switch (self.mode) {
+            .normal => self.enterVisual(.visual),
+            .insert => {
+                self.mode = .select;
+                self.select_anchor = self.cursor;
+            },
+            else => {},
+        }
+        self.moveBy(m);
+        if (self.mode == .select and self.select_anchor == self.cursor) {
+            self.select_anchor = null;
+            self.mode = .insert;
+        }
+    }
+
+    /// Removes a select-mode selection's text, without touching the
+    /// clipboard, and returns to insert mode with the caret where it was.
+    fn dropSelectSpan(self: *Editor) !void {
+        if (self.selectionSpan()) |span| try self.removeSpan(span);
+        self.select_anchor = null;
+        self.mode = .insert;
+    }
+
+    /// Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y: `u` / Ctrl+R from any mode. Insert
+    /// mode stays in insert mode, with the caret where the change was
+    /// (past a line's end if that is where it was); a selection is
+    /// dropped first.
+    fn undoAction(self: *Editor, redo_it: bool) !Outcome {
+        const typing = self.mode == .insert or self.mode == .select;
+        if (self.hasSelection()) self.exitVisual();
+        if (!typing) return if (redo_it) self.redo() else self.undo(self.takeCount());
+
+        const at = (if (redo_it) try self.buf.redo() else try self.buf.undo()) orelse {
+            self.setStatus("Already at {s} change", .{if (redo_it) "newest" else "oldest"});
+            return .none;
+        };
+        self.moveTo(@min(at, self.buf.len()), true);
+        return .none;
+    }
+
+    /// Shift+Tab in insert mode: dedent (or indent) the caret's line with
+    /// the caret staying on the character it was on.
+    fn shiftCaretLine(self: *Editor, right: bool) !void {
+        const c = SelEnd.of(&self.buf, self.cursor);
+        try self.shiftLines(c.line, c.line, right, 1);
+        self.moveTo(c.restore(&self.buf), true);
+    }
+
+    /// Ctrl+Backspace: delete back to the start of the word, stopping at
+    /// the line's start; at the start, join the line onto the one above
+    /// like Backspace does.
+    fn deleteWordBack(self: *Editor) !void {
+        const start = self.buf.lineStart(self.buf.lineAt(self.cursor));
+        if (self.cursor == start) return self.backspace();
+        const target = @max(motion.wordBackward(&self.buf, self.cursor, 1, false), start);
+        try self.buf.delete(target, self.cursor - target);
+        self.cursor = target;
+        self.syncSticky();
+    }
+
+    /// Ctrl+Delete: delete to the start of the next word (`dw`), stopping
+    /// at the line's end; at the end, join the next line on like Delete.
+    fn deleteWordForward(self: *Editor) !void {
+        const end = self.buf.lineEnd(self.buf.lineAt(self.cursor));
+        if (self.cursor >= end) return self.deleteForward();
+        const target = @min(wordTargetForDelete(&self.buf, self.cursor, 1), end);
+        try self.buf.delete(self.cursor, target - self.cursor);
+        self.syncSticky();
+    }
+
     /// Closes the open undo group unless the command in progress means to
     /// keep collecting into it: an insert-mode session is one `u`, and so
     /// is the delete-then-paste pair a visual-mode `p` turns into.
@@ -622,6 +822,12 @@ pub const Editor = struct {
             },
             .search => self.leaveSearch(.restore),
             .visual, .visual_line => self.exitVisual(),
+            // Straight to normal mode, the way Escape leaves insert mode.
+            .select => {
+                self.select_anchor = null;
+                self.mode = .normal;
+                self.moveTo(motion.clampNormal(&self.buf, self.cursor), true);
+            },
         }
     }
 
@@ -1309,7 +1515,7 @@ pub const Editor = struct {
     fn moveLines(self: *Editor, down: bool, n: usize) !void {
         var first = self.buf.lineAt(self.cursor);
         var last = first;
-        if (self.mode == .visual or self.mode == .visual_line) {
+        if (self.hasSelection()) {
             if (self.selectionSpan()) |span| {
                 first = self.buf.lineAt(span.lo);
                 last = self.buf.lineAt(if (span.hi > span.lo) span.hi - 1 else span.hi);
@@ -1363,7 +1569,7 @@ pub const Editor = struct {
     fn copyLines(self: *Editor, down: bool, n: usize) !void {
         var first = self.buf.lineAt(self.cursor);
         var last = first;
-        if (self.mode == .visual or self.mode == .visual_line) {
+        if (self.hasSelection()) {
             if (self.selectionSpan()) |span| {
                 first = self.buf.lineAt(span.lo);
                 last = self.buf.lineAt(if (span.hi > span.lo) span.hi - 1 else span.hi);
@@ -1398,6 +1604,93 @@ pub const Editor = struct {
         } else {
             try self.buf.insert(self.buf.lineStart(first), paste);
         }
+    }
+
+    /// Ctrl+/: line comments on or off for the cursor line, or every line
+    /// a selection touches, as one undo step -- VSCode's rule. When every
+    /// non-blank line already starts (after its indent) with the marker,
+    /// the marker and one space after it come off; otherwise each
+    /// non-blank line gets `marker ` at the block's smallest indent, so
+    /// the markers line up down the block. Blank lines are skipped, unless
+    /// the block is nothing but, when they get the marker at their end so
+    /// a comment can be started on an empty line.
+    fn toggleComment(self: *Editor) !void {
+        const marker = self.line_comment orelse {
+            self.setStatus("No line comment for this file type", .{});
+            return;
+        };
+        var first = self.buf.lineAt(self.cursor);
+        var last = first;
+        if (self.selectionSpan()) |span| {
+            first = self.buf.lineAt(span.lo);
+            last = self.buf.lineAt(if (span.hi > span.lo) span.hi - 1 else span.hi);
+        }
+
+        var any_text = false;
+        var all_commented = true;
+        var min_indent: usize = std.math.maxInt(usize);
+        for (first..last + 1) |line| {
+            const indent = self.indentLen(line);
+            if (indent == self.buf.lineLen(line)) continue;
+            any_text = true;
+            min_indent = @min(min_indent, indent);
+            if (!self.startsWithAt(self.buf.lineStart(line) + indent, marker)) all_commented = false;
+        }
+
+        self.buf.undoCheckpoint(self.cursor);
+        const a: ?SelEnd = if (self.select_anchor) |anchor| SelEnd.of(&self.buf, anchor) else null;
+        const c = SelEnd.of(&self.buf, self.cursor);
+
+        // Bottom-up, so an edit never moves a line still to be visited.
+        var line = last + 1;
+        while (line > first) {
+            line -= 1;
+            const start = self.buf.lineStart(line);
+            const indent = self.indentLen(line);
+            const blank = indent == self.buf.lineLen(line);
+            if (!any_text) {
+                try self.insertMarker(start + indent, marker);
+            } else if (blank) {
+                continue;
+            } else if (all_commented) {
+                const at = start + indent;
+                var n = marker.len;
+                if (at + n < self.buf.len() and self.buf.byteAt(at + n) == ' ') n += 1;
+                try self.buf.delete(at, n);
+            } else {
+                try self.insertMarker(start + min_indent, marker);
+            }
+        }
+
+        if (a) |end| self.select_anchor = end.restore(&self.buf);
+        const at = c.restore(&self.buf);
+        self.moveTo(if (self.mode == .normal) motion.clampNormal(&self.buf, at) else at, true);
+    }
+
+    /// `marker` plus one space, at `at`.
+    fn insertMarker(self: *Editor, at: usize, marker: []const u8) !void {
+        try self.buf.insert(at, " ");
+        try self.buf.insert(at, marker);
+    }
+
+    /// Bytes of leading spaces and tabs on `line`.
+    fn indentLen(self: *const Editor, line: usize) usize {
+        const start = self.buf.lineStart(line);
+        const end = self.buf.lineEnd(line);
+        var at = start;
+        while (at < end) : (at += 1) {
+            const b = self.buf.byteAt(at);
+            if (b != ' ' and b != '\t') break;
+        }
+        return at - start;
+    }
+
+    fn startsWithAt(self: *const Editor, at: usize, text: []const u8) bool {
+        if (at + text.len > self.buf.len()) return false;
+        for (text, 0..) |ch, i| {
+            if (self.buf.byteAt(at + i) != ch) return false;
+        }
+        return true;
     }
 
     /// One end of a visual selection, remembered across an edit that
@@ -1529,6 +1822,10 @@ pub const Editor = struct {
                 .hi = motion.nextCodepoint(&self.buf, hi),
                 .linewise = false,
             },
+            .select => {
+                if (hi == lo) return null;
+                return .{ .lo = lo, .hi = hi, .linewise = false };
+            },
             .visual_line => {
                 const first = self.buf.lineStart(self.buf.lineAt(lo));
                 const text_end = self.buf.lineEnd(self.buf.lineAt(hi));
@@ -1559,7 +1856,8 @@ pub const Editor = struct {
             }
         }
         self.resetPending();
-        self.mode = .normal;
+        // A select-mode selection came from insert mode and goes back there.
+        self.mode = if (self.mode == .select) .insert else .normal;
         self.select_anchor = null;
     }
 
@@ -1702,7 +2000,9 @@ pub const Editor = struct {
     fn removeSpan(self: *Editor, span: SelSpan) !void {
         if (span.hi <= span.lo) return;
         try self.buf.delete(span.lo, span.hi - span.lo);
-        self.cursor = motion.clampNormal(&self.buf, span.lo);
+        // Select mode returns to insert, where the caret may sit past the
+        // line's last character.
+        self.cursor = if (self.mode == .select) span.lo else motion.clampNormal(&self.buf, span.lo);
         self.syncSticky();
     }
 
@@ -1741,6 +2041,14 @@ pub const Editor = struct {
         }
         defer self.buf.closeUndoGroup();
 
+        // Over a select-mode selection a paste is typing: it replaces the
+        // selection and leaves the caret after it, in insert mode.
+        if (self.mode == .select) {
+            try self.dropSelectSpan();
+            try self.insertText(text);
+            return;
+        }
+
         const linewise = text[text.len - 1] == '\n';
         if (linewise) {
             const line = self.buf.lineAt(self.cursor);
@@ -1767,7 +2075,9 @@ pub const Editor = struct {
     pub fn clipboardCopy(self: *Editor) !Outcome {
         if (self.selectionSpan()) |span| {
             try self.stashYankRange(span.lo, span.hi, span.linewise);
-            self.exitVisual();
+            // A select-mode selection stays up, the way a copy leaves it
+            // in any other editor; vim's visual `y` is what ends one.
+            if (self.mode != .select) self.exitVisual();
         } else {
             const line = self.buf.lineAt(self.cursor);
             try self.stashYankRange(self.buf.lineStart(line), self.buf.lineEnd(line), true);
