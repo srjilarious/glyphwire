@@ -1339,9 +1339,11 @@ one keystroke and a single clipboard write — fanned out, every
 one to arrive would win. `paste` is typed input in all but name: fanned
 out, every pane's program would insert the text.
 
-`layout`, `scroll` and `scroll_offset` are **scoped to a context**: they
-reach only connections whose active context is the one the named layer
-belongs to, focused or not. Layer handles are per-context (every context
+`layout`, `scroll`, `scroll_offset` and `terminal_reply` are **scoped to
+a context**: they reach only connections whose active context is the one
+the named layer belongs to (for `terminal_reply`, the one whose text
+carried the query), focused or not. A terminal reply fanned out would be
+written into every pane's pty child as stray input. Layer handles are per-context (every context
 numbers its layers from 1), so the same bounds or offset fanned out would
 move an unrelated layer in every other program that happens to own that
 handle. A relayout that moves several panes at once sends one `layout`
