@@ -1408,6 +1408,47 @@ pub fn aWheelTapReachesOnlyTheNamedContextTest(io: std.Io, alloc: std.mem.Alloca
     try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"button\":\"left\"") != null);
 }
 
+/// A paste goes to the focused pane's program only. Fanned out, a path
+/// pasted into a shell pane was also inserted into the zoe beside it.
+/// Ordering trick: the unfocused client's first read must be the key
+/// reported after it gains focus, never the paste.
+pub fn pasteReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-paste-focus-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const other = try splitIntoTwoPanes(&srv);
+
+    var a_dec: wire.FrameDecoder = .{};
+    defer a_dec.deinit(alloc);
+    var a = try connectToPane(io, alloc, &srv, socket_path, glyphwire.root_pane_handle, "[\"clipboard\",\"key\"]", &a_dec);
+    defer a.thread.join();
+    defer a.stream.close(io);
+    var b_dec: wire.FrameDecoder = .{};
+    defer b_dec.deinit(alloc);
+    var b = try connectToPane(io, alloc, &srv, socket_path, other, "[\"clipboard\",\"key\"]", &b_dec);
+    defer b.thread.join();
+    defer b.stream.close(io);
+
+    try srv.broadcastPaste(alloc, "/home/me/path");
+    const a_got = try readOneFrame(io, alloc, &a.stream, &a_dec);
+    defer alloc.free(a_got);
+    try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"method\":\"paste\"") != null);
+
+    try srv.session.focusPane(other);
+    srv.ctx = srv.session.focusedContext();
+    try srv.reportKey(alloc, "x", true);
+    const b_got = try readOneFrame(io, alloc, &b.stream, &b_dec);
+    defer alloc.free(b_got);
+    try testz.expectTrue(std.mem.indexOf(u8, b_got, "\"key\":\"x\"") != null);
+}
+
 /// The host's click-to-focus moves focus without the manager asking, so
 /// the manager has to be told -- otherwise gmux's `z` zooms whichever pane
 /// it last focused itself, not the one the user clicked into.

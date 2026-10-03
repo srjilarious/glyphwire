@@ -537,7 +537,10 @@ pub const Server = struct {
             // `set_clipboard` and the last write wins at random -- a
             // backgrounded gw-shell overwriting salacommander's file
             // paths with its own prompt line.
-            std.mem.eql(u8, event, "copy_request");
+            std.mem.eql(u8, event, "copy_request") or
+            // Ctrl+Shift+V's text, which is typed input in all but name:
+            // fanned out, every pane's program inserted it.
+            std.mem.eql(u8, event, "paste");
     }
 
     /// The session's visibility change-counter (see
@@ -1535,10 +1538,11 @@ pub const Server = struct {
         self.broadcast(null, "copy_request", body);
     }
 
-    /// Fans a `paste` notification (committed clipboard text) out to
-    /// every `"clipboard"` subscriber. Not focus-gated, unlike
-    /// `requestCopy`: pasted text is data, and a backgrounded client
-    /// queueing it does no harm.
+    /// Sends a `paste` notification (committed clipboard text) to the
+    /// focused pane's on-screen client, the same gate as typed text
+    /// (`isFocusGatedEvent`). It is the answer to one keystroke: fanned
+    /// out, a path pasted into a shell pane also landed in the zoe buffer
+    /// next to it.
     pub fn broadcastPaste(self: *Server, alloc: std.mem.Allocator, text: []const u8) !void {
         const body = try rpc.pasteNotification(alloc, text);
         defer alloc.free(body);
