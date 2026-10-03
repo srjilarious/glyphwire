@@ -754,3 +754,64 @@ pub fn shadowWithoutBlurIsASharpRoundedRectTest(_: std.Io, alloc: std.mem.Alloca
     try testz.expectEqual(px[((1 * @as(usize, g.side)) + 1) * 4 + 2], 30);
     try testz.expectEqual(hs.shadow.outset(sh), 0);
 }
+
+// ── Pane divider glyphs ────────────────────────────────────────────────
+
+fn dividerGlyphAt(cells: []const hs.dividers.Cell, row: usize, col: usize) ?[]const u8 {
+    for (cells) |c| if (c.row == row and c.col == col) return c.glyph;
+    return null;
+}
+
+/// The window split side by side, then the right pane split top/bottom:
+/// one vertical line with a horizontal one leaving its right side.
+pub fn aDividerJunctionGetsATeeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const lines = [_]hs.dividers.Line{
+        .{ .rect = .{ .row = 0, .col = 10, .cols = 1, .rows = 10 }, .vertical = true },
+        .{ .rect = .{ .row = 4, .col = 11, .cols = 9, .rows = 1 }, .vertical = false },
+    };
+    var cells: std.ArrayList(hs.dividers.Cell) = .empty;
+    defer cells.deinit(alloc);
+    try hs.dividers.layout(alloc, &lines, &hs.dividers.single, &cells);
+
+    try testz.expectEqual(cells.items.len, 19);
+    try testz.expectEqualStr("├", dividerGlyphAt(cells.items, 4, 10).?);
+    try testz.expectEqualStr("│", dividerGlyphAt(cells.items, 0, 10).?);
+    try testz.expectEqualStr("│", dividerGlyphAt(cells.items, 9, 10).?);
+    try testz.expectEqualStr("─", dividerGlyphAt(cells.items, 4, 11).?);
+    try testz.expectEqualStr("─", dividerGlyphAt(cells.items, 4, 19).?);
+}
+
+/// Horizontal lines on both sides of a vertical one meet in a cross, and a
+/// vertical line hanging under a horizontal one is a downward tee.
+pub fn dividerCrossAndDownTeeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const lines = [_]hs.dividers.Line{
+        .{ .rect = .{ .row = 0, .col = 0, .cols = 21, .rows = 1 }, .vertical = false },
+        .{ .rect = .{ .row = 1, .col = 10, .cols = 1, .rows = 9 }, .vertical = true },
+        .{ .rect = .{ .row = 5, .col = 0, .cols = 10, .rows = 1 }, .vertical = false },
+        .{ .rect = .{ .row = 5, .col = 11, .cols = 10, .rows = 1 }, .vertical = false },
+    };
+    var cells: std.ArrayList(hs.dividers.Cell) = .empty;
+    defer cells.deinit(alloc);
+    try hs.dividers.layout(alloc, &lines, &hs.dividers.heavy, &cells);
+
+    try testz.expectEqualStr("╋", dividerGlyphAt(cells.items, 5, 10).?);
+    try testz.expectEqualStr("┳", dividerGlyphAt(cells.items, 0, 10).?);
+    try testz.expectEqualStr("━", dividerGlyphAt(cells.items, 0, 3).?);
+}
+
+/// A band two cells wide is two parallel lines, not a ladder of tees.
+pub fn sideBySideDividerCellsDontJoinTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const lines = [_]hs.dividers.Line{
+        .{ .rect = .{ .row = 0, .col = 4, .cols = 2, .rows = 3 }, .vertical = true },
+    };
+    var cells: std.ArrayList(hs.dividers.Cell) = .empty;
+    defer cells.deinit(alloc);
+    try hs.dividers.layout(alloc, &lines, &hs.dividers.single, &cells);
+    for (cells.items) |c| try testz.expectEqualStr("│", c.glyph);
+}
+
+pub fn dividerPresetNamesTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(hs.dividers.preset("block").? == .block);
+    try testz.expectEqualStr("═", hs.dividers.preset("double").?.glyphs.h);
+    try testz.expectTrue(hs.dividers.preset("dotted") == null);
+}
