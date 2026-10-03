@@ -382,14 +382,6 @@ fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
 /// host when it generated the event: sampling the live down-set instead
 /// lets a shell that fell behind send a TUI the wrong escape sequence
 /// (Ctrl released before its keystroke was encoded).
-/// The program a command line runs, as a title shows it: the first word's
-/// basename (`/usr/bin/htop -d 5` is `htop`).
-fn commandName(line: []const u8) []const u8 {
-    var it = std.mem.tokenizeAny(u8, line, " \t");
-    const first = it.next() orelse return "gw-shell";
-    return std.fs.path.basename(first);
-}
-
 fn ptyMods(mods: glyphwire.Mods) keyencode.Mods {
     return .{ .ctrl = mods.ctrl, .shift = mods.shift, .alt = mods.alt };
 }
@@ -2610,7 +2602,7 @@ const Prompt = struct {
         // A directory the host asked for lands here, just before the
         // prompt that will show it -- see `applyPendingCd`.
         self.applyPendingCd();
-        self.syncTitle("gw-shell");
+        self.syncPromptTitle();
         const cur = try self.writePromptPrefix(null);
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
@@ -3565,6 +3557,42 @@ const Prompt = struct {
         try self.setLine(text);
     }
 
+    /// At the prompt, this shell's context is `gw-shell <cwd>` -- the
+    /// directory is what changes while you move around. See `setTitle`.
+    fn syncPromptTitle(self: *Prompt) void {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = self.collapseHome(self.logicalCwd(&cwd_buf), &home_buf);
+        var next: [glyphwire.Context.max_title_len]u8 = undefined;
+        const title = std.fmt.bufPrint(&next, "gw-shell {s}", .{cwd}) catch "gw-shell";
+        self.setTitle(title);
+    }
+
+    /// While a command runs, the title is the command line itself, as
+    /// typed (`sudo htop -d 5`) -- what is running says more than where.
+    /// Cut to the title cap on a UTF-8 boundary.
+    fn syncCommandTitle(self: *Prompt, line: []const u8) void {
+        const text = std.mem.trimEnd(u8, line, " \t\r\n");
+        if (text.len == 0) return;
+        var len = @min(text.len, glyphwire.Context.max_title_len);
+        while (len > 0 and len < text.len and (text[len] & 0xC0) == 0x80) len -= 1;
+        self.setTitle(text[0..len]);
+    }
+
+    /// Names this shell's context, which glyphwire-host shows in the
+    /// window title when this pane has focus and the context switcher
+    /// lists. A glyphwire program started from here makes and names a
+    /// context of its own, so this only ever shows for the shell itself
+    /// and plain terminal programs. Embedded, the context is the host
+    /// program's, and its title is not ours to set. Sends only on change.
+    fn setTitle(self: *Prompt, title: []const u8) void {
+        if (self.layer != null) return;
+        if (std.mem.eql(u8, title, self.title_buf[0..self.title_len])) return;
+        self.client.setContextTitle(title) catch return;
+        @memcpy(self.title_buf[0..title.len], title);
+        self.title_len = title.len;
+    }
+
     /// Runs whatever the just-committed line (`self.line`) names.
     ///
     /// The line goes through `parse.parse` first (pipes, redirects,
@@ -3588,26 +3616,6 @@ const Prompt = struct {
     /// (`cd`, `exit`, a `defcmd`) works as a whole stage in an
     /// `&&` / `||` / `;` chain, but not as one stage of a `|` pipeline
     /// (see `runPipeline`).
-    /// Names this shell's context `"<program> <cwd>"` (`gw-shell
-    /// ~/code` at the prompt, `htop ~/code` while it runs), which
-    /// glyphwire-host shows in the window title when this pane has focus
-    /// and the context switcher lists. A glyphwire program started from
-    /// here makes and names a context of its own, so this only ever shows
-    /// for the shell itself and plain terminal programs. Embedded, the
-    /// context is the host program's, and its title is not ours to set.
-    fn syncTitle(self: *Prompt, program: []const u8) void {
-        if (self.layer != null) return;
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = self.collapseHome(self.logicalCwd(&cwd_buf), &home_buf);
-        var next: [glyphwire.Context.max_title_len]u8 = undefined;
-        const title = std.fmt.bufPrint(&next, "{s} {s}", .{ program, cwd }) catch program;
-        if (std.mem.eql(u8, title, self.title_buf[0..self.title_len])) return;
-        self.client.setContextTitle(title) catch return;
-        @memcpy(self.title_buf[0..title.len], title);
-        self.title_len = title.len;
-    }
-
     fn dispatchLine(self: *Prompt) !void {
         return self.dispatchLineText(self.line.text());
     }
@@ -3624,6 +3632,10 @@ const Prompt = struct {
         {
             return self.doAlias(text);
         }
+
+        // Before any of the paths below, bare commands included: `htop`
+        // has to be in the title while it runs, not after.
+        self.syncCommandTitle(trimmed);
 
         // Leading `NAME=VALUE` words: a bare run sets the session
         // environment (`FOO=bar`), a run followed by a command sets those
@@ -3654,7 +3666,6 @@ const Prompt = struct {
                     return;
                 }
 
-                self.syncTitle(commandName(trimmed));
                 const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
                 const status = try self.runLine(line);
                 const elapsed_ms = started.untilNow(self.client.io).raw.toMilliseconds();
