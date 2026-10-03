@@ -308,7 +308,9 @@ pub const Scroll = struct {
                 .layer = pane,
                 .root_owned = rootOwned(&at.ctx.root),
                 .report = if (report_layer) |l| l.mouse_report else false,
-                .focused = at.context == server.session.focusedContextHandle(),
+                // In the hovered pane's own frame, which is what its
+                // program's mouse coordinates are relative to.
+                .local = glyphwire.CellPos{ .row = cell.row - at.rect.row, .col = cell.col - at.rect.col },
             };
         };
         // In a divider band between panes there is nothing to scroll.
@@ -316,12 +318,13 @@ pub const Scroll = struct {
 
         // A mouse-mode program under the pointer gets the wheel itself,
         // as xterm wheel buttons, rather than having its screen scrolled
-        // away into scrollback (see `core.Layer.mouse_report`). Only in
-        // the focused pane: `mouse_button` goes to the focused context.
-        // Shift+wheel is left to the host, the same override Shift gives
-        // a drag.
-        if (hit_target.report and hit_target.focused and wheel_y != 0) {
-            self.reportWheel(eng, wheel_y);
+        // away into scrollback (see `core.Layer.mouse_report`). In
+        // whichever pane is under the pointer, focused or not -- the wheel
+        // is addressed to that pane's program (`reportWheelTapIn`), not
+        // broadcast to the focused one like a click. Shift+wheel is left
+        // to the host, the same override Shift gives a drag.
+        if (hit_target.report and wheel_y != 0) {
+            self.reportWheel(eng, hit_target.context, hit_target.local, wheel_y);
             return;
         }
 
@@ -379,15 +382,13 @@ pub const Scroll = struct {
     /// xterm wheel reports (buttons 64/65) and drops the releases, which
     /// xterm never sends for a wheel; they are here only so
     /// `Session.input` never sees a wheel "button" stuck down.
-    fn reportWheel(self: *Scroll, eng: *Engine, wheel_y: f32) void {
+    fn reportWheel(self: *Scroll, eng: *Engine, context: glyphwire.ContextHandle, cell: glyphwire.CellPos, wheel_y: f32) void {
         const server = self.app.server;
         const pos = eng.inputs.mouse.pos();
-        const cell = server.focusedCell(geometry.cellFromPixel(pos.x, pos.y)) orelse return;
         const name: []const u8 = if (wheel_y > 0) "wheel_up" else "wheel_down";
         const notches: usize = @max(1, @as(usize, @intFromFloat(@round(@abs(wheel_y)))));
         for (0..notches) |_| {
-            server.reportMouseButton(self.app.alloc, name, true, .{ .x = pos.x, .y = pos.y }, cell, 0, 1) catch return;
-            server.reportMouseButton(self.app.alloc, name, false, .{ .x = pos.x, .y = pos.y }, cell, 0, 1) catch return;
+            server.reportWheelTapIn(self.app.alloc, context, name, .{ .x = pos.x, .y = pos.y }, cell) catch return;
         }
     }
 
