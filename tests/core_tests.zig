@@ -5436,3 +5436,102 @@ pub fn reflowAtWithZeroDeltaChangesNothingTest(io: std.Io, alloc: std.mem.Alloca
     try testz.expectEqualStr("f", rowHead(&layer, 5));
     try testz.expectEqual(layer.history_len, 0);
 }
+
+// ── Multi-click selection ───────────────────────────────────────────────
+
+pub fn clickCounterChainsDoubleAndTripleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    var c: glyphwire.ClickCounter = .{};
+    try testz.expectEqual(c.press(0, .{ .x = 10, .y = 10 }, 1000), 1);
+    try testz.expectEqual(c.press(0, .{ .x = 12, .y = 9 }, 1200), 2);
+    try testz.expectEqual(c.press(0, .{ .x = 12, .y = 9 }, 1400), 3);
+    // Past a triple: a fresh single click, not a fourth.
+    try testz.expectEqual(c.press(0, .{ .x = 12, .y = 9 }, 1500), 1);
+}
+
+pub fn clickCounterResetsOnTimeDistanceOrButtonTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    var c: glyphwire.ClickCounter = .{};
+    _ = c.press(0, .{ .x = 10, .y = 10 }, 1000);
+    // Too slow.
+    try testz.expectEqual(c.press(0, .{ .x = 10, .y = 10 }, 1401), 1);
+    // Too far: past the slop on one axis.
+    try testz.expectEqual(c.press(0, .{ .x = 15, .y = 10 }, 1500), 1);
+    // Another button.
+    try testz.expectEqual(c.press(2, .{ .x = 15, .y = 10 }, 1600), 1);
+    try testz.expectEqual(c.press(2, .{ .x = 15, .y = 10 }, 1700), 2);
+}
+
+pub fn unitSpanWordStopsAtBlanksAndDelimitersTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 40, 2, 0);
+    defer layer.deinit();
+    try layer.writeText("see \"src/core.zig:42\" ok", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // Inside the path: the quotes stop it, `/ . :` don't.
+    const path = layer.unitSpanAt(.{ .above = 0, .col = 9 }, .word);
+    try testz.expectEqual(path.start.col, 5);
+    try testz.expectEqual(path.end.col, 19);
+    try testz.expectEqual(path.start.above, 0);
+
+    // A quote is a word of its own.
+    const quote = layer.unitSpanAt(.{ .above = 0, .col = 4 }, .word);
+    try testz.expectEqual(quote.start.col, 4);
+    try testz.expectEqual(quote.end.col, 4);
+
+    // The first word, from its middle.
+    const see = layer.unitSpanAt(.{ .above = 0, .col = 1 }, .word);
+    try testz.expectEqual(see.start.col, 0);
+    try testz.expectEqual(see.end.col, 2);
+
+    // A blank run selects the blanks, out to the edge past the text.
+    const tail = layer.unitSpanAt(.{ .above = 0, .col = 30 }, .word);
+    try testz.expectEqual(tail.start.col, 24);
+    try testz.expectEqual(tail.end.col, 39);
+}
+
+pub fn unitSpanWordCopiesTheWordTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 40, 2, 0);
+    defer layer.deinit();
+    try layer.writeText("ls ~/code/glyphwire|wc", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const s = layer.unitSpanAt(.{ .above = 0, .col = 6 }, .word);
+    layer.setSelection(s.start, s.end);
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("~/code/glyphwire", text);
+}
+
+pub fn unitSpanWordStepsOverWideGlyphsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 40, 2, 0);
+    defer layer.deinit();
+    try layer.writeText("a 日本語 b", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // Clicked on 本's spacer: the whole CJK run, spacers included.
+    const s = layer.unitSpanAt(.{ .above = 0, .col = 5 }, .word);
+    try testz.expectEqual(s.start.col, 2);
+    try testz.expectEqual(s.end.col, 7);
+    layer.setSelection(s.start, s.end);
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("日本語", text);
+}
+
+pub fn unitSpanLineCoversTheRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 0);
+    defer layer.deinit();
+    try layer.writeText("first line\r\nsecond line", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    const s = layer.unitSpanAt(.{ .above = -1, .col = 3 }, .line);
+    try testz.expectEqual(s.start.col, 0);
+    try testz.expectEqual(s.end.col, 19);
+    layer.setSelection(s.start, s.end);
+    const text = (try layer.selectionText(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("second line", text);
+}

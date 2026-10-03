@@ -457,6 +457,11 @@ pub const MouseButtonParams = struct {
     view_offset: usize = 0,
     /// See `KeyParams.mods`.
     mods: core.Mods = .{},
+    /// 1 for a single click, 2 for a double, 3 for a triple -- counted by
+    /// the host (`core.ClickCounter`) so every client agrees on what a
+    /// double-click is. A release carries the count of the press it ends.
+    /// Defaults to 1 for a reporter that doesn't count.
+    clicks: u8 = 1,
 };
 
 /// `mouse_move` params: the pointer's new pixel and cell position. Sent

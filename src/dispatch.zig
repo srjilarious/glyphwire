@@ -679,6 +679,10 @@ const ReportMouseButtonParams = struct {
     /// the user actually clicked while scrolled back. 0 (default) when the
     /// reporter is at the live tail or doesn't track scrollback.
     view_offset: usize = 0,
+    /// The press's click count (see `protocol.MouseButtonParams.clicks`),
+    /// passed through to the broadcast. 1 from a reporter that doesn't
+    /// count.
+    clicks: u8 = 1,
 };
 
 const ReportMouseMoveParams = struct {
@@ -3463,7 +3467,7 @@ pub const Dispatcher = struct {
         const changed = if (self.inputState()) |in| try in.setMouseButton(p.button, p.pressed) else true;
         if (!changed) return .{};
 
-        const notif_body = try rpc.mouseButtonNotification(alloc, p.button, p.pressed, p.px, p.cell, p.view_offset, self.currentMods());
+        const notif_body = try rpc.mouseButtonNotification(alloc, p.button, p.pressed, p.px, p.cell, p.view_offset, self.currentMods(), p.clicks);
         return .{ .broadcast = .{ .event = "mouse_button", .body = notif_body } };
     }
 

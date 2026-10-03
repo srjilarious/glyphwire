@@ -75,10 +75,11 @@ pub fn mouseButtonNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !v
         .{ .row = 2, .col = 1 },
         4,
         .{ .shift = true },
+        2,
     );
     defer alloc.free(body);
     try testz.expectEqualStr(
-        \\{"jsonrpc":"2.0","method":"mouse_button","params":{"button":"left","pressed":true,"px":{"x":12.5,"y":30},"cell":{"row":2,"col":1},"view_offset":4,"mods":{"ctrl":false,"alt":false,"shift":true,"super":false}}}
+        \\{"jsonrpc":"2.0","method":"mouse_button","params":{"button":"left","pressed":true,"px":{"x":12.5,"y":30},"cell":{"row":2,"col":1},"view_offset":4,"mods":{"ctrl":false,"alt":false,"shift":true,"super":false},"clicks":2}}
     , body);
 }
 

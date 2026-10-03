@@ -49,6 +49,12 @@ pub const Selection = struct {
     mouse_moved: bool = false,
     mouse_anchor: glyphwire.SelectionPoint = .{ .above = 0, .col = 0 },
     mouse_last_cell: glyphwire.CellPos = .{},
+    /// Set while a drag began as a double-click (`.word`) or triple-click
+    /// (`.line`): the selection is made at press time and every later
+    /// move grows it a whole unit at a time. `unit_anchor` is the word or
+    /// line the press landed on, which always stays selected.
+    mouse_unit: ?glyphwire.SelectUnit = null,
+    unit_anchor: glyphwire.UnitSpan = .{ .start = .{ .above = 0, .col = 0 }, .end = .{ .above = 0, .col = 0 } },
 
     /// Which layer of the visible context the current selection lives on
     /// -- null is the root layer, which is what keyboard mode and a drag
@@ -176,6 +182,25 @@ pub const Selection = struct {
             .view_cols = cols,
             .view_rows = rows,
         };
+    }
+
+    /// A word/line drag: widens `active` (the pointer's raw point) to the
+    /// whole unit under it, and keeps the unit the press landed on
+    /// selected by pinning `anchor` to its far end -- its end when the
+    /// pointer is past it, its start when the pointer has gone back
+    /// before it.
+    fn growByUnit(self: *Selection, unit: glyphwire.SelectUnit) void {
+        const p = self.active;
+        const span = self.app.server.selectionUnitAt(self.layer, p, unit) orelse return;
+        const a = self.unit_anchor;
+        const before = p.above > a.start.above or (p.above == a.start.above and p.col < a.start.col);
+        if (before) {
+            self.anchor = a.end;
+            self.active = span.start;
+        } else {
+            self.anchor = a.start;
+            self.active = span.end;
+        }
     }
 
     /// Pixel -> content-cell point within one layer, clamped to its
@@ -462,6 +487,26 @@ pub const Selection = struct {
                 self.mouse_last_cell = cell;
                 self.layer = handle;
                 self.mouse_anchor = self.pointAtPixel(pos.x, pos.y);
+                self.mouse_unit = switch (self.app.keys.press_clicks[@intFromEnum(app_mod.MouseButton.left)]) {
+                    2 => .word,
+                    3 => .line,
+                    else => null,
+                };
+                if (self.mouse_unit) |unit| {
+                    // A double/triple-click selects on the press, not
+                    // the release, and counts as a drag already: the
+                    // release must neither forward a click to the shell
+                    // nor clear what was just selected.
+                    const p = self.mouse_anchor;
+                    self.unit_anchor = server.selectionUnitAt(handle, p, unit) orelse .{ .start = p, .end = p };
+                    self.mouse_moved = true;
+                    self.mode = false;
+                    self.anchor = self.unit_anchor.start;
+                    self.active = self.unit_anchor.end;
+                    server.setSelection(self.app.alloc, self.layer, self.anchor, self.active) catch |err| {
+                        std.log.err("glyphwire-host: setSelection (multi-click) failed: {t}", .{err});
+                    };
+                }
                 return true;
             }
             return false;
@@ -495,6 +540,7 @@ pub const Selection = struct {
                     self.anchor = self.mouse_anchor;
                 }
                 self.active = self.pointAtPixel(pos.x, pos.y);
+                if (self.mouse_unit) |unit| self.growByUnit(unit);
                 server.setSelection(self.app.alloc, self.layer, self.anchor, self.active) catch |err| {
                     std.log.err("glyphwire-host: setSelection (drag) failed: {t}", .{err});
                 };
@@ -504,6 +550,7 @@ pub const Selection = struct {
 
         // Button released.
         self.mouse_selecting = false;
+        self.mouse_unit = null;
         if (!self.mouse_moved) {
             // A plain click: hand the shell the press+release it activates
             // on, and clear any leftover selection (standard behaviour).
@@ -519,8 +566,8 @@ pub const Selection = struct {
             // stays balanced without `input.KeyInput.mouse_down`.
             const vo = self.rootViewScroll();
             if (server.focusedCell(cell)) |pane_cell| {
-                server.reportMouseButton(self.app.alloc, "left", true, .{ .x = pos.x, .y = pos.y }, pane_cell, vo) catch {};
-                server.reportMouseButton(self.app.alloc, "left", false, .{ .x = pos.x, .y = pos.y }, pane_cell, vo) catch {};
+                server.reportMouseButton(self.app.alloc, "left", true, .{ .x = pos.x, .y = pos.y }, pane_cell, vo, 1) catch {};
+                server.reportMouseButton(self.app.alloc, "left", false, .{ .x = pos.x, .y = pos.y }, pane_cell, vo, 1) catch {};
             }
             // Whatever was selected, wherever it was: a plain click
             // clears it, which for a click on a different layer than the

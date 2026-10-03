@@ -62,7 +62,7 @@ pub fn textNotification(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
 }
 
 /// `mouse_button` press/release at `px`/`cell`, carrying the click-time
-/// scrollback `view_offset`.
+/// scrollback `view_offset` and the press's click count (`clicks`).
 pub fn mouseButtonNotification(
     alloc: std.mem.Allocator,
     button: []const u8,
@@ -71,6 +71,7 @@ pub fn mouseButtonNotification(
     cell: protocol.CellPos,
     view_offset: usize,
     mods: core.Mods,
+    clicks: u8,
 ) ![]u8 {
     return notification(alloc, "mouse_button", protocol.MouseButtonParams{
         .button = button,
@@ -79,6 +80,7 @@ pub fn mouseButtonNotification(
         .cell = cell,
         .view_offset = view_offset,
         .mods = mods,
+        .clicks = clicks,
     });
 }
 
