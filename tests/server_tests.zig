@@ -1223,3 +1223,147 @@ pub fn windowThemeChangeReachesOnlyFollowersTest(io: std.Io, alloc: std.mem.Allo
     defer alloc.free(b_first);
     try testz.expectTrue(std.mem.indexOf(u8, b_first, "\"method\":\"focus\"") != null);
 }
+
+/// A connected client bound to one pane, and the accept thread serving it.
+const PaneClient = struct { stream: std.Io.net.Stream, thread: std.Thread };
+
+/// Connects a client bound to `pane`, subscribed to `events_json` (a JSON
+/// array literal), and reads away the subscribe response.
+fn connectToPane(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    srv: *glyphwire.server.Server,
+    socket_path: []const u8,
+    pane: glyphwire.PaneHandle,
+    events_json: []const u8,
+    decoder: *wire.FrameDecoder,
+) !PaneClient {
+    const thread = try std.Thread.spawn(.{}, acceptOnce, .{ srv, alloc });
+    errdefer thread.join();
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var stream = try addr.connect(io);
+    errdefer stream.close(io);
+
+    var buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &buf);
+    const req = try std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"subscribe\",\"params\":{{\"events\":{s},\"pane\":{d}}}}}", .{ events_json, pane });
+    defer alloc.free(req);
+    try wire.writeFrame(&w.interface, req);
+    try w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &stream, decoder));
+    return .{ .stream = stream, .thread = thread };
+}
+
+/// Two panes side by side, both mapped, the root one focused. Returns the
+/// second pane's handle.
+fn splitIntoTwoPanes(srv: *glyphwire.server.Server) !glyphwire.PaneHandle {
+    const made = try srv.session.createPane(0, 0);
+    const split = try srv.session.createPaneSplit(.row, true);
+    try srv.session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try srv.session.setRootPaneSplit(split);
+    try srv.session.layoutPanes(null, null);
+    return made.pane;
+}
+
+/// Layer handles are per-context: two programs in two panes (two zoes)
+/// both own layer 1. A relayout must tell each client its own layer 1's
+/// bounds only -- pooled into one broadcast, each client applied both
+/// entries and the second zoe's rows dragged the first one's panels.
+pub fn layoutReachesOnlyItsOwnContextsClientsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 41, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-pane-layout-scope-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const other = try splitIntoTwoPanes(&srv);
+    for ([_]glyphwire.PaneHandle{ glyphwire.root_pane_handle, other }) |p| {
+        const c = srv.session.contextPtr(srv.session.panePtr(p).?.top()).?;
+        const layer = try c.createLayer(null, null, 0);
+        try testz.expectEqual(layer, 1);
+        const root = try c.createSplit(.row);
+        try c.setSplitChildren(root, &.{.{ .target = .{ .layer = layer } }});
+        try c.setRootSplit(root);
+    }
+
+    var a_dec: wire.FrameDecoder = .{};
+    defer a_dec.deinit(alloc);
+    var a = try connectToPane(io, alloc, &srv, socket_path, glyphwire.root_pane_handle, "[\"layout\"]", &a_dec);
+    defer a.thread.join();
+    defer a.stream.close(io);
+    var b_dec: wire.FrameDecoder = .{};
+    defer b_dec.deinit(alloc);
+    var b = try connectToPane(io, alloc, &srv, socket_path, other, "[\"layout\"]", &b_dec);
+    defer b.thread.join();
+    defer b.stream.close(io);
+
+    try srv.reportLayout(alloc);
+
+    const Notification = struct {
+        method: []const u8,
+        params: struct { layers: []const struct { layer: u32, cols: usize } },
+    };
+    const a_got = try readOneFrame(io, alloc, &a.stream, &a_dec);
+    defer alloc.free(a_got);
+    const a_parsed = try std.json.parseFromSlice(Notification, alloc, a_got, .{ .ignore_unknown_fields = true });
+    defer a_parsed.deinit();
+    try testz.expectEqual(a_parsed.value.params.layers.len, 1);
+
+    const b_got = try readOneFrame(io, alloc, &b.stream, &b_dec);
+    defer alloc.free(b_got);
+    const b_parsed = try std.json.parseFromSlice(Notification, alloc, b_got, .{ .ignore_unknown_fields = true });
+    defer b_parsed.deinit();
+    try testz.expectEqual(b_parsed.value.params.layers.len, 1);
+
+    // Each is its own pane's width, not the neighbour's.
+    try testz.expectEqual(a_parsed.value.params.layers[0].cols, srv.session.panePtr(glyphwire.root_pane_handle).?.rect.cols);
+    try testz.expectEqual(b_parsed.value.params.layers[0].cols, srv.session.panePtr(other).?.rect.cols);
+}
+
+/// The wheel over a full-screen program in an unfocused pane becomes
+/// arrow keys for *that* pane's program, not the focused one's. Ordering
+/// trick again: the focused client's first read must be the key reported
+/// after the tap, never the tap.
+pub fn aKeyTapReachesOnlyTheNamedContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-key-tap-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const other = try splitIntoTwoPanes(&srv);
+
+    var a_dec: wire.FrameDecoder = .{};
+    defer a_dec.deinit(alloc);
+    var a = try connectToPane(io, alloc, &srv, socket_path, glyphwire.root_pane_handle, "[\"key\"]", &a_dec);
+    defer a.thread.join();
+    defer a.stream.close(io);
+    var b_dec: wire.FrameDecoder = .{};
+    defer b_dec.deinit(alloc);
+    var b = try connectToPane(io, alloc, &srv, socket_path, other, "[\"key\"]", &b_dec);
+    defer b.thread.join();
+    defer b.stream.close(io);
+
+    // The root pane has focus; the tap names the other pane's context.
+    try srv.reportKeyTapIn(alloc, srv.session.panePtr(other).?.top(), "up");
+    const b_down = try readOneFrame(io, alloc, &b.stream, &b_dec);
+    defer alloc.free(b_down);
+    try testz.expectTrue(std.mem.indexOf(u8, b_down, "\"key\":\"up\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, b_down, "key_down") != null);
+
+    try srv.reportKey(alloc, "x", true);
+    const a_got = try readOneFrame(io, alloc, &a.stream, &a_dec);
+    defer alloc.free(a_got);
+    try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"key\":\"x\"") != null);
+}
