@@ -566,6 +566,60 @@ pub fn keyencodeReturnsNullForNonPrintableTest(_: std.Io, _: std.mem.Allocator) 
     try testz.expectEqual(keyencode.toPtyBytes("f5", .{ .ctrl = true }, .normal, &buf), null);
 }
 
+/// xterm's modifier forms: what vim / nvim / readline bind word motion
+/// and Shift+Tab to. Always `CSI`, even in application-cursor mode.
+pub fn keyencodeXtermModifierFormsTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [32]u8 = undefined;
+    try testz.expectEqualStr("\x1b[1;5D", keyencode.toPtyBytes("left", .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[1;2A", keyencode.toPtyBytes("up", .{ .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[1;5A", keyencode.toPtyBytes("up", .{ .ctrl = true }, .application, &buf).?);
+    try testz.expectEqualStr("\x1b[1;3H", keyencode.toPtyBytes("home", .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[3;3~", keyencode.toPtyBytes("delete", .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[6;5~", keyencode.toPtyBytes("page_down", .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[1;2P", keyencode.toPtyBytes("F1", .{ .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[15;5~", keyencode.toPtyBytes("F5", .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[1;8C", keyencode.toPtyBytes("right", .{ .ctrl = true, .alt = true, .shift = true }, .normal, &buf).?);
+}
+
+/// Enter / Tab / Backspace / Escape with modifiers in the legacy
+/// encoding, plus Ctrl+Alt on a letter.
+pub fn keyencodeLegacyControlKeyChordsTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [32]u8 = undefined;
+    try testz.expectEqualStr("\x1b[Z", keyencode.toPtyBytes("tab", .{ .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b\t", keyencode.toPtyBytes("tab", .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x08", keyencode.toPtyBytes("backspace", .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b\x7f", keyencode.toPtyBytes("backspace", .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b\r", keyencode.toPtyBytes("enter", .{ .alt = true }, .normal, &buf).?);
+    // No legacy spelling for Shift+Enter: it is just Enter.
+    try testz.expectEqualStr("\r", keyencode.toPtyBytes("enter", .{ .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b\x1b", keyencode.toPtyBytes("escape", .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b\x18", keyencode.toPtyBytes("x", .{ .ctrl = true, .alt = true }, .normal, &buf).?);
+}
+
+/// Kitty flag 1: Escape and the ambiguous chords become `CSI u`;
+/// unmodified Enter/Tab/Backspace and plain text stay legacy.
+pub fn keyencodeKittyDisambiguateTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [32]u8 = undefined;
+    const k: keyencode.EncodeOpts = .{ .kitty_flags = 1 };
+    try testz.expectEqualStr("\x1b[27u", keyencode.toPtyBytesOpts("escape", .{}, k, &buf).?);
+    try testz.expectEqualStr("\x1b[13;2u", keyencode.toPtyBytesOpts("enter", .{ .shift = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[9;2u", keyencode.toPtyBytesOpts("tab", .{ .shift = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[127;5u", keyencode.toPtyBytesOpts("backspace", .{ .ctrl = true }, k, &buf).?);
+    try testz.expectEqualStr("\r", keyencode.toPtyBytesOpts("enter", .{}, k, &buf).?);
+    try testz.expectEqualStr("\t", keyencode.toPtyBytesOpts("tab", .{}, k, &buf).?);
+    try testz.expectEqualStr("\x7f", keyencode.toPtyBytesOpts("backspace", .{}, k, &buf).?);
+    // Text with Ctrl/Alt: the unshifted key, shift in the modifier.
+    try testz.expectEqualStr("\x1b[99;5u", keyencode.toPtyBytesOpts("c", .{ .ctrl = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[97;6u", keyencode.toPtyBytesOpts("a", .{ .ctrl = true, .shift = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[49;3u", keyencode.toPtyBytesOpts("one", .{ .alt = true }, k, &buf).?);
+    try testz.expectEqualStr("a", keyencode.toPtyBytesOpts("a", .{}, k, &buf).?);
+    try testz.expectEqualStr("A", keyencode.toPtyBytesOpts("a", .{ .shift = true }, k, &buf).?);
+    // Navigation keys keep their legacy form; F3 moves off `CSI R`.
+    try testz.expectEqualStr("\x1b[1;5D", keyencode.toPtyBytesOpts("left", .{ .ctrl = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[13;2~", keyencode.toPtyBytesOpts("F3", .{ .shift = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1bOR", keyencode.toPtyBytesOpts("F3", .{}, k, &buf).?);
+}
+
 // ─── keyencode.encodeMouse ────────────────────────────────────────────
 
 pub fn encodeMouseSgrFormTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -647,6 +701,42 @@ pub fn modeTrackerSequenceSplitAcrossFeedsTest(_: std.Io, _: std.mem.Allocator) 
     mt.feed("h");
     try testz.expectTrue(mt.mouseReporting());
     try testz.expectTrue(mt.wantsAnyMotion());
+}
+
+pub fn modeTrackerFocusEventsTest(_: std.Io, _: std.mem.Allocator) !void {
+    var mt: pty.ModeTracker = .{};
+    try testz.expectFalse(mt.focusEvents());
+    mt.feed("\x1b[?1004h");
+    try testz.expectTrue(mt.focusEvents());
+    mt.feed("\x1b[?1004l");
+    try testz.expectFalse(mt.focusEvents());
+}
+
+/// The kitty keyboard flag stack: push / pop / set, masked to the one
+/// flag glyphwire supports, and a separate stack per screen.
+pub fn modeTrackerKittyKeyboardStackTest(_: std.Io, _: std.mem.Allocator) !void {
+    var mt: pty.ModeTracker = .{};
+    try testz.expectEqual(mt.encodeOpts().kitty_flags, @as(u8, 0));
+
+    // Push asks for every flag; only disambiguate (1) is kept.
+    mt.feed("\x1b[>31u");
+    try testz.expectEqual(mt.encodeOpts().kitty_flags, @as(u8, 1));
+
+    // The alternate screen has a stack of its own, starting empty.
+    mt.feed("\x1b[?1049h");
+    try testz.expectEqual(mt.encodeOpts().kitty_flags, @as(u8, 0));
+    mt.feed("\x1b[=1;1u");
+    try testz.expectEqual(mt.encodeOpts().kitty_flags, @as(u8, 1));
+    mt.feed("\x1b[?1049l");
+    try testz.expectEqual(mt.encodeOpts().kitty_flags, @as(u8, 1));
+
+    // Pop, split across two reads, back to nothing.
+    mt.feed("\x1b[");
+    mt.feed("<u");
+    try testz.expectEqual(mt.encodeOpts().kitty_flags, @as(u8, 0));
+    // A bare `CSI u` (restore cursor) is not part of the protocol.
+    mt.feed("\x1b[>1u\x1b[u");
+    try testz.expectEqual(mt.encodeOpts().kitty_flags, @as(u8, 1));
 }
 
 
