@@ -988,6 +988,30 @@ pub fn collapseHomeRewritesExactHomeAsBareTildeTest(_: std.Io, _: std.mem.Alloca
     try testz.expectEqualStr("~", homepath.collapseHome("/home/jeff", "/home/jeff", &buf));
 }
 
+// ─── homepath.expandHome: `~` in a path typed on zoe's `:` line
+
+pub fn expandHomeReadsTildeSlashAsHomeTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [256]u8 = undefined;
+    try testz.expectEqualStr("/home/jeff/code/nesterz/src/test.zig", homepath.expandHome("~/code/nesterz/src/test.zig", "/home/jeff", &buf));
+}
+
+pub fn expandHomeReadsBareTildeAsHomeTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [256]u8 = undefined;
+    try testz.expectEqualStr("/home/jeff", homepath.expandHome("~", "/home/jeff", &buf));
+}
+
+pub fn expandHomeLeavesOtherPathsAloneTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [256]u8 = undefined;
+    try testz.expectEqualStr("src/~x", homepath.expandHome("src/~x", "/home/jeff", &buf));
+    try testz.expectEqualStr("~bob/x", homepath.expandHome("~bob/x", "/home/jeff", &buf));
+    try testz.expectEqualStr("~/x", homepath.expandHome("~/x", null, &buf));
+}
+
+pub fn expandHomeFallsBackWhenBufferTooSmallTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [4]u8 = undefined;
+    try testz.expectEqualStr("~/code", homepath.expandHome("~/code", "/home/jeff", &buf));
+}
+
 pub fn collapseHomeLeavesPathsOutsideHomeAloneTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [256]u8 = undefined;
     try testz.expectEqualStr("/etc/hosts", homepath.collapseHome("/etc/hosts", "/home/jeff", &buf));
