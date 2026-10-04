@@ -164,8 +164,8 @@ back. `/` and `?` keep a history of their own. Both are shared by every
 tab and persist across sessions in `zoe_history` and `zoe_search_history`
 in the config directory (`GLYPHWIRE_NO_HISTORY=1` keeps them in memory).
 
-Filenames: Tab on the path of `:e`, `:w`, `:wq`/`:x`, `:sp`, `:vs` or
-`:cd` (directories only) completes it. One match is filled in, a
+Filenames: Tab on the path of `:e`, `:w`, `:wq`/`:x`, `:sp`, `:vs`, or
+`:cd` / `:addfolder` / `:rmfolder` (directories only) completes it. One match is filled in, a
 directory with its `/`; several fill in what they share and open a list
 over the line, where Tab / Shift+Tab / Up / Down pick, Enter takes the
 pick into the line (a directory then lists its own entries) and Escape
@@ -182,7 +182,9 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:bn` `:bp` | Next / previous tab |
 | `:bd` `:bd!` | Close the tab |
 | `:vs [path]` `:sp [path]` `:clo` | Split / close a group |
-| `:cd [dir]` `:pwd` | Working directory |
+| `:cd [dir]` `:pwd` | Working directory (in a workspace, `:cd` leaves the sidebar's folders alone) |
+| `:addfolder dir` | Add a folder to the sidebar's workspace |
+| `:rmfolder [dir]` | Take a folder out of the workspace (bare: the one the tree cursor is in) |
 | `:noh` | Clear the search highlight |
 | `:set lineno=off\|absolute\|relative` | Line numbers |
 | `:set tabwidth=N`, `expandtab=on\|off`, `whitespace=on\|off` | Indent and whitespace display |
@@ -216,6 +218,27 @@ any open tab inside it.
 The tree follows the disk: a file or folder created, deleted or renamed
 in the root or any open folder shows up within about a second, keeping
 open folders and the cursor's entry.
+
+### Workspaces
+
+`zoe dir1 dir2 ...` or `zoe project.code-workspace` opens several folders
+at once, the way VS Code's multi-root workspaces do. Each folder gets a
+header row in the tree (Enter collapses it, like any folder) with its
+contents beneath; with a single folder the tree has no header, as before.
+zoe starts in the first folder.
+
+- **Workspace files** are read, never written: only the `folders` list
+  (`path`, relative to the file, and optional `name`) is used. Comments and
+  trailing commas are fine; `settings` and the rest, and remote `uri`
+  folders, are ignored.
+- `:addfolder` / `:rmfolder` change the folders for this session only.
+- Ctrl+P and the tree's `/` search cover every folder; Ctrl+P prefixes
+  each result with its folder's name, so typing the name narrows to it.
+- The shell panel (Ctrl+`) opens in the folder that holds the current
+  file, falling back to the first folder.
+- Language servers start in the first folder with every folder in
+  `workspaceFolders`, and hear about `:addfolder` / `:rmfolder`.
+- A folder's header can't be renamed from the tree.
 
 ### Mouse
 

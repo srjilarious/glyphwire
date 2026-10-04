@@ -60,13 +60,29 @@ pub const Options = struct {
     include_dirs: bool = false,
 };
 
+/// One folder of a multi-folder walk (`Finder.initRoots`).
+pub const RootSpec = struct {
+    path: []const u8,
+    /// Prefixed onto every path found under `path`, so the list says
+    /// which folder a hit is in and a query can name it.
+    label: []const u8,
+};
+
 pub const Finder = struct {
     alloc: std.mem.Allocator,
     /// The directory the walk started from, owned. Paths are stored
-    /// relative to it and joined back onto it to open.
+    /// relative to it and joined back onto it to open. The first folder
+    /// of a multi-folder walk.
     root: []u8,
-    /// Every file found, relative to `root`, owned, alphabetical.
+    /// Every file found, relative to `root`, owned, alphabetical. In a
+    /// multi-folder walk each is `<label>/<path under its folder>`.
     paths: std.ArrayList([]u8) = .empty,
+    /// Multi-folder walks only (empty otherwise): every folder, owned,
+    /// and parallel to `paths` the index of the one each path is under.
+    /// Kept as an index rather than worked back out of the label, since
+    /// two workspace folders can share a name.
+    roots: std.ArrayList(Root) = .empty,
+    root_of: std.ArrayList(usize) = .empty,
     /// The current answer: indices into `paths`, best first.
     matches: std.ArrayList(Match) = .empty,
     query: lineedit.LineEdit = .empty,
@@ -82,6 +98,11 @@ pub const Finder = struct {
     truncated: bool = false,
     /// What the walk was allowed to collect. See `Options`.
     opts: Options = .{},
+
+    pub const Root = struct {
+        path: []u8,
+        label: []u8,
+    };
 
     /// Walks `root` and builds the listing. A directory that can't be
     /// read is skipped rather than failing the whole scan, the same rule
@@ -102,17 +123,74 @@ pub const Finder = struct {
         return self;
     }
 
+    /// Walks several folders into one list, each path prefixed with its
+    /// folder's label -- zoe's Ctrl+P over a workspace. One folder is
+    /// exactly `init`, with no prefix.
+    pub fn initRoots(alloc: std.mem.Allocator, io: std.Io, specs: []const RootSpec, opts: Options) !Finder {
+        std.debug.assert(specs.len > 0);
+        if (specs.len == 1) return init(alloc, io, specs[0].path, opts);
+
+        var self: Finder = .{ .alloc = alloc, .root = try alloc.dupe(u8, specs[0].path), .opts = opts };
+        errdefer self.deinit();
+        for (specs, 0..) |spec, i| {
+            const path = try alloc.dupe(u8, spec.path);
+            errdefer alloc.free(path);
+            const label = try alloc.dupe(u8, spec.label);
+            errdefer alloc.free(label);
+            try self.roots.append(alloc, .{ .path = path, .label = label });
+
+            const start = self.paths.items.len;
+            var ignores: gitignore.Stack = .{ .alloc = alloc };
+            defer ignores.deinit();
+            try self.scan(io, &ignores, spec.path, "", 0);
+
+            // Prefixed after the walk rather than during it: the walk's
+            // relative paths are what `.gitignore` patterns match.
+            for (self.paths.items[start..]) |*p| {
+                const labelled = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ spec.label, p.* });
+                alloc.free(p.*);
+                p.* = labelled;
+            }
+            try self.root_of.appendNTimes(alloc, i, self.paths.items.len - start);
+            if (self.truncated) break;
+        }
+
+        self.sortPaths();
+        try self.refilter();
+        return self;
+    }
+
     /// The walk returns entries in whatever order the filesystem hands
     /// them over, which is neither stable nor meaningful. Sorting once
     /// after it is what makes an empty query show the tree in a sensible
     /// order -- and `refilter` then leaves that order alone.
     pub fn sortPaths(self: *Finder) void {
-        std.mem.sort([]u8, self.paths.items, {}, lessThanPath);
+        if (self.root_of.items.len == 0) {
+            std.mem.sort([]u8, self.paths.items, {}, lessThanPath);
+            return;
+        }
+        // Sorted grouped by folder, then by path: `root_of` has to move
+        // with its path, and grouping keeps a workspace folder's files
+        // together under an empty query even when labels sort otherwise.
+        // Grouped already by construction, so each group sorts alone.
+        var start: usize = 0;
+        while (start < self.paths.items.len) {
+            var end = start + 1;
+            while (end < self.paths.items.len and self.root_of.items[end] == self.root_of.items[start]) end += 1;
+            std.mem.sort([]u8, self.paths.items[start..end], {}, lessThanPath);
+            start = end;
+        }
     }
 
     pub fn deinit(self: *Finder) void {
         for (self.paths.items) |p| self.alloc.free(p);
         self.paths.deinit(self.alloc);
+        for (self.roots.items) |r| {
+            self.alloc.free(r.path);
+            self.alloc.free(r.label);
+        }
+        self.roots.deinit(self.alloc);
+        self.root_of.deinit(self.alloc);
         self.matches.deinit(self.alloc);
         self.query.deinit(self.alloc);
         self.alloc.free(self.root);
@@ -232,8 +310,17 @@ pub const Finder = struct {
     /// lands in the same tab rather than a second one under a different
     /// spelling. Caller owns the result.
     pub fn selectedPath(self: *const Finder, alloc: std.mem.Allocator) !?[]u8 {
-        const rel = self.selected() orelse return null;
-        return try std.fs.path.join(alloc, &.{ self.root, rel });
+        if (self.cursor >= self.matches.items.len) return null;
+        return try self.absPath(alloc, self.matches.items[self.cursor].index);
+    }
+
+    /// `paths[index]` joined back onto the folder it was found in, the
+    /// label dropped. Caller owns the result.
+    pub fn absPath(self: *const Finder, alloc: std.mem.Allocator, index: usize) ![]u8 {
+        const p = self.paths.items[index];
+        if (self.root_of.items.len == 0) return std.fs.path.join(alloc, &.{ self.root, p });
+        const r = self.roots.items[self.root_of.items[index]];
+        return std.fs.path.join(alloc, &.{ r.path, p[r.label.len + 1 ..] });
     }
 
     /// Moves the cursor `delta` rows, clamped at both ends. Clamped

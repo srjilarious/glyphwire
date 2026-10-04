@@ -396,6 +396,33 @@ pub fn characterToByte(line: []const u8, character: u32, enc: PositionEncoding) 
 
 /// `path` as a `file://` URI, percent-encoding everything outside the
 /// unreserved set (and leaving `/` alone). Owned by the caller.
+/// One entry of LSP's `workspaceFolders`: a directory and its display
+/// name. Owned by whoever holds the list.
+pub const WorkspaceFolder = struct {
+    path: []const u8,
+    name: []const u8,
+};
+
+fn freeFolder(alloc: std.mem.Allocator, f: WorkspaceFolder) void {
+    alloc.free(f.path);
+    alloc.free(f.name);
+}
+
+/// `folders` as LSP's `WorkspaceFolder[]` JSON: `[{"uri":..,"name":..}]`.
+/// Caller owns the result.
+pub fn workspaceFoldersJson(alloc: std.mem.Allocator, folders: []const WorkspaceFolder) ![]u8 {
+    const Wire = struct { uri: []const u8, name: []const u8 };
+    const wire = try alloc.alloc(Wire, folders.len);
+    defer alloc.free(wire);
+    var made: usize = 0;
+    defer for (wire[0..made]) |w| alloc.free(w.uri);
+    for (folders, wire) |f, *w| {
+        w.* = .{ .uri = try pathToUri(alloc, f.path), .name = f.name };
+        made += 1;
+    }
+    return std.json.Stringify.valueAlloc(alloc, wire, .{});
+}
+
 pub fn pathToUri(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
@@ -548,13 +575,16 @@ pub const Server = struct {
     /// The caller has already checked `onPath`, so a failure here is a real
     /// one (fork failure, a binary that isn't executable) rather than "not
     /// installed".
+    /// `folders[0]` is the root: the server's cwd and its `rootUri`.
+    /// Every folder goes into `workspaceFolders`.
     pub fn start(
         alloc: std.mem.Allocator,
         io: std.Io,
         waker: Waker,
         cfg: ServerConfig,
-        root: []const u8,
+        folders: []const WorkspaceFolder,
     ) !*Server {
+        const root = folders[0].path;
         const self = try alloc.create(Server);
         errdefer alloc.destroy(self);
 
@@ -592,7 +622,7 @@ pub const Server = struct {
         trace("{s}: spawned {s}, reader thread up", .{ cfg.name, cfg.cmd[0] });
 
         trace("{s}: sending initialize (root {s})", .{ cfg.name, root });
-        self.sendInitialize(cfg, root) catch |err| {
+        self.sendInitialize(cfg, folders) catch |err| {
             trace("{s}: initialize failed to send: {t}", .{ cfg.name, err });
             // A server we can't even greet is no use; let the pool treat it
             // like one that isn't installed.
@@ -862,9 +892,11 @@ pub const Server = struct {
         };
     }
 
-    fn sendInitialize(self: *Server, cfg: ServerConfig, root: []const u8) !void {
-        const root_uri = try pathToUri(self.alloc, root);
+    fn sendInitialize(self: *Server, cfg: ServerConfig, folders: []const WorkspaceFolder) !void {
+        const root_uri = try pathToUri(self.alloc, folders[0].path);
         defer self.alloc.free(root_uri);
+        const folders_json = try workspaceFoldersJson(self.alloc, folders);
+        defer self.alloc.free(folders_json);
 
         // Written out rather than built from a struct because
         // `initializationOptions` is already-serialized JSON from the Lua
@@ -872,10 +904,13 @@ pub const Server = struct {
         var params: std.ArrayList(u8) = .empty;
         defer params.deinit(self.alloc);
         try params.print(self.alloc,
-            \\{{"processId":{d},"clientInfo":{{"name":"zoe"}},"rootUri":"{s}","workspaceFolders":[{{"uri":"{s}","name":"root"}}],
-        , .{ std.os.linux.getpid(), root_uri, root_uri });
+            \\{{"processId":{d},"clientInfo":{{"name":"zoe"}},"rootUri":"{s}","workspaceFolders":{s},
+        , .{ std.os.linux.getpid(), root_uri, folders_json });
+        // `workspaceFolders: true` is the promise behind
+        // `didChangeWorkspaceFolders`: `:addfolder` / `:rmfolder` tell a
+        // running server rather than restarting it.
         try params.appendSlice(self.alloc,
-            \\"capabilities":{"general":{"positionEncodings":["utf-8","utf-16"]},
+            \\"capabilities":{"general":{"positionEncodings":["utf-8","utf-16"]},"workspace":{"workspaceFolders":true},
         );
         try params.appendSlice(self.alloc,
             \\"textDocument":{"synchronization":{"didSave":true},"publishDiagnostics":{},"hover":{"contentFormat":["markdown","plaintext"]},"definition":{},
@@ -974,6 +1009,21 @@ pub const Server = struct {
         }, .{});
         defer self.alloc.free(params);
         try self.notify("textDocument/didOpen", params);
+    }
+
+    /// `workspace/didChangeWorkspaceFolders`. Dropped while the handshake
+    /// is still out: the server was started with the folder list as it
+    /// stood, and a folder changed in the second or so before it answers
+    /// is a rare enough case not to queue for.
+    pub fn didChangeWorkspaceFolders(self: *Server, added: []const WorkspaceFolder, removed: []const WorkspaceFolder) !void {
+        if (self.state != .ready) return;
+        const added_json = try workspaceFoldersJson(self.alloc, added);
+        defer self.alloc.free(added_json);
+        const removed_json = try workspaceFoldersJson(self.alloc, removed);
+        defer self.alloc.free(removed_json);
+        const params = try std.fmt.allocPrint(self.alloc, "{{\"event\":{{\"added\":{s},\"removed\":{s}}}}}", .{ added_json, removed_json });
+        defer self.alloc.free(params);
+        try self.notify("workspace/didChangeWorkspaceFolders", params);
     }
 
     /// `didOpen`, or a queued open while the handshake is still out.
@@ -1150,25 +1200,64 @@ pub const Pool = struct {
     /// `:lsp` can say "not installed" rather than saying nothing.
     missing: std.ArrayList([]const u8) = .empty,
 
+    /// Every workspace folder, owned, `root` first. Servers start with
+    /// the whole list and hear about changes to it.
+    folders: std.ArrayList(WorkspaceFolder) = .empty,
+
     pub fn init(
         alloc: std.mem.Allocator,
         io: std.Io,
         waker: Waker,
         root: []const u8,
     ) !Pool {
-        return .{
+        var self: Pool = .{
             .alloc = alloc,
             .io = io,
             .waker = waker,
             .root = try alloc.dupe(u8, root),
         };
+        errdefer self.deinit();
+        try self.appendFolder(root, std.fs.path.basename(root));
+        return self;
     }
 
     pub fn deinit(self: *Pool) void {
         for (self.servers.items) |s| s.deinit();
         self.servers.deinit(self.alloc);
         freeListStrings(self.alloc, &self.missing);
+        for (self.folders.items) |f| freeFolder(self.alloc, f);
+        self.folders.deinit(self.alloc);
         self.alloc.free(self.root);
+    }
+
+    fn appendFolder(self: *Pool, path: []const u8, name: []const u8) !void {
+        const p = try self.alloc.dupe(u8, path);
+        errdefer self.alloc.free(p);
+        const n = try self.alloc.dupe(u8, name);
+        errdefer self.alloc.free(n);
+        try self.folders.append(self.alloc, .{ .path = p, .name = n });
+    }
+
+    /// Adds a workspace folder: before `start`, it is simply in the list
+    /// every server starts with; after, each running server is told.
+    /// A folder already present is ignored.
+    pub fn addFolder(self: *Pool, path: []const u8, name: []const u8) !void {
+        for (self.folders.items) |f| if (std.mem.eql(u8, f.path, path)) return;
+        try self.appendFolder(path, name);
+        const added = self.folders.items[self.folders.items.len - 1 ..];
+        for (self.servers.items) |s| s.didChangeWorkspaceFolders(added, &.{}) catch {};
+    }
+
+    /// Drops a workspace folder and tells each running server. The root
+    /// stays a server's cwd and `rootUri` either way -- those were fixed
+    /// when it started.
+    pub fn removeFolder(self: *Pool, path: []const u8) void {
+        for (self.folders.items, 0..) |f, i| {
+            if (!std.mem.eql(u8, f.path, path)) continue;
+            for (self.servers.items) |s| s.didChangeWorkspaceFolders(&.{}, &.{f}) catch {};
+            freeFolder(self.alloc, self.folders.orderedRemove(i));
+            return;
+        }
     }
 
     /// Starts every enabled server whose binary is present. A server that
@@ -1186,7 +1275,7 @@ pub const Pool = struct {
                 try self.missing.append(self.alloc, try self.alloc.dupe(u8, cfg.name));
                 continue;
             }
-            const s = Server.start(self.alloc, self.io, self.waker, cfg, self.root) catch |err| {
+            const s = Server.start(self.alloc, self.io, self.waker, cfg, self.folders.items) catch |err| {
                 trace("{s}: failed to start: {t}", .{ cfg.name, err });
                 try self.missing.append(self.alloc, try self.alloc.dupe(u8, cfg.name));
                 continue;

@@ -69,6 +69,7 @@ const actions = @import("actions.zig");
 const tabs = @import("tabs.zig");
 const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
+const zoe_workspace = @import("workspace.zig");
 const profile = @import("profile.zig");
 const SpanCache = @import("spancache.zig").SpanCache;
 const selection_diff = @import("selection_diff.zig");
@@ -419,6 +420,11 @@ pub const Target = union(enum) {
     /// here: the tree roots on it like any other cwd, and the buffer
     /// starts empty.
     directory,
+    /// Several folders (`zoe a b`, `zoe x.code-workspace`). Like
+    /// `directory` -- `main` has changed into the first one, the buffer
+    /// starts empty and the focus on the tree -- with the folders
+    /// themselves passed to `Ui.init` separately.
+    workspace,
 };
 
 /// Which way a Ctrl+direction chord moves the focus.
@@ -1013,7 +1019,9 @@ pub const Ui = struct {
         client: *glyphwire.Client,
         listener: *glyphwire.InputListener,
         target: Target,
-        root_dir: []const u8,
+        /// The sidebar's folders, at least one: just the cwd, or a
+        /// workspace's list. Copied.
+        folders: []const Tree.RootSpec,
         environ: *const std.process.Environ.Map,
     ) !*Ui {
         const self = try alloc.create(Ui);
@@ -1148,7 +1156,7 @@ pub const Ui = struct {
             .search_history = .init(alloc),
             .client = client,
             .listener = listener,
-            .tree = try Tree.init(alloc, io, root_dir, .{}),
+            .tree = try Tree.initRoots(alloc, io, folders, .{}),
             // Set a few lines below, before anything can read it: the
             // first buffer builds its highlighter against the grammar
             // registry, which has to be at its final address in `self`
@@ -1190,12 +1198,12 @@ pub const Ui = struct {
 
         // After the config (which carries the server list) and before the
         // first buffer (which announces itself to whatever started).
-        self.startLsp(root_dir, environ);
+        self.startLsp(folders, environ);
 
 
         const target_path: ?[]const u8 = switch (target) {
             .file => |f| f.path,
-            .none, .directory => null,
+            .none, .directory, .workspace => null,
         };
         // `zoe some.png` is refused the same way opening it later would
         // be -- but zoe still comes up, on an empty buffer with the error
@@ -1212,18 +1220,19 @@ pub const Ui = struct {
         if (refused) |p| first.ed.setStatus("E484: \"{s}\" is not a text file", .{p});
         if (refused == null) switch (target) {
             .file => |f| if (f.line) |line| first.ed.gotoStartLine(line),
-            .none, .directory => {},
+            .none, .directory, .workspace => {},
         };
         try self.grp.buffers.append(alloc, first);
         self.buf = first;
         self.grp.active = 0;
 
         // `zoe <dir>` names a place to work, not a file to open: the tree
-        // is already rooted there (`root_dir` is the directory `main`
-        // changed into), so start the focus on it -- picking something
-        // out of it is the next thing that happens, and an empty scratch
-        // buffer has nothing to look at.
-        if (target == .directory) self.focus = .tree;
+        // is already rooted there (the directory `main` changed into), so
+        // start the focus on it -- picking something out of it is the
+        // next thing that happens, and an empty scratch buffer has
+        // nothing to look at. A workspace is the same thing, several
+        // times over.
+        if (target == .directory or target == .workspace) self.focus = .tree;
 
         try self.applySplitChildren();
         try client.setSplitChildren(root_split, &.{
@@ -1386,13 +1395,39 @@ pub const Ui = struct {
             self.shellClosed();
             return;
         }
-        self.shell.open(self.tree.root, self.winSize()) catch |err| {
+        var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        self.shell.open(self.shellDir(&dir_buf), self.winSize()) catch |err| {
             self.buf.ed.setStatus("can't start gw-shell: {t}", .{err});
             self.status_dirty = true;
             return;
         };
         // The shell takes the caret; what zoe last sent no longer stands.
         self.caret_host = null;
+    }
+
+    /// Where the shell panel starts: the workspace folder holding the
+    /// active buffer's file, so in a workspace the shell lands in the
+    /// project being edited. A scratch buffer, or a file outside every
+    /// folder, falls back to the first folder -- which with a single
+    /// folder is the only answer there ever was. `buf` holds the
+    /// absolute form of a relative buffer path while it is looked up.
+    fn shellDir(self: *const Ui, buf: []u8) []const u8 {
+        const fallback = self.tree.primaryRoot();
+        const p = self.buf.ed.path orelse return fallback;
+        const abs = self.absolutePath(p, buf) orelse return fallback;
+        const loc = self.tree.locate(abs) orelse return fallback;
+        return self.tree.roots.items[loc.root].path;
+    }
+
+    /// `path` made absolute against the cwd, into `buf`. Null when it
+    /// doesn't fit, or the cwd can't be read.
+    fn absolutePath(self: *const Ui, path: []const u8, buf: []u8) ?[]const u8 {
+        if (std.fs.path.isAbsolute(path)) return path;
+        const n = std.process.currentPath(self.io, buf) catch return null;
+        if (n + 1 + path.len > buf.len) return null;
+        buf[n] = '/';
+        @memcpy(buf[n + 1 ..][0..path.len], path);
+        return buf[0 .. n + 1 + path.len];
     }
 
     /// The panel went away -- Ctrl+` closed it, or its shell exited. Zoe
@@ -3026,7 +3061,11 @@ pub const Ui = struct {
         self.cancelFind();
         var find: TreeFind = .{ .scope = scope, .anchor = self.tree.cursor };
         errdefer find.deinit(self.alloc);
-        if (scope == .deep) find.deep = try tree_mod.deepList(self.alloc, self.io, self.tree.root, self.tree.visible);
+        if (scope == .deep) {
+            const roots = try self.tree.rootPaths(self.alloc);
+            defer self.alloc.free(roots);
+            find.deep = try tree_mod.deepListRoots(self.alloc, self.io, roots, self.tree.visible);
+        }
         self.find = find;
         self.status_dirty = true;
     }
@@ -3064,7 +3103,15 @@ pub const Ui = struct {
         self.cancelFind();
         self.cancelTreeEdit();
         const e = self.tree.at(self.tree.cursor) orelse return;
-        const dir = try self.alloc.dupe(u8, std.fs.path.dirname(e.path) orelse self.tree.root);
+        // A workspace folder's header is the folder itself, not a name in
+        // some parent zoe is showing; `:rmfolder` is what takes it out of
+        // the sidebar.
+        if (e.is_root) {
+            self.buf.ed.setStatus("E: \"{s}\" is a workspace folder; rename it outside zoe", .{e.name});
+            self.status_dirty = true;
+            return;
+        }
+        const dir = try self.alloc.dupe(u8, std.fs.path.dirname(e.path) orelse self.tree.roots.items[e.root].path);
         errdefer self.alloc.free(dir);
         const old_name = try self.alloc.dupe(u8, e.name);
         errdefer self.alloc.free(old_name);
@@ -3356,8 +3403,8 @@ pub const Ui = struct {
         switch (f.scope) {
             .visible => self.treeGoto(hit),
             .deep => {
-                const rel = f.deep.?.paths.items[hit];
-                const index = (try self.tree.reveal(self.io, rel)) orelse return;
+                const deep = &f.deep.?;
+                const index = (try self.tree.revealIn(self.io, deep.root_of.items[hit], deep.paths.items[hit])) orelse return;
                 try self.syncContentSizes();
                 self.treeGoto(index);
                 self.markTreeDirty(.full);
@@ -4005,6 +4052,8 @@ pub const Ui = struct {
             .split => |sp| try self.splitGroup(if (sp.vertical) .vertical else .horizontal, .after, self.expandArg(sp.path, &home_buf)),
             .close_group => try self.closeGroup(),
             .chdir => |target| self.changeDir(target),
+            .add_folder => |target| try self.addFolder(self.expandArg(target, &home_buf)),
+            .remove_folder => |target| try self.removeFolder(self.expandArg(target, &home_buf)),
             .pwd => {
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
                 const n = std.process.currentPath(self.io, &buf) catch {
@@ -4080,13 +4129,22 @@ pub const Ui = struct {
             } else |_| {}
         }
 
+        var new_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const new_n = std.process.currentPath(self.io, &new_buf) catch 0;
+        const new_root = if (new_n > 0) new_buf[0..new_n] else dest;
+
+        // A workspace's folders aren't the cwd, so `:cd` leaves them be:
+        // it moves where relative paths resolve and nothing else.
+        if (self.tree.multiRoot()) {
+            self.buf.ed.setStatus("{s}", .{new_root});
+            self.status_dirty = true;
+            return;
+        }
+
         // Re-root the tree at the resolved absolute cwd. (A name field
         // can't be up -- `:cd` is typed in the buffer pane, and leaving
         // the tree closed it -- but its rows are about to vanish.)
         self.cancelTreeEdit();
-        var new_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const new_n = std.process.currentPath(self.io, &new_buf) catch 0;
-        const new_root = if (new_n > 0) new_buf[0..new_n] else dest;
 
         if (Tree.init(self.alloc, self.io, new_root, self.tree.visible)) |fresh| {
             // A search's candidates are indices into the listing that is
@@ -4105,6 +4163,98 @@ pub const Ui = struct {
         self.buf.ed.setStatus("{s}", .{new_root});
     }
 
+    // ── Workspace folders ───────────────────────────────────────────────
+
+    /// `:addfolder <dir>` -- another folder in the sidebar, at the end,
+    /// open. The first one added to a single-folder tree turns it into a
+    /// workspace: the existing folder gets a header of its own.
+    fn addFolder(self: *Ui, target: ?[]const u8) !void {
+        self.status_dirty = true;
+        const t = target orelse {
+            self.buf.ed.setStatus("E471: Argument required", .{});
+            return;
+        };
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const joined = self.absolutePath(t, &abs_buf) orelse {
+            self.buf.ed.setStatus("E: path too long", .{});
+            return;
+        };
+        // Normalized, so `../x` and `x/` name the folder the same way the
+        // tree's root list does and a duplicate is caught.
+        const abs = try std.fs.path.resolve(self.alloc, &.{joined});
+        defer self.alloc.free(abs);
+        const st = std.Io.Dir.cwd().statFile(self.io, abs, .{}) catch {
+            self.buf.ed.setStatus("E: no such directory: {s}", .{abs});
+            return;
+        };
+        if (st.kind != .directory) {
+            self.buf.ed.setStatus("E: not a directory: {s}", .{abs});
+            return;
+        }
+
+        // Row indices are about to move under both.
+        self.cancelFind();
+        self.cancelTreeEdit();
+        const name = zoe_workspace.defaultName(abs);
+        if (!try self.tree.addRoot(self.io, .{ .path = abs, .name = name })) {
+            self.buf.ed.setStatus("\"{s}\" is already in the workspace", .{abs});
+            return;
+        }
+        if (self.lsp_pool) |*pool| pool.addFolder(abs, name) catch {};
+        if (self.tree.headerRow(self.tree.roots.items.len - 1)) |row| self.tree.cursor = row;
+        try self.treeChanged();
+        self.buf.ed.setStatus("added folder {s}", .{abs});
+    }
+
+    /// `:rmfolder [dir]` -- takes a folder out of the sidebar (never off
+    /// the disk): the one named, or the one the tree's cursor is in.
+    /// The last folder stays.
+    fn removeFolder(self: *Ui, target: ?[]const u8) !void {
+        self.status_dirty = true;
+        const index: usize = if (target) |t| blk: {
+            var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const joined = self.absolutePath(t, &abs_buf) orelse {
+                self.buf.ed.setStatus("E: path too long", .{});
+                return;
+            };
+            const abs = try std.fs.path.resolve(self.alloc, &.{joined});
+            defer self.alloc.free(abs);
+            break :blk self.tree.rootIndex(abs) orelse {
+                self.buf.ed.setStatus("E: not a workspace folder: {s}", .{abs});
+                return;
+            };
+        } else blk: {
+            const e = self.tree.at(self.tree.cursor) orelse {
+                self.buf.ed.setStatus("E471: Argument required", .{});
+                return;
+            };
+            break :blk e.root;
+        };
+        if (!self.tree.multiRoot()) {
+            self.buf.ed.setStatus("E: can't remove the only folder", .{});
+            return;
+        }
+
+        self.cancelFind();
+        self.cancelTreeEdit();
+        const path = try self.alloc.dupe(u8, self.tree.roots.items[index].path);
+        defer self.alloc.free(path);
+        try self.tree.removeRoot(self.io, index);
+        if (self.lsp_pool) |*pool| pool.removeFolder(path);
+        try self.treeChanged();
+        self.buf.ed.setStatus("removed folder {s}", .{path});
+    }
+
+    /// After the listing changed shape under code that isn't a plain
+    /// expand or collapse: the viewport pulled back, the grid resized, the
+    /// cursor followed, everything repainted.
+    fn treeChanged(self: *Ui) !void {
+        self.clampTreeScroll();
+        try self.syncContentSizes();
+        self.scrollTreeToCursor();
+        self.markTreeDirty(.full);
+    }
+
     // ── Finder ──────────────────────────────────────────────────────────
 
     /// Ctrl+P. Walks the tree root and opens the popup over the buffer
@@ -4114,8 +4264,13 @@ pub const Ui = struct {
         // The popup is modal, so a tree search underneath it would have
         // the statusline to itself with no way left to type into it.
         self.cancelFind();
-        const f = Finder.init(self.alloc, self.io, self.tree.root, .{ .visible = self.tree.visible }) catch |err| {
-            self.buf.ed.setStatus("E484: Can't scan {s}: {s}", .{ self.tree.root, @errorName(err) });
+        // Every workspace folder, each hit prefixed with its folder's
+        // name; one folder lists exactly as it always has.
+        var specs: std.ArrayList(finder_mod.RootSpec) = .empty;
+        defer specs.deinit(self.alloc);
+        for (self.tree.roots.items) |r| try specs.append(self.alloc, .{ .path = r.path, .label = r.name });
+        const f = Finder.initRoots(self.alloc, self.io, specs.items, .{ .visible = self.tree.visible }) catch |err| {
+            self.buf.ed.setStatus("E484: Can't scan {s}: {s}", .{ self.tree.primaryRoot(), @errorName(err) });
             self.status_dirty = true;
             return;
         };
@@ -4127,8 +4282,7 @@ pub const Ui = struct {
     /// tree -- the popup still closes, and the error lands in the
     /// statusline behind it.
     fn acceptFinder(self: *Ui) !void {
-        const rel = self.finder.selected() orelse return self.finder.close();
-        const path = try std.fs.path.join(self.alloc, &.{ self.finder.root().?, rel });
+        const path = (try self.finder.selectedPath(self.alloc)) orelse return self.finder.close();
         defer self.alloc.free(path);
         self.finder.close();
         try self.openFile(path);
@@ -4278,10 +4432,7 @@ pub const Ui = struct {
     /// made -- or else on the entry it was on.
     fn refreshTree(self: *Ui, onto: ?[]const u8) !void {
         if (onto) |p| try self.tree.reloadOnto(self.io, p) else try self.tree.reload(self.io);
-        self.clampTreeScroll();
-        try self.syncContentSizes();
-        self.scrollTreeToCursor();
-        self.markTreeDirty(.full);
+        try self.treeChanged();
     }
 
     /// Re-reads `slot`'s file after an outside change, keeping the view:
@@ -4488,7 +4639,7 @@ pub const Ui = struct {
     /// direction: LSP is not part of the editor's correctness, so a server
     /// that isn't installed, won't spawn or won't answer leaves zoe exactly
     /// as it was without one.
-    fn startLsp(self: *Ui, root_dir: []const u8, environ: *const std.process.Environ.Map) void {
+    fn startLsp(self: *Ui, folders: []const Tree.RootSpec, environ: *const std.process.Environ.Map) void {
         lsp.debug = environ.get("GLYPHWIRE_LSP_DEBUG") != null;
         const cfg = self.hl_config orelse {
             // No config means no server list, and also no grammar registry --
@@ -4498,7 +4649,11 @@ pub const Ui = struct {
         };
         if (!cfg.lsp_enabled) return;
 
-        var pool = lsp.Pool.init(self.alloc, self.io, lsp.Waker.fromListener(self.listener), root_dir) catch return;
+        // Rooted at the first folder, with every folder in its
+        // `workspaceFolders` (added before `start`, so they ride along in
+        // `initialize` rather than as a change).
+        var pool = lsp.Pool.init(self.alloc, self.io, lsp.Waker.fromListener(self.listener), folders[0].path) catch return;
+        for (folders[1..]) |f| pool.addFolder(f.path, f.name) catch {};
         pool.start(cfg.lsp_servers, environ) catch {};
         if (pool.servers.items.len == 0) {
             // Nothing started. Keep the pool anyway so `:lsp` can list what
@@ -5464,9 +5619,12 @@ pub const Ui = struct {
             for (g.buffers.items) |slot| slot.lsp_opened = false;
         }
 
-        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = std.process.currentPath(self.io, &root_buf) catch 0;
-        self.startLsp(if (n > 0) root_buf[0..n] else ".", self.environ);
+        // The sidebar's folders as they stand now -- `:addfolder` and a
+        // single-folder `:cd` included.
+        var specs: std.ArrayList(Tree.RootSpec) = .empty;
+        defer specs.deinit(self.alloc);
+        for (self.tree.roots.items) |r| specs.append(self.alloc, .{ .path = r.path, .name = r.name }) catch return;
+        self.startLsp(specs.items, self.environ);
         for (self.group_list.items) |g| {
             for (g.buffers.items) |slot| self.lspDidOpen(slot);
             // The sign column's marks went with the old store.
@@ -7218,7 +7376,11 @@ pub const Ui = struct {
                     // drawn dim, so "show hidden" reads as a listing with
                     // extra, lesser entries rather than as a listing that
                     // mysteriously doubled in length.
-                    .fg = if (e.hidden)
+                    // A workspace folder's header stands out from the
+                    // directories under it, the way VS Code's does.
+                    .fg = if (e.is_root)
+                        role(.fg_strong)
+                    else if (e.hidden)
                         (if (e.is_dir) role(.hidden_dir) else role(.hidden))
                     else
                         (if (e.is_dir) role(.dir) else role(.fg)),

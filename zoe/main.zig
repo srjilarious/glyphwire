@@ -17,6 +17,7 @@ const zargs = @import("zargunaught");
 const zoe = @import("zoe_support");
 const interrupt = @import("applib").interrupt;
 const homepath = @import("applib").homepath;
+const workspace = zoe.workspace;
 
 // const usage =
 //     \\usage: zoe [--keys <script>] [--quiet] [file|directory]
@@ -65,6 +66,14 @@ pub fn main(init: std.process.Init) !void {
         \\A directory argument changes into it (as `:cd` would) and starts on
         \\the file tree with an empty buffer; anything else is a file to open.
         \\--line N (before the file) starts the cursor on line N.
+        \\
+        \\Several directory arguments, or one VS Code .code-workspace file,
+        \\open a workspace: every folder gets its own collapsible section in
+        \\the sidebar, and Ctrl+P and the tree's / search cover all of them.
+        \\Only the workspace file's "folders" list is read, and zoe never
+        \\writes it. :addfolder <dir> and :rmfolder [dir] change the folders
+        \\for this session (a bare :rmfolder drops the one the tree cursor is
+        \\in).
         \\
         \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
         \\glyphwire display server. Ctrl+W is vim's window prefix: then v or s
@@ -138,6 +147,31 @@ pub fn main(init: std.process.Init) !void {
     if (args.positional.items.len > 0) {
         path = args.positional.items[0];
     }
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const start_cwd = cwd_buf[0..cwd_len];
+
+    // A workspace: one `.code-workspace` file, or more than one argument
+    // (which then all have to be directories -- zoe opens one file, not
+    // a list of them). Resolved against the cwd zoe was started in,
+    // before anything changes it.
+    var ws: ?workspace.Workspace = null;
+    defer if (ws) |*w| w.deinit();
+    if (args.positional.items.len > 1) {
+        for (args.positional.items) |p| {
+            if (!isDirectory(io, p)) return fail(io, "zoe: with several arguments, each must be a directory\n");
+        }
+        ws = try workspace.fromDirs(alloc, start_cwd, args.positional.items);
+    } else if (path) |p| {
+        if (workspace.isWorkspacePath(p) and !isDirectory(io, p)) {
+            ws = workspace.load(alloc, io, start_cwd, p) catch |err| {
+                var buf: [512]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "zoe: can't read workspace {s}: {t}\n", .{ p, err }) catch "zoe: can't read workspace\n";
+                return fail(io, msg);
+            };
+        }
+    }
     // What glyphwire-shell's default text `open_actions` entry passes
     // (`zoe --line {line} {sel}`), so a `gw-grep` hit opens on its match.
     // An option rather than vim's `+N`: zargunaught takes a bare `+N` as
@@ -155,7 +189,15 @@ pub fn main(init: std.process.Init) !void {
     // just spelled on the command line. Everything else (including a
     // name that doesn't exist yet) is a file.
     var target: zoe.Target = .none;
-    if (path) |p| {
+    if (ws) |w| {
+        // The first folder becomes the cwd, the way a single directory
+        // argument does: a relative `:w` or `:e` has to land somewhere,
+        // and the first folder is the one listed first. A first folder
+        // that doesn't exist leaves the cwd alone; its section is just
+        // empty.
+        std.process.setCurrentPath(io, w.folders.items[0].path) catch {};
+        target = .workspace;
+    } else if (path) |p| {
         if (isDirectory(io, p)) {
             std.process.setCurrentPath(io, p) catch return fail(io, "zoe: cannot change directory\n");
             target = .directory;
@@ -169,7 +211,7 @@ pub fn main(init: std.process.Init) !void {
     // would be neither. The UI opens the target itself: it owns every
     // buffer in its tab strip, and the first one is no different.
     if (script == null) {
-        if (try runUi(alloc, io, target, init.environ_map)) return;
+        if (try runUi(alloc, io, target, if (ws) |*w| w else null, init.environ_map)) return;
     }
 
     // A missing file is a new buffer, not an error -- `zoe newfile.txt`
@@ -177,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
     // into and leaves nothing to read.
     const file_path: ?[]const u8 = switch (target) {
         .file => |f| f.path,
-        .none, .directory => null,
+        .none, .directory, .workspace => null,
     };
     const text: []u8 = if (file_path) |p|
         std.Io.Dir.cwd().readFileAlloc(io, p, alloc, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
@@ -206,6 +248,8 @@ pub fn main(init: std.process.Init) !void {
             .quit,
             .chdir,
             .pwd,
+            .add_folder,
+            .remove_folder,
             .set_clipboard,
             .paste,
             .buffer_step,
@@ -251,6 +295,7 @@ fn runUi(
     alloc: std.mem.Allocator,
     io: std.Io,
     target: zoe.Target,
+    ws: ?*const workspace.Workspace,
     environ: *const std.process.Environ.Map,
 ) !bool {
     var client = glyphwire.Client.connectFromEnv(io, alloc, environ) catch {
@@ -282,11 +327,19 @@ fn runUi(
     }) catch return false;
     defer listener.deinit();
 
+    // The sidebar's folders: the workspace's, or else just the cwd.
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
     const cwd = cwd_buf[0..cwd_len];
+    var folders: std.ArrayList(zoe.Tree.RootSpec) = .empty;
+    defer folders.deinit(alloc);
+    if (ws) |w| {
+        for (w.folders.items) |f| try folders.append(alloc, .{ .path = f.path, .name = f.name });
+    } else {
+        try folders.append(alloc, .{ .path = cwd, .name = workspace.defaultName(cwd) });
+    }
 
-    const ui = try zoe.Ui.init(alloc, io, &client, listener, target, cwd, environ);
+    const ui = try zoe.Ui.init(alloc, io, &client, listener, target, folders.items, environ);
     defer ui.deinit();
 
     try ui.run();

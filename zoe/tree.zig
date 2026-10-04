@@ -22,6 +22,18 @@
 //! walks a `DeepList`, every path under the root whether its folder is
 //! open or not, and `reveal` then opens whatever it takes for the hit to
 //! become a row the cursor can sit on.
+//!
+//! **Several roots.** A workspace (`zoe/workspace.zig`) puts more than one
+//! folder in the sidebar. With one root the listing is that folder's
+//! contents at depth 0, exactly as it always was -- the root has no row of
+//! its own. With two or more, each root gets a header row at depth 0
+//! (`Entry.is_root`, named after the workspace folder) and its contents
+//! sit under it at depth 1, so collapsing a header is the ordinary
+//! collapse of a directory row. Every entry carries the index of the root
+//! it came from (`Entry.root`): its `.gitignore` chain and its path
+//! relative to its root both depend on which root that is, and a path
+//! prefix can't say for sure when one workspace folder sits inside
+//! another.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -43,7 +55,8 @@ pub const indent_cols: usize = 2;
 pub const icon_cols: usize = 3;
 
 pub const Entry = struct {
-    /// The final path component, owned.
+    /// The final path component, owned. A root header's is the
+    /// workspace folder's name instead.
     name: []u8,
     /// The full path, owned -- what `:e` and a click both need.
     path: []u8,
@@ -60,6 +73,11 @@ pub const Entry = struct {
     /// read; null for a file, a collapsed directory, or one that couldn't
     /// be stat'ed. What `changedOnDisk` compares against.
     stamp: ?i96 = null,
+    /// Index into `Tree.roots` of the folder this entry is under.
+    root: usize = 0,
+    /// A workspace folder's header row -- only present with two or more
+    /// roots. Always a directory; its `path` is the root's.
+    is_root: bool = false,
 
     /// Columns this row occupies when drawn.
     pub fn cols(self: Entry) usize {
@@ -67,10 +85,32 @@ pub const Entry = struct {
     }
 };
 
+/// One folder the tree is rooted at.
+pub const Root = struct {
+    /// Absolute, owned.
+    path: []u8,
+    /// What its header row says, owned. Unused with a single root, which
+    /// has no header.
+    name: []u8,
+    /// The root's mtime when it was last read -- `Entry.stamp` for a
+    /// directory with no row of its own. Single-root only: a header row
+    /// is an entry and keeps its own stamp.
+    stamp: ?i96 = null,
+};
+
+/// A path as the tree addresses it: which root, and where under it.
+pub const Located = struct {
+    root: usize,
+    /// Relative to that root, `/`-separated; empty for the root itself.
+    /// Borrowed from whatever absolute path it was cut out of.
+    rel: []const u8,
+};
+
 pub const Tree = struct {
     alloc: std.mem.Allocator,
-    /// The directory the tree is rooted at, owned.
-    root: []u8,
+    /// The folders the tree is rooted at, in sidebar order. Never empty
+    /// for a tree built by `init` / `initRoots`.
+    roots: std.ArrayList(Root) = .empty,
     /// Visible entries in draw order -- see the flattening note above.
     entries: std.ArrayList(Entry) = .empty,
     /// The highlighted row, in `entries` indices.
@@ -78,15 +118,161 @@ pub const Tree = struct {
     /// What the listing is allowed to show. Changing it needs a `reload`
     /// -- the entries are the answer to this question, not a view of it.
     visible: Visibility = .{},
-    /// The root's mtime when it was last read -- `Entry.stamp` for the
-    /// directory that has no row of its own.
-    root_stamp: ?i96 = null,
 
+    /// What a root is made from: borrowed strings, copied by the tree.
+    pub const RootSpec = struct {
+        path: []const u8,
+        name: []const u8,
+    };
+
+    /// A tree over one folder, the way zoe has always started.
     pub fn init(alloc: std.mem.Allocator, io: std.Io, root: []const u8, visible: Visibility) !Tree {
-        var self: Tree = .{ .alloc = alloc, .root = try alloc.dupe(u8, root), .visible = visible };
-        errdefer alloc.free(self.root);
-        self.root_stamp = try self.readInto(io, self.root, "", 0, 0);
+        return initRoots(alloc, io, &.{.{ .path = root, .name = std.fs.path.basename(root) }}, visible);
+    }
+
+    /// A tree over every folder in `specs` (at least one), each header
+    /// open -- which is how VS Code first shows a workspace.
+    pub fn initRoots(alloc: std.mem.Allocator, io: std.Io, specs: []const RootSpec, visible: Visibility) !Tree {
+        std.debug.assert(specs.len > 0);
+        var self: Tree = .{ .alloc = alloc, .visible = visible };
+        errdefer self.deinit();
+        for (specs) |spec| try self.appendRoot(spec);
+        try self.rebuild(io);
+        try self.openAllHeaders(io);
         return self;
+    }
+
+    fn appendRoot(self: *Tree, spec: RootSpec) !void {
+        const path = try self.alloc.dupe(u8, spec.path);
+        errdefer self.alloc.free(path);
+        const name = try self.alloc.dupe(u8, spec.name);
+        errdefer self.alloc.free(name);
+        try self.roots.append(self.alloc, .{ .path = path, .name = name });
+    }
+
+    /// Whether the sidebar shows header rows -- two or more roots.
+    pub fn multiRoot(self: *const Tree) bool {
+        return self.roots.items.len > 1;
+    }
+
+    /// The first root: where the shell panel falls back to, and what a
+    /// single-folder `:cd` replaces.
+    pub fn primaryRoot(self: *const Tree) []const u8 {
+        return self.roots.items[0].path;
+    }
+
+    /// Every root's path, in order, for a caller walking all of them.
+    /// The slice is the caller's to free; the strings are the tree's.
+    pub fn rootPaths(self: *const Tree, alloc: std.mem.Allocator) ![]const []const u8 {
+        const out = try alloc.alloc([]const u8, self.roots.items.len);
+        for (self.roots.items, out) |r, *o| o.* = r.path;
+        return out;
+    }
+
+    /// Adds a folder at the end, its header open, keeping what was open
+    /// elsewhere. False when it is already a root. The tree turns into a
+    /// multi-root one on the second folder, which moves every existing
+    /// row down a level under its new header -- `reload` restores by
+    /// path, so nothing that was open closes.
+    pub fn addRoot(self: *Tree, io: std.Io, spec: RootSpec) !bool {
+        if (self.rootIndex(spec.path) != null) return false;
+        const was_single = !self.multiRoot();
+        try self.appendRoot(spec);
+        try self.reload(io);
+        // The old root's header is new too, and opening it is what keeps
+        // its rows on screen across the change.
+        if (was_single) try self.openHeader(io, 0);
+        try self.openHeader(io, self.roots.items.len - 1);
+        return true;
+    }
+
+    /// Drops root `index`. The last root can't go: a sidebar with nothing
+    /// in it has no directory for a new file, the shell or Ctrl+P.
+    pub fn removeRoot(self: *Tree, io: std.Io, index: usize) !void {
+        if (self.roots.items.len <= 1 or index >= self.roots.items.len) return error.LastRoot;
+        // Entries name roots by index, so what was open is captured
+        // against the old numbering and renumbered before the rebuild;
+        // restoring against the shifted list would open folders in the
+        // wrong root.
+        var open = try self.snapshotOpen();
+        defer open.deinit(self.alloc);
+        open.dropRoot(self.alloc, index);
+
+        const gone = self.roots.orderedRemove(index);
+        self.alloc.free(gone.path);
+        self.alloc.free(gone.name);
+        try self.restore(io, &open);
+    }
+
+    pub fn rootIndex(self: *const Tree, abs: []const u8) ?usize {
+        for (self.roots.items, 0..) |r, i| {
+            if (std.mem.eql(u8, r.path, abs)) return i;
+        }
+        return null;
+    }
+
+    /// Which root `abs` is under, and where. The longest matching root
+    /// wins, so a workspace folder nested inside another claims its own
+    /// files. Null for a path under none of them.
+    pub fn locate(self: *const Tree, abs: []const u8) ?Located {
+        var best: ?Located = null;
+        var best_len: usize = 0;
+        for (self.roots.items, 0..) |r, i| {
+            if (!isUnder(r.path, abs)) continue;
+            if (best != null and r.path.len <= best_len) continue;
+            best = .{ .root = i, .rel = relOf(r.path, abs) };
+            best_len = r.path.len;
+        }
+        return best;
+    }
+
+    /// The header row of root `index`; null with a single root.
+    pub fn headerRow(self: *const Tree, index: usize) ?usize {
+        if (!self.multiRoot()) return null;
+        for (self.entries.items, 0..) |e, i| {
+            if (e.is_root and e.root == index) return i;
+        }
+        return null;
+    }
+
+    fn openHeader(self: *Tree, io: std.Io, index: usize) !void {
+        const row = self.headerRow(index) orelse return;
+        if (!self.entries.items[row].expanded) try self.toggle(io, row);
+    }
+
+    /// Opens every header, last first so each toggle's splice lands after
+    /// the headers still waiting.
+    fn openAllHeaders(self: *Tree, io: std.Io) !void {
+        var i = self.roots.items.len;
+        while (i > 0) {
+            i -= 1;
+            try self.openHeader(io, i);
+        }
+    }
+
+    /// Clears the listing and reads it from the top: a single root's
+    /// contents, or one closed header per root.
+    fn rebuild(self: *Tree, io: std.Io) !void {
+        self.clearEntries();
+        if (!self.multiRoot()) {
+            const r = &self.roots.items[0];
+            r.stamp = try self.readInto(io, r.path, 0, "", 0, 0);
+            return;
+        }
+        for (self.roots.items, 0..) |r, i| {
+            const path = try self.alloc.dupe(u8, r.path);
+            errdefer self.alloc.free(path);
+            const name = try self.alloc.dupe(u8, r.name);
+            errdefer self.alloc.free(name);
+            try self.entries.append(self.alloc, .{
+                .name = name,
+                .path = path,
+                .is_dir = true,
+                .depth = 0,
+                .root = i,
+                .is_root = true,
+            });
+        }
     }
 
     /// Whether a directory the tree is showing has changed on disk since
@@ -102,7 +288,11 @@ pub const Tree = struct {
     /// same everywhere. A collapsed folder isn't polled -- opening it
     /// reads it fresh anyway.
     pub fn changedOnDisk(self: *const Tree, io: std.Io) bool {
-        if (dirStamp(io, self.root) != self.root_stamp) return true;
+        // With headers, each root is an entry and the loop covers it.
+        if (!self.multiRoot()) {
+            const r = self.roots.items[0];
+            if (dirStamp(io, r.path) != r.stamp) return true;
+        }
         for (self.entries.items) |e| {
             if (!e.is_dir or !e.expanded) continue;
             if (dirStamp(io, e.path) != e.stamp) return true;
@@ -116,33 +306,33 @@ pub const Tree = struct {
     }
 
     /// The directory a new entry made from row `index` goes in: the row
-    /// itself when it is a directory, else the directory the row is in
-    /// (the root for an empty tree or a top-level file). Borrowed from
-    /// the tree; valid until it next changes.
+    /// itself when it is a directory (a root header included), else the
+    /// directory the row is in (the first root for an empty tree).
+    /// Borrowed from the tree; valid until it next changes.
     pub fn dirFor(self: *const Tree, index: usize) []const u8 {
-        const e = self.at(index) orelse return self.root;
+        const e = self.at(index) orelse return self.primaryRoot();
         if (e.is_dir) return e.path;
-        return std.fs.path.dirname(e.path) orelse self.root;
+        return std.fs.path.dirname(e.path) orelse self.roots.items[e.root].path;
     }
 
     /// The row of directory `abs`, expanded so its children are rows --
-    /// where a new entry's field goes. Null for the root itself, which
-    /// has no row, and for a directory the tree can't show.
+    /// where a new entry's field goes. Null for a single root itself,
+    /// which has no row, and for a directory the tree can't show. A
+    /// workspace root answers its header row.
     pub fn openDirRow(self: *Tree, io: std.Io, abs: []const u8) !?usize {
-        if (std.mem.eql(u8, abs, self.root)) return null;
-        const index = (try self.reveal(io, relOf(self.root, abs))) orelse return null;
+        const index = (try self.revealPath(io, abs)) orelse return null;
         const e = self.entries.items[index];
         if (e.is_dir and !e.expanded) try self.toggle(io, index);
         return index;
     }
 
     /// Re-reads and moves the cursor onto `abs` (an absolute path under
-    /// the root) -- after a create or a rename, so the entry just made is
+    /// a root) -- after a create or a rename, so the entry just made is
     /// the one highlighted. A path the tree can't show (hidden while
     /// Ctrl+H is off) leaves the cursor where `reload` put it.
     pub fn reloadOnto(self: *Tree, io: std.Io, abs: []const u8) !void {
         try self.reload(io);
-        if (try self.reveal(io, relOf(self.root, abs))) |index| self.cursor = index;
+        if (try self.revealPath(io, abs)) |index| self.cursor = index;
     }
 
     /// Re-reads the whole tree under the current `visible`, putting back
@@ -154,35 +344,76 @@ pub const Tree = struct {
     /// the point -- the indices all move when a hidden sibling appears
     /// above them.
     pub fn reload(self: *Tree, io: std.Io) !void {
-        var open: std.ArrayList([]u8) = .empty;
-        defer {
-            for (open.items) |p| self.alloc.free(p);
-            open.deinit(self.alloc);
+        var open = try self.snapshotOpen();
+        defer open.deinit(self.alloc);
+        try self.restore(io, &open);
+    }
+
+    /// The open folders and the cursor's entry, by (root, path under it)
+    /// -- what survives a rebuild. A header is recorded like any folder,
+    /// with an empty path, so a closed one stays closed.
+    const OpenSet = struct {
+        /// In tree order, so a parent is always restored before its child
+        /// -- though `revealIn` would open the ancestors anyway.
+        dirs: std.ArrayList(Mark) = .empty,
+        cursor: ?Mark = null,
+
+        const Mark = struct { root: usize, rel: []u8 };
+
+        fn deinit(self: *OpenSet, alloc: std.mem.Allocator) void {
+            for (self.dirs.items) |m| alloc.free(m.rel);
+            self.dirs.deinit(alloc);
+            if (self.cursor) |m| alloc.free(m.rel);
         }
-        // In tree order, so a parent is always restored before its child
-        // -- though `reveal` would open the ancestors anyway.
+
+        /// Forgets root `index` and renumbers the ones after it, ahead of
+        /// that root being removed.
+        fn dropRoot(self: *OpenSet, alloc: std.mem.Allocator, index: usize) void {
+            var keep: usize = 0;
+            for (self.dirs.items) |m| {
+                if (m.root == index) {
+                    alloc.free(m.rel);
+                    continue;
+                }
+                self.dirs.items[keep] = .{ .root = if (m.root > index) m.root - 1 else m.root, .rel = m.rel };
+                keep += 1;
+            }
+            self.dirs.shrinkRetainingCapacity(keep);
+            if (self.cursor) |*m| {
+                if (m.root == index) {
+                    alloc.free(m.rel);
+                    self.cursor = null;
+                } else if (m.root > index) m.root -= 1;
+            }
+        }
+    };
+
+    fn snapshotOpen(self: *const Tree) !OpenSet {
+        var open: OpenSet = .{};
+        errdefer open.deinit(self.alloc);
         for (self.entries.items) |e| {
             if (!e.is_dir or !e.expanded) continue;
-            try open.append(self.alloc, try self.alloc.dupe(u8, relOf(self.root, e.path)));
+            const rel = try self.alloc.dupe(u8, relOf(self.roots.items[e.root].path, e.path));
+            errdefer self.alloc.free(rel);
+            try open.dirs.append(self.alloc, .{ .root = e.root, .rel = rel });
         }
-        const on: ?[]u8 = if (self.at(self.cursor)) |e|
-            try self.alloc.dupe(u8, relOf(self.root, e.path))
-        else
-            null;
-        defer if (on) |p| self.alloc.free(p);
+        if (self.at(self.cursor)) |e| {
+            open.cursor = .{ .root = e.root, .rel = try self.alloc.dupe(u8, relOf(self.roots.items[e.root].path, e.path)) };
+        }
+        return open;
+    }
 
-        self.clearEntries();
-        self.root_stamp = try self.readInto(io, self.root, "", 0, 0);
-
-        for (open.items) |rel| {
-            const index = (try self.reveal(io, rel)) orelse continue;
+    fn restore(self: *Tree, io: std.Io, open: *const OpenSet) !void {
+        try self.rebuild(io);
+        for (open.dirs.items) |m| {
+            const index = (try self.revealIn(io, m.root, m.rel)) orelse continue;
             const e = self.entries.items[index];
             if (e.is_dir and !e.expanded) try self.toggle(io, index);
         }
         // The cursor's own row may itself have been hidden, in which case
         // there is nothing to go back to and it stays where it lands.
-        if (on) |rel| {
-            if (try self.reveal(io, rel)) |index| self.cursor = index;
+        if (open.cursor) |m| {
+            if (try self.revealIn(io, m.root, m.rel)) |index| self.cursor = index;
         }
         if (self.cursor >= self.entries.items.len) self.cursor = self.entries.items.len -| 1;
     }
@@ -195,14 +426,24 @@ pub const Tree = struct {
         self.entries.clearRetainingCapacity();
     }
 
-    /// `path` relative to `root`, `/` separated. Every entry's `path` was
-    /// built by joining onto the root, so this is a slice rather than a
-    /// computation; a path that somehow isn't under the root comes back
-    /// whole, which matches nothing and hides nothing.
+    /// `path` relative to `root`, `/` separated, and empty for the root
+    /// itself. Every entry's `path` was built by joining onto its root, so
+    /// this is a slice rather than a computation; a path that somehow
+    /// isn't under the root comes back whole, which matches nothing and
+    /// hides nothing.
     fn relOf(root: []const u8, path: []const u8) []const u8 {
+        if (std.mem.eql(u8, path, root)) return "";
         if (path.len <= root.len or !std.mem.startsWith(u8, path, root)) return path;
         const rest = path[root.len..];
         return if (rest[0] == '/') rest[1..] else rest;
+    }
+
+    /// Whether `path` is `root` or somewhere below it -- on a component
+    /// boundary, so `/src/zoe` is not under `/src/zo`.
+    fn isUnder(root: []const u8, path: []const u8) bool {
+        if (!std.mem.startsWith(u8, path, root)) return false;
+        if (path.len == root.len) return true;
+        return path[root.len] == '/' or std.mem.endsWith(u8, root, "/");
     }
 
     pub fn deinit(self: *Tree) void {
@@ -211,7 +452,11 @@ pub const Tree = struct {
             self.alloc.free(e.path);
         }
         self.entries.deinit(self.alloc);
-        self.alloc.free(self.root);
+        for (self.roots.items) |r| {
+            self.alloc.free(r.path);
+            self.alloc.free(r.name);
+        }
+        self.roots.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -242,7 +487,7 @@ pub const Tree = struct {
             self.collapse(index);
         } else {
             const e = self.entries.items[index];
-            const stamp = try self.readInto(io, e.path, relOf(self.root, e.path), e.depth + 1, index + 1);
+            const stamp = try self.readInto(io, e.path, e.root, relOf(self.roots.items[e.root].path, e.path), e.depth + 1, index + 1);
             self.entries.items[index].expanded = true;
             self.entries.items[index].stamp = stamp;
         }
@@ -270,13 +515,14 @@ pub const Tree = struct {
     /// unchanged rather than failing the whole operation: an unreadable
     /// folder should render as an empty one, not take the editor down.
     ///
-    /// `rel_dir` is `dir` relative to the root, and is what the
-    /// `.gitignore` files in scope are matched against.
+    /// `root` is the index of the root `dir` is under, and `rel_dir` is
+    /// `dir` relative to it -- what the `.gitignore` files in scope are
+    /// matched against.
     ///
     /// Returns `dir`'s mtime, taken *before* the read: a change landing
     /// while the read is under way then moves the mtime past the stamp,
     /// and the next `changedOnDisk` catches it rather than missing it.
-    fn readInto(self: *Tree, io: std.Io, dir: []const u8, rel_dir: []const u8, depth: usize, insert_at: usize) !?i96 {
+    fn readInto(self: *Tree, io: std.Io, dir: []const u8, root: usize, rel_dir: []const u8, depth: usize, insert_at: usize) !?i96 {
         const stamp = dirStamp(io, dir);
         var listing: std.ArrayList(Entry) = .empty;
         defer listing.deinit(self.alloc);
@@ -295,7 +541,7 @@ pub const Tree = struct {
         // dim rather than just listing them.
         var ignores: gitignore.Stack = .{ .alloc = self.alloc };
         defer ignores.deinit();
-        try self.pushIgnoreChain(io, &ignores, rel_dir);
+        try self.pushIgnoreChain(io, &ignores, self.roots.items[root].path, rel_dir);
 
         var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return stamp;
         defer handle.close(io);
@@ -306,7 +552,7 @@ pub const Tree = struct {
             const path = try std.fs.path.join(self.alloc, &.{ dir, raw.name });
             errdefer self.alloc.free(path);
 
-            const hidden = self.visible.isHidden(&ignores, raw.name, relOf(self.root, path), is_dir);
+            const hidden = self.visible.isHidden(&ignores, raw.name, relOf(self.roots.items[root].path, path), is_dir);
             if (self.visible.skips(hidden)) {
                 self.alloc.free(path);
                 continue;
@@ -321,6 +567,7 @@ pub const Tree = struct {
                 .is_dir = is_dir,
                 .depth = depth,
                 .hidden = hidden,
+                .root = root,
             });
         }
 
@@ -374,8 +621,22 @@ pub const Tree = struct {
         return end;
     }
 
-    /// Expands whatever it takes for `rel` -- a path relative to the tree
-    /// root, `/`-separated -- to be a visible row, and returns its index.
+    /// `revealIn` against the first root -- the whole tree when there is
+    /// only one.
+    pub fn reveal(self: *Tree, io: std.Io, rel: []const u8) !?usize {
+        return self.revealIn(io, 0, rel);
+    }
+
+    /// `revealIn` for an absolute path, under whichever root holds it.
+    pub fn revealPath(self: *Tree, io: std.Io, abs: []const u8) !?usize {
+        const loc = self.locate(abs) orelse return null;
+        return self.revealIn(io, loc.root, loc.rel);
+    }
+
+    /// Expands whatever it takes for `rel` -- a path relative to root
+    /// `root`, `/`-separated -- to be a visible row, and returns its index.
+    /// An empty `rel` is the root itself: its header row with several
+    /// roots, nothing with one.
     /// Null if any component is missing: the tree is a snapshot and the
     /// deep listing behind a `/` search is another one, so they can
     /// disagree about a file that has just been removed.
@@ -384,13 +645,22 @@ pub const Tree = struct {
     /// was never opened: the search finds the path, this turns it into a
     /// row. The expansion stays afterwards -- the row has to remain
     /// visible for the cursor to be on it.
-    pub fn reveal(self: *Tree, io: std.Io, rel: []const u8) !?usize {
+    pub fn revealIn(self: *Tree, io: std.Io, root: usize, rel: []const u8) !?usize {
         // The window of entries the next component must be found in:
-        // first the whole listing, then the children of whatever the
-        // previous component resolved to.
+        // first the root's listing, then the children of whatever the
+        // previous component resolved to. One root's listing is the whole
+        // tree; with headers it is the run under the root's header.
         var lo: usize = 0;
         var hi: usize = self.entries.items.len;
         var depth: usize = 0;
+        if (self.multiRoot()) {
+            const h = self.headerRow(root) orelse return null;
+            if (std.mem.trim(u8, rel, "/").len == 0) return h;
+            if (!self.entries.items[h].expanded) try self.toggle(io, h);
+            lo = h + 1;
+            hi = self.subtreeEnd(h);
+            depth = 1;
+        } else if (root != 0) return null;
         var found: ?usize = null;
 
         var it = std.mem.splitScalar(u8, rel, '/');
@@ -411,18 +681,18 @@ pub const Tree = struct {
         return found;
     }
 
-    /// Pushes the `.gitignore` of the root and of every directory on the
+    /// Pushes the `.gitignore` of `root` and of every directory on the
     /// way down to `rel_dir`, outermost first -- the order `Stack.match`
     /// resolves in.
-    fn pushIgnoreChain(self: *Tree, io: std.Io, stack: *gitignore.Stack, rel_dir: []const u8) !void {
-        _ = try stack.pushDir(io, self.root, "");
+    fn pushIgnoreChain(self: *Tree, io: std.Io, stack: *gitignore.Stack, root: []const u8, rel_dir: []const u8) !void {
+        _ = try stack.pushDir(io, root, "");
         if (rel_dir.len == 0) return;
 
         var i: usize = 0;
         while (true) {
             const end = std.mem.indexOfScalarPos(u8, rel_dir, i, '/') orelse rel_dir.len;
             const prefix = rel_dir[0..end];
-            const abs = try std.fs.path.join(self.alloc, &.{ self.root, prefix });
+            const abs = try std.fs.path.join(self.alloc, &.{ root, prefix });
             defer self.alloc.free(abs);
             _ = try stack.pushDir(io, abs, prefix);
             if (end == rel_dir.len) return;
@@ -453,9 +723,9 @@ pub const deep_max_entries: usize = 20_000;
 /// than a limit a source tree should reach.
 pub const deep_max_depth: usize = 16;
 
-/// Every path under the tree root, whether or not its folder is open:
-/// what a `/` search matches against, and what `Tree.reveal` is handed to
-/// turn a hit into a row.
+/// Every path under the tree's roots, whether or not its folder is open:
+/// what a `/` search matches against, and what `Tree.revealIn` is handed
+/// to turn a hit into a row.
 ///
 /// Read once when the search starts and thrown away when it ends, for the
 /// reason the Ctrl+P finder rescans on every open: a listing that stayed
@@ -467,6 +737,9 @@ pub const DeepList = struct {
     /// order; a directory still sits immediately before its children,
     /// since its path is a prefix of theirs.
     paths: std.ArrayList([]u8) = .empty,
+    /// Parallel to `paths`: the index of the root each path is relative
+    /// to. Paths are grouped by root, in root order, each group sorted.
+    root_of: std.ArrayList(usize) = .empty,
     /// The walk hit `deep_max_entries` and stopped early, so the listing
     /// is a prefix of the tree rather than the whole of it.
     truncated: bool = false,
@@ -477,6 +750,7 @@ pub const DeepList = struct {
     pub fn deinit(self: *DeepList) void {
         for (self.paths.items) |p| self.alloc.free(p);
         self.paths.deinit(self.alloc);
+        self.root_of.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -488,31 +762,43 @@ pub const DeepList = struct {
         return p[slash + 1 ..];
     }
 
-    /// Adds one path relative to the root. `deepScan` is the only caller
-    /// in the program; tests use it to build a listing directly.
+    /// Adds one path relative to the first root. Tests use it to build a
+    /// listing directly.
     pub fn addPath(self: *DeepList, rel: []const u8) !void {
         const owned = try self.alloc.dupe(u8, rel);
         errdefer self.alloc.free(owned);
         try self.paths.append(self.alloc, owned);
+        try self.root_of.append(self.alloc, 0);
     }
 };
 
-/// Walks `root` and collects every path under it. Directories are listed
-/// too, so a `/` search can land on a folder; one that can't be read is
-/// skipped rather than failing the walk, the rule the rest of the tree
-/// uses.
+/// `deepListRoots` over a single folder.
 pub fn deepList(alloc: std.mem.Allocator, io: std.Io, root: []const u8, visible: Visibility) !DeepList {
+    return deepListRoots(alloc, io, &.{root}, visible);
+}
+
+/// Walks every folder in `roots` and collects every path under each.
+/// Directories are listed too, so a `/` search can land on a folder; one
+/// that can't be read is skipped rather than failing the walk, the rule
+/// the rest of the tree uses. `deep_max_entries` bounds the whole walk,
+/// not each root.
+pub fn deepListRoots(alloc: std.mem.Allocator, io: std.Io, roots: []const []const u8, visible: Visibility) !DeepList {
     var self: DeepList = .{ .alloc = alloc, .visible = visible };
     errdefer self.deinit();
 
-    // Unlike the tree's own reads, this walk descends, so it pushes each
-    // directory's ignore file on the way in and pops it on the way out
-    // rather than re-reading the chain per directory.
-    var ignores: gitignore.Stack = .{ .alloc = alloc };
-    defer ignores.deinit();
-    try deepScan(&self, io, &ignores, root, "", 0);
+    for (roots, 0..) |root, i| {
+        const start = self.paths.items.len;
+        // Unlike the tree's own reads, this walk descends, so it pushes
+        // each directory's ignore file on the way in and pops it on the
+        // way out rather than re-reading the chain per directory.
+        var ignores: gitignore.Stack = .{ .alloc = alloc };
+        defer ignores.deinit();
+        try deepScan(&self, io, &ignores, root, "", 0);
 
-    std.mem.sort([]u8, self.paths.items, {}, lessThanPath);
+        std.mem.sort([]u8, self.paths.items[start..], {}, lessThanPath);
+        try self.root_of.appendNTimes(alloc, i, self.paths.items.len - start);
+        if (self.truncated) break;
+    }
     return self;
 }
 
