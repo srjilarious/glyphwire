@@ -310,6 +310,13 @@ pub const Popup = struct {
         return f.selected();
     }
 
+    /// The highlighted result as an absolute path, the right folder's
+    /// for a multi-folder finder (`Finder.selectedPath`). Caller owns it.
+    pub fn selectedPath(self: *const Popup, alloc: std.mem.Allocator) !?[]u8 {
+        const f = if (self.finder) |*open_f| open_f else return null;
+        return f.selectedPath(alloc);
+    }
+
     /// The directory the results are relative to.
     pub fn root(self: *const Popup) ?[]const u8 {
         const f = if (self.finder) |*open_f| open_f else return null;

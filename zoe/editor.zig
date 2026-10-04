@@ -127,6 +127,12 @@ pub const Outcome = union(enum) {
     /// `:pwd` -- show the working directory on the status line. The
     /// editor doesn't know it, so the host fills the message in.
     pwd,
+    /// `:addfolder <dir>` -- add a folder to the sidebar's workspace.
+    /// Borrows `Editor.cmd_arg`; null when no directory was given.
+    add_folder: ?[]const u8,
+    /// `:rmfolder [dir]` -- drop a workspace folder: the named one, or
+    /// with null the one the tree's cursor is in. Borrows `cmd_arg`.
+    remove_folder: ?[]const u8,
     /// `:bn` / `:bp` -- move to the next / previous open buffer. An
     /// `Editor` *is* one buffer and knows nothing about the others, so
     /// the list lives in `zoe/ui.zig` and these just name the direction.
@@ -2486,6 +2492,8 @@ pub const Editor = struct {
         }
         if (eq(u8, name, "cd") or eq(u8, name, "chdir")) return .{ .chdir = arg_opt };
         if (eq(u8, name, "pwd")) return .pwd;
+        if (eq(u8, name, "addfolder")) return .{ .add_folder = arg_opt };
+        if (eq(u8, name, "rmfolder")) return .{ .remove_folder = arg_opt };
         if (eq(u8, name, "set")) {
             self.applySet(arg_opt);
             return .none;

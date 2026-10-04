@@ -1433,7 +1433,8 @@ fn fakeEntry(alloc: std.mem.Allocator, name: []const u8, is_dir: bool, depth: us
 /// `src/` expanded, holding `core.zig` and a nested `sub/` with one file
 /// in it, then a top-level `README`.
 fn fakeTree(alloc: std.mem.Allocator) !zoe.Tree {
-    var t: zoe.Tree = .{ .alloc = alloc, .root = try alloc.dupe(u8, "/tmp") };
+    var t: zoe.Tree = .{ .alloc = alloc };
+    try t.roots.append(alloc, .{ .path = try alloc.dupe(u8, "/tmp"), .name = try alloc.dupe(u8, "tmp") });
     try t.entries.append(alloc, try fakeEntry(alloc, "src", true, 0));
     t.entries.items[0].expanded = true;
     try t.entries.append(alloc, try fakeEntry(alloc, "core.zig", false, 1));
@@ -5265,4 +5266,261 @@ pub fn treeReloadOntoLandsOnANewEntryTest(io: std.Io, alloc: std.mem.Allocator) 
 /// is likely to have, so a change made after it is a different stamp.
 fn waitForMtimeTick(io: std.Io) !void {
     try io.sleep(.fromMilliseconds(20), .awake);
+}
+
+// ─── workspaces: several folders in the sidebar ──────────────────────────
+
+const workspace = zoe.workspace;
+
+pub fn workspaceStripJsoncBlanksCommentsAndTrailingCommasTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\{
+        \\  // a line comment
+        \\  "folders": [ /* inline */ {"path": "a//b", "name": "x/*y*/"}, ],
+        \\}
+    ;
+    const text = try alloc.dupe(u8, src);
+    defer alloc.free(text);
+    workspace.stripJsonc(text);
+    // Same length, so error columns still line up.
+    try testz.expectEqual(text.len, src.len);
+    // Comment markers inside strings are text, not comments.
+    try testz.expectTrue(std.mem.indexOf(u8, text, "\"a//b\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, text, "\"x/*y*/\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, text, "line comment") == null);
+    try testz.expectTrue(std.mem.indexOf(u8, text, "inline") == null);
+    // Both trailing commas are gone, so std.json takes it.
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, text, .{});
+    parsed.deinit();
+}
+
+pub fn workspaceParseResolvesFoldersAgainstTheFileTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\{
+        \\  "folders": [
+        \\    { "path": "." },
+        \\    { "path": "../lib", "name": "Library" },
+        \\    { "uri": "vscode-remote://ssh/x" },
+        \\    { "path": "./" },
+        \\  ],
+        \\  "settings": { "editor.tabSize": 2 },
+        \\}
+    ;
+    var ws = try workspace.parse(alloc, src, "/home/me/proj");
+    defer ws.deinit();
+    // The remote `uri` folder is skipped and `./` is a duplicate of `.`.
+    try testz.expectEqual(ws.folders.items.len, 2);
+    try testz.expectEqualStr(ws.folders.items[0].path, "/home/me/proj");
+    try testz.expectEqualStr(ws.folders.items[0].name, "proj");
+    try testz.expectEqualStr(ws.folders.items[1].path, "/home/me/lib");
+    try testz.expectEqualStr(ws.folders.items[1].name, "Library");
+}
+
+pub fn workspaceWithNoFoldersIsAnErrorTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    if (workspace.parse(alloc, "{\"settings\": {}}", "/x")) |ws| {
+        var w = ws;
+        w.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| try testz.expectTrue(err == error.NoFolders);
+}
+
+pub fn workspaceFromDirsCollapsesDuplicatesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ws = try workspace.fromDirs(alloc, "/w", &.{ "a", "b/", "/w/a", "./b" });
+    defer ws.deinit();
+    try testz.expectEqual(ws.folders.items.len, 2);
+    try testz.expectEqualStr(ws.folders.items[0].path, "/w/a");
+    try testz.expectEqualStr(ws.folders.items[1].path, "/w/b");
+    try testz.expectTrue(workspace.isWorkspacePath("x/proj.code-workspace"));
+    try testz.expectFalse(workspace.isWorkspacePath("proj.code"));
+}
+
+/// Two scratch folders, `one` holding `src/a.zig` and `two` holding
+/// `b.txt`, as roots of one tree.
+const TwoRoots = struct {
+    a: ScanScratch,
+    b: ScanScratch,
+
+    fn init(io: std.Io, alloc: std.mem.Allocator, label: []const u8) !TwoRoots {
+        const la = try std.fmt.allocPrint(alloc, "{s}-one", .{label});
+        defer alloc.free(la);
+        const lb = try std.fmt.allocPrint(alloc, "{s}-two", .{label});
+        defer alloc.free(lb);
+        var a = try ScanScratch.init(io, alloc, la);
+        errdefer a.deinit();
+        var b = try ScanScratch.init(io, alloc, lb);
+        errdefer b.deinit();
+        try a.file("src/a.zig", "");
+        try b.file("b.txt", "");
+        return .{ .a = a, .b = b };
+    }
+
+    fn deinit(self: *TwoRoots) void {
+        self.a.deinit();
+        self.b.deinit();
+    }
+
+    fn specs(self: *const TwoRoots) [2]zoe.Tree.RootSpec {
+        return .{ .{ .path = self.a.path, .name = "one" }, .{ .path = self.b.path, .name = "two" } };
+    }
+};
+
+pub fn treeWithTwoRootsShowsAHeaderPerFolderTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try TwoRoots.init(io, alloc, "mroot");
+    defer s.deinit();
+    const specs = s.specs();
+    var t = try zoe.Tree.initRoots(alloc, io, &specs, .{});
+    defer t.deinit();
+
+    // one / src / two / b.txt -- headers open, contents a level down.
+    try testz.expectTrue(t.multiRoot());
+    try testz.expectEqual(t.len(), 4);
+    try testz.expectTrue(t.at(0).?.is_root);
+    try testz.expectEqualStr(t.at(0).?.name, "one");
+    try testz.expectTrue(t.at(0).?.expanded);
+    try testz.expectEqualStr(t.at(1).?.name, "src");
+    try testz.expectEqual(t.at(1).?.depth, 1);
+    try testz.expectEqual(t.at(1).?.root, 0);
+    try testz.expectEqualStr(t.at(2).?.name, "two");
+    try testz.expectEqualStr(t.at(3).?.name, "b.txt");
+    try testz.expectEqual(t.at(3).?.root, 1);
+
+    // A header is the folder: new entries made from it go in it.
+    try testz.expectEqualStr(t.dirFor(2), s.b.path);
+    try testz.expectEqualStr(t.dirFor(3), s.b.path);
+
+    // Revealing by absolute path finds the right root's subtree.
+    const deep = try std.fs.path.join(alloc, &.{ s.a.path, "src/a.zig" });
+    defer alloc.free(deep);
+    const row = (try t.revealPath(io, deep)).?;
+    try testz.expectEqualStr(t.at(row).?.name, "a.zig");
+    try testz.expectEqual(t.at(row).?.depth, 2);
+    // The root itself is its header row.
+    try testz.expectEqual((try t.revealIn(io, 1, "")).?, t.headerRow(1).?);
+}
+
+pub fn treeReloadKeepsAClosedHeaderClosedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try TwoRoots.init(io, alloc, "mreload");
+    defer s.deinit();
+    const specs = s.specs();
+    var t = try zoe.Tree.initRoots(alloc, io, &specs, .{});
+    defer t.deinit();
+
+    try t.toggle(io, 0); // close `one`
+    t.cursor = t.headerRow(1).?;
+    try t.reload(io);
+    try testz.expectFalse(t.at(0).?.expanded);
+    try testz.expectEqual(t.len(), 3);
+    try testz.expectEqualStr(t.at(t.cursor).?.name, "two");
+}
+
+pub fn treeLocatePrefersTheInnermostRootTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "mnested");
+    defer s.deinit();
+    try s.file("inner/x.zig", "");
+    const inner = try std.fs.path.join(alloc, &.{ s.path, "inner" });
+    defer alloc.free(inner);
+    var t = try zoe.Tree.initRoots(alloc, io, &.{
+        .{ .path = s.path, .name = "outer" },
+        .{ .path = inner, .name = "inner" },
+    }, .{});
+    defer t.deinit();
+
+    const x = try std.fs.path.join(alloc, &.{ inner, "x.zig" });
+    defer alloc.free(x);
+    const loc = t.locate(x).?;
+    try testz.expectEqual(loc.root, 1);
+    try testz.expectEqualStr(loc.rel, "x.zig");
+    // On a component boundary: `<root>-sibling` is not under `<root>`.
+    const sibling = try std.fmt.allocPrint(alloc, "{s}-sibling/y", .{s.path});
+    defer alloc.free(sibling);
+    try testz.expectTrue(t.locate(sibling) == null);
+}
+
+pub fn treeAddAndRemoveRootKeepWhatWasOpenTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try TwoRoots.init(io, alloc, "maddrm");
+    defer s.deinit();
+    var t = try zoe.Tree.init(alloc, io, s.a.path, .{});
+    defer t.deinit();
+    _ = try t.reveal(io, "src/a.zig");
+    try testz.expectEqual(t.len(), 2);
+
+    // Single -> workspace: the first folder gains a header and `src`
+    // stays open beneath it.
+    try testz.expectTrue(try t.addRoot(io, .{ .path = s.b.path, .name = "two" }));
+    try testz.expectFalse(try t.addRoot(io, .{ .path = s.b.path, .name = "two" }));
+    try testz.expectEqual(t.len(), 5);
+    try testz.expectTrue(t.at(0).?.is_root);
+    try testz.expectTrue(t.at(1).?.expanded);
+    try testz.expectEqualStr(t.at(2).?.name, "a.zig");
+    try testz.expectEqualStr(t.at(4).?.name, "b.txt");
+
+    // Removing the first folder renumbers the second, and back to a
+    // single root there are no headers at all.
+    try t.removeRoot(io, 0);
+    try testz.expectFalse(t.multiRoot());
+    try testz.expectEqual(t.len(), 1);
+    try testz.expectEqualStr(t.at(0).?.name, "b.txt");
+    try testz.expectEqual(t.at(0).?.depth, 0);
+    try testz.expectEqual(t.at(0).?.root, 0);
+    if (t.removeRoot(io, 0)) |_| return error.TestUnexpectedResult else |_| {}
+}
+
+pub fn treeDeepListRootsTagsEachPathWithItsRootTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try TwoRoots.init(io, alloc, "mdeep");
+    defer s.deinit();
+    var d = try zoe.tree.deepListRoots(alloc, io, &.{ s.a.path, s.b.path }, .{});
+    defer d.deinit();
+    try testz.expectEqual(d.paths.items.len, 3);
+    try testz.expectEqualStr(d.paths.items[0], "src");
+    try testz.expectEqualStr(d.paths.items[1], "src/a.zig");
+    try testz.expectEqual(d.root_of.items[1], 0);
+    try testz.expectEqualStr(d.paths.items[2], "b.txt");
+    try testz.expectEqual(d.root_of.items[2], 1);
+}
+
+pub fn finderInitRootsLabelsAndOpensTheRightFolderTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try TwoRoots.init(io, alloc, "mfinder");
+    defer s.deinit();
+    var f = try zoe.finder.Finder.initRoots(alloc, io, &.{
+        .{ .path = s.a.path, .label = "one" },
+        .{ .path = s.b.path, .label = "two" },
+    }, .{});
+    defer f.deinit();
+    try testz.expectEqual(f.matchCount(), 2);
+    try testz.expectEqualStr(f.matchAt(0).?, "one/src/a.zig");
+    try testz.expectEqualStr(f.matchAt(1).?, "two/b.txt");
+
+    // The folder's name is part of what a query matches.
+    try testz.expectTrue(try f.query.insert(alloc, "twob"));
+    try f.refilter();
+    try testz.expectEqual(f.matchCount(), 1);
+    const path = (try f.selectedPath(alloc)).?;
+    defer alloc.free(path);
+    const want = try std.fs.path.join(alloc, &.{ s.b.path, "b.txt" });
+    defer alloc.free(want);
+    try testz.expectEqualStr(path, want);
+}
+
+pub fn lspWorkspaceFoldersJsonListsEveryFolderTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const json = try lsp.workspaceFoldersJson(alloc, &.{
+        .{ .path = "/a", .name = "a" },
+        .{ .path = "/b c", .name = "say \"b\"" },
+    });
+    defer alloc.free(json);
+    try testz.expectEqualStr(json,
+        \\[{"uri":"file:///a","name":"a"},{"uri":"file:///b%20c","name":"say \"b\""}]
+    );
+}
+
+pub fn editorAddAndRemoveFolderCommandsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "", null);
+    defer ed.deinit();
+    switch (try keys.feed(&ed, ":addfolder ../lib<cr>")) {
+        .add_folder => |p| try testz.expectEqualStr(p.?, "../lib"),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (try keys.feed(&ed, ":rmfolder<cr>")) {
+        .remove_folder => |p| try testz.expectTrue(p == null),
+        else => return error.TestUnexpectedResult,
+    }
 }
