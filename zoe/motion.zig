@@ -70,8 +70,11 @@ pub fn nextCodepoint(buf: *const Buffer, off: usize) usize {
 }
 
 /// Snaps `off` back to the nearest codepoint boundary at or before it,
-/// never crossing out of the line it lands in.
+/// never crossing out of the line it lands in. The end of the buffer is
+/// itself a boundary (and has no byte to read), which is where an
+/// insert-mode cursor lands on a last line without a trailing newline.
 fn snapInLine(buf: *const Buffer, line: usize, off: usize) usize {
+    if (off >= buf.len()) return buf.len();
     const start = buf.lineStart(line);
     var i = off;
     while (i > start and isContinuation(buf.byteAt(i))) i -= 1;
