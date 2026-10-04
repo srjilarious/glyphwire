@@ -48,6 +48,13 @@ pub const Action = enum {
     focusRight,
     focusUp,
     focusDown,
+    /// The shown tab to the group that way (a new one split off on that
+    /// side when there is none). Unbound by default -- Ctrl+W Shift+hjkl
+    /// is the built-in route -- so these are for `keys` to bind directly.
+    moveTabLeft,
+    moveTabRight,
+    moveTabUp,
+    moveTabDown,
     jumpBack,
     jumpForward,
     /// The selection (or the line) to the system clipboard, removed.

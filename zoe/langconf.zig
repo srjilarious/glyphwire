@@ -9,7 +9,8 @@
 //! the colour theme (`theme`/`themes`, read by `applib/themeconf.zig`),
 //! an `injections` on/off switch, and
 //! the editor's display options (`page_lines`, `line_numbers`,
-//! `tab_width`, `expand_tab`, `show_whitespace`, `tab_tooltip_delay_ms`).
+//! `tab_width`, `expand_tab`, `show_whitespace`, `wrap`,
+//! `tab_tooltip_delay_ms`).
 //! With no file present
 //! zoe runs on the built-in languages, the `default` theme, injection
 //! enabled, and a 4-cell expanding Tab.
@@ -155,6 +156,9 @@ pub const Config = struct {
     /// a faint middle dot on each space, a faint arrow on each tab.
     /// Default false; `:set whitespace=…` overrides.
     show_whitespace: bool = false,
+    /// `config.wrap` -- soft-wrap long lines in the buffer pane. Default
+    /// false; `:set wrap=…` overrides.
+    wrap: bool = false,
     /// `config.tab_tooltip_delay_ms` -- how long the pointer rests on a
     /// tab before its file's full path pops up under it. Zero shows it
     /// at once; a negative value or a non-number is ignored.
@@ -269,6 +273,7 @@ pub fn parseSource(
     cfg.tab_width = readTabWidth(lua, cfg.tab_width);
     cfg.expand_tab = readFlag(lua, "expand_tab", cfg.expand_tab);
     cfg.show_whitespace = readFlag(lua, "show_whitespace", cfg.show_whitespace);
+    cfg.wrap = readFlag(lua, "wrap", cfg.wrap);
     cfg.tab_tooltip_delay_ms = readMs(lua, "tab_tooltip_delay_ms", 0, cfg.tab_tooltip_delay_ms);
     readLsp(lua, a, &cfg);
     cfg.keys = readKeys(lua, a);

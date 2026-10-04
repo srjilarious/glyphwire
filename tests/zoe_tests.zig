@@ -1034,7 +1034,7 @@ pub fn commandLineSetRejectsUnknownOptionAndValueTest(_: std.Io, alloc: std.mem.
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
 
-    _ = try keys.feed(&ed, ":set wrap=on<cr>");
+    _ = try keys.feed(&ed, ":set spell=on<cr>");
     try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E518:"));
 
     _ = try keys.feed(&ed, ":set lineno=sideways<cr>");
@@ -1069,6 +1069,190 @@ pub fn commandLineSetTabOptionsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     _ = try keys.feed(&ed, ":set whitespace=sometimes<cr>");
     try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E474:"));
     try testz.expectTrue(ed.show_whitespace);
+}
+
+// ─── Soft wrap ──────────────────────────────────────────────────────────
+
+const wrap_opts = zoe.display.Opts{ .tab_width = 4 };
+
+/// Collects every row `text` wraps into at `width`.
+fn wrapRows(text: []const u8, width: usize, out: []zoe.wrap.Row) usize {
+    var it = zoe.wrap.Rows.init(text, wrap_opts, width);
+    var n: usize = 0;
+    while (it.next()) |row| : (n += 1) out[n] = row;
+    return n;
+}
+
+pub fn wrapBreaksAfterTheLastSpaceThatFitsTest(_: std.Io, _: std.mem.Allocator) !void {
+    var rows: [8]zoe.wrap.Row = undefined;
+    const n = wrapRows("the quick brown fox", 10, &rows);
+    try testz.expectEqual(n, 2);
+    // The space stays at the end of the row it follows.
+    try testz.expectEqual(rows[0].start_col, 0);
+    try testz.expectEqual(rows[0].end_col, 10);
+    try testz.expectEqual(rows[0].end_byte, 10);
+    try testz.expectEqual(rows[1].start_col, 10);
+    try testz.expectEqual(rows[1].end_col, 19);
+    try testz.expectEqual(rows[1].end_byte, 19);
+}
+
+pub fn wrapCutsAWordWithNoSpaceAtThePaneEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
+    var rows: [8]zoe.wrap.Row = undefined;
+    const n = wrapRows("abcdefghij", 4, &rows);
+    try testz.expectEqual(n, 3);
+    try testz.expectEqual(rows[0].end_col, 4);
+    try testz.expectEqual(rows[1].end_col, 8);
+    try testz.expectEqual(rows[2].end_col, 10);
+}
+
+pub fn wrapEmptyAndExactlyFullLinesAreOneRowTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(zoe.wrap.rowCount("", wrap_opts, 4), 1);
+    // A line that fills its row exactly doesn't grow a blank one.
+    try testz.expectEqual(zoe.wrap.rowCount("abcd", wrap_opts, 4), 1);
+    try testz.expectEqual(zoe.wrap.rowCount("abcde", wrap_opts, 4), 2);
+}
+
+pub fn wrapNeverSplitsAWideCharacterTest(_: std.Io, _: std.mem.Allocator) !void {
+    var rows: [8]zoe.wrap.Row = undefined;
+    // Two columns each in a three-column pane: one per row.
+    const n = wrapRows("日本語", 3, &rows);
+    try testz.expectEqual(n, 3);
+    try testz.expectEqual(rows[0].end_col, 2);
+    try testz.expectEqual(rows[1].start_col, 2);
+    try testz.expectEqual(rows[1].end_col, 4);
+    // Wider than the pane altogether: still a row of its own.
+    try testz.expectEqual(zoe.wrap.rowCount("日本", wrap_opts, 1), 2);
+}
+
+pub fn wrapRowOfColPutsTheEndOfLineOnTheLastRowTest(_: std.Io, _: std.mem.Allocator) !void {
+    const text = "the quick brown fox";
+    try testz.expectEqual(zoe.wrap.rowOfCol(text, wrap_opts, 10, 0).index, 0);
+    try testz.expectEqual(zoe.wrap.rowOfCol(text, wrap_opts, 10, 9).index, 0);
+    try testz.expectEqual(zoe.wrap.rowOfCol(text, wrap_opts, 10, 12).index, 1);
+    // The insert-mode caret past the last character.
+    try testz.expectEqual(zoe.wrap.rowOfCol(text, wrap_opts, 10, 19).index, 1);
+}
+
+/// A wrapped editor: "aaaa bbbb cccc" breaks into three five-column rows
+/// ("aaaa ", "bbbb ", "cccc"), then a short second line.
+fn wrappedEditor(alloc: std.mem.Allocator) !Editor {
+    var ed = try Editor.initFromText(alloc, "aaaa bbbb cccc\nxy", null);
+    ed.wrap = true;
+    ed.wrap_cols = 5;
+    return ed;
+}
+
+pub fn wrapJAndKMoveByScreenRowTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try wrappedEditor(alloc);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "l"); // column 1 of the first row
+    _ = try keys.feed(&ed, "j");
+    try testz.expectEqual(ed.cursor, 6); // column 1 of "bbbb "
+    _ = try keys.feed(&ed, "j");
+    try testz.expectEqual(ed.cursor, 11); // column 1 of "cccc"
+    _ = try keys.feed(&ed, "j");
+    try testz.expectEqual(ed.cursor, 16); // on to the next line: "xy"
+    _ = try keys.feed(&ed, "k");
+    try testz.expectEqual(ed.cursor, 11); // back onto the last row
+    _ = try keys.feed(&ed, "<up>");
+    try testz.expectEqual(ed.cursor, 6);
+    _ = try keys.feed(&ed, "<down>");
+    try testz.expectEqual(ed.cursor, 11);
+}
+
+pub fn wrapRowMoveKeepsItsColumnAcrossAShortRowTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abcdefgh\nab\nabcdefgh", null);
+    defer ed.deinit();
+    ed.wrap = true;
+    ed.wrap_cols = 5;
+    _ = try keys.feed(&ed, "6l"); // "fgh" row, column 1 (byte 6)
+    _ = try keys.feed(&ed, "j");
+    try testz.expectEqual(ed.pos().line, 1);
+    try testz.expectEqual(ed.pos().col, 1); // "ab" is long enough
+    _ = try keys.feed(&ed, "jj");
+    try testz.expectEqual(ed.pos().line, 2);
+    try testz.expectEqual(ed.pos().col, 6); // second row, column 1 again
+}
+
+pub fn wrapCountedJStillMovesByLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try wrappedEditor(alloc);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "1j");
+    try testz.expectEqual(ed.pos().line, 1);
+}
+
+pub fn wrapOffJMovesByLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try wrappedEditor(alloc);
+    defer ed.deinit();
+    ed.wrap = false;
+    _ = try keys.feed(&ed, "j");
+    try testz.expectEqual(ed.pos().line, 1);
+}
+
+pub fn commandLineSetWrapTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    try testz.expectTrue(!ed.wrap);
+    _ = try keys.feed(&ed, ":set wrap=on<cr>");
+    try testz.expectTrue(ed.wrap);
+    _ = try keys.feed(&ed, ":set nowrap<cr>");
+    try testz.expectTrue(!ed.wrap);
+    _ = try keys.feed(&ed, ":set wrap<cr>");
+    try testz.expectTrue(ed.wrap);
+    _ = try keys.feed(&ed, ":set wrap=maybe<cr>");
+    try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E474:"));
+    try testz.expectTrue(ed.wrap);
+}
+
+/// `layoutRowMap`'s view of a fixed list of lines.
+const TestLines = struct {
+    lines: []const []const u8,
+    pub fn count(self: TestLines) usize {
+        return self.lines.len;
+    }
+    pub fn text(self: TestLines, alloc: std.mem.Allocator, line: usize) ![]u8 {
+        return alloc.dupe(u8, self.lines[line]);
+    }
+};
+
+pub fn layoutRowMapWrapsFromAPartScrolledLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var map: std.ArrayList(zoe.ui.RowView) = .empty;
+    defer map.deinit(alloc);
+    const lines = TestLines{ .lines = &.{ "aaaa bbbb", "x" } };
+    // Scrolled one row into the first line.
+    try zoe.ui.layoutRowMap(alloc, &map, lines, 0, 1, 0, 4, 5, true, wrap_opts);
+    try testz.expectEqual(map.items.len, 4);
+    try testz.expectEqual(map.items[0].line, 0);
+    try testz.expectEqual(map.items[0].sub, 1);
+    try testz.expectEqual(map.items[0].left, 5);
+    try testz.expectEqual(map.items[0].cols, 4);
+    try testz.expectTrue(map.items[0].last);
+    try testz.expectEqual(map.items[1].line, 1);
+    try testz.expectEqual(map.items[1].sub, 0);
+    try testz.expectTrue(map.items[2].pastEnd(2));
+    try testz.expectTrue(map.items[3].pastEnd(2));
+}
+
+pub fn layoutRowMapUnwrappedIsOneRowPerLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var map: std.ArrayList(zoe.ui.RowView) = .empty;
+    defer map.deinit(alloc);
+    const lines = TestLines{ .lines = &.{ "aaaa bbbb", "x", "y" } };
+    try zoe.ui.layoutRowMap(alloc, &map, lines, 1, 0, 3, 2, 5, false, wrap_opts);
+    try testz.expectEqual(map.items.len, 2);
+    try testz.expectEqual(map.items[0].line, 1);
+    try testz.expectEqual(map.items[1].line, 2);
+    try testz.expectEqual(map.items[0].left, 3);
+    try testz.expectEqual(map.items[0].cols, 5);
+}
+
+pub fn rowMapHashSeesARowCountChangeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var map: std.ArrayList(zoe.ui.RowView) = .empty;
+    defer map.deinit(alloc);
+    try zoe.ui.layoutRowMap(alloc, &map, TestLines{ .lines = &.{ "aaaa", "x" } }, 0, 0, 0, 3, 5, true, wrap_opts);
+    const before = zoe.ui.rowMapHash(map.items);
+    // The first line grew a second row, pushing "x" down.
+    try zoe.ui.layoutRowMap(alloc, &map, TestLines{ .lines = &.{ "aaaa bb", "x" } }, 0, 0, 0, 3, 5, true, wrap_opts);
+    try testz.expectNotEqual(zoe.ui.rowMapHash(map.items), before);
 }
 
 pub fn insertTabExpandsToTheNextStopTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -2761,6 +2945,26 @@ pub fn tabHitDistinguishesCloseFromBodyTest(_: std.Io, alloc: std.mem.Allocator)
     // empty bar past the last tab.
     try testz.expectTrue(tabs.hit(spans.items, spans.items[0].end) == null);
     try testz.expectTrue(tabs.hit(spans.items, 999) == null);
+}
+
+pub fn tabDropIndexSplitsEachTabAtItsMiddleTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var spans: std.ArrayList(tabs.Span) = .empty;
+    defer spans.deinit(alloc);
+    _ = try tabs.layout(alloc, &.{
+        .{ .label = "a.zig", .dirty = false },
+        .{ .label = "b.md", .dirty = false },
+    }, &spans);
+    const first = spans.items[0];
+    const second = spans.items[1];
+
+    // The left half of a tab drops in front of it, the right half after.
+    try testz.expectEqual(tabs.dropIndex(spans.items, first.start), 0);
+    try testz.expectEqual(tabs.dropIndex(spans.items, first.end - 1), 1);
+    try testz.expectEqual(tabs.dropIndex(spans.items, second.start), 1);
+    try testz.expectEqual(tabs.dropIndex(spans.items, second.end - 1), 2);
+    // Past the last tab, and an empty strip: the end.
+    try testz.expectEqual(tabs.dropIndex(spans.items, 999), 2);
+    try testz.expectEqual(tabs.dropIndex(&.{}, 5), 0);
 }
 
 pub fn tabScrollFollowsTheActiveTabTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -4627,6 +4831,19 @@ pub fn groupsSplitTurnsTheLeafIntoASplitTest(_: std.Io, alloc: std.mem.Allocator
     try testz.expectEqual(order[0], 1);
     try testz.expectEqual(order[1], 2);
     try testz.expectEqual(order[2], 3);
+}
+
+pub fn groupsSplitSideBeforePutsTheNewGroupFirstTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var layout = try groups.Layout.init(alloc, 1);
+    defer layout.deinit();
+    // Ctrl+W Shift+H with nothing to the left: the new group goes left.
+    const s = try layout.splitSide(1, 2, .vertical, 100, .before);
+    try testz.expectEqual(s.kind.split.first.kind.group, 2);
+    try testz.expectEqual(s.kind.split.second.kind.group, 1);
+    const order = try groupOrder(alloc, &layout);
+    defer alloc.free(order);
+    try testz.expectEqual(order[0], 2);
+    try testz.expectEqual(order[1], 1);
 }
 
 pub fn groupsRemoveCollapsesIntoTheSiblingTest(_: std.Io, alloc: std.mem.Allocator) !void {

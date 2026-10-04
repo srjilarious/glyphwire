@@ -27,6 +27,7 @@ const glyphwire = @import("glyphwire");
 const buffer = @import("buffer.zig");
 const motion = @import("motion.zig");
 const display = @import("display.zig");
+const wrap_mod = @import("wrap.zig");
 const search = @import("search.zig");
 const cmdhistory = @import("cmdhistory.zig");
 const actions = @import("actions.zig");
@@ -229,6 +230,21 @@ pub const Editor = struct {
     /// is pure display -- the core only carries it so `:set` has
     /// somewhere to put it.
     show_whitespace: bool = false,
+    /// Soft-wrap lines wider than the buffer pane onto the rows below
+    /// (`zoe/wrap.zig`). Off by default. `zoe.conf`'s `wrap`,
+    /// `:set wrap=…`. Pushed to every open buffer like the others.
+    wrap: bool = false,
+    /// The buffer pane's text width in columns, kept current by
+    /// `zoe/ui.zig` before each keystroke. The editor has no pane of its
+    /// own, but with `wrap` on an unprefixed `j`/`k` and Up/Down move by
+    /// screen row, and where a row breaks depends on it.
+    wrap_cols: usize = 0,
+    /// The column *within its screen row* a row move keeps aiming for --
+    /// the wrapped counterpart of `sticky_col`. Only honoured while the
+    /// cursor is still at `wrap_want_at`, the offset the last row move
+    /// left it on: any other move, or an edit, makes it stale.
+    wrap_want: usize = 0,
+    wrap_want_at: ?usize = null,
 
     /// The `:` line being typed, without the leading colon -- the same
     /// one-line field gw-shell's prompt and salacommander's path row use,
@@ -585,6 +601,10 @@ pub const Editor = struct {
             .focusRight,
             .focusUp,
             .focusDown,
+            .moveTabLeft,
+            .moveTabRight,
+            .moveTabUp,
+            .moveTabDown,
             .jumpBack,
             .jumpForward,
             .cut,
@@ -711,8 +731,8 @@ pub const Editor = struct {
         switch (m) {
             .left => self.moveTo(motion.left(buf, self.cursor, 1), true),
             .right => self.moveTo(motion.right(buf, self.cursor, 1, eol), true),
-            .up => self.moveTo(motion.up(buf, self.cursor, 1, self.sticky_col, eol), false),
-            .down => self.moveTo(motion.down(buf, self.cursor, 1, self.sticky_col, eol), false),
+            .up => if (!self.rowMove(.up, eol)) self.moveTo(motion.up(buf, self.cursor, 1, self.sticky_col, eol), false),
+            .down => if (!self.rowMove(.down, eol)) self.moveTo(motion.down(buf, self.cursor, 1, self.sticky_col, eol), false),
             .line_start => self.moveTo(motion.lineStart(buf, self.cursor), true),
             .line_end => self.moveTo(motion.lineEnd(buf, self.cursor, eol), true),
             // vim's insert-mode <C-Left>/<C-Right>: the `b` / `w` motions,
@@ -900,6 +920,62 @@ pub const Editor = struct {
 
     const VDir = enum { up, down };
 
+    /// One screen row up or down through soft-wrapped text: within the
+    /// cursor's line while it has rows left that way, else onto the
+    /// nearest row of the neighbouring line. Keeps the column within the
+    /// row the way `j`/`k` keep `sticky_col`. Returns false, having done
+    /// nothing, when wrapping is off -- the caller then moves by line.
+    fn rowMove(self: *Editor, dir: VDir, allow_eol: bool) bool {
+        if (!self.wrap or self.wrap_cols == 0) return false;
+        const opts: display.Opts = .{ .tab_width = self.tab_width, .show_whitespace = self.show_whitespace };
+        const width = self.wrap_cols;
+        const line = self.buf.lineAt(self.cursor);
+        const text = self.buf.lineText(self.alloc, line) catch return false;
+        defer self.alloc.free(text);
+
+        const col = display.colOfByte(text, self.cursor - self.buf.lineStart(line), opts);
+        const here = wrap_mod.rowOfCol(text, opts, width, col);
+        const want = if (self.wrap_want_at == self.cursor) self.wrap_want else col - here.row.start_col;
+
+        // The target row: `index` of `target_line`, where `maxInt` means
+        // that line's last row.
+        var target_line = line;
+        var index: usize = undefined;
+        switch (dir) {
+            .down => {
+                if (here.index + 1 < wrap_mod.rowCount(text, opts, width)) {
+                    index = here.index + 1;
+                } else if (line + 1 < self.buf.lineCount()) {
+                    target_line = line + 1;
+                    index = 0;
+                } else return true;
+            },
+            .up => {
+                if (here.index > 0) {
+                    index = here.index - 1;
+                } else if (line > 0) {
+                    target_line = line - 1;
+                    index = std.math.maxInt(usize);
+                } else return true;
+            },
+        }
+
+        const ttext = if (target_line == line) text else self.buf.lineText(self.alloc, target_line) catch return false;
+        defer if (target_line != line) self.alloc.free(ttext);
+        const place = wrap_mod.rowAt(ttext, opts, width, index);
+        var b = display.byteAtCol(ttext, place.row.start_col + want, opts);
+        // A row that isn't its line's last stops short of the next row's
+        // first character: past its end, land on its own last one.
+        if (place.row.end_byte < ttext.len and b >= place.row.end_byte) {
+            b = place.row.end_byte - 1;
+            while (b > place.row.start_byte and ttext[b] & 0xC0 == 0x80) b -= 1;
+        }
+        self.moveTo(motion.atColumn(&self.buf, target_line, b, allow_eol), true);
+        self.wrap_want = want;
+        self.wrap_want_at = self.cursor;
+        return true;
+    }
+
     /// PageDown / PageUp: a vertical jump of `page_lines`, keeping the
     /// sticky column just like `j` / `k`. `allow_eol` follows the mode,
     /// the same as the arrow keys.
@@ -974,8 +1050,13 @@ pub const Editor = struct {
         switch (c) {
             'h' => self.moveTo(motion.left(&self.buf, self.cursor, n), true),
             'l' => self.moveTo(motion.right(&self.buf, self.cursor, n, false), true),
-            'j' => self.moveTo(motion.down(&self.buf, self.cursor, n, self.sticky_col, false), false),
-            'k' => self.moveTo(motion.up(&self.buf, self.cursor, n, self.sticky_col, false), false),
+            // Wrapped, a bare `j`/`k` steps a screen row; with a count it
+            // still counts buffer lines, which is what relative line
+            // numbers and `5j` mean.
+            'j' => if (had_count or !self.rowMove(.down, false))
+                self.moveTo(motion.down(&self.buf, self.cursor, n, self.sticky_col, false), false),
+            'k' => if (had_count or !self.rowMove(.up, false))
+                self.moveTo(motion.up(&self.buf, self.cursor, n, self.sticky_col, false), false),
             'w' => self.moveTo(motion.wordForward(&self.buf, self.cursor, n, false), true),
             'W' => self.moveTo(motion.wordForward(&self.buf, self.cursor, n, true), true),
             'b' => self.moveTo(motion.wordBackward(&self.buf, self.cursor, n, false), true),
@@ -2467,6 +2548,8 @@ pub const Editor = struct {
     ///  - `tabwidth=N`                   -- cells between tab stops
     ///  - `expandtab=on|off`             -- Tab inserts spaces
     ///  - `whitespace=on|off`            -- mark spaces and tabs
+    ///  - `wrap=on|off`                  -- soft-wrap long lines (vim's
+    ///                                      bare `wrap` / `nowrap` too)
     ///
     /// An unknown option name or value leaves the setting as it was and
     /// reports the matching vim error. `zoe/ui.zig` pushes whatever
@@ -2476,6 +2559,12 @@ pub const Editor = struct {
             self.setStatus("E518: Unknown option: {s}", .{""});
             return;
         };
+        // vim's own spelling of the one boolean people reach for most.
+        const bare = std.mem.trim(u8, a, " \t");
+        if (std.mem.eql(u8, bare, "wrap") or std.mem.eql(u8, bare, "nowrap")) {
+            self.wrap = std.mem.eql(u8, bare, "wrap");
+            return;
+        }
         const eq_at = std.mem.indexOfScalar(u8, a, '=') orelse {
             self.setStatus("E518: Unknown option: {s}", .{a});
             return;
@@ -2508,6 +2597,13 @@ pub const Editor = struct {
         if (std.mem.eql(u8, opt, "expandtab")) {
             self.expand_tab = parseFlag(val) orelse {
                 self.setStatus("E474: Invalid argument: expandtab={s}", .{val});
+                return;
+            };
+            return;
+        }
+        if (std.mem.eql(u8, opt, "wrap")) {
+            self.wrap = parseFlag(val) orelse {
+                self.setStatus("E474: Invalid argument: wrap={s}", .{val});
                 return;
             };
             return;
