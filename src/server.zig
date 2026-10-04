@@ -6,6 +6,7 @@ const core = @import("core.zig");
 const wire = @import("wire.zig");
 const dispatch = @import("dispatch.zig");
 const rpc = @import("rpc.zig");
+const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
 const conn_stream = @import("conn_stream.zig");
 
@@ -51,12 +52,29 @@ pub const Connection = struct {
     /// until told otherwise, so a fresh one that does is sent nothing.
     /// Guarded by `registry_mutex`.
     focus_sent: bool = true,
+    /// How this connection's bodies are encoded (see `wire.Format`), learnt
+    /// from its first bytes. Settled before anything can be pushed to it:
+    /// every push is gated on a subscription, and subscribing takes a
+    /// frame.
+    format: wire.Format = .json,
 
-    fn send(self: *Connection, io: std.Io, body: []const u8) !void {
+    /// Sends a server-pushed message. `json_body` is always JSON -- the
+    /// `rpc.zig` builders make one body for every subscriber -- and is
+    /// re-encoded here for a MessagePack connection.
+    fn send(self: *Connection, io: std.Io, json_body: []const u8) !void {
+        if (self.format == .json) return self.sendNative(io, json_body);
+        const body = try codec.jsonToMsgpack(self.alloc, json_body);
+        defer self.alloc.free(body);
+        try self.sendNative(io, body);
+    }
+
+    /// Sends a body already in this connection's format -- a response its
+    /// own `Dispatcher` encoded.
+    fn sendNative(self: *Connection, io: std.Io, body: []const u8) !void {
         self.write_mutex.lockUncancelable(io);
         defer self.write_mutex.unlock(io);
 
-        const framed = try wire.framedAlloc(self.alloc, body);
+        const framed = try wire.framedAllocAs(self.alloc, self.format, body);
         defer self.alloc.free(framed);
         try self.stream.writeAll(io, framed);
     }
@@ -265,7 +283,7 @@ pub const Server = struct {
             const rs: ?*const dispatch.RemoteStarter = if (self.remote_starter) |*s| s else null;
             break :blk dispatch.Dispatcher.initForConnection(&self.session, conn.id, sp, rs);
         };
-        var decoder: wire.FrameDecoder = .{};
+        var decoder: wire.FrameDecoder = .{ .detect = true };
         defer decoder.deinit(alloc);
 
         var read_buf: [4096]u8 = undefined;
@@ -277,18 +295,34 @@ pub const Server = struct {
 
             while (try decoder.next(alloc)) |body| {
                 defer alloc.free(body);
+                // The first frame settled the format; every later one
+                // re-asserts it for free.
+                d.format = decoder.format;
+                conn.format = decoder.format;
 
-                // `load_image` / `update_image` are special: the JSON
-                // header frame declares a raw byte count that follows
-                // directly on the wire, not wrapped in another frame --
-                // see wire.zig's `readRaw` and decisions.md's binary
-                // side-channel framing. That payload has to be pulled off
-                // this connection's stream (and decoder buffer) before
-                // dispatch can respond, so it can't go through
-                // `Dispatcher.handle`'s normal single-frame path.
-                if (try dispatch.peekImagePayload(alloc, body)) |hdr| {
-                    const raw = try wire.readRaw(self.io, &stream, &decoder, alloc, hdr.bytes);
-                    defer alloc.free(raw);
+                // Decoded once, here: the envelope's `id` and `method` are
+                // what decide how a failure is reported below, and the
+                // dispatcher takes the same envelope rather than parsing
+                // the body again. An unparseable body is a failed message
+                // of unknown kind -- logged, connection kept.
+                const parsed = codec.parseEnvelope(d.format, alloc, body) catch |err| {
+                    std.log.warn("glyphwire: unparseable message: {t}", .{err});
+                    continue;
+                };
+                defer parsed.deinit();
+                const envelope = parsed.value;
+
+                // `load_image` / `update_image` are special. On JSON the
+                // header declares a raw byte count that follows directly
+                // on the wire, not wrapped in another frame -- see
+                // wire.zig's `readRaw` and decisions.md's binary
+                // side-channel framing -- so that payload has to be pulled
+                // off this connection's stream (and decoder buffer) before
+                // dispatch can respond. On MessagePack the bytes are
+                // inside the message already (`hdr.data`).
+                if (try dispatch.imagePayloadHeader(alloc, envelope)) |hdr| {
+                    const raw = if (hdr.data) |data| data else try wire.readRaw(self.io, &stream, &decoder, alloc, hdr.bytes);
+                    defer if (hdr.data == null) alloc.free(raw);
 
                     const resp = blk: {
                         self.ctx_mutex.lockUncancelable(self.io);
@@ -296,7 +330,7 @@ pub const Server = struct {
                         break :blk try d.handleLoadImage(alloc, hdr, raw);
                     };
                     defer alloc.free(resp);
-                    try conn.send(self.io, resp);
+                    try conn.sendNative(self.io, resp);
                     self.wake();
                     continue;
                 }
@@ -304,7 +338,7 @@ pub const Server = struct {
                 const handle_result = blk: {
                     self.ctx_mutex.lockUncancelable(self.io);
                     defer self.ctx_mutex.unlock(self.io);
-                    const r = d.handle(alloc, body);
+                    const r = d.handleEnvelope(alloc, envelope);
                     // A `create_context` / `activate_context` /
                     // `destroy_context` / `focus_pane` in this frame may
                     // have moved the focused context -- keep `self.ctx`
@@ -321,10 +355,8 @@ pub const Server = struct {
                 // propagates: see dispatch.zig's `isNotification` doc
                 // comment for why.
                 const result = handle_result catch |err| result: {
-                    if (dispatch.isNotification(alloc, body) catch true) {
-                        var name_buf: [64]u8 = undefined;
-                        const method = dispatch.peekMethod(alloc, body, &name_buf);
-                        std.log.warn("glyphwire: notification '{s}' failed: {t}", .{ method, err });
+                    if (envelope.id == null) {
+                        std.log.warn("glyphwire: notification '{s}' failed: {t}", .{ envelope.method, err });
                         break :result dispatch.HandleResult{};
                     }
                     return err;
@@ -335,7 +367,7 @@ pub const Server = struct {
 
                 if (result.response) |r| {
                     defer alloc.free(r);
-                    try conn.send(self.io, r);
+                    try conn.sendNative(self.io, r);
                 }
                 if (result.broadcast) |b| {
                     defer alloc.free(b.body);

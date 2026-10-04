@@ -12,6 +12,12 @@ const protocol = @import("protocol.zig");
 /// the call sites (they pick the method name and hand over a typed result
 /// / params value); this only removes the `const Response = struct { ... }`
 /// / `Stringify.valueAlloc` boilerplate that was repeated per handler.
+///
+/// Everything here is JSON. A pushed notification is built once, as JSON,
+/// for every subscriber, and `server.Connection.send` re-encodes it for a
+/// MessagePack connection. A request's reply is encoded in the asking
+/// connection's format to begin with (`codec.response`, via
+/// `Dispatcher.respond`); `response` below is the JSON form of that.
 
 /// `{"jsonrpc":"2.0","id":<id>,"result":<result>}` for a request reply.
 pub fn response(alloc: std.mem.Allocator, id: std.json.Value, result: anytype) ![]u8 {

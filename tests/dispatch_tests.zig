@@ -4665,3 +4665,130 @@ pub fn activateAtTogglesOutlineNodesTest(io: std.Io, alloc: std.mem.Allocator) !
     try testz.expectTrue(outline.nodes[0].collapsed);
     try testz.expectEqual(outline.visibleRows(), 1);
 }
+
+// ─── MessagePack connections ─────────────────────────────────────────────
+//
+// The same messages as the JSON tests above, re-encoded with
+// `codec.jsonToMsgpack`, through a `Dispatcher` whose connection speaks
+// MessagePack.
+
+fn msgpackBody(alloc: std.mem.Allocator, json: []const u8) ![]u8 {
+    return glyphwire.codec.jsonToMsgpack(alloc, json);
+}
+
+pub fn msgpackWriteTextUpdatesCoreStateTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    d.format = .msgpack;
+
+    const body = try msgpackBody(alloc,
+        \\{"method":"write_text","params":{"text":"hello","fg":{"r":255,"g":0,"b":0}}}
+    );
+    defer alloc.free(body);
+    const result = try d.handle(alloc, body);
+    try testz.expectTrue(result.response == null);
+
+    try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("o", ctx.root.cell(0, 4).grapheme());
+    try testz.expectEqual(ctx.root.cell(0, 0).style.fg.r, 255);
+    try testz.expectEqual(ctx.root.cursor.col, 5);
+}
+
+pub fn msgpackRequestIsAnsweredInMsgpackTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    d.format = .msgpack;
+
+    const body = try msgpackBody(alloc,
+        \\{"method":"get_property","id":11,"params":{"property":"cursor"}}
+    );
+    defer alloc.free(body);
+    const result = try d.handle(alloc, body);
+    const resp = result.response.?;
+    defer alloc.free(resp);
+
+    const parsed = try glyphwire.msgpack.decode(glyphwire.codec.Result(struct { row: usize, col: usize }), alloc, resp, .{});
+    defer parsed.deinit();
+    try testz.expectEqual(parsed.value.id, 11);
+    try testz.expectEqual(parsed.value.result.col, 0);
+}
+
+pub fn msgpackBatchRequestFormCorrelatesResponsesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    d.format = .msgpack;
+
+    const body = try msgpackBody(alloc,
+        \\{"id":7,"method":"batch","params":{"messages":[
+        \\  {"method":"create_metadata","params":{"json":"{\"a\":1}"},"id":1},
+        \\  {"method":"write_text","params":{"text":"hi"}},
+        \\  {"method":"bogus_method","params":{}},
+        \\  {"method":"get_property","params":{"property":"cursor"},"id":2}
+        \\]}}
+    );
+    defer alloc.free(body);
+    const result = try d.handle(alloc, body);
+    const resp = result.response.?;
+    defer alloc.free(resp);
+
+    const Sub = struct { id: i64, result: glyphwire.msgpack.Raw };
+    const T = struct { id: i64, result: struct { responses: []const Sub } };
+    const parsed = try glyphwire.msgpack.decode(T, alloc, resp, .{});
+    defer parsed.deinit();
+    try testz.expectEqual(parsed.value.id, 7);
+    const responses = parsed.value.result.responses;
+    try testz.expectEqual(responses.len, 2);
+    try testz.expectEqual(responses[0].id, 1);
+    try testz.expectEqual(responses[1].id, 2);
+
+    // The unknown method was skipped, and the write ahead of it applied.
+    const cursor = try glyphwire.msgpack.decodeLeaky(struct { col: usize }, parsed.arena.allocator(), responses[1].result.bytes, .{});
+    try testz.expectEqual(cursor.col, 2);
+}
+
+pub fn msgpackLoadImageCarriesBytesInlineTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    d.format = .msgpack;
+
+    const png = fakePngBytes(32, 16);
+    const body = try glyphwire.codec.request(.msgpack, alloc, 3, "load_image", .{
+        .format = @as([]const u8, "png"),
+        .data = glyphwire.msgpack.Bin{ .bytes = &png },
+    }, .{});
+    defer alloc.free(body);
+
+    const env = try glyphwire.codec.parseEnvelope(.msgpack, alloc, body);
+    defer env.deinit();
+    const hdr = (try dispatch.imagePayloadHeader(alloc, env.value)).?;
+    try testz.expectEqual(hdr.bytes, png.len);
+    try testz.expectTrue(std.mem.eql(u8, hdr.data.?, &png));
+
+    const resp = try d.handleLoadImage(alloc, hdr, hdr.data.?);
+    defer alloc.free(resp);
+    const parsed = try glyphwire.codec.parseResult(struct { handle: glyphwire.ImageHandle }, .msgpack, alloc, resp);
+    defer parsed.deinit();
+    const info = ctx.imageInfo(parsed.value.result.handle).?;
+    try testz.expectEqual(info.width, 32);
+    try testz.expectEqual(info.height, 16);
+}
+
+pub fn msgpackLoadImageWithoutDataIsRefusedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const body = try glyphwire.codec.request(.msgpack, alloc, 3, "load_image", .{
+        .format = @as([]const u8, "png"),
+        .bytes = @as(usize, 24),
+    }, .{});
+    defer alloc.free(body);
+    const env = try glyphwire.codec.parseEnvelope(.msgpack, alloc, body);
+    defer env.deinit();
+    try testz.expectError(dispatch.imagePayloadHeader(alloc, env.value), dispatch.DispatchError.MissingImageData);
+}

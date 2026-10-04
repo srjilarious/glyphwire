@@ -430,6 +430,24 @@ pub fn build(b: *std.Build) void {
     const probe_step = b.step("probe", "Run glyphwire-probe against GLYPHWIRE_SOCK");
     probe_step.dependOn(&run_probe.step);
 
+    // Not installed: a measuring tool, run on demand (optimized, e.g.
+    // `zig build bench-wire -Doptimize=ReleaseFast`).
+    const wire_bench_exe = b.addExecutable(.{
+        .name = "gw-wire-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/wire.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    wire_bench_exe.root_module.addImport("glyphwire", glyphwire_mod);
+
+    const run_wire_bench = b.addRunArtifact(wire_bench_exe);
+    run_wire_bench.addPassthruArgs();
+
+    const wire_bench_step = b.step("bench-wire", "Benchmark the JSON and MessagePack wire encodings");
+    wire_bench_step.dependOn(&run_wire_bench.step);
+
     const demo_exe = b.addExecutable(.{
         .name = "glyphwire-demo",
         .root_module = b.createModule(.{

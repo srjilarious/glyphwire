@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.5.0 — pre-1.0 draft.**
+**Version 0.6.0 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -65,6 +65,7 @@ connects.
 | `GLYPHWIRE_PANE` | host / multiplexer | The pane handle this process was seated in. A client **SHOULD** pass it as `subscribe`'s `pane` (section 6.18). |
 | `GLYPHWIRE_LAYER` | an embedded shell | The layer this process should draw on: the surface an omitted `layer` resolves to. A client **SHOULD** send it as `attach_layer` immediately after connecting. Unset means the context's root layer. |
 | `GLYPHWIRE_REMOTE` | `gw-agent` | Set inside a remote session. |
+| `GLYPHWIRE_WIRE` | user | `json` or `msgpack`: which encoding (section 2.2) the reference client opens its connections in. Default `msgpack`. Not part of the wire protocol — a host accepts both regardless. |
 | `GLYPHWIRE_CONFIG_DIR` | user | Overrides the config directory. Not part of the wire protocol. |
 
 A program that does not find `GLYPHWIRE_SOCK` **MUST** fall back to plain
@@ -74,7 +75,25 @@ grid is present: either it connected, or it is writing to a pipe.
 No client library is required. Anything that can open a socket and
 read/write bytes can speak this protocol.
 
-### 2.2 Framing
+### 2.2 Encodings and framing
+
+A connection speaks one of two encodings for its whole lifetime, chosen by
+the client:
+
+- **JSON** — JSON-RPC 2.0 bodies under `Content-Length` headers (2.2.1).
+- **MessagePack** — [MessagePack](https://msgpack.org/) bodies, each
+  preceded by its length (2.2.2).
+
+The message shapes are identical in both (section 3.1); only the bytes
+differ. A host **MUST** accept both, and **MUST** answer and notify a
+connection in the encoding it chose. It tells them apart by the
+connection's **first byte**: a MessagePack connection opens with a
+four-byte preamble whose first byte is `0xc1` — the one byte MessagePack
+never assigns, and one that cannot begin a `Content-Length` header. Any
+other first byte means JSON. There is no reply to the preamble; the
+client sends its first frame right behind it.
+
+#### 2.2.1 JSON framing
 
 Every message is framed LSP-style: a `Content-Length` header, a blank
 line, then exactly that many bytes of body.
@@ -102,11 +121,36 @@ Normative rules:
 This framing was chosen so JSON bodies never need newline-escaping and so
 a session stays debuggable with `nc -U` and `jq`.
 
+#### 2.2.2 MessagePack framing
+
+The client's first four bytes are the preamble `c1 47 57 4d` (`0xc1` then
+ASCII `GWM`). After it, every message in either direction is a 32-bit
+big-endian byte count followed by exactly that many bytes of one
+MessagePack value.
+
+```
+c1 47 57 4d                                     preamble (client, once)
+00 00 00 1f                                     body length: 31
+82 a6 6d 65 74 68 6f 64 aa 77 72 69 74 65 ...   {"method":"write_text", ...}
+```
+
+Normative rules:
+
+- A connection whose first byte is `0xc1` but whose next three are not
+  `GWM` is a framing error; the host **MUST** close it.
+- The preamble is sent once, by the client only. A host's replies carry
+  none.
+- A reader **MUST** tolerate a frame split across reads and several frames
+  arriving in one read.
+- MessagePack **ext** types and the byte `0xc1` **MUST NOT** appear inside
+  a body.
+
 ### 2.3 The binary side channel
 
-One message carries bytes that are not JSON: `load_image` (section 6.5).
-Its JSON frame declares a byte count, and exactly that many raw bytes
-follow **immediately on the socket, outside any frame**.
+**JSON connections only.** Two messages carry bytes that are not JSON:
+`load_image` and `update_image` (section 6.5). The JSON frame declares a
+byte count, and exactly that many raw bytes follow **immediately on the
+socket, outside any frame**.
 
 ```
 Content-Length: 85\r\n
@@ -125,8 +169,14 @@ Rules:
   frame and the payload on the same connection.
 - `load_image` **MUST NOT** appear inside a `batch` (section 6.19).
 
-This is the only place raw bytes cross the wire. Image pixels are never
-base64'd into JSON.
+This is the only place raw bytes cross a JSON connection. Image pixels are
+never base64'd into JSON.
+
+A **MessagePack** connection has no side channel: MessagePack has a binary
+type, so the image travels inside the message as a `data` member of type
+`bin`, and `bytes` is omitted. A MessagePack `load_image` /
+`update_image` without `data` fails with `MissingImageData`. The other
+rules above (request-only, not batchable) still hold.
 
 ## 3. The message layer
 
@@ -153,9 +203,26 @@ Three forms are used:
 {"jsonrpc": "2.0", "method": "write_text", "params": {"text": "hello"}}
 ```
 
-Rules:
+**MessagePack** (section 2.2.2) carries the same three forms as maps with
+the same string keys, minus `jsonrpc`, which carries no information:
 
-- `jsonrpc` **MUST** be the string `"2.0"`.
+```
+{"id": 1, "method": "create_layer", "params": {"scrollback_rows": 0}}
+{"id": 1, "result": {"handle": 3}}
+{"method": "write_text", "params": {"text": "hello"}}
+```
+
+(shown in JSON notation). Every value maps the obvious way — JSON object
+↔ map with `str` keys, array ↔ array, string ↔ `str`, number ↔ int or
+float, `true`/`false` ↔ bool, `null` ↔ nil — and a receiver **MUST**
+accept an int wherever a float is expected. Image bytes use `bin`
+(section 2.3); no other member does. An omitted member and a nil one mean
+the same thing wherever a member is optional.
+
+Rules (both encodings):
+
+- `jsonrpc` **MUST** be the string `"2.0"` on a JSON connection. On
+  MessagePack it **SHOULD** be omitted and **MUST** be ignored.
 - `id` **MAY** be any JSON value; the host echoes it back unchanged. A
   message with no `id` is a notification.
 - `params` is an object in every message that takes parameters. Positional
@@ -246,6 +313,7 @@ into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
 | `NotWindowManager`, `UnknownRole` | role messages |
 | `UnknownSplit`, `InvalidSplitAxis`, `InvalidSplitChild` | layer-split messages |
 | `UnknownImage`, `UnknownIcon`, `ImageIsIcon`, `InvalidIconOption`, `UnsupportedImageFormat` | image / icon messages |
+| `MissingImageData` | `load_image` / `update_image` on a MessagePack connection without a `data` member |
 | `UnknownMetadata`, `InvalidMetadataDirection` | metadata messages |
 | `UnknownTable`, `InvalidTableOption`, `TableRowShapeMismatch` | table messages |
 | `UnknownRect` | rect messages |
@@ -879,15 +947,16 @@ broadcasts `scroll` to other subscribers.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `load_image` | request | `format`, `bytes` **+ raw payload** | `{handle}` |
-| `update_image` | request | `handle`, `format`, `bytes` **+ raw payload** | `{handle}` |
+| `load_image` | request | `format`, `bytes` **+ raw payload** (JSON) / `format`, `data` (MessagePack) | `{handle}` |
+| `update_image` | request | `handle`, `format`, `bytes` **+ raw payload** (JSON) / `handle`, `format`, `data` (MessagePack) | `{handle}` |
 | `get_image_info` | request | `handle` | `{width, height}` |
 | `draw_image` | notification | `layer?`, `handle`, `row?`, `col?`, `row_span`, `col_span`, `scale?` = 1.0 | — |
 | `destroy_image` | notification | `handle` | — |
 
 `format` is `"png"`, `"jpeg"` (`"jpg"` accepted), `"bmp"` or `"gif"`;
-anything else reports `UnsupportedImageFormat`. `bytes` is the payload
-length, delivered per section 2.3.
+anything else reports `UnsupportedImageFormat`. On JSON, `bytes` is the
+payload length, delivered per section 2.3; on MessagePack the payload is
+`data` itself.
 
 `draw_image` sets each cell in the `row_span` × `col_span` rectangle to
 sample its own region of the image, so the picture spans the rectangle
@@ -1345,7 +1414,7 @@ last call.
 |---|---|---|---|
 | `batch` | request or notification | `messages` | array of sub-results |
 
-Applies an ordered list of JSON-RPC message objects in one go, under a
+Applies an ordered list of message objects in one go, under a
 single hold of the host's state lock, so nothing renders a half-updated
 grid partway through. This is the mechanism for a client that redraws a
 whole screen per frame.
@@ -1663,6 +1732,21 @@ tools people already have — `nc -U`, `jq` — and neither needs
 newline-escaping. The cost is bytes, and the answer to the cost is
 `batch` (6.17) plus a raw side channel for the one payload that would
 actually hurt (2.3).
+
+**Why MessagePack as well.** Profiling zoe put the remaining per-frame
+cost in JSON itself: every message is tokenised into a generic tree and
+then walked again into its params struct, and every string is escaped on
+the way out. A MessagePack body is decoded straight into the params
+struct, with lengths up front and nothing to unescape. Measured with
+`zig build bench-wire -Doptimize=ReleaseFast`: a 60-row syntax-coloured
+redraw dispatches about 2.5x faster and is about 40% smaller, a
+`get_cells` read-back decodes about 3.8x faster, and a synced redraw over
+the socket takes about half the time. JSON stays, because it is what `nc
+-U`, `jq` and a ten-line script can speak; the connection's first byte
+says which one it is, so nothing has to be configured on the host. Cap'n
+Proto and CBOR were considered: Cap'n Proto needs a schema compiler and
+code generation on both ends, and CBOR buys nothing here over MessagePack
+while being the larger format to hand-roll.
 
 **Why handles, not content, in read-backs.** `get_cells` reports an image
 as a handle, not pixels; a metadata tag as an id, not a blob. Resolving is

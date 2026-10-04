@@ -15,6 +15,7 @@ const all_tests = blk: {
         testz.Group{ .name = "Wire Tests", .tag = "wire", .mod = @import("./wire_tests.zig") },
         testz.Group{ .name = "Mux Tests", .tag = "mux", .mod = @import("./mux_tests.zig") },
         testz.Group{ .name = "RPC Tests", .tag = "rpc", .mod = @import("./rpc_tests.zig") },
+        testz.Group{ .name = "MessagePack Tests", .tag = "msgpack", .mod = @import("./msgpack_tests.zig") },
         testz.Group{ .name = "Profiler Tests", .tag = "profiler", .mod = @import("./profiler_tests.zig") },
         testz.Group{ .name = "Dispatch Tests", .tag = "dispatch", .mod = @import("./dispatch_tests.zig") },
         testz.Group{ .name = "Server Tests", .tag = "server", .mod = @import("./server_tests.zig") },
