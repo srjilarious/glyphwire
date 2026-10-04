@@ -74,6 +74,10 @@ const selection_diff = @import("selection_diff.zig");
 const diag = @import("diag.zig");
 const hover_mod = @import("hover.zig");
 const complete = @import("complete.zig");
+const cmdhistory = @import("cmdhistory.zig");
+const pathmenu = @import("pathmenu.zig");
+const pathcomplete = @import("applib").pathcomplete;
+const fsops = @import("applib").fsops;
 const buffer_mod = @import("buffer.zig");
 const shellpanel = @import("applib").shellpanel;
 
@@ -298,6 +302,52 @@ const TreeDirty = enum(u2) {
     none,
     selection,
     full,
+};
+
+/// The sidebar's in-place name field: `a` / Shift+F4 and F7 make an
+/// entry, `r` / F2 rename one. While it is up it owns the keyboard the
+/// way a tree search does, Enter commits and Escape abandons it.
+///
+/// A rename edits the entry's own row. A create has no row yet, so the
+/// pane draws a virtual one at the top of the directory it will land in
+/// (`row`), pushing the rows below it down one; `treeRowEntry` is the
+/// mapping. Nothing in `Tree` knows about it -- the entry only exists
+/// once the create has happened and the tree is re-read.
+const TreeEdit = struct {
+    kind: Kind,
+    field: lineedit.LineEdit = .{},
+    /// The directory the entry is made in or renamed within. Owned.
+    dir: []u8,
+    /// A rename's current name. Owned; empty for a create.
+    old_name: []u8,
+    /// The pane row the field is drawn on.
+    row: usize,
+    /// Its nesting, for the indent.
+    depth: usize,
+    /// Why the last Enter didn't take (a name that exists, one with a `/`
+    /// in a rename), shown on the statusline with the field kept open for
+    /// another try -- salacommander's F2 does the same. Static text.
+    err: ?[]const u8 = null,
+
+    const Kind = enum {
+        /// `a` / Shift+F4: a file, or a directory when the name ends in
+        /// `/`. Missing parents along the way are made too.
+        create,
+        /// F7: a directory, slash or not.
+        create_dir,
+        rename,
+    };
+
+    fn deinit(self: *TreeEdit, alloc: std.mem.Allocator) void {
+        self.field.deinit(alloc);
+        alloc.free(self.dir);
+        alloc.free(self.old_name);
+    }
+
+    /// Whether the field is a virtual row spliced into the listing.
+    fn inserts(self: *const TreeEdit) bool {
+        return self.kind != .rename;
+    }
 };
 
 /// Which set of names a tree-pane search is walking.
@@ -693,6 +743,11 @@ pub const Ui = struct {
     /// An in-progress tree-pane search (`f` or `/`), null the rest of the
     /// time. See `TreeFind`.
     find: ?TreeFind = null,
+    /// The sidebar's name field, non-null while a create or rename is
+    /// being typed. See `TreeEdit`.
+    tree_edit: ?TreeEdit = null,
+    /// Only the field's row needs repainting (a keystroke in it).
+    tree_edit_dirty: bool = false,
 
 
     /// An in-progress left-button drag in the buffer pane. `anchor` is
@@ -786,6 +841,13 @@ pub const Ui = struct {
     completion: ?complete.Menu = null,
     completion_layer: glyphwire.LayerHandle,
     completion_dirty: bool = false,
+    /// The `:` line's filename popup (Tab on a path argument), non-null
+    /// while it is up. See `zoe/pathmenu.zig`. A layer of its own rather
+    /// than the completion popup's: it hangs over the statusline, not
+    /// under a word in the buffer.
+    path_menu: ?pathmenu.Menu = null,
+    path_menu_layer: glyphwire.LayerHandle,
+    path_menu_dirty: bool = false,
     /// The newest outstanding completion request, and where the word it is
     /// for starts -- a reply for a word the cursor has since left is
     /// dropped, the same staleness rule hover has.
@@ -859,6 +921,16 @@ pub const Ui = struct {
     /// them. Each buffer's `Editor` points here (`Editor.keymaps`), which
     /// is safe because `Ui` lives on the heap and outlives its slots.
     keymaps: actions.Keymaps = .{},
+    /// The `:` and `/` lines' histories, shared by every buffer the same
+    /// way `keymaps` is (`Editor.cmd_history`). See `zoe/cmdhistory.zig`.
+    cmd_history: cmdhistory.History,
+    search_history: cmdhistory.History,
+    /// Where each is persisted (`zoe_history`, `zoe_search_history` in
+    /// the config directory). Owned; null when there is no config
+    /// directory or `GLYPHWIRE_NO_HISTORY` is set, and history is then
+    /// this session's only.
+    cmd_history_file: ?[]u8 = null,
+    search_history_file: ?[]u8 = null,
 
     /// The process environment, kept for `:cd` (`$HOME`) and passed on
     /// to the highlighter setup.
@@ -1011,6 +1083,11 @@ pub const Ui = struct {
         try client.setLayerVisible(completion_layer, false);
         try client.setLayerBackground(completion_layer, role(.popup_bg));
         try client.setLayerShadow(completion_layer, glyphwire.Shadow.dialog);
+        // The `:` line's filename popup, styled the same way.
+        const path_menu_layer = try client.createLayer(complete_max_cols, 1, 0);
+        try client.setLayerVisible(path_menu_layer, false);
+        try client.setLayerBackground(path_menu_layer, role(.popup_bg));
+        try client.setLayerShadow(path_menu_layer, glyphwire.Shadow.dialog);
         // The tab tooltip, last so it sits over everything: it hangs from
         // the tab strip over the top of the buffer and, for a long path,
         // over the file tree.
@@ -1035,6 +1112,8 @@ pub const Ui = struct {
             .alloc = alloc,
             .io = io,
             .keymaps = keymaps,
+            .cmd_history = .init(alloc),
+            .search_history = .init(alloc),
             .client = client,
             .listener = listener,
             .tree = try Tree.init(alloc, io, root_dir, .{}),
@@ -1050,6 +1129,7 @@ pub const Ui = struct {
             .hover_layer = hover_layer,
             .hover_panel_patch = hover_panel_patch,
             .completion_layer = completion_layer,
+            .path_menu_layer = path_menu_layer,
             .tab_tip_layer = tab_tip_layer,
             .tab_tip_patch = tab_tip_patch,
             .diags = diag.Store.init(alloc),
@@ -1073,6 +1153,8 @@ pub const Ui = struct {
         // which builds its own highlighter against what this leaves.
         self.loadConfig(cfg_owned.?, environ);
         cfg_owned = null;
+        // Best-effort too: a history that can't be read is an empty one.
+        self.loadHistories();
 
         // After the config (which carries the server list) and before the
         // first buffer (which announces itself to whatever started).
@@ -1407,6 +1489,8 @@ pub const Ui = struct {
         errdefer slot.ed.deinit();
         if (text != null) slot.disk = self.diskStamp(path.?);
         slot.ed.keymaps = &self.keymaps;
+        slot.ed.cmd_history = &self.cmd_history;
+        slot.ed.search_history = &self.search_history;
         slot.ed.line_comment = self.lineCommentFor(path);
 
         // Same line vim shows on opening: the file and its length, or
@@ -1497,12 +1581,18 @@ pub const Ui = struct {
         if (self.hover) |*h| h.deinit();
         if (self.hover_hl) |*h| h.deinit();
         if (self.completion) |*m| m.deinit();
+        if (self.path_menu) |*m| m.deinit();
         self.jumps.deinit(self.alloc);
         self.keymaps.deinit(self.alloc);
+        self.cmd_history.deinit();
+        self.search_history.deinit();
+        if (self.cmd_history_file) |p| self.alloc.free(p);
+        if (self.search_history_file) |p| self.alloc.free(p);
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
         self.finder.deinit();
         if (self.find) |*f| f.deinit(self.alloc);
+        if (self.tree_edit) |*te| te.deinit(self.alloc);
         if (self.prev_cwd) |p| self.alloc.free(p);
 
         // Every open buffer's text and parse tree, not just the visible
@@ -2013,7 +2103,23 @@ pub const Ui = struct {
     /// `clampTreeScroll` pulls the offset back too, so in practice these
     /// max out at the listing; this is the half that cannot be raced.
     fn treeContentRows(self: *const Ui) usize {
-        return @max(self.tree.len() + tree_trailing_rows, self.tree_scroll.row + self.tree_bounds.rows);
+        return @max(self.treeListedRows() + tree_trailing_rows, self.tree_scroll.row + self.tree_bounds.rows);
+    }
+
+    /// Rows the listing occupies: the tree's entries, plus the virtual
+    /// row a create's name field is drawn on.
+    fn treeListedRows(self: *const Ui) usize {
+        const extra: usize = if (self.tree_edit) |te| @intFromBool(te.inserts()) else 0;
+        return self.tree.len() + extra;
+    }
+
+    /// The entry drawn on pane row `r`: the tree's own, shifted down one
+    /// past a create's virtual row.
+    fn treeRowEntry(self: *const Ui, r: usize) ?tree_mod.Entry {
+        if (self.tree_edit) |te| {
+            if (te.inserts() and r > te.row) return self.tree.at(r - 1);
+        }
+        return self.tree.at(r);
     }
 
     fn treeContentCols(self: *const Ui) usize {
@@ -2046,7 +2152,7 @@ pub const Ui = struct {
             self.drainLsp();
             if (self.anyGroupDirty() or self.tree_dirty != .none or
                 self.status_dirty or self.finder.dirty or self.hover_dirty or self.completion_dirty or
-                self.tab_tip_dirty or self.tree_scroll_pending != null)
+                self.path_menu_dirty or self.tree_edit_dirty or self.tab_tip_dirty or self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
             // After the frame, not before: entering insert mode's frame
@@ -2117,7 +2223,10 @@ pub const Ui = struct {
             self.syncCompletion();
             if (self.completionDue()) self.requestCompletion(null, false);
             if (self.tabTipDue()) self.showTabTip();
-            if (self.diskCheckDue()) self.checkDisk();
+            if (self.diskCheckDue()) {
+                self.checkDisk();
+                try self.checkTreeDisk();
+            }
             // After the events, before the frame they produced: a mode
             // change in that batch retimes the host's key repeat before
             // the user can hold anything down in the new mode.
@@ -2331,6 +2440,11 @@ pub const Ui = struct {
                 if (self.completion != null and self.focus == .buffer and self.buf.ed.mode == .insert) {
                     if (try self.completionKey(k)) return;
                 }
+                // The same for the `:` line's filename popup, which also
+                // owns Tab there whether it is up or not.
+                if (self.focus == .buffer and self.buf.ed.mode == .command) {
+                    if (try self.cmdlineKey(k)) return;
+                }
 
                 // Everything else is a binding (`actions.zig`), looked up
                 // for the editor's mode -- the tree has no mode of its own
@@ -2352,6 +2466,9 @@ pub const Ui = struct {
                 }
                 const was_insert = self.buf.ed.mode == .insert;
                 try self.applyOutcome(try self.buf.ed.feedKey(k.key, k.mods));
+                // An Enter on the `:` or `/` line just recorded it.
+                self.flushHistories();
+                try self.syncPathMenu();
                 // Out of insert mode (into select mode, say), the popup has
                 // nothing left to complete.
                 if (self.completion != null and self.buf.ed.mode != .insert) self.closeCompletion();
@@ -2387,6 +2504,7 @@ pub const Ui = struct {
                 const was_insert = self.buf.ed.mode == .insert;
                 try self.applyOutcome(try self.buf.ed.feedText(t.text));
                 if (was_insert) self.afterInsertEdit(t.text);
+                try self.syncPathMenu();
             },
             .paste => |t| {
                 if (self.shell.isFocused()) return;
@@ -2411,6 +2529,7 @@ pub const Ui = struct {
                     };
                     if (typed) {
                         try self.applyOutcome(try self.buf.ed.feedText(t.text));
+                        try self.syncPathMenu();
                     } else {
                         // Normal / visual mode: splice the pasted text in
                         // like `p`, replacing any selection first, rather
@@ -2499,7 +2618,11 @@ pub const Ui = struct {
         // Leaving the tree abandons any search in it -- the prefix
         // describes where the tree cursor is, and the tree cursor stops
         // being what the keyboard drives.
-        if (to != .tree) self.cancelFind();
+        if (to != .tree) {
+            self.cancelFind();
+            // A half-typed name is abandoned the same way.
+            self.cancelTreeEdit();
+        }
         // Only the highlight appears or disappears: the listing itself is
         // untouched by a focus change.
         self.markTreeDirty(.selection);
@@ -2545,6 +2668,7 @@ pub const Ui = struct {
     /// the listing that is about to be replaced.
     fn toggleHidden(self: *Ui) !void {
         self.cancelFind();
+        self.cancelTreeEdit();
         self.tree.visible.show_hidden = !self.tree.visible.show_hidden;
         self.tree.reload(self.io) catch {};
         self.clampTreeScroll();
@@ -2586,6 +2710,9 @@ pub const Ui = struct {
     }
 
     fn treeKey(self: *Ui, ev: glyphwire.KeyEvent) !void {
+        // So does the name field, and it never lets a key through.
+        if (self.tree_edit != null) return self.treeEditKey(ev);
+
         // A search owns the keyboard while it is up, the way the Ctrl+P
         // popup does: Tab steps the candidates, Backspace shortens the
         // prefix, Enter takes the row and Escape drops the search.
@@ -2607,6 +2734,11 @@ pub const Ui = struct {
         if (eq(u8, key, "end")) self.treeGoto(self.tree.len() -| 1);
         if (eq(u8, key, "enter")) try self.treeActivate();
         if (eq(u8, key, "escape")) self.setFocus(.buffer);
+        // salacommander's keys for the same three, alongside `a` and `r`
+        // (`treeText`): F2 renames, F7 makes a directory, Shift+F4 a file.
+        if (eq(u8, key, "F2")) try self.startTreeRename();
+        if (eq(u8, key, "F7")) try self.startTreeCreate(.create_dir);
+        if (eq(u8, key, "F4") and ev.mods.shift) try self.startTreeCreate(.create);
     }
 
     /// How far Page Up / Page Down move in the tree: `tree_page_lines`
@@ -2635,6 +2767,7 @@ pub const Ui = struct {
     /// here the letters are already commands. `f` searches what is on
     /// screen, `/` searches the whole tree. See `TreeFind`.
     fn treeText(self: *Ui, text: []const u8) !void {
+        if (self.tree_edit != null) return self.treeEditText(text);
         if (self.find != null) return self.findText(text);
 
         var it = (std.unicode.Utf8View.init(text) catch return).iterator();
@@ -2650,6 +2783,11 @@ pub const Ui = struct {
                 'q' => self.setFocus(.buffer),
                 'f' => try self.startFind(.visible),
                 '/' => try self.startFind(.deep),
+                // nvim-tree's: `a` adds (a trailing `/` makes it a
+                // folder), `r` renames. Whatever else this chunk held is
+                // dropped -- it arrived before the field was there.
+                'a' => return self.startTreeCreate(.create),
+                'r' => return self.startTreeRename(),
                 else => {},
             }
         }
@@ -2688,9 +2826,16 @@ pub const Ui = struct {
     /// -- there the trailing blank row (`tree_trailing_rows`) is what
     /// takes the scrollbar instead.
     fn scrollTreeToCursor(self: *Ui) void {
+        self.scrollTreeToRow(self.tree.cursor, self.tree.len());
+    }
+
+    /// `scrollTreeToCursor` for any row of a `len`-row listing -- the
+    /// name field's, which sits in a listing one row longer than the
+    /// tree while a create is being typed.
+    fn scrollTreeToRow(self: *Ui, row: usize, len: usize) void {
         const rows = self.tree_bounds.rows;
         if (rows == 0) return;
-        const top = treeScrollTop(self.tree.cursor, self.tree_scroll.row, rows, self.tree.len());
+        const top = treeScrollTop(row, self.tree_scroll.row, rows, len);
         if (top == self.tree_scroll.row) return;
 
         self.tree_scroll.row = top;
@@ -2749,6 +2894,205 @@ pub const Ui = struct {
         errdefer find.deinit(self.alloc);
         if (scope == .deep) find.deep = try tree_mod.deepList(self.alloc, self.io, self.tree.root, self.tree.visible);
         self.find = find;
+        self.status_dirty = true;
+    }
+
+    // ── Sidebar create / rename ─────────────────────────────────────────
+
+    /// `a` / Shift+F4 (`.create`) and F7 (`.create_dir`): opens the name
+    /// field for a new entry in the directory under the cursor -- the row
+    /// itself when it is a directory, else the one it is in -- expanding
+    /// that directory so the new row has a place among its children.
+    fn startTreeCreate(self: *Ui, kind: TreeEdit.Kind) !void {
+        self.cancelFind();
+        self.cancelTreeEdit();
+        const dir = try self.alloc.dupe(u8, self.tree.dirFor(self.tree.cursor));
+        errdefer self.alloc.free(dir);
+        const old_name = try self.alloc.dupe(u8, "");
+        errdefer self.alloc.free(old_name);
+
+        var row: usize = 0;
+        var depth: usize = 0;
+        if (try self.tree.openDirRow(self.io, dir)) |index| {
+            row = index + 1;
+            depth = self.tree.entries.items[index].depth + 1;
+            self.tree.cursor = index;
+        }
+        self.tree_edit = .{ .kind = kind, .dir = dir, .old_name = old_name, .row = row, .depth = depth };
+        self.showTreeEdit();
+    }
+
+    /// `r` / F2: opens the name field over the entry under the cursor,
+    /// filled with its name and the caret before a file's extension --
+    /// salacommander's F2 rule (`fsops.renameCaret`). Ctrl+U from there
+    /// leaves just the extension to type in front of.
+    fn startTreeRename(self: *Ui) !void {
+        self.cancelFind();
+        self.cancelTreeEdit();
+        const e = self.tree.at(self.tree.cursor) orelse return;
+        const dir = try self.alloc.dupe(u8, std.fs.path.dirname(e.path) orelse self.tree.root);
+        errdefer self.alloc.free(dir);
+        const old_name = try self.alloc.dupe(u8, e.name);
+        errdefer self.alloc.free(old_name);
+        var field = try lineedit.LineEdit.init(self.alloc, e.name);
+        errdefer field.deinit(self.alloc);
+        _ = field.moveTo(fsops.renameCaret(e.name, e.is_dir));
+        self.tree_edit = .{
+            .kind = .rename,
+            .field = field,
+            .dir = dir,
+            .old_name = old_name,
+            .row = self.tree.cursor,
+            .depth = e.depth,
+        };
+        self.showTreeEdit();
+    }
+
+    /// Puts a just-opened field on screen: the keyboard in the tree, the
+    /// grid one row longer for a create, the field's row scrolled into
+    /// view, and the listing repainted around it. Can't fail: the field
+    /// already owns its strings, so the callers' cleanup is behind them.
+    fn showTreeEdit(self: *Ui) void {
+        const te = &self.tree_edit.?;
+        self.setFocus(.tree);
+        self.syncContentSizes() catch {};
+        self.scrollTreeToRow(te.row, self.treeListedRows());
+        self.markTreeDirty(.full);
+        self.status_dirty = true;
+    }
+
+    /// Closes the name field without doing anything. Safe to call when
+    /// there is none.
+    fn cancelTreeEdit(self: *Ui) void {
+        var te = self.tree_edit orelse return;
+        te.deinit(self.alloc);
+        self.tree_edit = null;
+        self.clampTreeScroll();
+        self.syncContentSizes() catch {};
+        self.markTreeDirty(.full);
+        self.status_dirty = true;
+    }
+
+    /// A named key while the field is up. It owns the keyboard: whatever
+    /// the field doesn't use is swallowed rather than moving a cursor the
+    /// field is drawn relative to.
+    fn treeEditKey(self: *Ui, ev: glyphwire.KeyEvent) !void {
+        const te = &self.tree_edit.?;
+        switch (te.field.handleKey(ev.key, ev.mods)) {
+            .submit => try self.commitTreeEdit(),
+            .cancel => self.cancelTreeEdit(),
+            .edited => {
+                te.err = null;
+                self.tree_edit_dirty = true;
+                self.status_dirty = true;
+            },
+            .moved => self.tree_edit_dirty = true,
+            .ignored => {},
+        }
+    }
+
+    /// Typed text while the field is up.
+    fn treeEditText(self: *Ui, text: []const u8) !void {
+        const te = &self.tree_edit.?;
+        if (!try te.field.insert(self.alloc, text)) return;
+        te.err = null;
+        self.tree_edit_dirty = true;
+        self.status_dirty = true;
+    }
+
+    /// Enter in the field. A name that can't be used (exists already, has
+    /// a `..`, or a `/` in a rename) keeps the field open with the reason
+    /// on the statusline; anything else closes it, re-reads the tree and
+    /// puts the cursor on the result. A new file also opens in a tab, with
+    /// the keyboard there -- making one is a prelude to typing in it.
+    fn commitTreeEdit(self: *Ui) !void {
+        const te = &self.tree_edit.?;
+        const name = te.field.text();
+        // An empty field, or a rename left as it was, is a change of mind.
+        if (name.len == 0 or (te.kind == .rename and std.mem.eql(u8, name, te.old_name))) {
+            return self.cancelTreeEdit();
+        }
+
+        switch (te.kind) {
+            .rename => {
+                fsops.renameInDir(self.io, self.alloc, te.dir, te.old_name, name) catch |err| {
+                    te.err = treeEditError(err);
+                    self.status_dirty = true;
+                    return;
+                };
+                const old_abs = try std.fs.path.join(self.alloc, &.{ te.dir, te.old_name });
+                defer self.alloc.free(old_abs);
+                const new_abs = try std.fs.path.join(self.alloc, &.{ te.dir, name });
+                defer self.alloc.free(new_abs);
+                self.retargetBuffers(old_abs, new_abs);
+                self.cancelTreeEdit();
+                try self.refreshTree(new_abs);
+            },
+            .create, .create_dir => {
+                fsops.checkNewPath(name) catch |err| {
+                    te.err = treeEditError(err);
+                    self.status_dirty = true;
+                    return;
+                };
+                const as_dir = te.kind == .create_dir or std.mem.endsWith(u8, name, "/");
+                const abs = try std.fs.path.join(self.alloc, &.{ te.dir, std.mem.trimEnd(u8, name, "/") });
+                defer self.alloc.free(abs);
+                const made = if (as_dir) fsops.makeDir(self.io, abs) else fsops.makeFile(self.io, abs);
+                made catch |err| {
+                    te.err = treeEditError(err);
+                    self.status_dirty = true;
+                    return;
+                };
+                self.cancelTreeEdit();
+                try self.refreshTree(abs);
+                if (!as_dir) {
+                    try self.openFile(abs);
+                    self.setFocus(.buffer);
+                }
+            },
+        }
+    }
+
+    /// The statusline text for a create or rename that didn't take.
+    fn treeEditError(err: anyerror) []const u8 {
+        return switch (err) {
+            error.PathAlreadyExists => "E: that name already exists",
+            error.InvalidName => "E: not a usable name (no `/` in a rename, no `.` or `..` parts)",
+            error.EmptyName => "E: the name is empty",
+            error.AccessDenied, error.PermissionDenied => "E: permission denied",
+            error.FileNotFound => "E: it is no longer there",
+            else => "E: the filesystem refused it",
+        };
+    }
+
+    /// After a rename on disk: every open buffer on the renamed file, or
+    /// anywhere under a renamed directory, follows it to the new path --
+    /// otherwise its next `:w` would quietly recreate the old name. The
+    /// language servers are told the old document closed; the buffer
+    /// reopens under its new name on the next sync, the same as `:w
+    /// <newname>` does it.
+    fn retargetBuffers(self: *Ui, old_abs: []const u8, new_abs: []const u8) void {
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                const abs = self.slotAbs(slot) orelse continue;
+                const rest: []const u8 = if (std.mem.eql(u8, abs, old_abs))
+                    ""
+                else if (std.mem.startsWith(u8, abs, old_abs) and abs.len > old_abs.len and abs[old_abs.len] == '/')
+                    abs[old_abs.len..]
+                else
+                    continue;
+                const moved = std.mem.concat(self.alloc, u8, &.{ new_abs, rest }) catch continue;
+                defer self.alloc.free(moved);
+
+                self.lspDidClose(slot);
+                slot.ed.setPath(moved) catch continue;
+                self.invalidateAbs(slot);
+                slot.lsp_opened = false;
+                slot.ed.line_comment = self.lineCommentFor(slot.ed.path);
+                self.selectHighlightLanguage(slot, slot.ed.path);
+                g.tabs_dirty = true;
+            }
+        }
         self.status_dirty = true;
     }
 
@@ -3152,6 +3496,9 @@ pub const Ui = struct {
         const b = self.tree_bounds;
         if (ev.cell.row < b.row or ev.cell.row >= b.row + b.rows) return;
         if (ev.cell.col < b.col or ev.cell.col >= b.col + b.cols) return;
+        // A click abandons a name being typed -- and takes the virtual
+        // row with it, so the index below is the tree's own.
+        self.cancelTreeEdit();
 
         const index = self.tree_scroll.row + (ev.cell.row - b.row);
         if (index >= self.tree.len()) return;
@@ -3162,6 +3509,276 @@ pub const Ui = struct {
         self.treeGoto(index);
         try self.treeActivate();
         self.status_dirty = true;
+    }
+
+    // ── `:` line filename completion ────────────────────────────────────
+
+    /// The `:` line's keys that are completion's rather than the line's:
+    /// Tab always, and with the popup up the keys that drive it. Returns
+    /// whether the key was taken. See `zoe/pathmenu.zig`.
+    fn cmdlineKey(self: *Ui, k: glyphwire.KeyEvent) !bool {
+        const eq = std.mem.eql;
+        const key = k.key;
+        if (self.path_menu) |*m| {
+            const rows = self.pathMenuRows();
+            if ((eq(u8, key, "tab") and !k.mods.shift) or eq(u8, key, "down")) {
+                m.move(1, rows);
+                self.path_menu_dirty = true;
+                return true;
+            }
+            if ((eq(u8, key, "tab") and k.mods.shift) or eq(u8, key, "up")) {
+                m.move(-1, rows);
+                self.path_menu_dirty = true;
+                return true;
+            }
+            // Enter takes the pick into the line; it never runs the
+            // command, so a pick can still be edited or Tab'd further.
+            if (eq(u8, key, "enter")) {
+                try self.acceptPathPick();
+                return true;
+            }
+            // Escape closes the popup and leaves the `:` line as it is.
+            if (eq(u8, key, "escape")) {
+                self.closePathMenu();
+                return true;
+            }
+            return false;
+        }
+        if (eq(u8, key, "tab") and !k.mods.ctrl and !k.mods.alt) {
+            try self.completePath();
+            return true;
+        }
+        return false;
+    }
+
+    /// Tab on the `:` line with no popup up. One match is filled in
+    /// outright; several fill in their common prefix and open the popup.
+    /// Nothing happens off a path argument or with no match.
+    fn completePath(self: *Ui) !void {
+        const cmd = &self.buf.ed.cmdline;
+        const t = pathmenu.target(cmd.text(), cmd.caret) orelse return;
+        const matches = try self.scanPathMatches(t);
+        if (matches.len == 0) {
+            pathcomplete.freeMatches(self.alloc, matches);
+            return;
+        }
+        if (matches.len == 1) {
+            defer pathcomplete.freeMatches(self.alloc, matches);
+            const ins = try pathmenu.insertion(self.alloc, matches[0]);
+            defer self.alloc.free(ins);
+            try self.replaceCmdline(t.seg_start, cmd.caret, ins);
+            return;
+        }
+
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(self.alloc);
+        for (matches) |m| try names.append(self.alloc, m.name);
+        const lcp = pathcomplete.commonPrefixLen(names.items);
+        if (lcp > t.prefix.len) {
+            // `matches` is owned by the popup from here, so copy the
+            // prefix out before the line edit could move anything.
+            const shared = try self.alloc.dupe(u8, matches[0].name[0..lcp]);
+            defer self.alloc.free(shared);
+            try self.replaceCmdline(t.seg_start, cmd.caret, shared);
+        }
+        self.closePathMenu();
+        self.path_menu = pathmenu.Menu.init(self.alloc, matches, t.seg_start);
+        self.path_menu_dirty = true;
+    }
+
+    /// Enter in the popup: the pick replaces the segment. A directory
+    /// goes straight on to listing its own entries, the way picking a
+    /// folder in a file dialog opens it.
+    fn acceptPathPick(self: *Ui) !void {
+        const m = self.path_menu orelse return;
+        const pick = m.current() orelse return self.closePathMenu();
+        const ins = try pathmenu.insertion(self.alloc, pick);
+        defer self.alloc.free(ins);
+        const is_dir = pick.is_dir;
+        const start = m.seg_start;
+        self.closePathMenu();
+        try self.replaceCmdline(start, self.buf.ed.cmdline.caret, ins);
+        if (is_dir) try self.completePath();
+        self.status_dirty = true;
+    }
+
+    /// After the `:` line changed under an open popup (typing, Backspace,
+    /// a caret move): re-list against what the caret is now on, closing
+    /// the popup once there is nothing to list or the line is gone.
+    fn syncPathMenu(self: *Ui) !void {
+        if (self.path_menu == null) return;
+        if (self.focus != .buffer or self.buf.ed.mode != .command) return self.closePathMenu();
+        const cmd = &self.buf.ed.cmdline;
+        const t = pathmenu.target(cmd.text(), cmd.caret) orelse return self.closePathMenu();
+        const matches = try self.scanPathMatches(t);
+        if (matches.len == 0) {
+            pathcomplete.freeMatches(self.alloc, matches);
+            return self.closePathMenu();
+        }
+        self.closePathMenu();
+        self.path_menu = pathmenu.Menu.init(self.alloc, matches, t.seg_start);
+        self.path_menu_dirty = true;
+    }
+
+    fn closePathMenu(self: *Ui) void {
+        if (self.path_menu) |*m| {
+            m.deinit();
+            self.path_menu = null;
+            self.path_menu_dirty = true;
+        }
+    }
+
+    /// The entries `t` can complete to, read from its directory with `~`
+    /// expanded. Caller owns the result (`pathcomplete.freeMatches`).
+    fn scanPathMatches(self: *Ui, t: pathmenu.Target) ![]pathcomplete.Match {
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dir = homepath.expandHome(t.dir, self.environ.get("HOME"), &home_buf);
+        const all = try pathcomplete.scanDir(self.alloc, self.io, dir, t.prefix);
+        return if (t.dirs_only) pathmenu.keepDirs(self.alloc, all) else all;
+    }
+
+    /// Replaces bytes `[start, end)` of the `:` line with `text`, leaving
+    /// the caret just after it.
+    fn replaceCmdline(self: *Ui, start: usize, end: usize, text: []const u8) !void {
+        const cmd = &self.buf.ed.cmdline;
+        const line = cmd.text();
+        const joined = try std.mem.concat(self.alloc, u8, &.{ line[0..start], text, line[end..] });
+        defer self.alloc.free(joined);
+        try cmd.setText(self.alloc, joined);
+        _ = cmd.moveTo(start + text.len);
+        self.status_dirty = true;
+    }
+
+    /// Rows the popup shows: as many matches as fit above the statusline,
+    /// up to the completion popup's limit.
+    fn pathMenuRows(self: *const Ui) usize {
+        const m = self.path_menu orelse return 0;
+        return @min(@min(m.count(), complete_max_rows), self.status_bounds.row);
+    }
+
+    /// Draws the filename popup, or hides it: one name per row, a
+    /// directory with its `/`, standing on the statusline with its names
+    /// lined up over the segment they would replace.
+    fn renderPathMenu(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
+        const m = if (self.path_menu) |*x| x else {
+            try batch.setLayerVisible(self.path_menu_layer, false);
+            return;
+        };
+        const sb = self.status_bounds;
+        const rows = self.pathMenuRows();
+        if (rows == 0 or sb.cols < 8) {
+            try batch.setLayerVisible(self.path_menu_layer, false);
+            return;
+        }
+        m.follow(rows);
+
+        var want: usize = 12;
+        for (0..rows) |r| {
+            const it = m.visible(r) orelse break;
+            want = @max(want, 1 + display.width(it.name, .{}) + 2);
+        }
+        const cols = @min(@min(want, complete_max_cols), sb.cols);
+
+        // The names start one cell in, so that cell sits under the `:`
+        // line's segment start (itself one past the `:`).
+        const seg_col = sb.col + 1 + lineedit.displayCol(self.buf.ed.cmdline.text(), m.seg_start);
+        const col = @max(sb.col, @min(seg_col -| 1, sb.col + (sb.cols - cols)));
+        try batch.setLayerSize(self.path_menu_layer, cols, rows);
+        try batch.setLayerCellPosition(self.path_menu_layer, sb.row - rows, col);
+
+        for (0..rows) |r| {
+            const it = m.visible(r) orelse break;
+            const selected = m.top + r == m.selected;
+            try batch.writeSpans(&.{
+                .{ .text = " " },
+                .{ .text = it.name, .fg = role(if (it.is_dir) .popup_kind else .popup_label) },
+                .{ .text = if (it.is_dir) "/" else "", .fg = role(.popup_kind) },
+            }, .{
+                .layer = self.path_menu_layer,
+                .row = r,
+                .col = 0,
+                .fg = role(.popup_label),
+                .bg = role(if (selected) .popup_selected_bg else .popup_bg),
+                .max_cols = cols,
+                .pad = true,
+                .selectable = false,
+            });
+        }
+        try batch.setLayerVisible(self.path_menu_layer, true);
+    }
+
+    // ── Command-line history ────────────────────────────────────────────
+
+    /// Reads `zoe_history` and `zoe_search_history` from the config
+    /// directory. Anything going wrong leaves that history empty and
+    /// unpersisted rather than failing startup; `GLYPHWIRE_NO_HISTORY`
+    /// (what the tests set, as for gw-shell) turns persistence off.
+    fn loadHistories(self: *Ui) void {
+        if (self.environ.get("GLYPHWIRE_NO_HISTORY")) |v| {
+            if (v.len > 0) return;
+        }
+        const dir = glyphwire.configDirPath(self.alloc, self.environ) catch return;
+        defer self.alloc.free(dir);
+        self.cmd_history_file = self.loadHistory(&self.cmd_history, dir, "zoe_history");
+        self.search_history_file = self.loadHistory(&self.search_history, dir, "zoe_search_history");
+    }
+
+    /// Loads one history file into `hist`, returning its path (owned) for
+    /// later writes, or null when it can't be used. A missing file is a
+    /// first run: empty, but still written to.
+    fn loadHistory(self: *Ui, hist: *cmdhistory.History, dir: []const u8, name: []const u8) ?[]u8 {
+        const path = std.fs.path.join(self.alloc, &.{ dir, name }) catch return null;
+        if (std.Io.Dir.cwd().readFileAlloc(self.io, path, self.alloc, .limited(8 << 20))) |bytes| {
+            defer self.alloc.free(bytes);
+            hist.load(bytes) catch |err| {
+                std.log.warn("zoe: could not load {s}: {t}", .{ path, err });
+                self.alloc.free(path);
+                return null;
+            };
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => {
+                std.log.warn("zoe: could not read {s}: {t}", .{ path, err });
+                self.alloc.free(path);
+                return null;
+            },
+        }
+        return path;
+    }
+
+    /// Writes whichever history has lines the file hasn't seen. Run after
+    /// every key, so it is a no-op almost always; a submitted `:` or `/`
+    /// line is on disk before the next keystroke, which is what lets
+    /// another zoe window's Up find it.
+    fn flushHistories(self: *Ui) void {
+        self.flushHistory(&self.cmd_history, self.cmd_history_file);
+        self.flushHistory(&self.search_history, self.search_history_file);
+    }
+
+    /// Re-reads the file and merges this session's pending lines onto it
+    /// (`history.mergeSerialize`), so two zoes add to the file instead of
+    /// the last one to write reverting the other's.
+    fn flushHistory(self: *Ui, hist: *cmdhistory.History, file: ?[]const u8) void {
+        if (!hist.hasPending()) return;
+        // Unpersisted, the pending list is only ever cleared here.
+        const path = file orelse return hist.markWritten();
+        const cwd = std.Io.Dir.cwd();
+        const disk = cwd.readFileAlloc(self.io, path, self.alloc, .limited(8 << 20)) catch |err| switch (err) {
+            error.FileNotFound => self.alloc.dupe(u8, "") catch return,
+            else => {
+                std.log.warn("zoe: could not read {s}: {t}", .{ path, err });
+                return;
+            },
+        };
+        defer self.alloc.free(disk);
+        const bytes = hist.serializeOnto(disk) catch return;
+        defer self.alloc.free(bytes);
+        if (std.fs.path.dirname(path)) |d| cwd.createDirPath(self.io, d) catch {};
+        cwd.writeFile(self.io, .{ .sub_path = path, .data = bytes }) catch |err| {
+            std.log.warn("zoe: could not write {s}: {t}", .{ path, err });
+            return;
+        };
+        hist.markWritten();
     }
 
     // ── Editor outcomes ─────────────────────────────────────────────────
@@ -3273,7 +3890,10 @@ pub const Ui = struct {
             } else |_| {}
         }
 
-        // Re-root the tree at the resolved absolute cwd.
+        // Re-root the tree at the resolved absolute cwd. (A name field
+        // can't be up -- `:cd` is typed in the buffer pane, and leaving
+        // the tree closed it -- but its rows are about to vanish.)
+        self.cancelTreeEdit();
         var new_buf: [std.fs.max_path_bytes]u8 = undefined;
         const new_n = std.process.currentPath(self.io, &new_buf) catch 0;
         const new_root = if (new_n > 0) new_buf[0..new_n] else dest;
@@ -3448,6 +4068,29 @@ pub const Ui = struct {
                 }
             }
         }
+    }
+
+    /// The sidebar's half of the disk check: a folder on screen that
+    /// gained, lost or renamed an entry is re-read, keeping what was open
+    /// and the cursor's entry (`Tree.changedOnDisk`, `Tree.reload`).
+    /// Skipped while a tree search or a name field is up -- both hold row
+    /// indices a re-read would shift -- and caught on the next beat once
+    /// they close.
+    fn checkTreeDisk(self: *Ui) !void {
+        if (self.find != null or self.tree_edit != null) return;
+        if (!self.tree.changedOnDisk(self.io)) return;
+        try self.refreshTree(null);
+    }
+
+    /// Re-reads the tree and repaints it, with the cursor on `onto` (an
+    /// absolute path) when given -- the entry a create or rename just
+    /// made -- or else on the entry it was on.
+    fn refreshTree(self: *Ui, onto: ?[]const u8) !void {
+        if (onto) |p| try self.tree.reloadOnto(self.io, p) else try self.tree.reload(self.io);
+        self.clampTreeScroll();
+        try self.syncContentSizes();
+        self.scrollTreeToCursor();
+        self.markTreeDirty(.full);
     }
 
     /// Re-reads `slot`'s file after an outside change, keeping the view:
@@ -4742,6 +5385,10 @@ pub const Ui = struct {
             .selection => try self.renderTreeSelection(&batch),
             .full => try self.renderTree(&batch),
         };
+        // A keystroke in the sidebar's name field: its row and nothing
+        // else, unless the whole listing was just written anyway.
+        if (self.tree_visible and self.tree_edit_dirty and self.tree_dirty != .full)
+            try self.renderTreeEditRow(&batch, self.treeContentCols());
         if (self.status_dirty) try self.renderStatus(&batch);
         // Last in the frame, as they are last in the compositing order. The
         // hover popup after the finder: both float, and a hover raised while
@@ -4755,6 +5402,7 @@ pub const Ui = struct {
         // repaint (a scroll, a wrap) as well as its own changes.
         if (self.completion_dirty or (self.completion != null and focused_buffer_dirty))
             try self.renderCompletion(&batch);
+        if (self.path_menu_dirty) try self.renderPathMenu(&batch);
         if (self.tab_tip_dirty) try self.renderTabTip(&batch);
         self.prof.addNet(.paint, t_build, nested_before);
 
@@ -4773,9 +5421,11 @@ pub const Ui = struct {
         self.prof.endFrame();
 
         self.tree_dirty = .none;
+        self.tree_edit_dirty = false;
         self.status_dirty = false;
         self.hover_dirty = false;
         self.completion_dirty = false;
+        self.path_menu_dirty = false;
         self.tab_tip_dirty = false;
     }
 
@@ -6146,10 +6796,19 @@ pub const Ui = struct {
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(self.alloc);
 
+        // The name field stands in for the highlight while it is up: it is
+        // where the keyboard is.
+        const editing = self.tree_edit != null;
         var r: usize = 0;
         while (r < content_rows) : (r += 1) {
-            const entry = self.tree.at(r);
-            const selected = self.focus == .tree and r == self.tree.cursor;
+            if (self.tree_edit) |te| {
+                if (r == te.row) {
+                    try self.renderTreeEditRow(batch, content_cols);
+                    continue;
+                }
+            }
+            const entry = self.treeRowEntry(r);
+            const selected = !editing and self.focus == .tree and r == self.tree.cursor;
             const bg = if (selected) role(.selection_bg) else role(.sidebar_bg);
 
             line.clearRetainingCapacity();
@@ -6196,7 +6855,66 @@ pub const Ui = struct {
             }
         }
 
-        self.tree_painted = .{ .row = self.tree.cursor, .focused = self.focus == .tree };
+        self.tree_painted = .{ .row = self.tree.cursor, .focused = !editing and self.focus == .tree };
+    }
+
+    /// The name field's row: the icon the entry has (or will have), the
+    /// typed name and the caret, on the highlight. The cheap repaint for a
+    /// keystroke in the field -- the rest of the listing hasn't moved.
+    fn renderTreeEditRow(self: *Ui, batch: *glyphwire.client.Client.Batch, content_cols: usize) !void {
+        const te = &(self.tree_edit orelse return);
+        const text = te.field.text();
+        const indent = te.depth * tree_mod.indent_cols;
+        const start = indent + tree_mod.icon_cols;
+
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(self.alloc);
+        try line.appendNTimes(self.alloc, ' ', start);
+        try line.appendSlice(self.alloc, text);
+        try batch.writeTextOpts(line.items, .{
+            .layer = self.tree_layer,
+            .row = te.row,
+            .col = 0,
+            .fg = role(.fg),
+            .bg = role(.selection_bg),
+            .max_cols = content_cols,
+            .pad = true,
+        });
+
+        // The caret, inverted the way the `:` line draws its own.
+        const caret_col = start + te.field.caretCol();
+        if (caret_col < content_cols) {
+            const under = if (te.field.caret < text.len)
+                text[te.field.caret..lineedit.nextBoundary(text, te.field.caret)]
+            else
+                " ";
+            try batch.writeTextOpts(under, .{
+                .layer = self.tree_layer,
+                .row = te.row,
+                .col = caret_col,
+                .fg = role(.selection_bg),
+                .bg = role(.fg),
+            });
+        }
+
+        // A rename keeps the entry's icon; a create shows what the typed
+        // name will make, so a trailing `/` turns it into a folder.
+        const icon: []const u8 = switch (te.kind) {
+            .rename => if (self.tree.at(te.row)) |e| iconFor(e) else "file/folder",
+            .create_dir => "file/folder",
+            .create => if (std.mem.endsWith(u8, text, "/"))
+                "file/folder"
+            else
+                ls_icons.iconForFileName(text) orelse ls_icons.iconForExtension(text),
+        };
+        const natural = self.cell_px_h > 0;
+        try batch.drawIconOnStyled(self.tree_layer, te.row, indent, icon, .{
+            .scale = if (natural) .natural else .fit,
+            .h_align = .start,
+            .v_align = .center,
+            .max_h = if (natural) self.cell_px_h else null,
+            .foreground = true,
+        });
     }
 
     /// The cheap half of the tree repaint: the highlight moved, and
@@ -6211,6 +6929,9 @@ pub const Ui = struct {
     /// reason it exists -- see docs/api.md.
     fn renderTreeSelection(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         if (self.tree_bounds.cols == 0 or self.tree_bounds.rows == 0) return;
+        // The field's start and end repaint in full; there is no
+        // highlight to move while it is up.
+        if (self.tree_edit != null) return;
         const focused = self.focus == .tree;
         const cols = self.treeContentCols();
         const was = self.tree_painted;
@@ -6367,7 +7088,22 @@ pub const Ui = struct {
         // itself is never drawn in the pane. The `/` prompt keeps the key
         // that started it, so the scope the search is running in stays
         // readable while it runs.
-        if (self.find) |f| {
+        // The sidebar's name field says what Enter will do, or why the
+        // last one didn't.
+        if (self.tree_edit) |te| {
+            if (te.err) |msg| {
+                fg = role(.message_error);
+                try line.print(self.alloc, " {s}", .{msg});
+            } else {
+                var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const where = homepath.collapseHome(te.dir, self.environ.get("HOME"), &home_buf);
+                switch (te.kind) {
+                    .create => try line.print(self.alloc, " New file in {s}  (end with / for a folder; Enter creates, Esc cancels)", .{where}),
+                    .create_dir => try line.print(self.alloc, " New folder in {s}  (Enter creates, Esc cancels)", .{where}),
+                    .rename => try line.print(self.alloc, " Rename {s}  (Enter renames, Esc cancels)", .{te.old_name}),
+                }
+            }
+        } else if (self.find) |f| {
             const prompt: []const u8 = if (f.scope == .deep) "/" else "find: ";
             const n = f.hits.items.len;
             if (n == 0) {
@@ -6423,8 +7159,10 @@ pub const Ui = struct {
         // The mode word (right after the leading space, in the normal
         // status form) gets its own colour as a span of the same write.
         const mode_word = modeName(self.buf.ed.mode);
+        // Only the plain status form starts with the mode word; the tree's
+        // search and name field take the row with text of their own.
         const show_mode = self.buf.ed.mode != .command and self.buf.ed.mode != .search and
-            self.buf.ed.status.items.len == 0;
+            self.buf.ed.status.items.len == 0 and self.find == null and self.tree_edit == null;
         const opts: glyphwire.client.Client.TextOpts = .{
             .layer = self.status_layer,
             .row = 0,

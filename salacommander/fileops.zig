@@ -17,6 +17,7 @@
 //! several sources with a non-directory `dest` is an error.
 
 const std = @import("std");
+const fsops = @import("applib").fsops;
 
 pub const Kind = enum {
     copy,
@@ -110,41 +111,11 @@ pub const Operation = struct {
     }
 };
 
-/// Creates `path` (absolute) and any missing parents, the way MC's F7
-/// accepts `a/b/c`. An existing directory is `error.PathAlreadyExists`,
-/// so the dialog can say so rather than silently doing nothing.
-pub fn makeDir(io: std.Io, path: []const u8) !void {
-    const cwd = std.Io.Dir.cwd();
-    if (cwd.statFile(io, path, .{ .follow_symlinks = false })) |_| {
-        return error.PathAlreadyExists;
-    } else |_| {}
-    try cwd.createDirPath(io, path);
-}
-
-/// Checks a name typed into F2's field. F2 renames within the pane's
-/// directory and nothing else -- moving is F6's job -- so a `/` is
-/// refused rather than read as a path, as are `.` and `..`, which name
-/// directories that already exist. NUL can't be in a filename at all.
-pub fn checkNewName(name: []const u8) error{ EmptyName, InvalidName }!void {
-    if (name.len == 0) return error.EmptyName;
-    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidName;
-    if (std.mem.indexOfAny(u8, name, "/\x00") != null) return error.InvalidName;
-}
-
-/// F2: renames `old` to `new` inside `dir` (absolute). Unlike F6 this
-/// never replaces anything: an existing `new` is `error.PathAlreadyExists`
-/// and nothing is touched, so the field can stay open for another try.
-/// `new` is checked with `checkNewName` first.
-pub fn renameInDir(io: std.Io, alloc: std.mem.Allocator, dir: []const u8, old: []const u8, new: []const u8) !void {
-    try checkNewName(new);
-    const src = try std.fs.path.join(alloc, &.{ dir, old });
-    defer alloc.free(src);
-    const dest = try std.fs.path.join(alloc, &.{ dir, new });
-    defer alloc.free(dest);
-    if (exists(io, dest)) return error.PathAlreadyExists;
-    const cwd = std.Io.Dir.cwd();
-    try std.Io.Dir.rename(cwd, src, cwd, dest, io);
-}
+/// F7, F2 and F2's name check. They live in `applib` because zoe's
+/// sidebar offers the same three in place; see `applib/fsops.zig`.
+pub const makeDir = fsops.makeDir;
+pub const checkNewName = fsops.checkNewName;
+pub const renameInDir = fsops.renameInDir;
 
 /// Where `src` lands when copied or moved to `dest`, per the MC rules in
 /// the module doc. Caller owns the result.

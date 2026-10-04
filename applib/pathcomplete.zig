@@ -1,13 +1,60 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
+
+//! Filename completion for a typed line: gw-shell's Tab and zoe's `:`
+//! line. The string helpers are pure; `scanDir` is the one directory
+//! read, kept here so both agree on which entries a prefix matches (a
+//! dotfile only once the prefix starts with `.`). What a caller does with
+//! the matches -- the shell's picker and inline hint, zoe's popup -- and
+//! the edits to its own line stay with the caller.
 
 const std = @import("std");
-const wordsplit = @import("applib").wordsplit;
+const wordsplit = @import("wordsplit.zig");
 
-/// Pure string helpers for glyphwire-shell's Tab completion. The actual
-/// directory scan and the edits to the on-screen line live in
-/// `shell/main.zig` (`Prompt.doComplete`); everything here is testable
-/// with no filesystem or IO.
+/// One directory entry that matched a completion prefix.
+pub const Match = struct {
+    /// The entry's name (no directory part), owned.
+    name: []u8,
+    is_dir: bool,
+};
+
+/// The entries of `dir` whose names start with `prefix`, sorted by name.
+/// Dotfiles are left out unless `prefix` itself starts with `.`; an
+/// unreadable `dir` is simply no matches. Free with `freeMatches`.
+pub fn scanDir(alloc: std.mem.Allocator, io: std.Io, dir: []const u8, prefix: []const u8) ![]Match {
+    var out: std.ArrayList(Match) = .empty;
+    errdefer {
+        for (out.items) |m| alloc.free(m.name);
+        out.deinit(alloc);
+    }
+
+    const scan_dir = if (dir.len == 0) "." else dir;
+    var d = std.Io.Dir.cwd().openDir(io, scan_dir, .{ .iterate = true }) catch return out.toOwnedSlice(alloc);
+    defer d.close(io);
+
+    const want_hidden = prefix.len > 0 and prefix[0] == '.';
+    var it = d.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+        if (!want_hidden and std.mem.startsWith(u8, entry.name, ".")) continue;
+        const name = try alloc.dupe(u8, entry.name);
+        errdefer alloc.free(name);
+        try out.append(alloc, .{ .name = name, .is_dir = entry.kind == .directory });
+    }
+
+    std.mem.sort(Match, out.items, {}, struct {
+        fn lessThan(_: void, a: Match, b: Match) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+    return out.toOwnedSlice(alloc);
+}
+
+pub fn freeMatches(alloc: std.mem.Allocator, matches: []Match) void {
+    for (matches) |m| alloc.free(m.name);
+    alloc.free(matches);
+}
+
 /// The `[start, end)` byte range of the "word" the cursor sits in, used
 /// to decide what a Tab press should complete. A word boundary is an
 /// unescaped space or tab; a `\` immediately before a space keeps that

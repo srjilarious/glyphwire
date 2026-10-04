@@ -82,7 +82,13 @@ pub fn main(init: std.process.Init) !void {
         \\In the file tree, j/k/arrows and Page Up/Page Down move and Enter or
         \\Space opens. f jumps to the next name starting with what you type; /
         \\does the same over the whole tree, opening whatever folders that
-        \\takes; Tab cycles the matches.
+        \\takes; Tab cycles the matches. a (or Shift+F4) makes a new file
+        \\there -- end the name with / for a folder -- F7 a folder, and r
+        \\(or F2) renames in place. The tree follows changes on disk.
+        \\
+        \\On the : line, Up/Down recall earlier commands (filtered by what
+        \\is typed; / searches have their own history) and Tab completes a
+        \\filename for :e, :w, :sp, :vs and :cd. ~ means $HOME.
         \\
         \\ZOE_PROFILE=<file> writes one timing line per drawn frame (input,
         \\parse, highlight queries, paint, send) to <file>.

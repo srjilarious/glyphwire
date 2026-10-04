@@ -25,6 +25,8 @@ const SpanCache = zoe.spancache.SpanCache;
 const lsp = zoe.lsp;
 const diag = zoe.diag;
 const langconf = zoe.langconf;
+const pathcomplete = @import("applib").pathcomplete;
+const fsops = @import("applib").fsops;
 
 /// Builds an editor over `text`, runs `script`, and asserts the buffer
 /// matches `expected`. Most cases below are one call to this.
@@ -4796,4 +4798,244 @@ pub fn syntaxSetThemeKeepsTreeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectFalse(hl.generation == gen);
     try hl.lineSpans(0, 11, &spans);
     try testz.expectTrue((spanAt(spans.items, 7) orelse return error.NoSpanOverNumber).color.eql(RoleColor.role(.number)));
+}
+
+// ─── cmdhistory: Up/Down on the `:` and `/` lines ────────────────────────
+
+pub fn cmdHistoryUpWalksBackAndDownRestoresTheTypedLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var h = zoe.cmdhistory.History.init(alloc);
+    defer h.deinit();
+    try h.record("e a.zig");
+    try h.record("w");
+    try h.record("e b.zig");
+
+    try testz.expectEqualStr((try h.older("")).?, "e b.zig");
+    try testz.expectEqualStr((try h.older("e b.zig")).?, "w");
+    try testz.expectEqualStr((try h.older("w")).?, "e a.zig");
+    // Nothing older: the line stays as it is.
+    try testz.expectTrue((try h.older("e a.zig")) == null);
+    try testz.expectEqualStr(h.newer().?, "w");
+    try testz.expectEqualStr(h.newer().?, "e b.zig");
+    // Past the newest is what was typed before Up, and the browse ends.
+    try testz.expectEqualStr(h.newer().?, "");
+    try testz.expectTrue(h.newer() == null);
+}
+
+pub fn cmdHistoryFiltersOnWhatWasTypedTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var h = zoe.cmdhistory.History.init(alloc);
+    defer h.deinit();
+    try h.record("e src/a.zig");
+    try h.record("set tabwidth=4");
+    try h.record("e src/b.zig");
+    try h.record("noh");
+
+    try testz.expectEqualStr((try h.older("e ")).?, "e src/b.zig");
+    try testz.expectEqualStr((try h.older("e src/b.zig")).?, "e src/a.zig");
+    try testz.expectTrue((try h.older("e src/a.zig")) == null);
+    try testz.expectEqualStr(h.newer().?, "e src/b.zig");
+    try testz.expectEqualStr(h.newer().?, "e ");
+}
+
+pub fn cmdHistoryRecordsLikeTheShellTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var h = zoe.cmdhistory.History.init(alloc);
+    defer h.deinit();
+    try h.record("w");
+    try h.record("w");
+    try h.record("");
+    try testz.expectEqual(h.entries.items.len, 1);
+    try testz.expectEqual(h.pending.items.len, 1);
+
+    // The write merges onto what is on disk rather than replacing it.
+    const bytes = try h.serializeOnto("q\n");
+    defer alloc.free(bytes);
+    try testz.expectEqualStr(bytes, "q\nw\n");
+    h.markWritten();
+    try testz.expectFalse(h.hasPending());
+}
+
+pub fn cmdHistoryLoadsAFileTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var h = zoe.cmdhistory.History.init(alloc);
+    defer h.deinit();
+    try h.load("e x\n\nw\nw\n");
+    try testz.expectEqual(h.entries.items.len, 2);
+    try testz.expectFalse(h.hasPending());
+    try testz.expectEqualStr((try h.older("")).?, "w");
+}
+
+pub fn editorColonLineRecallsHistoryWithUpTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var h = zoe.cmdhistory.History.init(alloc);
+    defer h.deinit();
+    var ed = try Editor.initFromText(alloc, "one\ntwo\nthree\n", null);
+    defer ed.deinit();
+    ed.cmd_history = &h;
+
+    _ = try keys.feed(&ed, ":3<cr>:1<cr>");
+    try testz.expectEqual(h.entries.items.len, 2);
+    // Up twice reaches `:3`; Enter runs it.
+    _ = try keys.feed(&ed, ":<up><up><cr>");
+    try testz.expectEqual(ed.pos().line, 2);
+    // Typing after Up ends the browse: the next Up filters on `1`.
+    _ = try keys.feed(&ed, ":<up><bs>1<up>");
+    try testz.expectEqualStr(ed.cmdline.text(), "1");
+}
+
+pub fn editorSearchHistoryIsSeparateFromColonTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cmd = zoe.cmdhistory.History.init(alloc);
+    defer cmd.deinit();
+    var srch = zoe.cmdhistory.History.init(alloc);
+    defer srch.deinit();
+    var ed = try Editor.initFromText(alloc, "alpha\nbeta\nalpha\n", null);
+    defer ed.deinit();
+    ed.cmd_history = &cmd;
+    ed.search_history = &srch;
+
+    _ = try keys.feed(&ed, "/beta<cr>:noh<cr>");
+    try testz.expectEqual(srch.entries.items.len, 1);
+    try testz.expectEqual(cmd.entries.items.len, 1);
+    _ = try keys.feed(&ed, "gg/<up>");
+    try testz.expectEqualStr(ed.cmdline.text(), "beta");
+    // The recalled pattern previews like a typed one.
+    try testz.expectEqual(ed.pos().line, 1);
+}
+
+// ─── pathmenu: Tab on a `:` path argument ────────────────────────────────
+
+pub fn pathMenuTargetFindsTheLastSegmentTest(_: std.Io, _: std.mem.Allocator) !void {
+    const line = "e ~/code/nest";
+    const t = zoe.pathmenu.target(line, line.len).?;
+    try testz.expectEqualStr(t.dir, "~/code/");
+    try testz.expectEqualStr(t.prefix, "nest");
+    try testz.expectEqual(t.seg_start, 9);
+    try testz.expectFalse(t.dirs_only);
+}
+
+pub fn pathMenuTargetKeepsSpacesInTheArgumentTest(_: std.Io, _: std.mem.Allocator) !void {
+    // `:e` takes the rest of the line as one path.
+    const line = "e My Docs/no";
+    const t = zoe.pathmenu.target(line, line.len).?;
+    try testz.expectEqualStr(t.dir, "My Docs/");
+    try testz.expectEqualStr(t.prefix, "no");
+}
+
+pub fn pathMenuTargetNeedsAPathCommandTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(zoe.pathmenu.target("set tab", 7) == null);
+    // Still on the command name.
+    try testz.expectTrue(zoe.pathmenu.target("e", 1) == null);
+    // Straight after the space: an empty argument, completed in the cwd.
+    const t = zoe.pathmenu.target("vs ", 3).?;
+    try testz.expectEqualStr(t.dir, "");
+    try testz.expectEqualStr(t.prefix, "");
+    try testz.expectEqual(t.seg_start, 3);
+    try testz.expectTrue(zoe.pathmenu.target("cd sr", 5).?.dirs_only);
+}
+
+pub fn pathMenuKeepDirsDropsFilesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "pathmenu");
+    defer s.deinit();
+    try s.file("src/a.zig", "");
+    try s.file("scripts/b.sh", "");
+    try s.file("setup.py", "");
+    try s.file(".secret", "");
+
+    const all = try pathcomplete.scanDir(alloc, io, s.path, "s");
+    try testz.expectEqual(all.len, 3);
+    const dirs = try zoe.pathmenu.keepDirs(alloc, all);
+    defer pathcomplete.freeMatches(alloc, dirs);
+    try testz.expectEqual(dirs.len, 2);
+    try testz.expectEqualStr(dirs[0].name, "scripts");
+    try testz.expectEqualStr(dirs[1].name, "src");
+
+    const ins = try zoe.pathmenu.insertion(alloc, dirs[1]);
+    defer alloc.free(ins);
+    try testz.expectEqualStr(ins, "src/");
+}
+
+pub fn pathMenuMoveWrapsAndScrollsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const names = [_][]const u8{ "a", "b", "c", "d" };
+    const matches = try alloc.alloc(pathcomplete.Match, names.len);
+    for (names, 0..) |n, i| matches[i] = .{ .name = try alloc.dupe(u8, n), .is_dir = false };
+    var m = zoe.pathmenu.Menu.init(alloc, matches, 2);
+    defer m.deinit();
+
+    m.move(-1, 2);
+    try testz.expectEqualStr(m.current().?.name, "d");
+    try testz.expectEqual(m.top, 2);
+    m.move(1, 2);
+    try testz.expectEqualStr(m.current().?.name, "a");
+    try testz.expectEqual(m.top, 0);
+}
+
+// ─── tree: create, rename, auto-refresh ──────────────────────────────────
+
+pub fn treeNoticesAnEntryAddedOnDiskTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "treewatch");
+    defer s.deinit();
+    try s.file("src/a.zig", "");
+
+    var t = try zoe.Tree.init(alloc, io, s.path, .{});
+    defer t.deinit();
+    _ = try t.reveal(io, "src/a.zig");
+    try testz.expectFalse(t.changedOnDisk(io));
+
+    // Inside an open folder. Directory mtimes can be coarse, so wait for
+    // the clock to move before changing it.
+    try waitForMtimeTick(io);
+    try s.file("src/b.zig", "");
+    try testz.expectTrue(t.changedOnDisk(io));
+
+    try t.reload(io);
+    try testz.expectFalse(t.changedOnDisk(io));
+    try testz.expectEqual(t.len(), 3);
+    try testz.expectEqualStr(t.at(2).?.name, "b.zig");
+}
+
+pub fn treeIgnoresChangesInACollapsedFolderTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "treecollapsed");
+    defer s.deinit();
+    try s.file("src/a.zig", "");
+
+    var t = try zoe.Tree.init(alloc, io, s.path, .{});
+    defer t.deinit();
+    try waitForMtimeTick(io);
+    try s.file("src/b.zig", "");
+    // `src` was never opened: opening it reads it fresh anyway.
+    try testz.expectFalse(t.changedOnDisk(io));
+}
+
+pub fn treeDirForPicksTheFolderUnderTheCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "treedirfor");
+    defer s.deinit();
+    try s.file("src/a.zig", "");
+    try s.file("top.txt", "");
+
+    var t = try zoe.Tree.init(alloc, io, s.path, .{});
+    defer t.deinit();
+    const src = (try t.openDirRow(io, t.at(0).?.path)).?;
+    try testz.expectTrue(t.at(src).?.expanded);
+    // A directory row: the directory. A file in it: the same directory.
+    try testz.expectEqualStr(t.dirFor(0), t.at(0).?.path);
+    try testz.expectEqualStr(t.dirFor(1), t.at(0).?.path);
+    // A top-level file: the root.
+    try testz.expectEqualStr(t.dirFor(2), s.path);
+    try testz.expectTrue((try t.openDirRow(io, s.path)) == null);
+}
+
+pub fn treeReloadOntoLandsOnANewEntryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "treeonto");
+    defer s.deinit();
+    try s.file("a.txt", "");
+
+    var t = try zoe.Tree.init(alloc, io, s.path, .{});
+    defer t.deinit();
+    const made = try std.fs.path.join(alloc, &.{ s.path, "new/deep/file.zig" });
+    defer alloc.free(made);
+    try fsops.makeFile(io, made);
+    try t.reloadOnto(io, made);
+    try testz.expectEqualStr(t.at(t.cursor).?.name, "file.zig");
+}
+
+/// Sleeps past one tick of the coarsest directory mtime a test filesystem
+/// is likely to have, so a change made after it is a different stamp.
+fn waitForMtimeTick(io: std.Io) !void {
+    try io.sleep(.fromMilliseconds(20), .awake);
 }

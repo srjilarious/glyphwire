@@ -28,6 +28,7 @@ const buffer = @import("buffer.zig");
 const motion = @import("motion.zig");
 const display = @import("display.zig");
 const search = @import("search.zig");
+const cmdhistory = @import("cmdhistory.zig");
 const actions = @import("actions.zig");
 
 const Buffer = buffer.Buffer;
@@ -300,6 +301,13 @@ pub const Editor = struct {
     keymaps: ?*const actions.Keymaps = null,
     own_keymaps: ?actions.Keymaps = null,
 
+    /// What Up/Down walk on the `:` and `/` lines (`zoe/cmdhistory.zig`).
+    /// Owned by `zoe/ui.zig` and shared by every buffer, so a command
+    /// typed in one tab comes back in another. Null in a bare editor,
+    /// which then has no history and leaves Up/Down to the line.
+    cmd_history: ?*cmdhistory.History = null,
+    search_history: ?*cmdhistory.History = null,
+
     /// The language's line-comment marker (`//`, `#`), for Ctrl+/. Set by
     /// the host from the file's extension; null where the language has
     /// none, or for a file no language claims. Borrowed.
@@ -405,12 +413,14 @@ pub const Editor = struct {
                 },
                 .command => {
                     _ = try self.cmdline.insert(self.alloc, rest);
+                    if (self.cmd_history) |h| h.endBrowse();
                     return self.takeYankPending();
                 },
                 // The `/` line moves the cursor on every keystroke, so
                 // the whole chunk goes in and the search is re-run once.
                 .search => {
                     _ = try self.cmdline.insert(self.alloc, rest);
+                    if (self.search_history) |h| h.endBrowse();
                     self.incrementalSearch();
                     return self.takeYankPending();
                 },
@@ -480,12 +490,17 @@ pub const Editor = struct {
                     self.mode = .normal;
                     return .none;
                 }
+                if (try self.browseHistory(self.cmd_history, key, mods)) return .none;
                 // Everything else the shared field knows is the field's:
                 // Home/Ctrl+A, End/Ctrl+E, Ctrl+Left/Right over the path
                 // segments of a `:e`, Ctrl+Backspace, Ctrl+U, Ctrl+K.
                 switch (self.cmdline.handleKey(key, mods)) {
                     .submit => return self.runCommand(),
-                    .moved, .edited, .ignored => return .none,
+                    .edited => {
+                        if (self.cmd_history) |h| h.endBrowse();
+                        return .none;
+                    },
+                    .moved, .ignored => return .none,
                     // Escape is `escape`'s below, which also clears the
                     // line; it never reaches here.
                     .cancel => return .none,
@@ -499,6 +514,12 @@ pub const Editor = struct {
                     self.leaveSearch(.restore);
                     return .none;
                 }
+                // A pattern recalled from history previews like a typed
+                // one.
+                if (try self.browseHistory(self.search_history, key, mods)) {
+                    self.incrementalSearch();
+                    return .none;
+                }
                 switch (self.cmdline.handleKey(key, mods)) {
                     .submit => {
                         try self.commitSearch();
@@ -508,6 +529,7 @@ pub const Editor = struct {
                     // `incsearch` preview must not walk forward one match
                     // per keystroke.
                     .edited => {
+                        if (self.search_history) |h| h.endBrowse();
                         self.incrementalSearch();
                         return .none;
                     },
@@ -1062,10 +1084,7 @@ pub const Editor = struct {
             '*' => try self.searchWord(.forward, n),
             '#' => try self.searchWord(.backward, n),
 
-            ':' => {
-                self.mode = .command;
-                self.cmdline.clear();
-            },
+            ':' => self.startCommandLine(),
 
             // `K` -- what is this? Nothing the editor core can answer; see
             // `Outcome.lsp_hover`.
@@ -1963,8 +1982,7 @@ pub const Editor = struct {
             // `'<,'>` range support yet).
             ':' => {
                 self.exitVisual();
-                self.mode = .command;
-                self.cmdline.clear();
+                self.startCommandLine();
             },
             else => {},
         }
@@ -2134,6 +2152,7 @@ pub const Editor = struct {
         self.search_match = null;
         self.mode = .search;
         self.cmdline.clear();
+        if (self.search_history) |h| h.endBrowse();
     }
 
     const SearchExit = enum {
@@ -2183,6 +2202,7 @@ pub const Editor = struct {
     /// repeats the previous pattern, the way a bare `/` does in vim.
     fn commitSearch(self: *Editor) !void {
         const typed = self.cmdline.text();
+        if (self.search_history) |h| try h.record(typed);
         if (typed.len > 0) {
             self.search_pat.clearRetainingCapacity();
             try self.search_pat.appendSlice(self.alloc, typed);
@@ -2316,6 +2336,32 @@ pub const Editor = struct {
 
     // ── Command line ────────────────────────────────────────────────────
 
+    /// `:` -- an empty command line, and a fresh start for Up's filter.
+    fn startCommandLine(self: *Editor) void {
+        self.mode = .command;
+        self.cmdline.clear();
+        if (self.cmd_history) |h| h.endBrowse();
+    }
+
+    /// Up and Down on the `:` or `/` line: walk `hist` and put the entry
+    /// on the line. Returns whether the key was one of the two (true even
+    /// when there was nothing further to go to, so the line's own
+    /// handling never sees them). Up/Down with a modifier, or with no
+    /// history at all, are left to the line.
+    fn browseHistory(self: *Editor, hist: ?*cmdhistory.History, key: []const u8, mods: Mods) !bool {
+        const h = hist orelse return false;
+        if (mods.ctrl or mods.alt or mods.shift or mods.super) return false;
+        const eq = std.mem.eql;
+        const entry = if (eq(u8, key, "up"))
+            try h.older(self.cmdline.text())
+        else if (eq(u8, key, "down"))
+            h.newer()
+        else
+            return false;
+        if (entry) |e| try self.cmdline.setText(self.alloc, e);
+        return true;
+    }
+
     /// Runs whatever is on the `:` line and returns to normal mode.
     /// Everything that touches the filesystem leaves as an `Outcome` for
     /// the host to carry out.
@@ -2324,6 +2370,10 @@ pub const Editor = struct {
         const line = std.mem.trim(u8, self.cmdline.text(), " \t");
         defer self.cmdline.clear();
         if (line.len == 0) return .none;
+        // Recorded before it runs, so a command that fails (a typo, a
+        // `:w` to a bad path) is still there to fix with Up -- vim does
+        // the same.
+        if (self.cmd_history) |h| try h.record(line);
 
         // `:42` -- jump to a line.
         if (allDigits(line)) {

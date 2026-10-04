@@ -18,7 +18,7 @@
 
 pub const parse = @import("parse.zig");
 pub const envassign = @import("envassign.zig");
-pub const complete = @import("complete.zig");
+pub const complete = @import("applib").pathcomplete;
 pub const glob = @import("glob.zig");
 pub const handshake = @import("handshake.zig");
 pub const flushgate = @import("flushgate.zig");

@@ -2169,16 +2169,9 @@ fn writeField(b: *Batch, layer: glyphwire.LayerHandle, in: *const LineEdit, row:
     return view.start;
 }
 
-/// Where F2 puts the caret in `name`: before the extension, so the part
-/// usually changed is right there and the extension is kept by default.
-/// At the end for a directory (`src.old` is a name, not a type), for a
-/// dotfile with no second dot, and for a name with no dot at all.
-pub fn renameCaret(name: []const u8, is_dir: bool) usize {
-    if (is_dir) return name.len;
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return name.len;
-    if (dot == 0) return name.len;
-    return dot;
-}
+/// Where F2 puts the caret in `name`. Shared with zoe's sidebar rename;
+/// see `applib/fsops.zig`.
+pub const renameCaret = @import("applib").fsops.renameCaret;
 
 /// True when a key event is one half of a keystroke whose text arrives
 /// separately on the `text` stream -- a letter, Space, a keypad digit or

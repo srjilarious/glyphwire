@@ -56,6 +56,10 @@ pub const Entry = struct {
     /// whether or not hidden entries are being shown, so the listing knows
     /// *why* each row is there.
     hidden: bool = false,
+    /// An expanded directory's mtime as it was when its children were
+    /// read; null for a file, a collapsed directory, or one that couldn't
+    /// be stat'ed. What `changedOnDisk` compares against.
+    stamp: ?i96 = null,
 
     /// Columns this row occupies when drawn.
     pub fn cols(self: Entry) usize {
@@ -74,12 +78,71 @@ pub const Tree = struct {
     /// What the listing is allowed to show. Changing it needs a `reload`
     /// -- the entries are the answer to this question, not a view of it.
     visible: Visibility = .{},
+    /// The root's mtime when it was last read -- `Entry.stamp` for the
+    /// directory that has no row of its own.
+    root_stamp: ?i96 = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, root: []const u8, visible: Visibility) !Tree {
         var self: Tree = .{ .alloc = alloc, .root = try alloc.dupe(u8, root), .visible = visible };
         errdefer alloc.free(self.root);
-        try self.readInto(io, self.root, "", 0, 0);
+        self.root_stamp = try self.readInto(io, self.root, "", 0, 0);
         return self;
+    }
+
+    /// Whether a directory the tree is showing has changed on disk since
+    /// it was read: the root or any expanded folder gained, lost or
+    /// renamed an entry (each of which moves the directory's own mtime),
+    /// or has gone. `zoe/ui.zig` asks on the once-a-second disk check
+    /// and answers yes with a `reload`, which re-reads everything and
+    /// keeps what was open and where the cursor was.
+    ///
+    /// Polling the directories already on screen rather than watching
+    /// with inotify, for the reasons `zoe/diskwatch.zig` gives for files:
+    /// a stat per open folder per second costs nothing and works the
+    /// same everywhere. A collapsed folder isn't polled -- opening it
+    /// reads it fresh anyway.
+    pub fn changedOnDisk(self: *const Tree, io: std.Io) bool {
+        if (dirStamp(io, self.root) != self.root_stamp) return true;
+        for (self.entries.items) |e| {
+            if (!e.is_dir or !e.expanded) continue;
+            if (dirStamp(io, e.path) != e.stamp) return true;
+        }
+        return false;
+    }
+
+    fn dirStamp(io: std.Io, path: []const u8) ?i96 {
+        const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
+        return st.mtime.nanoseconds;
+    }
+
+    /// The directory a new entry made from row `index` goes in: the row
+    /// itself when it is a directory, else the directory the row is in
+    /// (the root for an empty tree or a top-level file). Borrowed from
+    /// the tree; valid until it next changes.
+    pub fn dirFor(self: *const Tree, index: usize) []const u8 {
+        const e = self.at(index) orelse return self.root;
+        if (e.is_dir) return e.path;
+        return std.fs.path.dirname(e.path) orelse self.root;
+    }
+
+    /// The row of directory `abs`, expanded so its children are rows --
+    /// where a new entry's field goes. Null for the root itself, which
+    /// has no row, and for a directory the tree can't show.
+    pub fn openDirRow(self: *Tree, io: std.Io, abs: []const u8) !?usize {
+        if (std.mem.eql(u8, abs, self.root)) return null;
+        const index = (try self.reveal(io, relOf(self.root, abs))) orelse return null;
+        const e = self.entries.items[index];
+        if (e.is_dir and !e.expanded) try self.toggle(io, index);
+        return index;
+    }
+
+    /// Re-reads and moves the cursor onto `abs` (an absolute path under
+    /// the root) -- after a create or a rename, so the entry just made is
+    /// the one highlighted. A path the tree can't show (hidden while
+    /// Ctrl+H is off) leaves the cursor where `reload` put it.
+    pub fn reloadOnto(self: *Tree, io: std.Io, abs: []const u8) !void {
+        try self.reload(io);
+        if (try self.reveal(io, relOf(self.root, abs))) |index| self.cursor = index;
     }
 
     /// Re-reads the whole tree under the current `visible`, putting back
@@ -109,7 +172,7 @@ pub const Tree = struct {
         defer if (on) |p| self.alloc.free(p);
 
         self.clearEntries();
-        try self.readInto(io, self.root, "", 0, 0);
+        self.root_stamp = try self.readInto(io, self.root, "", 0, 0);
 
         for (open.items) |rel| {
             const index = (try self.reveal(io, rel)) orelse continue;
@@ -179,8 +242,9 @@ pub const Tree = struct {
             self.collapse(index);
         } else {
             const e = self.entries.items[index];
-            try self.readInto(io, e.path, relOf(self.root, e.path), e.depth + 1, index + 1);
+            const stamp = try self.readInto(io, e.path, relOf(self.root, e.path), e.depth + 1, index + 1);
             self.entries.items[index].expanded = true;
+            self.entries.items[index].stamp = stamp;
         }
     }
 
@@ -196,6 +260,7 @@ pub const Tree = struct {
         }
         self.entries.replaceRange(self.alloc, index + 1, end - index - 1, &.{}) catch {};
         self.entries.items[index].expanded = false;
+        self.entries.items[index].stamp = null;
         if (self.cursor >= self.entries.items.len) self.cursor = self.entries.items.len -| 1;
     }
 
@@ -207,7 +272,12 @@ pub const Tree = struct {
     ///
     /// `rel_dir` is `dir` relative to the root, and is what the
     /// `.gitignore` files in scope are matched against.
-    fn readInto(self: *Tree, io: std.Io, dir: []const u8, rel_dir: []const u8, depth: usize, insert_at: usize) !void {
+    ///
+    /// Returns `dir`'s mtime, taken *before* the read: a change landing
+    /// while the read is under way then moves the mtime past the stamp,
+    /// and the next `changedOnDisk` catches it rather than missing it.
+    fn readInto(self: *Tree, io: std.Io, dir: []const u8, rel_dir: []const u8, depth: usize, insert_at: usize) !?i96 {
+        const stamp = dirStamp(io, dir);
         var listing: std.ArrayList(Entry) = .empty;
         defer listing.deinit(self.alloc);
         errdefer for (listing.items) |e| {
@@ -227,7 +297,7 @@ pub const Tree = struct {
         defer ignores.deinit();
         try self.pushIgnoreChain(io, &ignores, rel_dir);
 
-        var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
+        var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return stamp;
         defer handle.close(io);
 
         var it = handle.iterate();
@@ -257,6 +327,7 @@ pub const Tree = struct {
         std.mem.sort(Entry, listing.items, {}, lessThan);
         try self.entries.insertSlice(self.alloc, @min(insert_at, self.entries.items.len), listing.items);
         listing.clearRetainingCapacity();
+        return stamp;
     }
 
     /// Directories first, then case-insensitively by name -- so
