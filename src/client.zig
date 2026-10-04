@@ -6,9 +6,8 @@ const core = @import("core.zig");
 const wire = @import("wire.zig");
 const net_read = @import("net_read.zig");
 const protocol = @import("protocol.zig");
-
-/// Serialization for `notifyCompact`: null optional fields are omitted.
-const compact_json: std.json.Stringify.Options = .{ .emit_null_optional_fields = false };
+const codec = @import("codec.zig");
+const msgpack = @import("msgpack.zig");
 
 pub const PxPos = core.PxPos;
 pub const CellPos = core.CellPos;
@@ -55,6 +54,24 @@ fn signalHandshake(io: std.Io) !void {
 /// `environ`.
 var process_pane: ?core.PaneHandle = null;
 
+/// The encoding every connection this process opens speaks (see
+/// `wire.Format`). MessagePack unless `GLYPHWIRE_WIRE=json` says
+/// otherwise -- the escape hatch for watching a client's traffic with
+/// `nc -U` / `jq`, or comparing the two encodings.
+var process_wire_format: wire.Format = .msgpack;
+
+/// Reads `GLYPHWIRE_WIRE` (`json` or `msgpack`) into
+/// `process_wire_format`. An unknown value is ignored.
+pub fn noteWireFormatFromEnviron(environ_map: *const std.process.Environ.Map) void {
+    const raw = environ_map.get("GLYPHWIRE_WIRE") orelse return;
+    process_wire_format = std.meta.stringToEnum(wire.Format, raw) orelse return;
+}
+
+/// The encoding `Client.connect` / `InputListener.connect` will use.
+pub fn processWireFormat() wire.Format {
+    return process_wire_format;
+}
+
 /// Records `GLYPHWIRE_PANE` from an environment map. `connectFromEnv`
 /// calls this itself; a program that connects by explicit socket path
 /// (`glyphwire-shell`) should call it once at startup, before connecting.
@@ -66,6 +83,7 @@ var process_pane: ?core.PaneHandle = null;
 /// `GLYPHWIRE_PANE` is set only by a multiplexer.
 pub fn notePaneFromEnviron(environ_map: *const std.process.Environ.Map) void {
     noteSurfaceFromEnviron(environ_map);
+    noteWireFormatFromEnviron(environ_map);
     const raw = environ_map.get("GLYPHWIRE_PANE") orelse return;
     process_pane = std.fmt.parseInt(core.PaneHandle, raw, 10) catch null;
 }
@@ -110,8 +128,9 @@ fn paneFromEnv() ?core.PaneHandle {
     return process_pane;
 }
 
-/// A glyphwire client: wraps connecting to `GLYPHWIRE_SOCK`, JSON-RPC
-/// framing, and request/response correlation, so a program doesn't have to
+/// A glyphwire client: wraps connecting to `GLYPHWIRE_SOCK`, encoding and
+/// framing (MessagePack by default, JSON on request -- see `format`), and
+/// request/response correlation, so a program doesn't have to
 /// hand-build JSON strings to speak the protocol (as the early test clients
 /// did). One request in flight at a time -- every method here is a
 /// synchronous send-then-wait-for-one-frame call, which is all any client
@@ -125,6 +144,8 @@ pub const Client = struct {
     io: std.Io,
     alloc: std.mem.Allocator,
     stream: std.Io.net.Stream,
+    /// This connection's encoding, fixed at `connect`. See `wire.Format`.
+    format: wire.Format = .json,
     decoder: wire.FrameDecoder = .{},
     next_id: i64 = 1,
     /// Ceiling on how long a single `readFrame` (i.e. any `request`) will
@@ -165,10 +186,24 @@ pub const Client = struct {
     /// propagated: a hiccup writing to stdout shouldn't take down the
     /// actual wire connection this call exists to establish.
     pub fn connect(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8) ConnectError!Client {
+        return connectAs(io, alloc, socket_path, process_wire_format);
+    }
+
+    /// `connect`, speaking `format` rather than the process's default.
+    pub fn connectAs(io: std.Io, alloc: std.mem.Allocator, socket_path: []const u8, format: wire.Format) ConnectError!Client {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
         const stream = try addr.connect(io);
         signalHandshake(io) catch {};
-        var client: Client = .{ .io = io, .alloc = alloc, .stream = stream };
+        var client: Client = .{
+            .io = io,
+            .alloc = alloc,
+            .stream = stream,
+            .format = format,
+            .decoder = .{ .format = format },
+        };
+        // A write that fails here means the connection is already gone;
+        // the first real message will surface that.
+        client.writePreamble() catch {};
         client.attachPaneFromEnv();
         client.attachSurfaceFromEnv();
         return client;
@@ -229,6 +264,20 @@ pub const Client = struct {
         const socket_path = environ_map.get("GLYPHWIRE_SOCK") orelse return error.NoSession;
         notePaneFromEnviron(environ_map);
         return connect(io, alloc, socket_path);
+    }
+
+    /// `connectFromEnv`, speaking `format` whatever `GLYPHWIRE_WIRE` says
+    /// -- for a tool whose job is the bytes themselves (`glyphwire-probe`
+    /// sends and prints raw JSON).
+    pub fn connectFromEnvAs(
+        io: std.Io,
+        alloc: std.mem.Allocator,
+        environ_map: *const std.process.Environ.Map,
+        format: wire.Format,
+    ) (ConnectError || NoSessionError)!Client {
+        const socket_path = environ_map.get("GLYPHWIRE_SOCK") orelse return error.NoSession;
+        notePaneFromEnviron(environ_map);
+        return connectAs(io, alloc, socket_path, format);
     }
 
     /// Closes the connection. First drains it: `write_text`/`set_property`
@@ -869,28 +918,61 @@ pub const Client = struct {
         const id = self.next_id;
         self.next_id += 1;
 
-        const Msg = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: i64,
-            method: []const u8,
-            params: struct { format: []const u8, bytes: usize, handle: ?core.ImageHandle },
-        };
-        try self.send(Msg{
-            .id = id,
-            .method = method,
-            .params = .{ .format = format, .bytes = bytes.len, .handle = handle },
-        });
+        switch (self.format) {
+            // The header declares the count; the bytes follow on their own.
+            .json => {
+                const body = try codec.request(.json, self.alloc, id, method, .{
+                    .format = format,
+                    .bytes = bytes.len,
+                    .handle = handle,
+                }, .{});
+                defer self.alloc.free(body);
+                try self.frameAndFlush(body);
 
-        var write_buf: [4096]u8 = undefined;
-        var w = self.stream.writer(self.io, &write_buf);
-        try w.interface.writeAll(bytes);
-        try w.interface.flush();
+                var write_buf: [4096]u8 = undefined;
+                var w = self.stream.writer(self.io, &write_buf);
+                try w.interface.writeAll(bytes);
+                try w.interface.flush();
+            },
+            // MessagePack has a binary type, so the bytes ride inside the
+            // message: `{id, method, params: {format, handle, data}}` with
+            // `data` last, so everything up to its `bin` header is encoded
+            // here and the bytes themselves go straight from the caller's
+            // buffer to the socket behind it -- never copied into a body.
+            .msgpack => {
+                var enc: msgpack.Encoder = .init(self.alloc, .{});
+                defer enc.deinit();
+                try enc.writeMapLen(3);
+                try enc.writeStr("id");
+                try enc.writeInt(id);
+                try enc.writeStr("method");
+                try enc.writeStr(method);
+                try enc.writeStr("params");
+                try enc.writeMapLen(3);
+                try enc.writeStr("format");
+                try enc.writeStr(format);
+                try enc.writeStr("handle");
+                try enc.write(handle);
+                try enc.writeStr("data");
+                try enc.writeBinHeader(bytes.len);
+                const head = enc.written();
+
+                var write_buf: [4096]u8 = undefined;
+                var w = self.stream.writer(self.io, &write_buf);
+                var len: [4]u8 = undefined;
+                std.mem.writeInt(u32, &len, @intCast(head.len + bytes.len), .big);
+                try w.interface.writeAll(&len);
+                try w.interface.writeAll(head);
+                try w.interface.writeAll(bytes);
+                try w.interface.flush();
+                self.bytes_sent += head.len + bytes.len;
+                self.frames_sent += 1;
+            },
+        }
 
         const resp_body = try self.readFrame();
         defer self.alloc.free(resp_body);
-        const parsed = try std.json.parseFromSlice(ResponseOf(struct { handle: core.ImageHandle }), self.alloc, resp_body, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseResult(struct { handle: core.ImageHandle }, self.format, self.alloc, resp_body);
         defer parsed.deinit();
         return parsed.value.result.handle;
     }
@@ -2658,12 +2740,9 @@ pub const Client = struct {
     pub const colorToWire = protocol.colorToWire;
 
     fn notify(self: *Client, method: []const u8, params: anytype) !void {
-        const Msg = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8,
-            params: @TypeOf(params),
-        };
-        try self.send(Msg{ .method = method, .params = params });
+        const body = try codec.notification(self.format, self.alloc, method, params, .{});
+        defer self.alloc.free(body);
+        try self.frameAndFlush(body);
     }
 
     /// `notify` with every null field left out of the JSON rather than
@@ -2672,57 +2751,46 @@ pub const Client = struct {
     /// thing -- today `write_text`, the hot path, where the nulls were over
     /// half the bytes of a syntax-coloured frame.
     fn notifyCompact(self: *Client, method: []const u8, params: anytype) !void {
-        const Msg = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8,
-            params: @TypeOf(params),
-        };
-        const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{ .method = method, .params = params }, compact_json);
+        const body = try codec.notification(self.format, self.alloc, method, params, .{ .omit_nulls = true });
         defer self.alloc.free(body);
         try self.frameAndFlush(body);
     }
 
-    fn request(self: *Client, comptime ResultT: type, method: []const u8, params: anytype) !std.json.Parsed(ResponseOf(ResultT)) {
+    fn request(self: *Client, comptime ResultT: type, method: []const u8, params: anytype) !std.json.Parsed(codec.Result(ResultT)) {
         const id = self.next_id;
         self.next_id += 1;
 
-        const Msg = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: i64,
-            method: []const u8,
-            params: @TypeOf(params),
-        };
-        try self.send(Msg{ .id = id, .method = method, .params = params });
+        const body = try codec.request(self.format, self.alloc, id, method, params, .{});
+        defer self.alloc.free(body);
+        try self.frameAndFlush(body);
 
         const resp_body = try self.readFrame();
         defer self.alloc.free(resp_body);
 
-        // alloc_always: resp_body is freed right after this returns, so
-        // string fields (including RenderCell.grapheme, read well after
-        // this call for a getCells response) must be copied into the
-        // Parsed(T)'s own arena rather than referencing resp_body -- the
-        // default (alloc_if_needed) would leave them dangling.
-        return try std.json.parseFromSlice(ResponseOf(ResultT), self.alloc, resp_body, .{
-            .ignore_unknown_fields = true,
-            .allocate = .alloc_always,
-        });
+        // Strings are copied: resp_body is freed right after this returns,
+        // so string fields (including RenderCell.grapheme, read well after
+        // this call for a getCells response) must live in the Parsed(T)'s
+        // own arena rather than reference resp_body.
+        return try codec.parseResult(ResultT, self.format, self.alloc, resp_body);
     }
 
-    fn send(self: *Client, msg: anytype) !void {
-        const body = try std.json.Stringify.valueAlloc(self.alloc, msg, .{});
-        defer self.alloc.free(body);
-        try self.frameAndFlush(body);
+    /// Writes the bytes that open a connection in `format` (see
+    /// `wire.writePreamble`).
+    fn writePreamble(self: *Client) !void {
+        var write_buf: [16]u8 = undefined;
+        var w = self.stream.writer(self.io, &write_buf);
+        try wire.writePreamble(&w.interface, self.format);
+        try w.interface.flush();
     }
 
-    /// Frames one already-serialized JSON-RPC body and flushes it to the
-    /// socket. Split out of `send` so `Batch.send` can hand over a body it
-    /// assembled itself (splicing pre-validated sub-message objects into
-    /// one `batch` message) rather than round-tripping through
-    /// `Stringify.valueAlloc` again.
+    /// Frames one already-encoded body and flushes it to the socket.
+    /// Separate from encoding so `Batch.send` can hand over a body it
+    /// assembled itself (splicing pre-encoded sub-messages into one
+    /// `batch` message) rather than encoding everything again.
     fn frameAndFlush(self: *Client, body: []const u8) !void {
         var write_buf: [4096]u8 = undefined;
         var w = self.stream.writer(self.io, &write_buf);
-        try wire.writeFrame(&w.interface, body);
+        try wire.writeFrameAs(&w.interface, self.format, body);
         try w.interface.flush();
         self.bytes_sent += body.len;
         self.frames_sent += 1;
@@ -2772,10 +2840,11 @@ pub const Client = struct {
 
         fn append(self: *Batch, sub_id: ?u32, method: []const u8, params: anytype) !void {
             const a = self.arena.allocator();
+            const format = self.client.format;
             const s = if (sub_id) |sid|
-                try std.json.Stringify.valueAlloc(a, .{ .method = method, .params = params, .id = sid }, .{})
+                try codec.encodeAlloc(format, a, .{ .method = method, .params = params, .id = sid }, .{})
             else
-                try std.json.Stringify.valueAlloc(a, .{ .method = method, .params = params }, .{});
+                try codec.encodeAlloc(format, a, .{ .method = method, .params = params }, .{});
             try self.msgs.append(a, s);
         }
 
@@ -2783,7 +2852,7 @@ pub const Client = struct {
         /// `Client.notifyCompact` for which methods may use it.
         fn notifyCompact(self: *Batch, method: []const u8, params: anytype) !void {
             const a = self.arena.allocator();
-            const s = try std.json.Stringify.valueAlloc(a, .{ .method = method, .params = params }, compact_json);
+            const s = try codec.encodeAlloc(self.client.format, a, .{ .method = method, .params = params }, .{ .omit_nulls = true });
             try self.msgs.append(a, s);
         }
 
@@ -3202,34 +3271,64 @@ pub const Client = struct {
         /// the single response frame. Caller frees with
         /// `BatchResults.deinit`.
         pub fn send(self: *Batch) !BatchResults {
-            const a = self.arena.allocator();
-            var bw = std.Io.Writer.Allocating.init(a);
             const has_requests = self.n_requests > 0;
-
-            try bw.writer.writeAll("{\"jsonrpc\":\"2.0\",");
-            if (has_requests) {
-                const outer_id = self.client.next_id;
+            const outer_id: ?i64 = if (has_requests) blk: {
+                const id = self.client.next_id;
                 self.client.next_id += 1;
-                try bw.writer.print("\"id\":{d},", .{outer_id});
-            }
-            try bw.writer.writeAll("\"method\":\"batch\",\"params\":{\"messages\":[");
-            for (self.msgs.items, 0..) |m, i| {
-                if (i != 0) try bw.writer.writeAll(",");
-                try bw.writer.writeAll(m);
-            }
-            try bw.writer.writeAll("]}}");
+                break :blk id;
+            } else null;
 
-            try self.client.frameAndFlush(bw.written());
+            switch (self.client.format) {
+                .json => {
+                    var bw = std.Io.Writer.Allocating.init(self.arena.allocator());
+                    try bw.writer.writeAll("{\"jsonrpc\":\"2.0\",");
+                    if (outer_id) |id| try bw.writer.print("\"id\":{d},", .{id});
+                    try bw.writer.writeAll("\"method\":\"batch\",\"params\":{\"messages\":[");
+                    for (self.msgs.items, 0..) |m, i| {
+                        if (i != 0) try bw.writer.writeAll(",");
+                        try bw.writer.writeAll(m);
+                    }
+                    try bw.writer.writeAll("]}}");
+                    try self.client.frameAndFlush(bw.written());
+                },
+                .msgpack => {
+                    var enc: msgpack.Encoder = .init(self.arena.allocator(), .{});
+                    try enc.writeMapLen(if (outer_id != null) 3 else 2);
+                    if (outer_id) |id| {
+                        try enc.writeStr("id");
+                        try enc.writeInt(id);
+                    }
+                    try enc.writeStr("method");
+                    try enc.writeStr("batch");
+                    try enc.writeStr("params");
+                    try enc.writeMapLen(1);
+                    try enc.writeStr("messages");
+                    try enc.writeArrayLen(self.msgs.items.len);
+                    for (self.msgs.items) |m| try enc.writeRaw(m);
+                    try self.client.frameAndFlush(enc.written());
+                },
+            }
 
-            if (!has_requests) return .{ .parsed = null, .arena = std.heap.ArenaAllocator.init(self.client.alloc) };
+            var results: BatchResults = .{ .format = self.client.format, .arena = std.heap.ArenaAllocator.init(self.client.alloc) };
+            if (!has_requests) return results;
+            errdefer results.deinit();
 
             const resp_body = try self.client.readFrame();
             defer self.client.alloc.free(resp_body);
-            const parsed = try std.json.parseFromSlice(BatchResponseEnvelope, self.client.alloc, resp_body, .{
-                .ignore_unknown_fields = true,
-                .allocate = .alloc_always,
-            });
-            return .{ .parsed = parsed, .arena = std.heap.ArenaAllocator.init(self.client.alloc) };
+            switch (self.client.format) {
+                .json => results.json = try std.json.parseFromSlice(BatchResponseEnvelope, self.client.alloc, resp_body, .{
+                    .ignore_unknown_fields = true,
+                    .allocate = .alloc_always,
+                }),
+                .msgpack => {
+                    // Kept as the body: each response is decoded only when
+                    // its slot is read, straight into the caller's type.
+                    results.msgpack_body = try results.arena.allocator().dupe(u8, resp_body);
+                    const env = try msgpack.decodeLeaky(MsgpackBatchResponse, results.arena.allocator(), results.msgpack_body, .{});
+                    results.msgpack_responses = env.result.responses;
+                },
+            }
+            return results;
         }
     };
 
@@ -3256,10 +3355,7 @@ pub const Client = struct {
 };
 
 fn ResponseOf(comptime ResultT: type) type {
-    return struct {
-        id: i64 = 0,
-        result: ResultT = undefined,
-    };
+    return codec.Result(ResultT);
 }
 
 /// The outer shape of a request-form `batch` response:
@@ -3274,65 +3370,98 @@ const BatchResponseEnvelope = struct {
     } = .{},
 };
 
+/// `BatchResponseEnvelope` on MessagePack: each response stays encoded.
+const MsgpackBatchResponse = struct {
+    result: struct {
+        responses: []const msgpack.Raw = &.{},
+    } = .{},
+};
+
 /// The result side of `Client.Batch.send`. `deinit` frees it. For a
 /// notification-form batch (no request adders) it's empty and every
 /// lookup returns `error.BatchResultMissing`.
 pub const BatchResults = struct {
-    parsed: ?std.json.Parsed(BatchResponseEnvelope),
-    /// Backs the on-demand re-parse in `get` -- kept separate from
-    /// `parsed`'s own arena so this type owns a definite allocator even
-    /// in the notification-form (`parsed == null`) case.
+    format: wire.Format,
+    /// The parsed response on a JSON connection; null for a
+    /// notification-form batch (or on MessagePack).
+    json: ?std.json.Parsed(BatchResponseEnvelope) = null,
+    /// On MessagePack, each response left encoded (slices of a copy of the
+    /// response body held in `arena`), decoded only when `get` asks.
+    msgpack_body: []const u8 = &.{},
+    msgpack_responses: []const msgpack.Raw = &.{},
+    /// Backs the on-demand decode in `get`, and the MessagePack body --
+    /// kept separate from `json`'s own arena so this type owns a definite
+    /// allocator even for a notification-form batch.
     arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *BatchResults) void {
-        if (self.parsed) |*p| p.deinit();
+        if (self.json) |*p| p.deinit();
         self.arena.deinit();
     }
 
-    /// The response for `slot`. The server answers in add order, so slot
-    /// `n` is normally at index `n - 1`; that is checked first. A failed
-    /// sub-message is dropped rather than left as a hole, which shifts
-    /// every later response down, so a miss falls back to scanning for the
-    /// id. Without the direct check, reading back every slot of an
-    /// N-request batch was N^2 lookups -- most of `gw-grep`'s time on a
-    /// large search, at 1000 `create_metadata`s per batch.
-    fn element(self: *const BatchResults, slot: Client.Batch.Slot) ?std.json.Value {
-        const p = self.parsed orelse return null;
-        const responses = p.value.result.responses;
-        const want: i64 = slot.id;
-        if (slot.id >= 1 and slot.id <= responses.len) {
-            const resp = responses[slot.id - 1];
-            if (responseId(resp) == want) return resp;
+    fn count(self: *const BatchResults) usize {
+        return switch (self.format) {
+            .json => if (self.json) |p| p.value.result.responses.len else 0,
+            .msgpack => self.msgpack_responses.len,
+        };
+    }
+
+    /// The `id` of response `i`, or null when it has none.
+    fn idAt(self: *const BatchResults, i: usize) ?i64 {
+        switch (self.format) {
+            .json => {
+                const obj = switch (self.json.?.value.result.responses[i]) {
+                    .object => |o| o,
+                    else => return null,
+                };
+                return switch (obj.get("id") orelse return null) {
+                    .integer => |n| n,
+                    else => null,
+                };
+            },
+            .msgpack => {
+                var scratch: [256]u8 = undefined;
+                var fba: std.heap.FixedBufferAllocator = .init(&scratch);
+                const r = msgpack.decodeLeaky(struct { id: ?i64 = null }, fba.allocator(), self.msgpack_responses[i].bytes, .{}) catch return null;
+                return r.id;
+            },
         }
-        for (responses) |resp| {
-            if (responseId(resp) == want) return resp;
+    }
+
+    /// The index of the response for `slot`. The server answers in add
+    /// order, so slot `n` is normally at index `n - 1`; that is checked
+    /// first. A failed sub-message is dropped rather than left as a hole,
+    /// which shifts every later response down, so a miss falls back to
+    /// scanning for the id. Without the direct check, reading back every
+    /// slot of an N-request batch was N^2 lookups -- most of `gw-grep`'s
+    /// time on a large search, at 1000 `create_metadata`s per batch.
+    fn element(self: *const BatchResults, slot: Client.Batch.Slot) ?usize {
+        const n = self.count();
+        const want: i64 = slot.id;
+        if (slot.id >= 1 and slot.id <= n) {
+            if (self.idAt(slot.id - 1) == want) return slot.id - 1;
+        }
+        for (0..n) |i| {
+            if (self.idAt(i) == want) return i;
         }
         return null;
     }
 
-    fn responseId(resp: std.json.Value) ?i64 {
-        const obj = switch (resp) {
-            .object => |o| o,
-            else => return null,
-        };
-        return switch (obj.get("id") orelse return null) {
-            .integer => |n| n,
-            else => null,
-        };
-    }
-
-    /// Re-parses the response element for `slot` as `{result: T}` and
-    /// returns the `result`. `T` follows `std.json` parsing rules; a
-    /// scalar or owned-by-arena value is safe to use until `deinit`.
-    /// Errors `BatchResultMissing` if the slot produced no response (it
-    /// failed server-side, or the batch was notification-form).
+    /// Decodes the response for `slot` as `{result: T}` and returns the
+    /// `result`. A scalar or arena-owned value is safe to use until
+    /// `deinit`. Errors `BatchResultMissing` if the slot produced no
+    /// response (it failed server-side, or the batch was
+    /// notification-form).
     pub fn get(self: *BatchResults, comptime T: type, slot: Client.Batch.Slot) !T {
-        const resp = self.element(slot) orelse return error.BatchResultMissing;
+        const i = self.element(slot) orelse return error.BatchResultMissing;
         const Wrapped = struct { result: T };
-        const w = try std.json.parseFromValueLeaky(Wrapped, self.arena.allocator(), resp, .{
-            .ignore_unknown_fields = true,
-            .allocate = .alloc_always,
-        });
+        const w = switch (self.format) {
+            .json => try std.json.parseFromValueLeaky(Wrapped, self.arena.allocator(), self.json.?.value.result.responses[i], .{
+                .ignore_unknown_fields = true,
+                .allocate = .alloc_always,
+            }),
+            .msgpack => try msgpack.decodeLeaky(Wrapped, self.arena.allocator(), self.msgpack_responses[i].bytes, .{}),
+        };
         return w.result;
     }
 
@@ -4004,6 +4133,9 @@ pub const InputListener = struct {
     io: std.Io,
     alloc: std.mem.Allocator,
     stream: std.Io.net.Stream,
+    /// This connection's encoding -- the process default (see
+    /// `processWireFormat`), like `Client.connect`'s.
+    format: wire.Format = .json,
     listen_thread: std.Thread,
     mutex: std.Io.Mutex = .init,
     state: core.InputState,
@@ -4073,7 +4205,14 @@ pub const InputListener = struct {
 
         const self = try alloc.create(InputListener);
         errdefer alloc.destroy(self);
-        self.* = .{ .io = io, .alloc = alloc, .stream = stream, .listen_thread = undefined, .state = core.InputState.init(alloc) };
+        self.* = .{
+            .io = io,
+            .alloc = alloc,
+            .stream = stream,
+            .format = process_wire_format,
+            .listen_thread = undefined,
+            .state = core.InputState.init(alloc),
+        };
         errdefer self.state.deinit();
 
         try self.sendSubscribeAndWaitForAck(events, pane);
@@ -4414,17 +4553,17 @@ pub const InputListener = struct {
     /// Fire-and-forget (a notification, no ack); safe to call while the
     /// reader thread is running (nothing else writes this connection).
     pub fn attachContext(self: *InputListener, context: core.ContextHandle) !void {
-        const Msg = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8 = "attach_context",
-            params: struct { context: core.ContextHandle },
-        };
-        const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{ .params = .{ .context = context } }, .{});
+        const body = try codec.notification(self.format, self.alloc, "attach_context", .{ .context = context }, .{});
         defer self.alloc.free(body);
+        try self.writeBody(body);
+    }
 
-        var write_buf: [256]u8 = undefined;
+    /// Frames and flushes one body (plus, before the first, the format's
+    /// preamble -- see `sendSubscribeAndWaitForAck`).
+    fn writeBody(self: *InputListener, body: []const u8) !void {
+        var write_buf: [1024]u8 = undefined;
         var w = self.stream.writer(self.io, &write_buf);
-        try wire.writeFrame(&w.interface, body);
+        try wire.writeFrameAs(&w.interface, self.format, body);
         try w.interface.flush();
     }
 
@@ -4438,18 +4577,10 @@ pub const InputListener = struct {
     /// Ordering makes it safe anyway -- everything this connection receives
     /// afterwards is decided on the server, after this has been processed.
     pub fn joinWindowManager(self: *InputListener, token: u64) !void {
-        const Msg = struct {
-            jsonrpc: []const u8 = "2.0",
-            method: []const u8 = "join_role",
-            params: struct { role: []const u8 = "window_manager", token: u64 },
-        };
-        const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{ .params = .{ .token = token } }, .{});
+        const Params = struct { role: []const u8 = "window_manager", token: u64 };
+        const body = try codec.notification(self.format, self.alloc, "join_role", Params{ .token = token }, .{});
         defer self.alloc.free(body);
-
-        var write_buf: [256]u8 = undefined;
-        var w = self.stream.writer(self.io, &write_buf);
-        try wire.writeFrame(&w.interface, body);
-        try w.interface.flush();
+        try self.writeBody(body);
     }
 
     /// `subscribe`, carrying this connection's pane when `GLYPHWIRE_PANE`
@@ -4463,26 +4594,22 @@ pub const InputListener = struct {
     /// into one message makes that window impossible rather than merely
     /// small.
     fn sendSubscribeAndWaitForAck(self: *InputListener, events: []const []const u8, pane: ?core.PaneHandle) !void {
-        const Msg = struct {
-            jsonrpc: []const u8 = "2.0",
-            id: i64 = 1,
-            method: []const u8 = "subscribe",
-            params: struct {
-                events: []const []const u8,
-                pane: ?core.PaneHandle = null,
-            },
+        const Params = struct {
+            events: []const []const u8,
+            pane: ?core.PaneHandle = null,
         };
-        const body = try std.json.Stringify.valueAlloc(self.alloc, Msg{
-            .params = .{ .events = events, .pane = pane },
-        }, .{});
+        const body = try codec.request(self.format, self.alloc, 1, "subscribe", Params{ .events = events, .pane = pane }, .{});
         defer self.alloc.free(body);
 
+        // The connection's first bytes: the preamble rides in front of
+        // `subscribe`, its first frame.
         var write_buf: [1024]u8 = undefined;
         var w = self.stream.writer(self.io, &write_buf);
-        try wire.writeFrame(&w.interface, body);
+        try wire.writePreamble(&w.interface, self.format);
+        try wire.writeFrameAs(&w.interface, self.format, body);
         try w.interface.flush();
 
-        var decoder: wire.FrameDecoder = .{};
+        var decoder: wire.FrameDecoder = .{ .format = self.format };
         defer decoder.deinit(self.alloc);
 
         var read_buf: [4096]u8 = undefined;
@@ -4505,7 +4632,7 @@ pub const InputListener = struct {
     }
 
     fn listenLoop(self: *InputListener) !void {
-        var decoder: wire.FrameDecoder = .{};
+        var decoder: wire.FrameDecoder = .{ .format = self.format };
         defer decoder.deinit(self.alloc);
 
         var read_buf: [4096]u8 = undefined;
@@ -4525,10 +4652,7 @@ pub const InputListener = struct {
     }
 
     fn handleNotification(self: *InputListener, body: []const u8) !void {
-        const Envelope = struct { method: []const u8, params: std.json.Value = .null };
-        const parsed = try std.json.parseFromSlice(Envelope, self.alloc, body, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseEnvelope(self.format, self.alloc, body);
         defer parsed.deinit();
         const method = parsed.value.method;
         const params = parsed.value.params;
@@ -4690,7 +4814,7 @@ pub const InputListener = struct {
         }
     }
 
-    fn parseParams(self: *InputListener, comptime T: type, params: std.json.Value) !std.json.Parsed(T) {
-        return std.json.parseFromValue(T, self.alloc, params, .{ .ignore_unknown_fields = true });
+    fn parseParams(self: *InputListener, comptime T: type, params: codec.Params) !std.json.Parsed(T) {
+        return codec.parseParams(T, self.alloc, params);
     }
 };

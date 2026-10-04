@@ -7,12 +7,61 @@ const conn_stream = @import("conn_stream.zig");
 /// LSP-style framing: a `Content-Length` header, a blank line, then exactly
 /// that many body bytes. Chosen so JSON bodies never need newline-escaping
 /// and frames stay `nc -U` / `jq`-debuggable — see decisions.md, Transport &
-/// Wire Format. The body itself is opaque bytes at this layer; the JSON-RPC
-/// message shape is a concern of the dispatch layer built on top of this.
+/// Wire Format. That is a JSON connection's framing; a MessagePack one
+/// length-prefixes instead (see `Format`). The body itself is opaque bytes
+/// at this layer; its encoding is `codec.zig`'s concern.
 pub const FrameError = error{
     MissingContentLength,
     InvalidContentLength,
+    /// A connection opened with `0xc1` but not the rest of
+    /// `msgpack_preamble`.
+    BadPreamble,
 };
+
+/// How one connection's bodies are encoded and framed, fixed for its
+/// lifetime. `json`: JSON-RPC bodies under `Content-Length` headers (the
+/// framing above). `msgpack`: MessagePack bodies, each preceded by its
+/// length as a big-endian `u32` -- see decisions in docs/protocol.md's
+/// Transport section.
+pub const Format = enum { json, msgpack };
+
+/// What a MessagePack client writes once, before its first frame. A server
+/// tells the two formats apart from a connection's first byte: `0xc1` is
+/// the one byte MessagePack never assigns, and can't start a JSON
+/// connection's `Content-Length` header either.
+pub const msgpack_preamble = "\xc1GWM";
+
+/// Writes the connection-opening bytes `format` needs: the preamble for
+/// MessagePack, nothing for JSON (whose framing is self-announcing).
+pub fn writePreamble(writer: *std.Io.Writer, format: Format) !void {
+    if (format == .msgpack) try writer.writeAll(msgpack_preamble);
+}
+
+/// `writeFrame` for either format.
+pub fn writeFrameAs(writer: *std.Io.Writer, format: Format, body: []const u8) !void {
+    switch (format) {
+        .json => try writeFrame(writer, body),
+        .msgpack => {
+            var len: [4]u8 = undefined;
+            std.mem.writeInt(u32, &len, @intCast(body.len), .big);
+            try writer.writeAll(&len);
+            try writer.writeAll(body);
+        },
+    }
+}
+
+/// `framedAlloc` for either format.
+pub fn framedAllocAs(alloc: std.mem.Allocator, format: Format, body: []const u8) ![]u8 {
+    switch (format) {
+        .json => return framedAlloc(alloc, body),
+        .msgpack => {
+            const out = try alloc.alloc(u8, 4 + body.len);
+            std.mem.writeInt(u32, out[0..4], @intCast(body.len), .big);
+            @memcpy(out[4..], body);
+            return out;
+        },
+    }
+}
 
 /// Writes one framed message to `writer`.
 pub fn writeFrame(writer: *std.Io.Writer, body: []const u8) !void {
@@ -35,6 +84,13 @@ pub fn framedAlloc(alloc: std.mem.Allocator, body: []const u8) ![]u8 {
 /// buffered so far.
 pub const FrameDecoder = struct {
     buf: std.ArrayList(u8) = .empty,
+    /// The framing `next` reassembles. A client knows its own; a server
+    /// sets `detect` and lets the first bytes decide (see
+    /// `msgpack_preamble`), after which this holds the answer.
+    format: Format = .json,
+    /// Decide `format` from the connection's opening bytes on the first
+    /// `next`, consuming the MessagePack preamble if that's what they are.
+    detect: bool = false,
 
     pub fn deinit(self: *FrameDecoder, alloc: std.mem.Allocator) void {
         self.buf.deinit(alloc);
@@ -48,6 +104,21 @@ pub const FrameDecoder = struct {
     /// slice and must free it with `alloc`), or null if not enough bytes
     /// have been fed yet to complete one.
     pub fn next(self: *FrameDecoder, alloc: std.mem.Allocator) !?[]u8 {
+        if (self.detect) {
+            const buf = self.buf.items;
+            if (buf.len == 0) return null;
+            if (buf[0] == msgpack_preamble[0]) {
+                if (buf.len < msgpack_preamble.len) return null;
+                if (!std.mem.eql(u8, buf[0..msgpack_preamble.len], msgpack_preamble)) return FrameError.BadPreamble;
+                self.consume(msgpack_preamble.len);
+                self.format = .msgpack;
+            } else {
+                self.format = .json;
+            }
+            self.detect = false;
+        }
+        if (self.format == .msgpack) return self.nextLengthPrefixed(alloc);
+
         const header_end = std.mem.indexOf(u8, self.buf.items, "\r\n\r\n") orelse return null;
         const content_length = try parseContentLength(self.buf.items[0..header_end]);
 
@@ -56,13 +127,25 @@ pub const FrameDecoder = struct {
         if (self.buf.items.len < body_end) return null;
 
         const body = try alloc.dupe(u8, self.buf.items[body_start..body_end]);
-        errdefer alloc.free(body);
-
-        const remaining_len = self.buf.items.len - body_end;
-        std.mem.copyForwards(u8, self.buf.items[0..remaining_len], self.buf.items[body_end..]);
-        self.buf.shrinkRetainingCapacity(remaining_len);
-
+        self.consume(body_end);
         return body;
+    }
+
+    fn nextLengthPrefixed(self: *FrameDecoder, alloc: std.mem.Allocator) !?[]u8 {
+        if (self.buf.items.len < 4) return null;
+        const len = std.mem.readInt(u32, self.buf.items[0..4], .big);
+        const end = 4 + @as(usize, len);
+        if (self.buf.items.len < end) return null;
+        const body = try alloc.dupe(u8, self.buf.items[4..end]);
+        self.consume(end);
+        return body;
+    }
+
+    /// Drops the first `n` buffered bytes.
+    fn consume(self: *FrameDecoder, n: usize) void {
+        const remaining_len = self.buf.items.len - n;
+        std.mem.copyForwards(u8, self.buf.items[0..remaining_len], self.buf.items[n..]);
+        self.buf.shrinkRetainingCapacity(remaining_len);
     }
 
     /// Consumes exactly `n` raw bytes from the front of the buffer, not
@@ -77,12 +160,7 @@ pub const FrameDecoder = struct {
         if (self.buf.items.len < n) return null;
 
         const raw = try alloc.dupe(u8, self.buf.items[0..n]);
-        errdefer alloc.free(raw);
-
-        const remaining_len = self.buf.items.len - n;
-        std.mem.copyForwards(u8, self.buf.items[0..remaining_len], self.buf.items[n..]);
-        self.buf.shrinkRetainingCapacity(remaining_len);
-
+        self.consume(n);
         return raw;
     }
 };

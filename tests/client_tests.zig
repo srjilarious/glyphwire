@@ -512,6 +512,51 @@ fn fakePngBytes(width: u32, height: u32) [24]u8 {
     return bytes;
 }
 
+/// The same session driven by a JSON client and then a MessagePack one:
+/// writes, a request-form batch, an image load (side-channel on JSON,
+/// inline `bin` on MessagePack) and a `get_cells` read-back must agree.
+pub fn clientSpeaksBothWireFormatsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 10, 4, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    for ([_]glyphwire.wire.Format{ .json, .msgpack }, 0..) |format, row| {
+        const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+        defer thread.join();
+
+        var client = try glyphwire.Client.connectAs(io, alloc, socket_path, format);
+        defer client.deinit();
+
+        try client.setCursor(row, 0);
+        try client.writeText(@tagName(format), null, null);
+
+        var b = client.batch();
+        defer b.deinit();
+        const slot = try b.createMetadata("{\"k\":1}");
+        try b.writeText("!", null, null);
+        var results = try b.send();
+        defer results.deinit();
+        const meta = try results.metadataHandle(slot);
+        try testz.expectEqualStr(ctx.metadataJson(meta).?, "{\"k\":1}");
+
+        const png = fakePngBytes(24, 12);
+        const handle = try client.loadImage("png", &png);
+        const info = try client.getImageInfo(handle);
+        try testz.expectEqual(info.width, 24);
+
+        var snapshot = try client.getCells();
+        defer snapshot.deinit();
+        try testz.expectEqualStr(snapshot.cellAt(row, 0).grapheme, @tagName(format)[0..1]);
+        try testz.expectEqualStr(snapshot.cellAt(row, @tagName(format).len).grapheme, "!");
+    }
+}
+
 pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);
     defer ctx.deinit();

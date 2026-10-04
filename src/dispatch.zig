@@ -5,6 +5,8 @@ const std = @import("std");
 const core = @import("core.zig");
 const protocol = @import("protocol.zig");
 const rpc = @import("rpc.zig");
+const codec = @import("codec.zig");
+const wire = @import("wire.zig");
 
 /// Dispatches decoded JSON-RPC message bodies (the wire module's frame
 /// payloads) against a headless `Context`. This is the message-catalog
@@ -82,6 +84,9 @@ pub const DispatchError = error{
     OutlineNodeOutOfRange,
     TableRowShapeMismatch,
     UnsupportedImageFormat,
+    /// A `load_image` / `update_image` on a MessagePack connection had no
+    /// `data`: the side-channel is JSON's, so the bytes must be inline.
+    MissingImageData,
     UnknownSplit,
     /// `create_split`'s `axis` wasn't `"row"` or `"column"`.
     InvalidSplitAxis,
@@ -136,11 +141,7 @@ pub const DispatchError = error{
     RemoteStartFailed,
 };
 
-const Envelope = struct {
-    method: []const u8,
-    id: ?std.json.Value = null,
-    params: std.json.Value = .null,
-};
+const Envelope = codec.Envelope;
 
 /// `layer` (omitted, or `root_layer_handle`) means the root layer.
 /// `row`/`col` place the cursor before writing, each defaulting to the
@@ -1076,20 +1077,11 @@ const SetUnderlineParams = struct {
     underline_color: ?protocol.Color = null,
 };
 
-/// `batch` params: an ordered list of sub-messages, each a normal
-/// JSON-RPC object (`{method, params, id?}`) -- the same shape `handle`
-/// parses from a standalone frame. See `handleBatch` for how they're
-/// applied (in order, under the one `ctx_mutex` hold server.zig already
-/// takes for the outer `batch` message) and how sub-message `id`s
-/// correlate to the entries in the response's `responses` array.
-const BatchParams = struct {
-    messages: []const std.json.Value,
-};
-
-/// The JSON header of a request that carries image bytes on the binary
-/// side-channel (`load_image`, `update_image`), peeked out of a frame body
-/// before the payload it declares (`bytes` raw bytes, following directly
-/// on the wire) can be read — see `peekImagePayload` and wire.zig's
+/// The header of a request that carries image bytes (`load_image`,
+/// `update_image`). On a JSON connection the bytes ride the binary
+/// side-channel, so this is peeked out of a frame body before the payload
+/// it declares (`bytes` raw bytes, following directly on the wire) can be
+/// read — see `peekImagePayload` and wire.zig's
 /// `readRaw`. `id` is copied by value straight out of the envelope's
 /// arena: safe only because `Client` always sends integer request ids
 /// (never a string, which would need its own copy) — see
@@ -1104,6 +1096,10 @@ pub const LoadImageHeader = struct {
     /// which allocates a fresh one. What tells the two apart after the
     /// peek, so server.zig's side-channel path stays one branch.
     target: ?core.ImageHandle = null,
+    /// The payload itself, when it arrived inside the message (a
+    /// MessagePack `bin` field) rather than on the side-channel. Borrowed
+    /// from the frame body.
+    data: ?[]const u8 = null,
 };
 
 /// Which input event categories a connection has opted into (see
@@ -1413,19 +1409,29 @@ pub const RemoteStarter = struct {
 /// anything else on the connection can be read, whether they are becoming
 /// a new handle or replacing an existing one.
 pub fn peekImagePayload(alloc: std.mem.Allocator, body: []const u8) !?LoadImageHeader {
-    const parsed = try std.json.parseFromSlice(Envelope, alloc, body, .{
-        .ignore_unknown_fields = true,
-    });
+    const parsed = try codec.parseEnvelope(.json, alloc, body);
     defer parsed.deinit();
-    const is_load = std.mem.eql(u8, parsed.value.method, "load_image");
-    const is_update = std.mem.eql(u8, parsed.value.method, "update_image");
-    if (!is_load and !is_update) return null;
-    const id = parsed.value.id orelse return DispatchError.NotARequest;
+    return imagePayloadHeader(alloc, parsed.value);
+}
 
-    const Params = struct { format: []const u8, bytes: usize, handle: ?core.ImageHandle = null };
-    const p = try std.json.parseFromValue(Params, alloc, parsed.value.params, .{
-        .ignore_unknown_fields = true,
-    });
+/// `peekImagePayload` on an envelope that's already decoded, in either
+/// format. A MessagePack connection carries the bytes inline as a `data`
+/// `bin` field instead of declaring a side-channel count, so its header
+/// comes back with `data` set (borrowed from the frame body) and
+/// `bytes` its length.
+pub fn imagePayloadHeader(alloc: std.mem.Allocator, envelope: Envelope) !?LoadImageHeader {
+    const is_load = std.mem.eql(u8, envelope.method, "load_image");
+    const is_update = std.mem.eql(u8, envelope.method, "update_image");
+    if (!is_load and !is_update) return null;
+    const id = envelope.id orelse return DispatchError.NotARequest;
+
+    const Params = struct {
+        format: []const u8,
+        bytes: usize = 0,
+        handle: ?core.ImageHandle = null,
+        data: ?[]const u8 = null,
+    };
+    const p = try codec.parseParams(Params, alloc, envelope.params);
     defer p.deinit();
 
     const format = core.ImageFormat.fromName(p.value.format) orelse return DispatchError.UnsupportedImageFormat;
@@ -1433,7 +1439,15 @@ pub fn peekImagePayload(alloc: std.mem.Allocator, body: []const u8) !?LoadImageH
     // nothing to update, and silently loading a new image instead would
     // hand the caller a handle it isn't expecting.
     const target = if (is_update) p.value.handle orelse return DispatchError.UnknownImage else null;
-    return .{ .id = id, .format = format, .bytes = p.value.bytes, .target = target };
+    // The side-channel is JSON's; a MessagePack message must carry its
+    // bytes. `data` points into the frame body, not `p`'s arena (strings
+    // are borrowed), so it outlives the `deinit` above.
+    const data: ?[]const u8 = switch (envelope.params) {
+        .json => null,
+        .msgpack => p.value.data orelse return DispatchError.MissingImageData,
+    };
+    const bytes = if (data) |d| d.len else p.value.bytes;
+    return .{ .id = id, .format = format, .bytes = bytes, .target = target, .data = data };
 }
 
 /// Peeks at a decoded frame body to determine whether it's a notification
@@ -1448,9 +1462,7 @@ pub fn peekImagePayload(alloc: std.mem.Allocator, body: []const u8) !?LoadImageH
 /// severing the connection is the least-bad fallback there rather than
 /// leaving the client's request hanging forever with no reply.
 pub fn isNotification(alloc: std.mem.Allocator, body: []const u8) !bool {
-    const parsed = try std.json.parseFromSlice(Envelope, alloc, body, .{
-        .ignore_unknown_fields = true,
-    });
+    const parsed = try codec.parseEnvelope(.json, alloc, body);
     defer parsed.deinit();
     return parsed.value.id == null;
 }
@@ -1460,9 +1472,7 @@ pub fn isNotification(alloc: std.mem.Allocator, body: []const u8) !bool {
 /// message: "notification failed: UnknownMethod" on its own gives a reader
 /// nothing to act on.
 pub fn peekMethod(alloc: std.mem.Allocator, body: []const u8, out: []u8) []const u8 {
-    const parsed = std.json.parseFromSlice(Envelope, alloc, body, .{
-        .ignore_unknown_fields = true,
-    }) catch return "?";
+    const parsed = codec.parseEnvelope(.json, alloc, body) catch return "?";
     defer parsed.deinit();
     const n = @min(parsed.value.method.len, out.len);
     @memcpy(out[0..n], parsed.value.method[0..n]);
@@ -1573,6 +1583,10 @@ pub const Dispatcher = struct {
     /// How `start_remote` brings up a remote session, or null on a server
     /// that can't (see `RemoteStarter`). Injected by `Server`.
     remote_starter: ?*const RemoteStarter = null,
+    /// The encoding this connection's messages arrive in and its responses
+    /// go out in (see `wire.Format`). JSON until the server learns
+    /// otherwise from the connection's first bytes.
+    format: wire.Format = .json,
 
     pub fn init(ctx: *core.Context) Dispatcher {
         return .{ .ctx = ctx };
@@ -1628,11 +1642,21 @@ pub const Dispatcher = struct {
 
     /// Handles one decoded frame body. See `HandleResult`.
     pub fn handle(self: *Dispatcher, alloc: std.mem.Allocator, body: []const u8) !HandleResult {
-        const parsed = try std.json.parseFromSlice(Envelope, alloc, body, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseEnvelope(self.format, alloc, body);
         defer parsed.deinit();
         return self.dispatchEnvelope(alloc, parsed.value);
+    }
+
+    /// `handle` for an envelope the caller already decoded -- server.zig
+    /// decodes each frame once and needs the `id`/`method` itself to decide
+    /// what a failure means.
+    pub fn handleEnvelope(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) !HandleResult {
+        return self.dispatchEnvelope(alloc, envelope);
+    }
+
+    /// A response body for request `id`, in this connection's format.
+    fn respond(self: *const Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, result: anytype) ![]u8 {
+        return codec.response(self.format, alloc, id, result);
     }
 
     /// Routes an already-parsed envelope through `dispatchCatalog` and, on
@@ -1911,27 +1935,26 @@ pub const Dispatcher = struct {
     /// absent (notification form): no response at all; any response a
     /// sub-request produced is dropped with a warning.
     ///
-    /// The return set is spelled out (`ParseFromValueError`) rather than
-    /// inferred, to break the inferred-error-set cycle with
-    /// `dispatchEnvelope`: every error `dispatchEnvelope` can raise is
-    /// caught per sub-message below, so this function only ever surfaces
-    /// its own `BatchParams` parse / allocation failures.
-    fn handleBatch(self: *Dispatcher, alloc: std.mem.Allocator, outer_id: ?std.json.Value, params_value: std.json.Value) std.json.ParseFromValueError!HandleResult {
-        const parsed = try std.json.parseFromValue(BatchParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    /// The return set is spelled out (`anyerror`) rather than inferred, to
+    /// break the inferred-error-set cycle with `dispatchEnvelope`: every
+    /// error `dispatchEnvelope` can raise is caught per sub-message below,
+    /// so this function only ever surfaces its own params parse /
+    /// allocation failures.
+    fn handleBatch(self: *Dispatcher, alloc: std.mem.Allocator, outer_id: ?std.json.Value, params_value: codec.Params) anyerror!HandleResult {
+        const parsed = try codec.parseBatchMessages(alloc, params_value);
         defer parsed.deinit();
 
-        var arena_state = std.heap.ArenaAllocator.init(alloc);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
+        // Each sub-response stays as the body its handler encoded; the
+        // reply splices them in rather than decoding them back into a
+        // tree to re-encode (what made a 1000-request batch slow).
+        var responses: std.ArrayList([]u8) = .empty;
+        defer {
+            for (responses.items) |r| alloc.free(r);
+            responses.deinit(alloc);
+        }
 
-        var responses: std.ArrayList(std.json.Value) = .empty;
-
-        for (parsed.value.messages) |msg_value| {
-            const sub = std.json.parseFromValue(Envelope, alloc, msg_value, .{
-                .ignore_unknown_fields = true,
-            }) catch |err| {
+        for (parsed.value) |msg| {
+            const sub = codec.parseEnvelopeFrom(alloc, msg) catch |err| {
                 std.log.warn("glyphwire: batch sub-message parse failed: {t}", .{err});
                 continue;
             };
@@ -1953,22 +1976,20 @@ pub const Dispatcher = struct {
             }
 
             if (result.response) |resp| {
-                defer alloc.free(resp);
                 if (outer_id == null) {
+                    alloc.free(resp);
                     std.log.warn("glyphwire: response from batched '{s}' dropped (notification-form batch)", .{sub.value.method});
                     continue;
                 }
-                const v = std.json.parseFromSliceLeaky(std.json.Value, arena, resp, .{}) catch |err| {
-                    std.log.warn("glyphwire: re-parsing batched '{s}' response failed: {t}", .{ sub.value.method, err });
-                    continue;
+                responses.append(alloc, resp) catch |err| {
+                    alloc.free(resp);
+                    return err;
                 };
-                try responses.append(arena, v);
             }
         }
 
         const id = outer_id orelse return .{};
-        const BatchResult = struct { responses: []const std.json.Value };
-        return .{ .response = try rpc.response(alloc, id, BatchResult{ .responses = responses.items }) };
+        return .{ .response = try codec.batchResponse(self.format, alloc, id, responses.items) };
     }
 
     /// Handles a `load_image` / `update_image` request's JSON header once
@@ -1996,16 +2017,14 @@ pub const Dispatcher = struct {
                 std.log.warn("glyphwire: image sweep failed: {t}", .{err});
             };
         }
-        return try rpc.response(alloc, hdr.id, LoadImageResult{ .handle = image_handle });
+        return try self.respond(alloc, hdr.id, LoadImageResult{ .handle = image_handle });
     }
 
     /// `destroy_image`: releases a loaded image's bytes. A notification,
     /// like every other `destroy_*` — see `handleDestroyImage`'s
     /// registration below.
-    fn handleDestroyImage(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(ImageInfoParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDestroyImage(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(ImageInfoParams, alloc, params_value);
         defer parsed.deinit();
         try self.ctx.destroyImage(parsed.value.handle);
     }
@@ -2051,10 +2070,8 @@ pub const Dispatcher = struct {
         return id;
     }
 
-    fn handleWriteText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(WriteTextParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleWriteText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(WriteTextParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -2123,19 +2140,15 @@ pub const Dispatcher = struct {
         return .{};
     }
 
-    fn handleInsertCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(CellCountParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleInsertCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(CellCountParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         layer.insertCells(parsed.value.count);
     }
 
-    fn handleDeleteCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(CellCountParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDeleteCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(CellCountParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         layer.deleteCells(parsed.value.count);
@@ -2146,10 +2159,8 @@ pub const Dispatcher = struct {
     /// scrolled pane can scroll without retransmitting every visible row.
     /// A notification -- the shift is best-effort and batchable next to
     /// the follow-up redraw of the newly-exposed band.
-    fn handleMoveContent(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(MoveContentParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleMoveContent(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(MoveContentParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -2160,10 +2171,8 @@ pub const Dispatcher = struct {
         layer.moveContent(p.top, p.bot, p.count, dir);
     }
 
-    fn handleSetProperty(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(PropertyParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetProperty(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(PropertyParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2240,11 +2249,9 @@ pub const Dispatcher = struct {
         self: *Dispatcher,
         alloc: std.mem.Allocator,
         id: std.json.Value,
-        params_value: std.json.Value,
+        params_value: codec.Params,
     ) ![]u8 {
-        const parsed = try std.json.parseFromValue(PropertyParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(PropertyParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2262,7 +2269,7 @@ pub const Dispatcher = struct {
                 phases: []const core.ProfilePhase,
                 counters: []const core.ProfileCount,
             };
-            return try rpc.response(alloc, id, View{
+            return try self.respond(alloc, id, View{
                 .active = snap.active,
                 .fps = snap.fps,
                 .skips_per_sec = snap.skips_per_sec,
@@ -2275,13 +2282,13 @@ pub const Dispatcher = struct {
 
         if (std.mem.eql(u8, p.property, "cursor")) {
             const cursor = layer.getProperty(.cursor).cursor;
-            return try rpc.response(alloc, id, CursorResult{ .row = cursor.row, .col = cursor.col });
+            return try self.respond(alloc, id, CursorResult{ .row = cursor.row, .col = cursor.col });
         } else if (std.mem.eql(u8, p.property, "revision")) {
             const revision = layer.getProperty(.revision).revision;
-            return try rpc.response(alloc, id, RevisionResult{ .revision = revision });
+            return try self.respond(alloc, id, RevisionResult{ .revision = revision });
         } else if (std.mem.eql(u8, p.property, "position")) {
             const pos = layer.getProperty(.position).position;
-            return try rpc.response(alloc, id, PositionResult{ .x = pos.x, .y = pos.y });
+            return try self.respond(alloc, id, PositionResult{ .x = pos.x, .y = pos.y });
         } else if (std.mem.eql(u8, p.property, "cell_position")) {
             // Needs the session's cell metrics, so it goes through the
             // context rather than the resolved layer -- see
@@ -2289,17 +2296,17 @@ pub const Dispatcher = struct {
             const value = self.ctx.getLayerProperty(self.surfaceOr(p.layer), .cell_position) catch
                 return DispatchError.UnknownLayer;
             const cell = value.cell_position;
-            return try rpc.response(alloc, id, CellPositionResult{ .row = cell.row, .col = cell.col });
+            return try self.respond(alloc, id, CellPositionResult{ .row = cell.row, .col = cell.col });
         } else if (std.mem.eql(u8, p.property, "visibility")) {
             const visible = layer.getProperty(.visibility).visibility;
-            return try rpc.response(alloc, id, VisibilityResult{ .visible = visible });
+            return try self.respond(alloc, id, VisibilityResult{ .visible = visible });
         } else if (std.mem.eql(u8, p.property, "viewport")) {
             const vp = layer.getProperty(.viewport).viewport;
-            return try rpc.response(alloc, id, SizeResult{ .cols = vp.cols, .rows = vp.rows });
+            return try self.respond(alloc, id, SizeResult{ .cols = vp.cols, .rows = vp.rows });
         } else if (std.mem.eql(u8, p.property, "scroll_offset")) {
             const off = layer.getProperty(.scroll_offset).scroll_offset;
             const max = layer.maxScroll();
-            return try rpc.response(alloc, id, ScrollOffsetResult{
+            return try self.respond(alloc, id, ScrollOffsetResult{
                 .row = off.row,
                 .col = off.col,
                 .max_row = max.row,
@@ -2307,7 +2314,7 @@ pub const Dispatcher = struct {
             });
         } else if (std.mem.eql(u8, p.property, "scrollbars")) {
             const sb = layer.getProperty(.scrollbars).scrollbars;
-            return try rpc.response(alloc, id, ScrollbarsResult{
+            return try self.respond(alloc, id, ScrollbarsResult{
                 .vertical = sb.vertical,
                 .horizontal = sb.horizontal,
                 .row = sb.row,
@@ -2317,43 +2324,43 @@ pub const Dispatcher = struct {
             });
         } else if (std.mem.eql(u8, p.property, "size")) {
             const sz = layer.getProperty(.size).size;
-            return try rpc.response(alloc, id, SizeResult{ .cols = sz.cols, .rows = sz.rows });
+            return try self.respond(alloc, id, SizeResult{ .cols = sz.cols, .rows = sz.rows });
         } else if (std.mem.eql(u8, p.property, "content_extent")) {
             const ce = layer.getProperty(.content_extent).content_extent;
-            return try rpc.response(alloc, id, SizeResult{ .cols = ce.cols, .rows = ce.rows });
+            return try self.respond(alloc, id, SizeResult{ .cols = ce.cols, .rows = ce.rows });
         } else if (std.mem.eql(u8, p.property, "scroll")) {
             const sc = layer.getProperty(.scroll).scroll;
-            return try rpc.response(alloc, id, ScrollResult{ .offset = sc.offset, .max = sc.max });
+            return try self.respond(alloc, id, ScrollResult{ .offset = sc.offset, .max = sc.max });
         } else if (std.mem.eql(u8, p.property, "scroll_mode")) {
             const mode = layer.getProperty(.scroll_mode).scroll_mode;
-            return try rpc.response(alloc, id, ScrollModeResult{ .mode = @tagName(mode) });
+            return try self.respond(alloc, id, ScrollModeResult{ .mode = @tagName(mode) });
         } else if (std.mem.eql(u8, p.property, "background")) {
             const bg: ?protocol.Color = if (layer.getProperty(.background).background) |c|
                 colorToJson(c)
             else
                 null;
-            return try rpc.response(alloc, id, BackgroundResult{ .color = bg });
+            return try self.respond(alloc, id, BackgroundResult{ .color = bg });
         } else if (std.mem.eql(u8, p.property, "pty_mode")) {
             const on = layer.getProperty(.pty_mode).pty_mode;
-            return try rpc.response(alloc, id, PtyModeResult{ .enabled = on });
+            return try self.respond(alloc, id, PtyModeResult{ .enabled = on });
         } else if (std.mem.eql(u8, p.property, "mouse_select")) {
             const on = layer.getProperty(.mouse_select).mouse_select;
-            return try rpc.response(alloc, id, PtyModeResult{ .enabled = on });
+            return try self.respond(alloc, id, PtyModeResult{ .enabled = on });
         } else if (std.mem.eql(u8, p.property, "mouse_report")) {
             const on = layer.getProperty(.mouse_report).mouse_report;
-            return try rpc.response(alloc, id, PtyModeResult{ .enabled = on });
+            return try self.respond(alloc, id, PtyModeResult{ .enabled = on });
         } else if (std.mem.eql(u8, p.property, "opacity")) {
             const v = layer.getProperty(.opacity).opacity;
-            return try rpc.response(alloc, id, OpacityResult{ .value = v });
+            return try self.respond(alloc, id, OpacityResult{ .value = v });
         } else if (std.mem.eql(u8, p.property, "shadow")) {
             const sh: ?ShadowJson = if (layer.getProperty(.shadow).shadow) |v| ShadowJson.fromCore(v) else null;
-            return try rpc.response(alloc, id, ShadowResult{ .shadow = sh });
+            return try self.respond(alloc, id, ShadowResult{ .shadow = sh });
         } else if (std.mem.eql(u8, p.property, "selection_flow")) {
             const f = layer.getProperty(.selection_flow).selection_flow;
-            return try rpc.response(alloc, id, SelectionFlowResult{ .mode = @tagName(f.mode), .cols = f.column_cols, .col = f.origin_col });
+            return try self.respond(alloc, id, SelectionFlowResult{ .mode = @tagName(f.mode), .cols = f.column_cols, .col = f.origin_col });
         } else if (std.mem.eql(u8, p.property, "resize_edge")) {
             const e = layer.getProperty(.resize_edge).resize_edge;
-            return try rpc.response(alloc, id, ResizeEdgeResult{ .edge = @tagName(e) });
+            return try self.respond(alloc, id, ResizeEdgeResult{ .edge = @tagName(e) });
         }
         return DispatchError.UnknownProperty;
     }
@@ -2364,16 +2371,14 @@ pub const Dispatcher = struct {
     /// recorded as the layer's first owner, so the layer is culled if the
     /// connection later closes without destroying it (see
     /// `Context.removeConnectionOwnership`).
-    fn handleCreateLayer(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(CreateLayerParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleCreateLayer(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(CreateLayerParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
         const layer_handle = try self.ctx.createLayer(p.width, p.height, p.scrollback_rows);
         if (self.conn_id) |cid| self.ctx.addLayerOwner(layer_handle, cid) catch {};
-        return try rpc.response(alloc, id, CreateLayerResult{ .handle = layer_handle });
+        return try self.respond(alloc, id, CreateLayerResult{ .handle = layer_handle });
     }
 
     /// `destroy_layer`: frees a layer and drops it from compositing (see
@@ -2384,10 +2389,8 @@ pub const Dispatcher = struct {
     /// otherwise `DispatchError.LayerPermissionDenied`, which server.zig
     /// logs and drops without touching the layer. An in-process caller
     /// (`conn_id` null) bypasses the check.
-    fn handleDestroyLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(DestroyLayerParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDestroyLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(DestroyLayerParams, alloc, params_value);
         defer parsed.deinit();
         const layer_handle = parsed.value.layer;
         if (self.conn_id) |cid| {
@@ -2405,10 +2408,8 @@ pub const Dispatcher = struct {
     /// it. Errors `UnknownLayer` for an unknown or root handle. A no-op
     /// for an in-process caller (`conn_id` null) -- it owns nothing and
     /// needs no ownership to act.
-    fn handleAdoptLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(AdoptLayerParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleAdoptLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(AdoptLayerParams, alloc, params_value);
         defer parsed.deinit();
         if (self.conn_id) |cid| {
             self.ctx.addLayerOwner(parsed.value.layer, cid) catch return DispatchError.UnknownLayer;
@@ -2441,11 +2442,9 @@ pub const Dispatcher = struct {
     /// against the new context, not the shell's. The connection is
     /// recorded as first owner, so the context (and everything in it) is
     /// culled if the connection closes without `destroy_context`.
-    fn handleCreateContext(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
+    fn handleCreateContext(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try std.json.parseFromValue(CreateContextParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(CreateContextParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2463,7 +2462,7 @@ pub const Dispatcher = struct {
         if (p.title) |t| try self.ctx.setTitle(t);
 
         var result = try self.contextBroadcast(alloc);
-        result.response = try rpc.response(alloc, id, CreateContextResult{ .context = new_handle });
+        result.response = try self.respond(alloc, id, CreateContextResult{ .context = new_handle });
         return result;
     }
 
@@ -2475,11 +2474,9 @@ pub const Dispatcher = struct {
     /// otherwise, logged and dropped by server.zig). The root context
     /// reports `RootContextImmutable`. An in-process caller bypasses the
     /// check.
-    fn handleDestroyContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+    fn handleDestroyContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try std.json.parseFromValue(ContextHandleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(ContextHandleParams, alloc, params_value);
         defer parsed.deinit();
         const target = parsed.value.context;
 
@@ -2507,11 +2504,9 @@ pub const Dispatcher = struct {
     /// activating the root context, and un-backgrounds by activating its
     /// own handle again. `UnknownContext` for an unknown handle; a no-op
     /// if it's already visible.
-    fn handleActivateContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+    fn handleActivateContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try std.json.parseFromValue(ContextHandleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(ContextHandleParams, alloc, params_value);
         defer parsed.deinit();
         session.activateContext(parsed.value.context) catch return DispatchError.UnknownContext;
         return try self.contextBroadcast(alloc);
@@ -2527,11 +2522,9 @@ pub const Dispatcher = struct {
     /// `UnknownContext` for an unknown handle; ownership is untouched
     /// (attaching isn't adopting). A no-op for a sessionless dispatcher's
     /// caller other than the error.
-    fn handleAttachContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+    fn handleAttachContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try std.json.parseFromValue(ContextHandleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(ContextHandleParams, alloc, params_value);
         defer parsed.deinit();
         const target = parsed.value.context;
         self.ctx = session.contextPtr(target) orelse return DispatchError.UnknownContext;
@@ -2551,10 +2544,8 @@ pub const Dispatcher = struct {
     /// Null restores the context's root layer. `UnknownLayer` for a handle
     /// this context doesn't have, so a typo fails at the point of use
     /// rather than silently drawing somewhere else.
-    fn handleAttachLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetCaretLayerParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleAttachLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetCaretLayerParams, alloc, params_value);
         defer parsed.deinit();
         const target = parsed.value.layer orelse {
             self.surface = null;
@@ -2571,11 +2562,9 @@ pub const Dispatcher = struct {
     /// connection may then `destroy_context` it). `UnknownContext` for an
     /// unknown or root handle; a no-op for an in-process caller. The
     /// context-level mirror of `adopt_layer`.
-    fn handleAdoptContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+    fn handleAdoptContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try std.json.parseFromValue(ContextHandleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(ContextHandleParams, alloc, params_value);
         defer parsed.deinit();
         if (self.conn_id) |cid| {
             session.addContextOwner(parsed.value.context, cid) catch return DispatchError.UnknownContext;
@@ -2586,10 +2575,8 @@ pub const Dispatcher = struct {
     /// `core.Context.title`). Needs no ownership: naming what you are
     /// drawing on is not a privilege, and a shell names the root context
     /// it inherited this way.
-    fn handleSetContextTitle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetContextTitleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetContextTitle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetContextTitleParams, alloc, params_value);
         defer parsed.deinit();
         try self.ctx.setTitle(parsed.value.title);
     }
@@ -2598,10 +2585,8 @@ pub const Dispatcher = struct {
     /// (see `core.Context.theme`), or with neither `name` nor `theme`
     /// puts it back on the window's. Needs no ownership, like a title: a
     /// program colours what it draws.
-    fn handleSetTheme(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetThemeParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetTheme(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetThemeParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2623,7 +2608,7 @@ pub const Dispatcher = struct {
         const st = &self.ctx.theme;
         var slots: [core.theme.slot_count]protocol.Color = undefined;
         for (st.theme.slots, 0..) |c, i| slots[i] = colorToJson(c);
-        return try rpc.response(alloc, id, GetThemeResult{
+        return try self.respond(alloc, id, GetThemeResult{
             .name = st.name(),
             .dark = st.theme.dark,
             .panel_style = st.panelStyle(),
@@ -2647,7 +2632,7 @@ pub const Dispatcher = struct {
             const ctx = session.contextPtr(h).?;
             e.* = .{ .context = h, .title = ctx.title.items, .visible = i == 0 };
         }
-        return try rpc.response(alloc, id, protocol.ListContextsResult{
+        return try self.respond(alloc, id, protocol.ListContextsResult{
             .current = self.active_ctx,
             .contexts = entries,
         });
@@ -2674,20 +2659,18 @@ pub const Dispatcher = struct {
     /// Answers `{granted}` rather than failing, so a client can fall back
     /// gracefully (a second `gmux` in the same window tells the user
     /// there's already one, instead of dying on a wire error).
-    fn handleRequestRole(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+    fn handleRequestRole(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try std.json.parseFromValue(RequestRoleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(RequestRoleParams, alloc, params_value);
         defer parsed.deinit();
         if (!std.mem.eql(u8, parsed.value.role, "window_manager")) return DispatchError.UnknownRole;
         // An in-process caller already has every privilege and needs no
         // registration; report success without taking the slot away from a
         // real client.
         const cid = self.conn_id orelse
-            return try rpc.response(alloc, id, RequestRoleResult{ .granted = true });
+            return try self.respond(alloc, id, RequestRoleResult{ .granted = true });
         const token = session.claimManager(cid, parsed.value.token orelse 0);
-        return try rpc.response(alloc, id, RequestRoleResult{
+        return try self.respond(alloc, id, RequestRoleResult{
             .granted = token != null,
             .token = token,
         });
@@ -2701,11 +2684,9 @@ pub const Dispatcher = struct {
     /// running, so it has nowhere to read a response -- the same reason
     /// `attach_context` is a notification. It needs no answer: the caller
     /// already has the token, and a bad one simply grants nothing.
-    fn handleJoinRole(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+    fn handleJoinRole(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try std.json.parseFromValue(RequestRoleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(RequestRoleParams, alloc, params_value);
         defer parsed.deinit();
         if (!std.mem.eql(u8, parsed.value.role, "window_manager")) return DispatchError.UnknownRole;
         const cid = self.conn_id orelse return;
@@ -2720,11 +2701,9 @@ pub const Dispatcher = struct {
     /// Needs no role: declaring where you live is not a privilege, and a
     /// program can only ever be pointed at its own pane by the manager
     /// that spawned it.
-    fn handleAttachPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+    fn handleAttachPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try std.json.parseFromValue(AttachPaneParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(AttachPaneParams, alloc, params_value);
         defer parsed.deinit();
         const target = parsed.value.pane;
         const pane = session.panePtr(target) orelse return DispatchError.UnknownPane;
@@ -2737,16 +2716,14 @@ pub const Dispatcher = struct {
     /// not on screen yet -- the manager places it by editing the tree,
     /// which is one `set_pane_split_children` away and keeps creation and
     /// placement separately undoable.
-    fn handleCreatePane(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
+    fn handleCreatePane(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try std.json.parseFromValue(CreatePaneParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(CreatePaneParams, alloc, params_value);
         defer parsed.deinit();
 
         const made = try session.createPane(self.conn_id orelse 0, parsed.value.scrollback_rows);
         return .{
-            .response = try rpc.response(alloc, id, CreatePaneResult{
+            .response = try self.respond(alloc, id, CreatePaneResult{
                 .pane = made.pane,
                 .context = made.context,
             }),
@@ -2758,11 +2735,9 @@ pub const Dispatcher = struct {
     /// the pane and every context in it. The program is killed first, so
     /// it never gets a chance to draw onto a context that is about to be
     /// freed underneath it.
-    fn handleDestroyPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+    fn handleDestroyPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try std.json.parseFromValue(PaneHandleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(PaneHandleParams, alloc, params_value);
         defer parsed.deinit();
         const target = parsed.value.pane;
 
@@ -2784,43 +2759,35 @@ pub const Dispatcher = struct {
     /// `focus_pane`: which pane raw input goes to. An unmapped pane (one
     /// not currently placed in the tree) reports `UnknownPane` rather than
     /// swallowing every subsequent keystroke into something invisible.
-    fn handleFocusPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+    fn handleFocusPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try std.json.parseFromValue(PaneHandleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(PaneHandleParams, alloc, params_value);
         defer parsed.deinit();
         session.focusPane(parsed.value.pane) catch return DispatchError.UnknownPane;
         return try self.contextBroadcast(alloc);
     }
 
-    fn handleCreatePaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+    fn handleCreatePaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const session = try self.requireManager();
-        const parsed = try std.json.parseFromValue(CreatePaneSplitParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(CreatePaneSplitParams, alloc, params_value);
         defer parsed.deinit();
         const axis = std.meta.stringToEnum(core.SplitAxis, parsed.value.axis) orelse
             return DispatchError.InvalidSplitAxis;
         const split_handle = try session.createPaneSplit(axis, parsed.value.resizable);
-        return try rpc.response(alloc, id, CreatePaneSplitResult{ .split = split_handle });
+        return try self.respond(alloc, id, CreatePaneSplitResult{ .split = split_handle });
     }
 
-    fn handleDestroyPaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+    fn handleDestroyPaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try std.json.parseFromValue(PaneSplitHandleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(PaneSplitHandleParams, alloc, params_value);
         defer parsed.deinit();
         session.destroyPaneSplit(parsed.value.split) catch return DispatchError.UnknownPaneSplit;
         return .{ .panes_changed = true };
     }
 
-    fn handleSetPaneSplitChildren(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+    fn handleSetPaneSplitChildren(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try std.json.parseFromValue(SetPaneSplitChildrenParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(SetPaneSplitChildrenParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2853,21 +2820,17 @@ pub const Dispatcher = struct {
         return .{ .panes_changed = true };
     }
 
-    fn handleSetRootPaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+    fn handleSetRootPaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try std.json.parseFromValue(SetRootPaneSplitParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(SetRootPaneSplitParams, alloc, params_value);
         defer parsed.deinit();
         session.setRootPaneSplit(parsed.value.split) catch return DispatchError.UnknownPaneSplit;
         return .{ .panes_changed = true };
     }
 
-    fn handleMovePaneDivider(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
+    fn handleMovePaneDivider(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try std.json.parseFromValue(MovePaneDividerParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(MovePaneDividerParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         session.movePaneDivider(p.split, p.index, p.delta) catch return DispatchError.UnknownPaneSplit;
@@ -2885,12 +2848,10 @@ pub const Dispatcher = struct {
     /// output should land. A manager that forked children itself would
     /// have to reconstruct all of that, and would be the only thing able
     /// to reap them -- which is what makes detach/reattach impossible.
-    fn handleSpawnInPane(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+    fn handleSpawnInPane(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const session = try self.requireManager();
         const spawner = self.spawner orelse return DispatchError.SpawnUnsupported;
-        const parsed = try std.json.parseFromValue(SpawnInPaneParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(SpawnInPaneParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         if (p.argv.len == 0) return DispatchError.SpawnFailed;
@@ -2902,7 +2863,7 @@ pub const Dispatcher = struct {
 
         const pid = spawner.spawn(p.pane, base, p.argv, cols, rows) catch
             return DispatchError.SpawnFailed;
-        return try rpc.response(alloc, id, SpawnInPaneResult{ .pid = pid });
+        return try self.respond(alloc, id, SpawnInPaneResult{ .pid = pid });
     }
 
     /// `start_remote`: brings up an `ssh` trunk whose remote clients draw
@@ -2921,28 +2882,24 @@ pub const Dispatcher = struct {
     /// pane and comes back the moment the session ends -- the shell that
     /// ran `gwssh` is still sitting there, the way it sits behind `ssh` in
     /// an ordinary terminal.
-    fn handleStartRemote(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
+    fn handleStartRemote(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const starter = self.remote_starter orelse return DispatchError.RemoteUnsupported;
-        const parsed = try std.json.parseFromValue(StartRemoteParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(StartRemoteParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         if (p.dest.len == 0) return DispatchError.RemoteStartFailed;
 
         const session = starter.start(p.dest, p.ssh_args, p.remote_command, self.active_pane, self.active_ctx) catch
             return DispatchError.RemoteStartFailed;
-        return try rpc.response(alloc, id, StartRemoteResult{ .session = session });
+        return try self.respond(alloc, id, StartRemoteResult{ .session = session });
     }
 
     /// `stop_remote`: ends a session `start_remote` returned. Deliberately
     /// forgiving about an unknown id -- the caller is racing the
     /// `remote_exit` notification every time it cancels one.
-    fn handleStopRemote(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+    fn handleStopRemote(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const starter = self.remote_starter orelse return DispatchError.RemoteUnsupported;
-        const parsed = try std.json.parseFromValue(StopRemoteParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(StopRemoteParams, alloc, params_value);
         defer parsed.deinit();
         starter.stop(parsed.value.session);
     }
@@ -2954,11 +2911,9 @@ pub const Dispatcher = struct {
     /// for why that distinction is the whole point. A manager therefore
     /// receives *only* its own commands (`window_key_*` / `window_text`) and
     /// never sees a program's keystrokes at all.
-    fn handleSetWindowPrefix(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
+    fn handleSetWindowPrefix(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = try self.requireManager();
-        const parsed = try std.json.parseFromValue(SetWindowPrefixParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try codec.parseParams(SetWindowPrefixParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2980,10 +2935,8 @@ pub const Dispatcher = struct {
     /// else, so the host picks it up on its next repaint
     /// (`host/redraw.zig` folds the flag into the change-detection
     /// fingerprint).
-    fn handleSetWindowScrollbar(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetWindowScrollbarParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetWindowScrollbar(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetWindowScrollbarParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.window_scrollbar = parsed.value.visible;
     }
@@ -2994,10 +2947,8 @@ pub const Dispatcher = struct {
     /// An unknown or root handle reports `UnknownLayer` and leaves the
     /// setting as it was. Changes nothing else; the host picks it up on
     /// its next repaint (`host/redraw.zig` folds it into the fingerprint).
-    fn handleSetCaretLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetCaretLayerParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetCaretLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetCaretLayerParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.setCaretLayer(parsed.value.layer) catch |err| return switch (err) {
             error.UnknownLayer => DispatchError.UnknownLayer,
@@ -3008,10 +2959,8 @@ pub const Dispatcher = struct {
     /// connection's active context (see `core.Context.caret_visible`),
     /// whichever layer it tracks. The host picks it up on its next repaint
     /// (`host/redraw.zig` folds the flag into the fingerprint).
-    fn handleSetCaretVisible(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetCaretVisibleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetCaretVisible(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetCaretVisibleParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.caret_visible = parsed.value.visible;
     }
@@ -3020,10 +2969,8 @@ pub const Dispatcher = struct {
     /// connection's caret in (see `core.Context.caret_shape`), or `null`
     /// to go back to the shape `host.conf.lua` configured. An unknown
     /// shape name fails to parse like any other bad param.
-    fn handleSetCaretShape(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetCaretShapeParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetCaretShape(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetCaretShapeParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.caret_shape = parsed.value.shape;
     }
@@ -3039,10 +2986,8 @@ pub const Dispatcher = struct {
     /// the current override, or from `core.KeyRepeat`'s defaults when
     /// there is none. Changes nothing else: the host reads the focused
     /// context's value on its next tick and hands it to the engine.
-    fn handleSetKeyRepeat(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetKeyRepeatParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetKeyRepeat(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetKeyRepeatParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3081,10 +3026,8 @@ pub const Dispatcher = struct {
         return .{ .broadcast = .{ .event = "layout", .body = body } };
     }
 
-    fn handleCreateSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(CreateSplitParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleCreateSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(CreateSplitParams, alloc, params_value);
         defer parsed.deinit();
 
         const axis = std.meta.stringToEnum(core.SplitAxis, parsed.value.axis) orelse
@@ -3094,22 +3037,18 @@ pub const Dispatcher = struct {
         // and test call sites untouched) -- set it here, before the split
         // has children or a layout.
         if (self.ctx.splits.getPtr(split_handle)) |s| s.resizable = parsed.value.resizable;
-        return try rpc.response(alloc, id, CreateSplitResult{ .handle = split_handle });
+        return try self.respond(alloc, id, CreateSplitResult{ .handle = split_handle });
     }
 
-    fn handleDestroySplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(DestroySplitParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDestroySplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(DestroySplitParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.destroySplit(parsed.value.split) catch return DispatchError.UnknownSplit;
         return try self.relayout(alloc);
     }
 
-    fn handleSetSplitChildren(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(SetSplitChildrenParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetSplitChildren(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(SetSplitChildrenParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3143,19 +3082,15 @@ pub const Dispatcher = struct {
         return try self.relayout(alloc);
     }
 
-    fn handleSetRootSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(SetRootSplitParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetRootSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(SetRootSplitParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.setRootSplit(parsed.value.split) catch return DispatchError.UnknownSplit;
         return try self.relayout(alloc);
     }
 
-    fn handleMoveDivider(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(MoveDividerParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleMoveDivider(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(MoveDividerParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.moveDivider(p.split, p.index, p.delta) catch return DispatchError.UnknownSplit;
@@ -3166,10 +3101,8 @@ pub const Dispatcher = struct {
     /// order (see `Context.raiseLayer`). The root layer is always the
     /// bottom of the stack and isn't in the order at all, so naming it as
     /// `layer` or `above` reports `UnknownLayer`.
-    fn handleRaiseLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(RaiseLayerParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleRaiseLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(RaiseLayerParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.raiseLayer(parsed.value.layer, parsed.value.above) catch
             return DispatchError.UnknownLayer;
@@ -3177,10 +3110,8 @@ pub const Dispatcher = struct {
 
     /// `lower_layer`: the mirror of `raise_layer` (see
     /// `Context.lowerLayer`).
-    fn handleLowerLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(LowerLayerParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleLowerLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(LowerLayerParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.lowerLayer(parsed.value.layer, parsed.value.below) catch
             return DispatchError.UnknownLayer;
@@ -3190,14 +3121,12 @@ pub const Dispatcher = struct {
     /// -- the server never parses it, just stores/returns it) and returns a
     /// fresh handle a later `write_text`/`draw_icon`/`destroy_metadata` can
     /// reference.
-    fn handleCreateMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(CreateMetadataParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleCreateMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(CreateMetadataParams, alloc, params_value);
         defer parsed.deinit();
 
         const metadata_handle = try self.ctx.createMetadata(parsed.value.json);
-        return try rpc.response(alloc, id, CreateMetadataResult{ .handle = metadata_handle });
+        return try self.respond(alloc, id, CreateMetadataResult{ .handle = metadata_handle });
     }
 
     /// `destroy_metadata`: frees `id`'s stored JSON (see
@@ -3205,10 +3134,8 @@ pub const Dispatcher = struct {
     /// with `id` afterward isn't this call's problem -- there's no
     /// reference counting yet). Errors on an unknown id, same treatment
     /// `destroy_layer` gives an unknown layer handle.
-    fn handleDestroyMetadata(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(DestroyMetadataParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDestroyMetadata(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(DestroyMetadataParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.destroyMetadata(parsed.value.id) catch return DispatchError.UnknownMetadata;
     }
@@ -3220,10 +3147,8 @@ pub const Dispatcher = struct {
     /// `col` are required rather than cursor-defaulted: this is a targeted
     /// lookup (e.g. resolving whatever cell a mouse click landed on), not
     /// a draw at "wherever the cursor currently is".
-    fn handleGetMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(GetMetadataParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleGetMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(GetMetadataParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3237,7 +3162,7 @@ pub const Dispatcher = struct {
             null;
         const json = if (metadata_id) |m| self.ctx.metadataJson(m) else null;
 
-        return try rpc.response(alloc, id, GetMetadataResult{ .id = metadata_id, .json = json });
+        return try self.respond(alloc, id, GetMetadataResult{ .id = metadata_id, .json = json });
     }
 
     /// `find_metadata`: from the content cell `(above, col)`, reports the
@@ -3246,10 +3171,8 @@ pub const Dispatcher = struct {
     /// Ctrl+PgUp / Ctrl+PgDn scrollback-span navigation is the caller; the
     /// walk runs server-side so it never has to `get_cells` the grid to
     /// find spans itself (decisions.md, Metadata).
-    fn handleFindMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(FindMetadataParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleFindMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(FindMetadataParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3263,17 +3186,15 @@ pub const Dispatcher = struct {
             .{ .found = true, .above = hit.above, .col = hit.col, .id = hit.id }
         else
             .{ .found = false };
-        return try rpc.response(alloc, id, result);
+        return try self.respond(alloc, id, result);
     }
 
     /// Returns a full row-major snapshot of the given layer's (default:
     /// root's) visible viewport, plus its current revision -- the
     /// read-back path decisions.md flagged as not yet exposed over the
     /// wire.
-    fn handleGetCells(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(GetCellsParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleGetCells(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(GetCellsParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         const view_offset = parsed.value.view_offset;
@@ -3346,7 +3267,7 @@ pub const Dispatcher = struct {
             }
         }
 
-        return try rpc.response(alloc, id, protocol.CellsResult{
+        return try self.respond(alloc, id, protocol.CellsResult{
             .cols = layer.width,
             .rows = layer.height,
             .revision = layer.revision,
@@ -3362,16 +3283,14 @@ pub const Dispatcher = struct {
     /// and glyphwire-host, which owns the field directly, just reads it
     /// next frame. A request, unlike the host-internal `Server.reportScroll`
     /// path the mouse wheel/scrollbar use.
-    fn handleScrollView(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(ScrollViewParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleScrollView(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(ScrollViewParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
         const new_offset = layer.scrollView(p.offset, p.delta);
 
-        const resp_body = try rpc.response(alloc, id, ScrollResult{ .offset = new_offset, .max = layer.history_len });
+        const resp_body = try self.respond(alloc, id, ScrollResult{ .offset = new_offset, .max = layer.history_len });
         errdefer alloc.free(resp_body);
 
         // Null for the root layer's scrollback, a handle for a non-root
@@ -3406,10 +3325,8 @@ pub const Dispatcher = struct {
     /// the authoritative down-set and, if the key's state actually
     /// changed, returns a `key_down`/`key_up` broadcast for other
     /// connections subscribed to `"key"`.
-    fn handleReportKey(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(ReportKeyParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleReportKey(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(ReportKeyParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3445,10 +3362,8 @@ pub const Dispatcher = struct {
     /// down-set to update -- text is transient -- so this only fans a
     /// `text` broadcast out to `"text"` subscribers. An empty string is
     /// dropped.
-    fn handleReportText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(ReportTextParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleReportText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(ReportTextParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3466,10 +3381,8 @@ pub const Dispatcher = struct {
         return .{ .broadcast = .{ .event = "text", .body = notif_body } };
     }
 
-    fn handleReportMouseButton(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(ReportMouseButtonParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleReportMouseButton(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(ReportMouseButtonParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3487,10 +3400,8 @@ pub const Dispatcher = struct {
     /// notification to `"mouse_move"` subscribers. Per-pixel motion
     /// within one cell is dropped (the host already coalesces most of it,
     /// and an xterm mouse report is cell-granular anyway).
-    fn handleReportMouseMove(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(ReportMouseMoveParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleReportMouseMove(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(ReportMouseMoveParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3504,10 +3415,8 @@ pub const Dispatcher = struct {
         return .{ .broadcast = .{ .event = "mouse_move", .body = notif_body } };
     }
 
-    fn handleSubscribe(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(SubscribeParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSubscribe(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(SubscribeParams, alloc, params_value);
         defer parsed.deinit();
         self.subscriptions = Subscriptions.setFromEvents(parsed.value.events);
 
@@ -3526,7 +3435,7 @@ pub const Dispatcher = struct {
             }
         }
 
-        return try rpc.response(alloc, id, SubscribeResult{ .subscribed = parsed.value.events });
+        return try self.respond(alloc, id, SubscribeResult{ .subscribed = parsed.value.events });
     }
 
     fn handleGetInputState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
@@ -3541,7 +3450,7 @@ pub const Dispatcher = struct {
             while (bit.next()) |k| try buttons.append(alloc, k.*);
         }
 
-        return try rpc.response(alloc, id, protocol.InputStateResult{
+        return try self.respond(alloc, id, protocol.InputStateResult{
             .keys_down = keys.items,
             .mouse_buttons_down = buttons.items,
             .cursor_px = .{ .x = self.ctx.pointer.cursor_px.x, .y = self.ctx.pointer.cursor_px.y },
@@ -3549,14 +3458,12 @@ pub const Dispatcher = struct {
         });
     }
 
-    fn handleGetImageInfo(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(ImageInfoParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleGetImageInfo(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(ImageInfoParams, alloc, params_value);
         defer parsed.deinit();
 
         const info = self.ctx.imageInfo(parsed.value.handle) orelse return DispatchError.UnknownImage;
-        return try rpc.response(alloc, id, ImageInfoResult{ .width = info.width, .height = info.height });
+        return try self.respond(alloc, id, ImageInfoResult{ .width = info.width, .height = info.height });
     }
 
     /// Resolves an optional `row`/`col` pair against `layer`'s current
@@ -3570,10 +3477,8 @@ pub const Dispatcher = struct {
         return .{ .row = row orelse layer.cursor.row, .col = col orelse layer.cursor.col };
     }
 
-    fn handleDrawImage(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(DrawImageParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDrawImage(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(DrawImageParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3602,10 +3507,8 @@ pub const Dispatcher = struct {
     /// `Layer.drawIcon` just needs the handle -- no dimensions/cell
     /// metrics to look up, unlike `handleDrawImage`, since an icon always
     /// scales the whole source image into the whole cell.
-    fn handleDrawIcon(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(DrawIconParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDrawIcon(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(DrawIconParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3632,10 +3535,8 @@ pub const Dispatcher = struct {
     /// -- see `Layer.tagMetadata`'s doc comment. `metadata_id` is
     /// validated the same way `write_text`/`draw_icon`'s is
     /// (`resolveMetadata`), erroring `UnknownMetadata` on a bad handle.
-    fn handleTagMetadata(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(TagMetadataParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleTagMetadata(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(TagMetadataParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3647,10 +3548,8 @@ pub const Dispatcher = struct {
     /// cells to blank. `rows`/`cols` default to "the rest of the layer
     /// from `row`/`col`" (clamped to 0 if `row`/`col` is already past the
     /// edge), so an all-defaulted `clear()` wipes everything.
-    fn handleClear(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(ClearParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleClear(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(ClearParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3664,10 +3563,8 @@ pub const Dispatcher = struct {
     /// `set_bg`: `clear`'s region with only the background repainted, so
     /// moving a highlight costs a message instead of a row of text. Same
     /// region defaulting `handleClear` does.
-    fn handleSetBg(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetBgParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetBg(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetBgParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3678,10 +3575,8 @@ pub const Dispatcher = struct {
     }
 
     /// `set_fg`: `set_bg` for the text colour -- see `core.Layer.fillFg`.
-    fn handleSetFg(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetFgParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetFg(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetFgParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3696,10 +3591,8 @@ pub const Dispatcher = struct {
     /// colours are under it. See `core.Layer.fillUnderline` for why an
     /// editor needs this rather than threading the underline through every
     /// write that touches the row.
-    fn handleSetUnderline(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(SetUnderlineParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetUnderline(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetUnderlineParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3717,7 +3610,7 @@ pub const Dispatcher = struct {
     /// `Context.cell_px_w`/`cell_px_h` and glyphwire-host's matching
     /// constants.
     fn handleGetCellMetrics(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
-        return try rpc.response(alloc, id, CellMetricsResult{
+        return try self.respond(alloc, id, CellMetricsResult{
             .cell_px_w = self.ctx.cell_px_w,
             .cell_px_h = self.ctx.cell_px_h,
         });
@@ -3746,10 +3639,8 @@ pub const Dispatcher = struct {
     /// omitted) at the resolved anchor (cursor-defaulted, same convention
     /// `draw_icon` already uses). No rows yet -- nothing to
     /// paint until `table_set_rows`.
-    fn handleCreateTable(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(CreateTableParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleCreateTable(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(CreateTableParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3780,15 +3671,13 @@ pub const Dispatcher = struct {
         const style = try resolveTableStyle(talloc, p.style);
         const table_handle = try self.ctx.createTable(self.surfaceOr(p.layer), anchor.row, anchor.col, columns, style);
 
-        return try rpc.response(alloc, id, CreateTableResult{ .handle = table_handle });
+        return try self.respond(alloc, id, CreateTableResult{ .handle = table_handle });
     }
 
     /// `destroy_table`: blanks the table's painted region and frees it
     /// (`Context.destroyTable`).
-    fn handleDestroyTable(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(DestroyTableParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDestroyTable(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(DestroyTableParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.destroyTable(self.surfaceOr(p.layer), p.table) catch |err| switch (err) {
@@ -3814,10 +3703,8 @@ pub const Dispatcher = struct {
         };
     }
 
-    fn handleCreateOutline(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(CreateOutlineParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleCreateOutline(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(CreateOutlineParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3828,13 +3715,11 @@ pub const Dispatcher = struct {
         errdefer style.deinit(self.ctx.alloc);
         const outline_handle = try self.ctx.createOutline(self.surfaceOr(p.layer), anchor.row, anchor.col, width, style);
 
-        return try rpc.response(alloc, id, CreateOutlineResult{ .handle = outline_handle });
+        return try self.respond(alloc, id, CreateOutlineResult{ .handle = outline_handle });
     }
 
-    fn handleDestroyOutline(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(DestroyOutlineParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDestroyOutline(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(DestroyOutlineParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.destroyOutline(self.surfaceOr(p.layer), p.outline) catch |err| switch (err) {
@@ -3885,10 +3770,8 @@ pub const Dispatcher = struct {
     /// `outline_set_nodes`: replaces the node list wholesale and draws
     /// fresh at the anchor, scrolling the layer terminal-style -- the
     /// `render` path, same as `table_set_rows`.
-    fn handleOutlineSetNodes(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(OutlineSetNodesParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleOutlineSetNodes(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(OutlineSetNodesParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3903,10 +3786,8 @@ pub const Dispatcher = struct {
     /// layer around the outline (`core.Layer.reflowAt`) and redraws it --
     /// see `core.Outline.setNodeCollapsed` for why this can't be the
     /// in-place repaint a table re-sort gets.
-    fn handleOutlineSetCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(OutlineSetCollapsedParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleOutlineSetCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(OutlineSetCollapsedParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3943,10 +3824,8 @@ pub const Dispatcher = struct {
     /// `outline_set_all_collapsed`: one reflow and one repaint for the
     /// whole list, rather than the N a client would pay sending one
     /// `outline_set_collapsed` per node.
-    fn handleOutlineSetAllCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(OutlineSetAllCollapsedParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleOutlineSetAllCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(OutlineSetAllCollapsedParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3956,10 +3835,8 @@ pub const Dispatcher = struct {
         return self.outlineViewFollow(alloc, p.layer, layer, outline, null);
     }
 
-    fn handleOutlineSetStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(OutlineSetStyleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleOutlineSetStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(OutlineSetStyleParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3974,10 +3851,8 @@ pub const Dispatcher = struct {
     /// are already readable through the layer's `get_cells`, exactly as
     /// for a table. `visible` per node saves a client re-deriving the
     /// collapse walk to find out what is actually on screen.
-    fn handleOutlineGetState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(OutlineGetStateParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleOutlineGetState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(OutlineGetStateParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3996,7 +3871,7 @@ pub const Dispatcher = struct {
         var it = outline.visibleIter();
         while (it.next()) |v| nodes[v.index].visible = true;
 
-        return try rpc.response(alloc, id, protocol.OutlineStateResult{
+        return try self.respond(alloc, id, protocol.OutlineStateResult{
             .nodes = nodes,
             .node_count = outline.nodes.len,
             .visible_rows = outline.visibleRows(),
@@ -4017,10 +3892,8 @@ pub const Dispatcher = struct {
         });
     }
 
-    fn handleCreateRect(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(CreateRectParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleCreateRect(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(CreateRectParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const rect_handle = self.ctx.createRect(self.surfaceOr(p.layer), .{
@@ -4035,13 +3908,11 @@ pub const Dispatcher = struct {
             error.UnknownLayer => return DispatchError.UnknownLayer,
             else => |e| return e,
         };
-        return .{ .response = try rpc.response(alloc, id, CreateRectResult{ .handle = rect_handle }) };
+        return .{ .response = try self.respond(alloc, id, CreateRectResult{ .handle = rect_handle }) };
     }
 
-    fn handleUpdateRect(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(UpdateRectParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleUpdateRect(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(UpdateRectParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.updateRect(self.surfaceOr(p.layer), p.rect, .{
@@ -4058,10 +3929,8 @@ pub const Dispatcher = struct {
         };
     }
 
-    fn handleDestroyRect(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(DestroyRectParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDestroyRect(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(DestroyRectParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.destroyRect(self.surfaceOr(p.layer), p.rect) catch |err| switch (err) {
@@ -4070,10 +3939,8 @@ pub const Dispatcher = struct {
         };
     }
 
-    fn handleCreateNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(CreateNinePatchParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleCreateNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(CreateNinePatchParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const style = self.ctx.ninePatchStyle(p.style) orelse return DispatchError.UnknownNinePatchStyle;
@@ -4087,13 +3954,11 @@ pub const Dispatcher = struct {
             error.UnknownLayer => return DispatchError.UnknownLayer,
             else => |e| return e,
         };
-        return .{ .response = try rpc.response(alloc, id, CreateNinePatchResult{ .handle = np_handle }) };
+        return .{ .response = try self.respond(alloc, id, CreateNinePatchResult{ .handle = np_handle }) };
     }
 
-    fn handleUpdateNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(UpdateNinePatchParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleUpdateNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(UpdateNinePatchParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const style: ?core.NinePatchStyle = if (p.style) |name|
@@ -4112,10 +3977,8 @@ pub const Dispatcher = struct {
         };
     }
 
-    fn handleDestroyNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(DestroyNinePatchParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleDestroyNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(DestroyNinePatchParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.destroyNinePatch(self.surfaceOr(p.layer), p.nine_patch) catch |err| switch (err) {
@@ -4198,10 +4061,8 @@ pub const Dispatcher = struct {
     /// current sort state, and repaints (`Table.render`) -- see
     /// core.zig's Table section on why this needs no host/main.zig
     /// changes to actually show up.
-    fn handleTableSetRows(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(TableSetRowsParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleTableSetRows(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(TableSetRowsParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -4219,10 +4080,8 @@ pub const Dispatcher = struct {
     /// `core.Table.sortedIndices`. Repaints immediately, same as
     /// `table_set_rows` -- this is the message a future sort-aware
     /// `glyphwire-shell` click handler would call.
-    fn handleTableSetSort(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(TableSetSortParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleTableSetSort(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(TableSetSortParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -4241,10 +4100,8 @@ pub const Dispatcher = struct {
 
     /// `table_set_style`: replaces the table's whole style (e.g. toggling
     /// `alt_row_bg` on/off) and repaints.
-    fn handleTableSetStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(TableSetStyleParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleTableSetStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(TableSetStyleParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -4262,10 +4119,8 @@ pub const Dispatcher = struct {
     /// section), so there's no separate "get rendered table" message.
     /// For a future client that needs to know e.g. which columns are
     /// sortable before deciding what a header click should do.
-    fn handleTableGetState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(TableGetStateParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleTableGetState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(TableGetStateParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -4287,7 +4142,7 @@ pub const Dispatcher = struct {
             };
         }
 
-        return try rpc.response(alloc, id, protocol.TableStateResult{
+        return try self.respond(alloc, id, protocol.TableStateResult{
             .columns = columns,
             .row_count = table.rows.len,
             .sort_column = table.sort_column,
@@ -4326,40 +4181,32 @@ pub const Dispatcher = struct {
         return .{ .broadcast = .{ .event = "selection", .body = body } };
     }
 
-    fn handleSetSelection(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(protocol.SetSelectionParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetSelection(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(protocol.SetSelectionParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         layer.setSelection(pointFromWire(parsed.value.anchor), pointFromWire(parsed.value.active));
         return selectionBroadcast(alloc, layer);
     }
 
-    fn handleUpdateSelection(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(protocol.UpdateSelectionParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleUpdateSelection(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(protocol.UpdateSelectionParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         layer.updateSelectionActive(pointFromWire(parsed.value.active));
         return selectionBroadcast(alloc, layer);
     }
 
-    fn handleClearSelection(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(protocol.LayerOnlyParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleClearSelection(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(protocol.LayerOnlyParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         layer.clearSelection();
         return selectionBroadcast(alloc, layer);
     }
 
-    fn handleGetSelection(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(protocol.LayerOnlyParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleGetSelection(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(protocol.LayerOnlyParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         const state: protocol.SelectionState = if (layer.selection) |s| .{
@@ -4367,18 +4214,16 @@ pub const Dispatcher = struct {
             .anchor = .{ .above = s.anchor.above, .col = s.anchor.col },
             .active_end = .{ .above = s.active.above, .col = s.active.col },
         } else .{ .active = false };
-        return try rpc.response(alloc, id, state);
+        return try self.respond(alloc, id, state);
     }
 
-    fn handleGetSelectionText(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(protocol.LayerOnlyParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleGetSelectionText(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(protocol.LayerOnlyParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         const text = (try layer.selectionText(alloc)) orelse try alloc.dupe(u8, "");
         defer alloc.free(text);
-        return try rpc.response(alloc, id, protocol.SelectionTextResult{ .text = text });
+        return try self.respond(alloc, id, protocol.SelectionTextResult{ .text = text });
     }
 
     /// Builds the `HighlightState` response for `layer`: every currently
@@ -4388,13 +4233,11 @@ pub const Dispatcher = struct {
         const entries = try alloc.alloc(protocol.HighlightEntry, ids.len);
         defer alloc.free(entries);
         for (ids, entries) |mid, *e| e.* = .{ .id = mid, .json = self.ctx.metadataJson(mid) };
-        return try rpc.response(alloc, id, protocol.HighlightState{ .entries = entries });
+        return try self.respond(alloc, id, protocol.HighlightState{ .entries = entries });
     }
 
-    fn handleToggleHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(protocol.ToggleHighlightParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleToggleHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(protocol.ToggleHighlightParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -4421,10 +4264,8 @@ pub const Dispatcher = struct {
     /// `scroll` broadcast as `outline_set_collapsed`). Reports which, or
     /// `"none"` so the caller can fall back to its own action. Server-side
     /// so glyphwire-shell never scans the grid to find a header or node.
-    fn handleActivateAt(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) !HandleResult {
-        const parsed = try std.json.parseFromValue(protocol.ActivateAtParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleActivateAt(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(protocol.ActivateAtParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -4432,7 +4273,7 @@ pub const Dispatcher = struct {
         if (layer.sortableHeaderAt(p.row, p.col, p.view_offset)) |hit| {
             hit.table.cycleSortOnColumn(hit.col);
             try hit.table.repaint(layer, self.ctx);
-            return .{ .response = try rpc.response(alloc, id, protocol.ActivateAtResult{
+            return .{ .response = try self.respond(alloc, id, protocol.ActivateAtResult{
                 .action = "sorted",
                 .offset = layer.view_scroll,
             }) };
@@ -4451,7 +4292,7 @@ pub const Dispatcher = struct {
                 const screen = hit.outline.top_live + @as(i64, @intCast(span.row)) + @as(i64, @intCast(layer.view_scroll));
                 if (screen >= 0 and screen < @as(i64, @intCast(layer.height))) node_row = @intCast(screen);
             }
-            result.response = try rpc.response(alloc, id, protocol.ActivateAtResult{
+            result.response = try self.respond(alloc, id, protocol.ActivateAtResult{
                 .action = "toggled",
                 .offset = layer.view_scroll,
                 .row = node_row,
@@ -4459,51 +4300,43 @@ pub const Dispatcher = struct {
             return result;
         }
 
-        return .{ .response = try rpc.response(alloc, id, protocol.ActivateAtResult{
+        return .{ .response = try self.respond(alloc, id, protocol.ActivateAtResult{
             .action = "none",
             .offset = layer.view_scroll,
         }) };
     }
 
-    fn handleSetHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(protocol.SetHighlightParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(protocol.SetHighlightParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         try layer.setHighlightIds(parsed.value.ids);
         return try self.highlightStateResponse(alloc, id, layer);
     }
 
-    fn handleClearHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(protocol.LayerOnlyParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleClearHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(protocol.LayerOnlyParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         layer.clearHighlightIds();
         return try self.highlightStateResponse(alloc, id, layer);
     }
 
-    fn handleGetHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: std.json.Value) ![]u8 {
-        const parsed = try std.json.parseFromValue(protocol.LayerOnlyParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleGetHighlight(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(protocol.LayerOnlyParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         return try self.highlightStateResponse(alloc, id, layer);
     }
 
-    fn handleSetClipboard(self: *Dispatcher, alloc: std.mem.Allocator, params_value: std.json.Value) !void {
-        const parsed = try std.json.parseFromValue(protocol.ClipboardTextParams, alloc, params_value, .{
-            .ignore_unknown_fields = true,
-        });
+    fn handleSetClipboard(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(protocol.ClipboardTextParams, alloc, params_value);
         defer parsed.deinit();
         try self.ctx.setClipboard(parsed.value.text);
     }
 
     fn handleGetClipboard(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
-        return try rpc.response(alloc, id, protocol.ClipboardResult{ .text = self.ctx.clipboardText() });
+        return try self.respond(alloc, id, protocol.ClipboardResult{ .text = self.ctx.clipboardText() });
     }
 
     /// `get_errors`: returns this connection's buffered failed-notification
@@ -4519,8 +4352,8 @@ pub const Dispatcher = struct {
     /// it can't send the next until the server has caught up with this
     /// one, so input that arrives meanwhile queues on the client and folds
     /// into one frame instead of the server falling behind frame by frame.
-    fn handleSync(_: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
-        return rpc.response(alloc, id, struct {}{});
+    fn handleSync(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
+        return self.respond(alloc, id, struct {}{});
     }
 
     fn handleGetErrors(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
@@ -4532,7 +4365,7 @@ pub const Dispatcher = struct {
             try entries.append(alloc, .{ .method = e.method(), .code = e.code, .seq = e.seq });
         }
 
-        const body = try rpc.response(alloc, id, protocol.ErrorsResult{ .errors = entries.items, .dropped = self.error_dropped });
+        const body = try self.respond(alloc, id, protocol.ErrorsResult{ .errors = entries.items, .dropped = self.error_dropped });
 
         // Drain: the reply is built, so these are now delivered.
         self.error_ring_start = 0;
