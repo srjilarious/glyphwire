@@ -4,10 +4,10 @@
 const std = @import("std");
 const testz = @import("testz");
 
-// The pure data model behind the `zj` builtin (see shell/zjump.zig): no
+// The pure data model behind the `zj` builtin (see applib/zjump.zig): no
 // IO, so these tests build a database in memory, drive it, and assert on
 // what comes back.
-const zjump = @import("shell_support").zjump;
+const zjump = @import("applib").zjump;
 
 const hour = 3600;
 const day = 86_400;
@@ -371,4 +371,58 @@ pub fn journalReplayIsIndependentOfTheSessionsOwnDbTest(_: std.Io, alloc: std.me
 
     try testz.expectEqual(rankOf(&db2, "/x").?, 5.0);
     try testz.expectEqual(lastOf(&db2, "/x").?, @as(i64, 210));
+}
+
+// ─── gw-hist --dirs helpers ──────────────────────────────────────────
+
+pub fn byFrecencyOrdersBestFirstTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const now = 10 * week;
+    const entries = [_]zjump.Entry{
+        // 40 visits, last a month ago: 40 * 0.25 = 10
+        .{ .path = "/old/habit", .rank = 40, .last = now - 4 * week },
+        // 3 visits this hour: 3 * 4.0 = 12
+        .{ .path = "/this/morning", .rank = 3, .last = now - 60 },
+        // Same score as `/tie/b`; the newer `last` wins.
+        .{ .path = "/tie/b", .rank = 1, .last = now - 3 * hour },
+        .{ .path = "/tie/a", .rank = 1, .last = now - 2 * hour },
+    };
+    const sorted = try zjump.byFrecency(alloc, &entries, now);
+    defer alloc.free(sorted);
+    try testz.expectEqualStr("/this/morning", sorted[0].path);
+    try testz.expectEqualStr("/old/habit", sorted[1].path);
+    try testz.expectEqualStr("/tie/a", sorted[2].path);
+    try testz.expectEqualStr("/tie/b", sorted[3].path);
+}
+
+pub fn byFrecencyEqualScoreAndLastFallsBackToPathTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const entries = [_]zjump.Entry{
+        .{ .path = "/b", .rank = 1, .last = 5 },
+        .{ .path = "/a", .rank = 1, .last = 5 },
+    };
+    const sorted = try zjump.byFrecency(alloc, &entries, 5);
+    defer alloc.free(sorted);
+    try testz.expectEqualStr("/a", sorted[0].path);
+    try testz.expectEqualStr("/b", sorted[1].path);
+}
+
+pub fn cdLinePlainPathTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const line = try zjump.cdLine(alloc, "/usr/local/src");
+    defer alloc.free(line);
+    try testz.expectEqualStr("cd /usr/local/src", line);
+}
+
+pub fn cdLineKeepsLeadingTildeBareTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const line = try zjump.cdLine(alloc, "~/code/glyphwire");
+    defer alloc.free(line);
+    try testz.expectEqualStr("cd ~/code/glyphwire", line);
+
+    const home = try zjump.cdLine(alloc, "~");
+    defer alloc.free(home);
+    try testz.expectEqualStr("cd ~", home);
+}
+
+pub fn cdLineEscapesSpecialBytesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const line = try zjump.cdLine(alloc, "~/My Stuff/$x");
+    defer alloc.free(line);
+    try testz.expectEqualStr("cd ~/My\\ Stuff/\\$x", line);
 }
