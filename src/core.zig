@@ -8,6 +8,7 @@ const std = @import("std");
 const key_encode = @import("key_encode.zig");
 
 pub const theme = @import("theme.zig");
+pub const divider_style = @import("divider_style.zig");
 
 /// Truecolor RGBA, or a reference to a theme palette slot or role (`ref`).
 /// A reference's `r`/`g`/`b` mean nothing: the host resolves it against
@@ -7692,6 +7693,13 @@ pub const Context = struct {
     /// Bumped on every change to `theme`, so glyphwire-host rebuilds the
     /// layer batches it resolved against the old one.
     theme_gen: u64 = 0,
+    /// How glyphwire-host draws this context's own split bands (see
+    /// `divider_style`). Inherits the host's `pane_divider_style` until
+    /// the program sends `set_divider_style`. Never touches the bands
+    /// *between* panes: those belong to no program.
+    divider_style: divider_style.Override = .{},
+    /// Bumped on every `set_divider_style`, so glyphwire-host repaints.
+    divider_style_gen: u64 = 0,
 
     pub const max_title_len = 128;
 
@@ -7749,6 +7757,13 @@ pub const Context = struct {
         self.theme = session_theme.*;
         self.theme_own = false;
         self.theme_gen +%= 1;
+    }
+
+    /// `set_divider_style`: replaces this context's override wholesale.
+    /// An empty one (`.{}`) goes back to the host's style.
+    pub fn setDividerStyle(self: *Context, style: divider_style.Override) void {
+        self.divider_style = style;
+        self.divider_style_gen +%= 1;
     }
 
     /// `set_context_title`: replaces the title (see `title`), truncated to

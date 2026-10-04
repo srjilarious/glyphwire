@@ -24,6 +24,7 @@ const glyphwire = @import("glyphwire");
 const syntax = @import("applib").syntax;
 const themes = @import("applib").theme;
 const themeconf = @import("themeconf");
+const dividerconf = @import("dividerconf");
 const keybind = @import("applib").keybind;
 const actions = @import("actions.zig");
 const editor = @import("editor.zig");
@@ -138,6 +139,10 @@ pub const Config = struct {
     /// `"relative"` keeps the caret's own line absolute. `:set lineno=…`
     /// overrides it at runtime.
     line_numbers: editor.LineNumbers = .absolute,
+    /// `config.divider_style` / `config.divider_chars` -- how the host
+    /// draws zoe's split bands (`applib/dividerconf.zig`). Empty, the
+    /// default, inherits the host's `pane_divider_style`.
+    divider_style: glyphwire.divider_style.Override = .{},
     /// `config.tab_width` -- cells between tab stops, both for a `\t`
     /// already in the file and for the grid an expanding Tab indents
     /// onto. Default 4; anything outside 1..`editor.max_tab_width` is
@@ -250,6 +255,7 @@ pub fn parseSource(
     }
 
     cfg.themes = themeconf.read(lua, a, conf_name);
+    cfg.divider_style = dividerconf.read(lua, conf_name);
     cfg.grammar_dirs = readGrammarDirs(lua, a, environ);
     cfg.langs = readLangs(lua, a);
     cfg.injections = readInjections(lua);

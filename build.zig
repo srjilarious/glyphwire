@@ -82,6 +82,14 @@ pub fn build(b: *std.Build) void {
     });
     themeconf_mod.addImport("glyphwire", glyphwire_mod);
 
+    // applib/dividerconf.zig: a program's own `divider_style` /
+    // `divider_chars` over the host's (`set_divider_style`). Its own
+    // module for the same ziglua reason as `themeconf`.
+    const dividerconf_mod = b.addModule("dividerconf", .{
+        .root_source_file = b.path("applib/dividerconf.zig"),
+    });
+    dividerconf_mod.addImport("glyphwire", glyphwire_mod);
+
     // Windowless pieces of glyphwire-host (pixel/cell geometry, scrollbar
     // math, `host.conf.lua` value clamps, the key-repeat policy) so the
     // test runner can exercise them without standing up a window or a GL
@@ -110,6 +118,7 @@ pub fn build(b: *std.Build) void {
     // keymap and shell panel it shares with salacommander.
     zoe_support_mod.addImport("applib", applib_mod);
     zoe_support_mod.addImport("themeconf", themeconf_mod);
+    zoe_support_mod.addImport("dividerconf", dividerconf_mod);
 
     // gmux's split-tree structure (pure) and its tiny Lua config, shared
     // by the `gmux` binary and its test runner -- same cross-directory-
@@ -260,10 +269,14 @@ pub fn build(b: *std.Build) void {
     // applib/themeconf.zig (`theme.lua`, and the `theme` key of each
     // program's own config) is the seventh.
     themeconf_mod.addImport("ziglua", ziglua_mod);
+    // applib/dividerconf.zig is the eighth.
+    dividerconf_mod.addImport("ziglua", ziglua_mod);
     // The programs whose own config can override the window's theme.
     shell_support_mod.addImport("themeconf", themeconf_mod);
     read_support_mod.addImport("themeconf", themeconf_mod);
     salacommander_support_mod.addImport("themeconf", themeconf_mod);
+    // The programs whose own config can override the host's divider style.
+    salacommander_support_mod.addImport("dividerconf", dividerconf_mod);
 
     // ── syntax highlighting (zoe, gw-grep) ──
     //
@@ -291,6 +304,7 @@ pub fn build(b: *std.Build) void {
     tests_mod.addImport("ls_support", ls_support_mod);
     tests_mod.addImport("grep_support", grep_support_mod);
     tests_mod.addImport("themeconf", themeconf_mod);
+    tests_mod.addImport("dividerconf", dividerconf_mod);
     tests_mod.addImport("host_support", host_support_mod);
     tests_mod.addImport("zoe_support", zoe_support_mod);
     tests_mod.addImport("gmux_support", gmux_support_mod);
@@ -696,6 +710,7 @@ pub fn build(b: *std.Build) void {
     });
     sala_exe.root_module.addImport("glyphwire", glyphwire_mod);
     sala_exe.root_module.addImport("themeconf", themeconf_mod);
+    sala_exe.root_module.addImport("dividerconf", dividerconf_mod);
     sala_exe.root_module.addImport("applib", applib_mod);
     sala_exe.root_module.addImport("zargunaught", zargunaught_mod);
     sala_exe.root_module.addImport("salacommander_support", salacommander_support_mod);

@@ -1273,6 +1273,15 @@ pub const Client = struct {
         } });
     }
 
+    /// `set_divider_style` -- a notification. How the host draws the
+    /// bands of this connection's active context's own split tree: a
+    /// preset and/or single glyphs, each falling back to the host's
+    /// `pane_divider_style` when null. An empty override (`.{}`) goes
+    /// back to the host's style entirely.
+    pub fn setDividerStyle(self: *Client, style: *const core.divider_style.Override) !void {
+        try self.notify("set_divider_style", protocol.DividerStyleWire.fromOverride(style));
+    }
+
     /// `set_theme` by built-in name -- a notification.
     pub fn setThemeByName(self: *Client, name: []const u8) !void {
         try self.notify("set_theme", .{ .name = name });

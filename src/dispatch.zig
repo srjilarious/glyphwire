@@ -64,6 +64,10 @@ pub const DispatchError = error{
     /// `set_theme`'s `name` isn't a built-in theme. (A `theme.lua`
     /// theme is resolved by the client and sent whole.)
     UnknownTheme,
+    /// `set_divider_style`'s `style` isn't a `core.divider_style.Preset`.
+    UnknownDividerStyle,
+    /// A `set_divider_style` `chars` entry isn't exactly one cell wide.
+    InvalidDividerChar,
     /// `move_content`'s `direction` wasn't `"up"` or `"down"`.
     InvalidMoveDirection,
     /// `find_metadata`'s `direction` wasn't `"next"` or `"prev"`.
@@ -1799,6 +1803,7 @@ pub const Dispatcher = struct {
         .{ "adopt_context", catVoid(handleAdoptContext) },
         .{ "set_context_title", catVoid(handleSetContextTitle) },
         .{ "set_theme", catVoid(handleSetTheme) },
+        .{ "set_divider_style", catVoid(handleSetDividerStyle) },
         .{ "get_theme", catBytesIdNoParams(handleGetTheme) },
         .{ "list_contexts", catBytesIdNoParams(handleListContexts) },
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
@@ -2601,6 +2606,22 @@ pub const Dispatcher = struct {
             const session = self.session orelse return DispatchError.NoContextSession;
             self.ctx.followTheme(&session.theme);
         }
+    }
+
+    /// `set_divider_style`: how the host draws the bands of this
+    /// connection's active context's own split tree (see
+    /// `core.Context.divider_style`). Replaces any earlier override
+    /// wholesale; neither param goes back to the host's style. A bad
+    /// name or glyph leaves the setting as it was. Needs no ownership,
+    /// like a theme.
+    fn handleSetDividerStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(protocol.DividerStyleWire, alloc, params_value);
+        defer parsed.deinit();
+        const style = parsed.value.toOverride() catch |err| return switch (err) {
+            error.UnknownDividerStyle => DispatchError.UnknownDividerStyle,
+            error.InvalidDividerChar => DispatchError.InvalidDividerChar,
+        };
+        self.ctx.setDividerStyle(style);
     }
 
     /// `get_theme`: the active context's theme, every slot and role.

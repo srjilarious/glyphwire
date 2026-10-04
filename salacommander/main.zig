@@ -98,6 +98,9 @@ pub fn main(init: std.process.Init) !void {
         "text",
         "paste",
         "resize",
+        // The pane split re-laid-out: a window resize, or the band
+        // between the panes dragged.
+        "layout",
         "scroll_offset",
         "mouse_button",
         "context",

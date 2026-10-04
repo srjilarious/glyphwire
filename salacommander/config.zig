@@ -19,6 +19,8 @@ const Lua = ziglua.Lua;
 const pane_mod = @import("pane.zig");
 const actions = @import("actions.zig");
 const openaction = @import("openaction.zig");
+const glyphwire = @import("glyphwire");
+const dividerconf = @import("dividerconf");
 
 pub const conf_name = "salacommander.conf.lua";
 
@@ -60,6 +62,10 @@ pub const Config = struct {
     /// and the same limit: it must be a glyphwire client, since it runs
     /// in the session with no terminal of its own (see `Ui.runInSession`).
     editor: ?[]u8 = null,
+    /// `divider_style` / `divider_chars`: how the host draws the band
+    /// between the panes (`applib/dividerconf.zig`). Empty, the default,
+    /// inherits the host's `pane_divider_style`.
+    divider_style: glyphwire.divider_style.Override = .{},
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
         for (self.keys) |k| {
@@ -154,6 +160,7 @@ pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     }
     result.config.keys = readKeys(alloc, lua) catch &.{};
     result.config.open_actions = readOpenActions(alloc, lua) catch &.{};
+    result.config.divider_style = dividerconf.read(lua, conf_name);
     if (stringField(lua, "editor")) |v| {
         if (std.mem.trim(u8, v, " ").len == 0) {
             std.log.warn("salacommander: {s} `editor` is empty; ignored", .{conf_name});

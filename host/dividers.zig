@@ -1,11 +1,13 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: MPL-2.0
 
-//! How the bands between *panes* are drawn: box-drawing lines by default,
-//! with the right junction glyph wherever two dividers meet, or the older
-//! solid `block` band. `host.conf.lua`'s `pane_divider_style` picks a
-//! preset and `pane_divider_chars` overrides single glyphs (see
-//! `config_load.loadConfig`).
+//! How divider bands are drawn: box-drawing lines by default, with the
+//! right junction glyph wherever two dividers meet, or the older solid
+//! `block` band. `host.conf.lua`'s `pane_divider_style` picks a preset and
+//! `pane_divider_chars` overrides single glyphs (see
+//! `config_load.loadConfig`). That style covers the bands between panes
+//! and, unless a program sent `set_divider_style` for its own context, the
+//! bands inside each program's split tree too.
 //!
 //! Pure: no renderer, no session. `render.zig` hands in the band rects and
 //! draws the `Cell`s that come back, so the junction rule has unit tests.
@@ -13,45 +15,18 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 
-/// One glyph per shape a divider cell can take. A junction is named for
-/// the arm it adds to a straight line: `t_right` is `├` (a vertical line
-/// with an arm to the right).
-pub const Glyphs = struct {
-    h: []const u8,
-    v: []const u8,
-    cross: []const u8,
-    t_down: []const u8,
-    t_up: []const u8,
-    t_left: []const u8,
-    t_right: []const u8,
-    tl: []const u8,
-    tr: []const u8,
-    bl: []const u8,
-    br: []const u8,
-};
+// The glyph sets and presets live in the core library, so a program
+// can name them in `set_divider_style` (see `glyphwire.divider_style`).
+const divider_style = glyphwire.divider_style;
+pub const Glyphs = divider_style.Glyphs;
+pub const single = divider_style.single;
+pub const heavy = divider_style.heavy;
+pub const double = divider_style.double;
+pub const Style = divider_style.Style;
+pub const default_style = divider_style.default_style;
+pub const preset = divider_style.preset;
 
-pub const single: Glyphs = .{ .h = "─", .v = "│", .cross = "┼", .t_down = "┬", .t_up = "┴", .t_left = "┤", .t_right = "├", .tl = "┌", .tr = "┐", .bl = "└", .br = "┘" };
-pub const heavy: Glyphs = .{ .h = "━", .v = "┃", .cross = "╋", .t_down = "┳", .t_up = "┻", .t_left = "┫", .t_right = "┣", .tl = "┏", .tr = "┓", .bl = "┗", .br = "┛" };
-pub const double: Glyphs = .{ .h = "═", .v = "║", .cross = "╬", .t_down = "╦", .t_up = "╩", .t_left = "╣", .t_right = "╠", .tl = "╔", .tr = "╗", .bl = "╚", .br = "╝" };
-
-pub const Style = union(enum) {
-    /// A solid band in the theme's `pane_divider` colour.
-    block,
-    glyphs: Glyphs,
-};
-
-pub const default_style: Style = .{ .glyphs = single };
-
-/// `pane_divider_style`'s preset names, or null for an unknown one.
-pub fn preset(name: []const u8) ?Style {
-    if (std.mem.eql(u8, name, "single")) return .{ .glyphs = single };
-    if (std.mem.eql(u8, name, "heavy")) return .{ .glyphs = heavy };
-    if (std.mem.eql(u8, name, "double")) return .{ .glyphs = double };
-    if (std.mem.eql(u8, name, "block")) return .block;
-    return null;
-}
-
-/// One pane divider band, in window cells. `vertical` is a band between
+/// One divider band, in window cells. `vertical` is a band between
 /// side-by-side panes (a `.row` split).
 pub const Line = struct {
     rect: glyphwire.CellRect,

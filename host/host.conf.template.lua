@@ -118,7 +118,10 @@
 --     -- How the lines between panes (gmux splits) are drawn, in the
 --     -- theme's `pane_divider` colour: "single" (─ │ with ├ ┤ ┬ ┴ ┼
 --     -- where they meet), "heavy" (━ ┃ ╋), "double" (═ ║ ╬), or "block"
---     -- (a solid band).
+--     -- (a solid band). The bands inside a program (zoe's tree|editor
+--     -- line, salacommander's middle) use it too, in the dimmer
+--     -- `divider` colour, unless that program's own config sets
+--     -- `divider_style` / `divider_chars`.
 --     pane_divider_style = "single",
 --
 --     -- Override any of the style's glyphs, each one cell wide. Keys:

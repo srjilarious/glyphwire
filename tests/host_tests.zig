@@ -9,6 +9,7 @@ const testz = @import("testz");
 // backend's own tests live in `host_eng_tests.zig`.
 const glyphwire = @import("glyphwire");
 const hs = @import("host_support");
+const dividerconf = @import("dividerconf");
 const geometry = hs.geometry;
 const config = hs.config;
 const system_font = hs.system_font;
@@ -808,6 +809,81 @@ pub fn sideBySideDividerCellsDontJoinTest(_: std.Io, alloc: std.mem.Allocator) !
     defer cells.deinit(alloc);
     try hs.dividers.layout(alloc, &lines, &hs.dividers.single, &cells);
     for (cells.items) |c| try testz.expectEqualStr("│", c.glyph);
+}
+
+// ── A program's own divider style (`set_divider_style`) ────────────────
+
+const divider_style = glyphwire.divider_style;
+
+/// An empty override is the host's style, whatever that is -- a program
+/// that sets nothing inherits it.
+pub fn emptyDividerOverrideInheritsTheHostTest(_: std.Io, _: std.mem.Allocator) !void {
+    const none: divider_style.Override = .{};
+    try testz.expectTrue(none.inherits());
+    try testz.expectTrue(none.resolve(.block) == .block);
+    const g = none.resolve(.{ .glyphs = divider_style.double }).glyphs;
+    try testz.expectEqualStr("║", g.v);
+}
+
+/// A preset replaces the host's style outright.
+pub fn dividerOverridePresetBeatsTheHostTest(_: std.Io, _: std.mem.Allocator) !void {
+    const o: divider_style.Override = .{ .preset = .heavy };
+    try testz.expectFalse(o.inherits());
+    try testz.expectEqualStr("┃", o.resolve(.{ .glyphs = divider_style.double }).glyphs.v);
+    const block: divider_style.Override = .{ .preset = .block };
+    try testz.expectTrue(block.resolve(divider_style.default_style) == .block);
+}
+
+/// Glyphs alone are laid over the host's style; over `block` they start
+/// from `single`, as `pane_divider_chars` does.
+pub fn dividerOverrideCharsLayOverTheHostTest(_: std.Io, _: std.mem.Allocator) !void {
+    const o: divider_style.Override = .{ .chars = .{ .v = divider_style.Glyph.init("┆").? } };
+    const over_double = o.resolve(.{ .glyphs = divider_style.double }).glyphs;
+    try testz.expectEqualStr("┆", over_double.v);
+    try testz.expectEqualStr("═", over_double.h);
+    const over_block = o.resolve(.block).glyphs;
+    try testz.expectEqualStr("┆", over_block.v);
+    try testz.expectEqualStr("─", over_block.h);
+}
+
+/// A divider glyph must be exactly one cell: empty, wide and two-glyph
+/// strings are refused.
+pub fn dividerGlyphMustBeOneCellTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(divider_style.Glyph.init("|") != null);
+    try testz.expectTrue(divider_style.Glyph.init("") == null);
+    try testz.expectTrue(divider_style.Glyph.init("||") == null);
+    try testz.expectTrue(divider_style.Glyph.init("中") == null);
+}
+
+/// `divider_style` / `divider_chars` in a program's own config; bad
+/// values are skipped rather than failing the rest.
+pub fn dividerconfReadsStyleAndCharsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const o = dividerconf.fromSource(alloc,
+        \\config = { divider_style = "double", divider_chars = { v = "┇", h = "too wide" } }
+    , "test.conf.lua");
+    try testz.expectTrue(o.preset.? == .double);
+    try testz.expectEqualStr("┇", o.chars.v.?.slice());
+    try testz.expectTrue(o.chars.h == null);
+
+    const bad = dividerconf.fromSource(alloc,
+        \\config = { divider_style = "wavy" }
+    , "test.conf.lua");
+    try testz.expectTrue(bad.inherits());
+
+    const absent = dividerconf.fromSource(alloc,
+        \\config = { theme = "nord" }
+    , "test.conf.lua");
+    try testz.expectTrue(absent.inherits());
+}
+
+/// A `set_divider_style` changes nothing in any layer, so the redraw
+/// signature has to see it on its own.
+pub fn contextSigMovesOnDividerStyleTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    const before = redraw.contextSig(&ctx);
+    ctx.setDividerStyle(.{ .preset = .heavy });
+    try testz.expectFalse(std.meta.eql(before, redraw.contextSig(&ctx)));
 }
 
 // ── Redraw signature ───────────────────────────────────────────────────

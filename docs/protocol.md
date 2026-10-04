@@ -306,6 +306,7 @@ into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
 | `InvalidTextScale` | `write_text`'s `scale` is not one of the enumerated values |
 | `InvalidColor`, `UnknownColorRole` | a colour's `slot` is outside 0–23, or its `role` is not a role name; `set_theme` slot given as a reference |
 | `UnknownTheme` | `set_theme`'s `name` is not a built-in theme |
+| `UnknownDividerStyle`, `InvalidDividerChar` | `set_divider_style`'s `style` is not a preset, or a `chars` glyph is not exactly one cell wide |
 | `UnknownLayer` | any `layer` handle that does not exist, **and** the root handle where a non-root one is required |
 | `LayerPermissionDenied` | `destroy_layer` from a non-owner |
 | `UnknownContext`, `RootContextImmutable`, `ContextPermissionDenied`, `NoContextSession` | context messages |
@@ -575,7 +576,9 @@ opt-in: a list whose rows carry meaning in their own colours may keep
 them on the cursor row, but a light theme's cursor fill is saturated
 enough that only this reads on it. `divider` and `pane_divider` are the
 host's own: the band between split layers (the context's theme) and
-between panes (the window theme's).
+between panes (the window theme's). Both are drawn in the host's
+`pane_divider_style`; a program may restyle its own split bands with
+`set_divider_style`.
 
 **Whose theme.** The host has a **window theme**, read at startup from
 `theme.lua` in the config directory (`config = { theme = "nord" }`, or a
@@ -621,6 +624,7 @@ Each entry gives the method, its kind, its params and its result.
 | `set_context_title` | notification | `title` | — |
 | `set_theme` | notification | `name?`, `theme?` | — |
 | `get_theme` | request | — | `{name, dark, panel_style, own, slots, roles}` |
+| `set_divider_style` | notification | `style?`, `chars?` | — |
 | `list_contexts` | request | — | `{current, contexts: [{context, title, visible}]}` |
 | `set_window_scrollbar` | notification | `visible` | — |
 | `set_caret_layer` | notification | `layer?` | — |
@@ -669,6 +673,19 @@ fixed colour, plus `own` (whether the context set it) and `panel_style`
 (the nine-patch style a popup should be framed with, since a nine-patch
 can't be recoloured). A program needs it only for what it can't express
 as a reference: the frame name, or a colour it blends itself.
+
+`set_divider_style` restyles the bands of the issuing connection's
+current context's own split tree. Until a program sends it, those bands
+are drawn in whatever style the host uses between panes. `style` is a
+preset — `"single"`, `"heavy"`, `"double"` or `"block"` — and `chars`
+an object of single-cell glyphs keyed `h`, `v`, `cross`, `t_down`,
+`t_up`, `t_left`, `t_right`, `tl`, `tr`, `bl`, `br`, laid over the
+preset (or over the host's style when `style` is absent). Each call
+replaces the last; with neither, the context goes back to the host's
+style. An unknown preset is `UnknownDividerStyle` and a glyph that is
+not exactly one cell wide `InvalidDividerChar`; either leaves the setting
+as it was. It never changes the bands between panes, which belong to no
+program. No ownership needed.
 
 `list_contexts` returns the issuing connection's **own pane's** stack, top
 (on screen) first, each with its `title` (empty if never set) and
