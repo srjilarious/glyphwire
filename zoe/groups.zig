@@ -44,6 +44,9 @@ pub const Orientation = enum {
     }
 };
 
+/// Which half of a new split the new group takes.
+pub const Side = enum { before, after };
+
 pub const Node = struct {
     parent: ?*Node = null,
     kind: union(enum) {
@@ -124,12 +127,20 @@ pub const Layout = struct {
     /// node, whose children the caller sends; its parent (null when it is
     /// the root) is the one other list whose child changed.
     pub fn split(self: *Layout, id: GroupId, new_id: GroupId, orientation: Orientation, handle: glyphwire.SplitHandle) !*Node {
+        return self.splitSide(id, new_id, orientation, handle, .after);
+    }
+
+    /// `split`, with the new group on either side of the old one: `.before`
+    /// puts it left of (or above) group `id` -- where Ctrl+W Shift+H / K
+    /// send a tab when there is no group that way yet.
+    pub fn splitSide(self: *Layout, id: GroupId, new_id: GroupId, orientation: Orientation, handle: glyphwire.SplitHandle, side: Side) !*Node {
         const leaf = self.find(id) orelse return error.UnknownGroup;
         const first = try self.alloc.create(Node);
         errdefer self.alloc.destroy(first);
         const second = try self.alloc.create(Node);
-        first.* = .{ .parent = leaf, .kind = .{ .group = id } };
-        second.* = .{ .parent = leaf, .kind = .{ .group = new_id } };
+        const ids: [2]GroupId = if (side == .after) .{ id, new_id } else .{ new_id, id };
+        first.* = .{ .parent = leaf, .kind = .{ .group = ids[0] } };
+        second.* = .{ .parent = leaf, .kind = .{ .group = ids[1] } };
         // The leaf becomes the split in place, so its parent's pointer to
         // it -- and so the parent's shape -- is unchanged.
         leaf.kind = .{ .split = .{ .handle = handle, .orientation = orientation, .first = first, .second = second } };

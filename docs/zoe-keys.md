@@ -38,8 +38,9 @@ Ctrl+W, and the completion popup's keys.
 | `toggleHidden` | Ctrl+H | Dotfiles and `.gitignore`d paths, in the tree and finder |
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
 | `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |
-| `windowPrefix` | Ctrl+W | Then `v` / `s` split, `q` / `c` close, `w` (or Ctrl+W) next group, `h` `j` `k` `l` / arrows focus |
+| `windowPrefix` | Ctrl+W | Then `v` / `s` split, `q` / `c` close, `w` (or Ctrl+W) next group, `h` `j` `k` `l` / arrows focus, Shift+`H` `J` `K` `L` / Shift+arrows move the tab |
 | `focusLeft` `focusRight` `focusUp` `focusDown` | Ctrl+Left / Right / Up / Down, Ctrl+L / K / J | Focus the group (or tree) that way |
+| `moveTabLeft` `moveTabRight` `moveTabUp` `moveTabDown` | (unbound; Ctrl+W Shift+H / L / K / J) | Move the shown tab to the group that way, splitting a new group off on that side if there is none. A group left without tabs closes |
 | `jumpBack` / `jumpForward` | Ctrl+O / Ctrl+I | Jumplist (the way back from `gd`) |
 | `cut` | Ctrl+Shift+X | Selection (or line) to the clipboard, removed |
 | `paste` | Ctrl+Shift+P | Clipboard after the cursor, or over a selection |
@@ -112,7 +113,7 @@ PageDown page, Tab or Enter accept, Escape closes.
 
 | Keys | Action |
 |---|---|
-| `h` `j` `k` `l` | Move. Counts work (`5j`) |
+| `h` `j` `k` `l` | Move. Counts work (`5j`). With `wrap` on, a bare `j` / `k` (and Up / Down) moves one screen row; a count still moves by line |
 | `w` `W` `b` `B` `e` `E` | Word motions (small / big word) |
 | `0` `^` `$` | Line start / first non-blank / line end |
 | `gg` `G` `{n}G` `{n}gg` | First / last / line *n* |
@@ -185,6 +186,7 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:noh` | Clear the search highlight |
 | `:set lineno=off\|absolute\|relative` | Line numbers |
 | `:set tabwidth=N`, `expandtab=on\|off`, `whitespace=on\|off` | Indent and whitespace display |
+| `:set wrap=on\|off` (or `:set wrap` / `:set nowrap`) | Soft-wrap long lines at word breaks |
 | `:theme [name]` (`:colo`) | Switch colour theme |
 | `:lsp`, `:lsp restart` | Language server status / restart |
 | `:diag` | List diagnostics |
@@ -221,8 +223,11 @@ Click to place the cursor and focus a group; drag to select (enters
 visual mode); double-click selects a word (vim's `iw` run: identifier,
 punctuation or blanks) and triple-click a line (`V`), and dragging on
 from either grows the selection a word or line at a time; wheel and scrollbar thumb scroll any group; Shift+wheel
-scrolls a tab strip; click a tab to switch, its `×` to close; hover a tab
-for its full path; drag a divider to resize groups or the shell panel.
+scrolls a tab strip; click a tab to switch, its `×` to close; drag a tab
+onto another group's strip (dropped in front of the tab under the pointer)
+or pane (added at the end) to move it there, or along its own strip to
+reorder it; hover a tab for its full path; drag a divider to resize
+groups or the shell panel.
 
 ## Gaps
 

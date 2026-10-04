@@ -108,6 +108,17 @@ pub fn hit(spans: []const Span, col: usize) ?Hit {
     return null;
 }
 
+/// Where a tab dropped at strip column `col` goes in the list: before
+/// the first tab whose middle is right of the drop, so dropping on a
+/// tab's left half lands in front of it and on its right half after it.
+/// Past the last tab (or on an empty strip) is the end.
+pub fn dropIndex(spans: []const Span, col: usize) usize {
+    for (spans, 0..) |s, i| {
+        if (col < s.start + (s.end - s.start) / 2) return i;
+    }
+    return spans.len;
+}
+
 /// The label for a buffer path -- its basename, since the statusline
 /// already carries the full path. Buffers whose basenames collide are
 /// shown identically; the statusline disambiguates them.

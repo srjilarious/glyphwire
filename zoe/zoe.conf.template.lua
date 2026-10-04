@@ -141,6 +141,13 @@
 --     -- differently. `:set whitespace=on|off` changes it live.
 --     show_whitespace = false,
 --
+--     -- Soft-wrap lines wider than the pane onto the rows below,
+--     -- breaking after a space where one fits. While it is on, j/k and
+--     -- Up/Down move by screen row (a count still moves by line).
+--     -- `:set wrap=on|off` (or vim's `:set wrap` / `:set nowrap`)
+--     -- changes it live.
+--     wrap = false,
+--
 --     -- Milliseconds the pointer rests on a tab before the file's full
 --     -- path pops up under it. 0 shows it at once.
 --     tab_tooltip_delay_ms = 400,
