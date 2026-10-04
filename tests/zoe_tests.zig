@@ -276,6 +276,16 @@ pub fn motionStickyColumnSnapsToCodepointTest(_: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(motion.down(&buf, 2, 1, 2, false), 6);
 }
 
+pub fn motionDownOntoUnterminatedLastLineInInsertModeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // No trailing newline, so the last line's end-of-line offset is the
+    // end of the buffer. A long sticky column clamps to it with
+    // `allow_eol`, and the codepoint snap must not read the byte there.
+    var buf = try Buffer.initFromText(alloc, "abcdefgh\nxyz");
+    defer buf.deinit();
+    try testz.expectEqual(motion.down(&buf, 7, 1, 7, true), 12);
+    try testz.expectEqual(motion.atColumn(&buf, 1, 99, true), 12);
+}
+
 pub fn motionWordForwardTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var buf = try Buffer.initFromText(alloc, "foo bar.baz qux");
     defer buf.deinit();
