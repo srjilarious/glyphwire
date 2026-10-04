@@ -16,7 +16,7 @@ const script_engine = @import("shell_support").script_engine;
 const themeconf = @import("themeconf");
 const history = @import("applib").history;
 const homepath = @import("applib").homepath;
-const zjump = @import("shell_support").zjump;
+const zjump = @import("applib").zjump;
 const flushgate = @import("shell_support").flushgate;
 const crashlog = @import("shell_support").crashlog;
 const keyencode = @import("shell_support").keyencode;
@@ -896,9 +896,12 @@ fn runPrompt(
             try prompt.historySearch();
         } else if (alt and std.mem.eql(u8, ev.key, "d")) {
             // Drops `cd <cwd>` onto the line to be edited into the
-            // directory you actually want -- see `cdCwdLine`. The one
-            // alt chord the prompt binds.
+            // directory you actually want -- see `cdCwdLine`.
             try prompt.cdCwdLine();
+        } else if (alt and std.mem.eql(u8, ev.key, "c")) {
+            // fzf's chord for "cd into a directory I pick" -- see
+            // `dirSearch`.
+            try prompt.dirSearch();
         } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
             // While browsing, ctrl+left/right is a bigger horizontal step
             // (`scrollback_jump` columns), mirroring ctrl+up/down's row
@@ -3508,6 +3511,23 @@ const Prompt = struct {
     /// the periodic flush gate, is already in the file `gw-hist` reads
     /// directly rather than over any live connection to this process.
     fn historySearch(self: *Prompt) !void {
+        try self.runHistPicker(false);
+    }
+
+    /// Alt+C: `gw-hist --dirs`, the same picker opened on `zj`'s
+    /// directory database instead of the history, so a pick lands on the
+    /// line as `cd <path>`. Waits for Enter like Ctrl+R does rather than
+    /// changing directory on the spot (fzf's Alt+C does), so every
+    /// directory change still goes through a line the user submitted.
+    /// The flush in `runHistPicker` matters here too: it writes this
+    /// session's `zj` visits into the `z.db` gw-hist reads.
+    fn dirSearch(self: *Prompt) !void {
+        try self.runHistPicker(true);
+    }
+
+    /// The shared body of Ctrl+R and Alt+C. `dirs` adds gw-hist's leading
+    /// `--dirs` flag.
+    fn runHistPicker(self: *Prompt, dirs: bool) !void {
         self.flushPersistentState(.due);
         // Whatever is already typed seeds the search (`gw-hist [query...]`,
         // see hist/main.zig's `seedQuery`), so Ctrl+R after `git com`
@@ -3521,10 +3541,15 @@ const Prompt = struct {
         // a blank line spawns `gw-hist` bare, so a stray space doesn't
         // open the search filtered down to nothing.
         const seed = std.mem.trim(u8, self.line.text(), " \t");
+        var argv_buf: [3][]const u8 = undefined;
+        var argv: std.ArrayList([]const u8) = .initBuffer(&argv_buf);
+        argv.appendAssumeCapacity("gw-hist");
+        if (dirs) argv.appendAssumeCapacity("--dirs");
         if (seed.len == 0) {
-            try self.runCommand(&.{"gw-hist"});
+            try self.runCommand(argv.items);
         } else {
-            try self.runCommandOpts(&.{ "gw-hist", seed }, .{ .expand_tilde = false });
+            argv.appendAssumeCapacity(seed);
+            try self.runCommandOpts(argv.items, .{ .expand_tilde = false });
         }
         if (self.takePendingResultLine()) |line| {
             defer self.client.alloc.free(line);

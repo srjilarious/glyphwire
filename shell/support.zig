@@ -21,7 +21,6 @@ pub const envassign = @import("envassign.zig");
 pub const complete = @import("complete.zig");
 pub const glob = @import("glob.zig");
 pub const handshake = @import("handshake.zig");
-pub const zjump = @import("zjump.zig");
 pub const flushgate = @import("flushgate.zig");
 pub const crashlog = @import("crashlog.zig");
 pub const config = @import("config.zig");

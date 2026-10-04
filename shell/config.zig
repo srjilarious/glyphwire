@@ -154,7 +154,7 @@ pub const PromptConfig = struct {
 };
 
 /// What a `zj{ ... }` call declared -- config for the `zj` directory-jump
-/// builtin (see `shell/zjump.zig`). Merges key by key across calls, last
+/// builtin (see `applib/zjump.zig`). Merges key by key across calls, last
 /// write winning. `exclude_dirs` strings are owned by the enclosing
 /// `ShellConfig` (`prompt_arena`) and are taken verbatim -- `shell/main.zig`
 /// expands a leading `~` when it copies them.

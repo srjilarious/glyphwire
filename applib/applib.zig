@@ -25,6 +25,8 @@
 //!   `wordsplit`  shell-style word splitting and quoting (gw-shell,
 //!                salacommander)
 //!   `history`    the shared command history file (gw-shell, gw-hist)
+//!   `zjump`      the `zj` frecency directory database (gw-shell,
+//!                gw-hist --dirs)
 //!   `fuzzy`      the subsequence matcher (gw-hist, zoe, salacommander)
 //!   `gitignore`  `.gitignore` matching + hidden-file rule (zoe,
 //!                salacommander)
@@ -52,6 +54,7 @@ pub const keybind = @import("keybind.zig");
 pub const shellpanel = @import("shellpanel.zig");
 pub const wordsplit = @import("wordsplit.zig");
 pub const history = @import("history.zig");
+pub const zjump = @import("zjump.zig");
 pub const fuzzy = @import("fuzzy.zig");
 pub const gitignore = @import("gitignore.zig");
 pub const finder = @import("finder.zig");
