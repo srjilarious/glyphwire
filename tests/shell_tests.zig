@@ -703,6 +703,55 @@ pub fn modeTrackerSequenceSplitAcrossFeedsTest(_: std.Io, _: std.mem.Allocator) 
     try testz.expectTrue(mt.wantsAnyMotion());
 }
 
+// ─── pty.Utf8Carry ────────────────────────────────────────────────────
+
+/// A character split across two reads is held back and completed by the
+/// next one -- the `write_text ... InvalidUtf8` seen scrolling in nvim.
+pub fn utf8CarryJoinsCharacterSplitAcrossReadsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var carry: pty.Utf8Carry = .{};
+    defer carry.deinit(alloc);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+
+    const box = "\u{2500}"; // 3 bytes
+    try carry.feed(alloc, "ab" ++ box[0..2], &out);
+    try testz.expectEqualStr("ab", out.items);
+    try carry.feed(alloc, box[2..] ++ "c", &out);
+    try testz.expectEqualStr(box ++ "c", out.items);
+
+    // A 4-byte character arriving one byte per read.
+    const icon = "\u{1F600}";
+    for (icon[0..3]) |b| {
+        try carry.feed(alloc, &.{b}, &out);
+        try testz.expectEqual(out.items.len, 0);
+    }
+    try carry.feed(alloc, icon[3..], &out);
+    try testz.expectEqualStr(icon, out.items);
+}
+
+/// Bytes that are not UTF-8 become U+FFFD and the rest of the chunk
+/// survives; a character cut off by the end of the stream does too.
+pub fn utf8CarryReplacesInvalidBytesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var carry: pty.Utf8Carry = .{};
+    defer carry.deinit(alloc);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+
+    try carry.feed(alloc, "caf\xe9 \x1b[31mok", &out); // Latin-1 é
+    try testz.expectEqualStr("caf\u{FFFD} \x1b[31mok", out.items);
+
+    // A lead byte followed by a non-continuation is bad on the spot.
+    try carry.feed(alloc, "\xe2a", &out);
+    try testz.expectEqualStr("\u{FFFD}a", out.items);
+
+    try carry.feed(alloc, "x\xe2\x94", &out);
+    try testz.expectEqualStr("x", out.items);
+    try carry.finish(alloc, &out);
+    try testz.expectEqualStr("\u{FFFD}", out.items);
+    try carry.finish(alloc, &out);
+    try testz.expectEqual(out.items.len, 0);
+}
+
 pub fn modeTrackerFocusEventsTest(_: std.Io, _: std.mem.Allocator) !void {
     var mt: pty.ModeTracker = .{};
     try testz.expectFalse(mt.focusEvents());

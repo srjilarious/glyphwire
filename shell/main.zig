@@ -5095,6 +5095,16 @@ const Prompt = struct {
         var out_buf: [512]u8 = undefined;
         var real_out = std.Io.File.stdout().writer(io, &out_buf);
 
+        // Mirrored output goes out as `write_text`, which must be valid
+        // UTF-8: a character split across two reads is held back to the
+        // next one, and stray non-UTF-8 bytes become U+FFFD. See
+        // `pty.Utf8Carry`.
+        var carry: glyphwire.pty.Utf8Carry = .{};
+        defer carry.deinit(alloc);
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(alloc);
+        const mirror: Mirror = .{ .carry = &carry, .text = &text };
+
         var buf: [4096]u8 = undefined;
         while (true) {
             var pfd = [_]std.posix.pollfd{.{ .fd = ctx.master, .events = std.posix.POLL.IN, .revents = 0 }};
@@ -5119,24 +5129,36 @@ const Prompt = struct {
                 if (aware == null) continue; // still a prefix of the marker
                 ctx.aware.store(if (aware.?) 1 else 2, .release);
                 const body = if (aware.?) pending.items[hs.marker.len..] else pending.items;
-                emitChunk(ctx, &real_out, aware.?, body);
+                emitChunk(ctx, &real_out, mirror, aware.?, body);
                 pending.clearRetainingCapacity();
                 continue;
             }
-            emitChunk(ctx, &real_out, aware.?, chunk);
+            emitChunk(ctx, &real_out, mirror, aware.?, chunk);
         }
 
         // EOF before the handshake could resolve (total output shorter
         // than the marker) -> treat as a plain child, flush what we held.
         if (aware == null and pending.items.len > 0) {
-            emitChunk(ctx, &real_out, false, pending.items);
+            emitChunk(ctx, &real_out, mirror, false, pending.items);
+        }
+        // A character the child's last write cut short.
+        if (aware != true) {
+            carry.finish(alloc, &text) catch {};
+            if (text.items.len > 0) self.drawText(text.items, null, null) catch {};
         }
     }
+
+    /// `ptyReaderThread`'s UTF-8 repair state for mirrored output, handed
+    /// to `emitChunk`.
+    const Mirror = struct {
+        carry: *glyphwire.pty.Utf8Carry,
+        text: *std.ArrayList(u8),
+    };
 
     /// One chunk from `ptyReaderThread`: onto the grid (plain child) or to
     /// this process's real stdout and the crash tail (aware child).
     /// Best-effort -- a write failure here has nowhere useful to go.
-    fn emitChunk(ctx: *PtyReaderCtx, real_out: *std.Io.File.Writer, aware: bool, bytes: []const u8) void {
+    fn emitChunk(ctx: *PtyReaderCtx, real_out: *std.Io.File.Writer, mirror: Mirror, aware: bool, bytes: []const u8) void {
         if (bytes.len == 0) return;
         const self = ctx.prompt;
         if (aware) {
@@ -5144,7 +5166,8 @@ const Prompt = struct {
             real_out.interface.writeAll(bytes) catch {};
             real_out.interface.flush() catch {};
         } else {
-            self.drawText(bytes, null, null) catch {};
+            mirror.carry.feed(self.client.alloc, bytes, mirror.text) catch return;
+            if (mirror.text.items.len > 0) self.drawText(mirror.text.items, null, null) catch {};
         }
     }
 
