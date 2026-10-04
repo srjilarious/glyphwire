@@ -1,12 +1,14 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! The data model behind the `zj` builtin -- glyphwire-shell's take on
 //! `z` / zoxide / autojump directory jumping. Pure: `shell/main.zig` does
 //! the filesystem IO (reading and writing `~/.config/glyphwire/z.db`,
 //! resolving the real cwd, `chdir`-ing) and this module turns the file's
 //! bytes into ranked entries, decides which one a query means, and turns
-//! the entries back into bytes.
+//! the entries back into bytes. `gw-hist --dirs` reads the same file to
+//! offer every visited directory as a fuzzy-filtered list (`byFrecency`,
+//! `cdLine`), which is why this lives in `applib` rather than `shell/`.
 //!
 //! ## Frecency
 //!
@@ -41,6 +43,7 @@
 //! never a result (jumping to where you already are is a no-op).
 
 const std = @import("std");
+const wordsplit = @import("wordsplit.zig");
 
 /// Once the summed `rank` of every entry passes this, `age` runs.
 pub const max_total_rank: f64 = 10_000;
@@ -341,6 +344,39 @@ pub const MatchOpts = struct {
     exists: ?*const fn (ctx: ?*anyopaque, path: []const u8) bool = null,
     exists_ctx: ?*anyopaque = null,
 };
+
+/// `entries` copied and ordered best-first by `score` at `now`, ties
+/// broken toward the more recently visited, then by path so the order is
+/// deterministic. `gw-hist --dirs` shows them in this order and keeps it
+/// while filtering, the same ranking `zj` uses to pick its one winner.
+/// Caller owns the returned slice (the paths still belong to the `Db`).
+pub fn byFrecency(alloc: std.mem.Allocator, entries: []const Entry, now: i64) ![]Entry {
+    const sorted = try alloc.dupe(Entry, entries);
+    std.mem.sort(Entry, sorted, now, struct {
+        fn lessThan(at: i64, a: Entry, b: Entry) bool {
+            const sa = score(a, at);
+            const sb = score(b, at);
+            if (sa != sb) return sa > sb;
+            if (a.last != b.last) return a.last > b.last;
+            return std.mem.lessThan(u8, a.path, b.path);
+        }
+    }.lessThan);
+    return sorted;
+}
+
+/// The prompt line that changes into `display`, a path as `gw-hist
+/// --dirs` lists it (`~`-collapsed or absolute): `cd ` plus the path with
+/// every shell-special byte backslash-escaped (`wordsplit.escapeSpecial`)
+/// so a space or `$` in a directory name stays one literal argument. A
+/// leading `~` is left bare, since the shell only expands an unescaped
+/// one. Caller owns the result.
+pub fn cdLine(alloc: std.mem.Allocator, display: []const u8) ![]u8 {
+    const tilde = display.len > 0 and display[0] == '~';
+    const rest = if (tilde) display[1..] else display;
+    const escaped = try wordsplit.escapeSpecial(alloc, rest);
+    defer alloc.free(escaped);
+    return std.fmt.allocPrint(alloc, "cd {s}{s}", .{ if (tilde) "~" else "", escaped });
+}
 
 /// Frecency: visit weight scaled by a recency multiplier.
 pub fn score(e: Entry, now: i64) f64 {

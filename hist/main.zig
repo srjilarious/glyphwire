@@ -29,6 +29,18 @@
 //! `Prompt.historySearch`), so reaching for the history mid-line keeps
 //! that typing instead of discarding it. See `seedQuery`.
 //!
+//! `gw-hist --dirs [query...]` opens on the *directory* view instead:
+//! every directory the shell has changed into, read from `zj`'s
+//! frecency database (`z.db`, see `applib.zjump`) -- one entry per path,
+//! so no duplicates -- and listed `~`-collapsed, best frecency first. A
+//! query fuzzy-matches the same way it does over history but only
+//! narrows the list; the survivors keep their frecency order, the way
+//! zoxide's `zi` behaves, since "where do I usually go" is the question
+//! this view answers. Picking one hands back `cd <path>` (`zjump.cdLine`)
+//! rather than the path itself. glyphwire-shell's Alt+C opens this view
+//! (see `Prompt.dirSearch`). Tab flips between the two views, keeping
+//! the query.
+//!
 //! On Enter, the selected line is written to `$GLYPHWIRE_RESULT_FD` --
 //! the shell opens this pipe before spawning every foreground command
 //! (see `shell/main.zig`'s `result_fd_env`) so any program, not just this
@@ -42,6 +54,8 @@ const glyphwire = @import("glyphwire");
 const history = @import("applib").history;
 const fuzzy = @import("applib").fuzzy;
 const interrupt = @import("applib").interrupt;
+const zjump = @import("applib").zjump;
+const homepath = @import("applib").homepath;
 
 /// Rows the header block occupies: title, search field, hint line.
 const header_rows: usize = 3;
@@ -67,10 +81,14 @@ pub fn main(init: std.process.Init) !void {
     interrupt.keep();
     const arena = init.arena.allocator();
 
-    const seed = try seedQuery(arena, try init.minimal.args.toSlice(arena));
+    const args = try parseArgs(arena, try init.minimal.args.toSlice(arena));
 
     const entries = loadHistory(alloc, io, init.environ_map) catch &.{};
     defer if (entries.len > 0) history.freeEntries(alloc, @constCast(entries));
+    // Both lists are loaded up front whichever view opens, so Tab
+    // switches instantly. `z.db` is small (aging keeps it bounded), and
+    // the strings live in `arena` for the life of the process.
+    const dirs = loadDirs(arena, io, init.environ_map) catch &.{};
 
     var client = try glyphwire.Client.connectFromEnv(io, alloc, init.environ_map);
     defer client.deinit();
@@ -83,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer listener.deinit();
 
-    const ui = try Ui.init(alloc, &client, listener, entries, seed);
+    const ui = try Ui.init(alloc, &client, listener, entries, dirs, args.mode, args.seed);
     defer ui.deinit();
 
     try ui.run();
@@ -103,10 +121,34 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+/// Which list the picker is showing. Tab flips between them.
+const Mode = enum {
+    /// Every command line from the shell's history file.
+    history,
+    /// Every directory in `zj`'s `z.db`; a pick becomes `cd <path>`.
+    dirs,
+};
+
+const Args = struct {
+    mode: Mode = .history,
+    seed: []const u8 = "",
+};
+
+/// `gw-hist [--dirs] [query...]`. Only a *leading* `--dirs` is the flag,
+/// so a query that happens to contain the word (Ctrl+R over a typed
+/// `ls --dirs`) is still searched for rather than swallowed.
+fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) !Args {
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "--dirs")) {
+        return .{ .mode = .dirs, .seed = try seedQuery(arena, args[1..]) };
+    }
+    return .{ .seed = try seedQuery(arena, args) };
+}
+
 /// The query the search opens with, from `gw-hist [query...]`: every
 /// argument after the program name, joined with single spaces. Empty (no
 /// arguments) opens on the whole history, which is what a bare `gw-hist`
-/// has always done.
+/// has always done. (`parseArgs` passes `args` with any `--dirs` already
+/// in the program name's slot, so it is skipped the same way.)
 ///
 /// Joined rather than "take `args[1]`, ignore the rest" so both callers
 /// read naturally: glyphwire-shell's Ctrl+R passes the typed line as one
@@ -143,6 +185,45 @@ fn loadHistory(alloc: std.mem.Allocator, io: std.Io, environ_map: *const std.pro
     return try history.parse(alloc, bytes);
 }
 
+/// The directory view's rows: `z.db`'s paths, best frecency first
+/// (`zjump.byFrecency`), `~`-collapsed for display. Two kinds of entry
+/// are left out: the current directory, since a `cd` to where you
+/// already are does nothing (`zj` skips it too), and any path that no
+/// longer opens as a directory. The shell prunes those from the file
+/// itself only when a `zj` jump trips over one, so they can linger.
+/// `$GLYPHWIRE_NO_HISTORY` empties the list, the same opt-out the shell
+/// honours for the file.
+fn loadDirs(arena: std.mem.Allocator, io: std.Io, environ_map: *const std.process.Environ.Map) ![]const []const u8 {
+    if (environ_map.get("GLYPHWIRE_NO_HISTORY")) |v| {
+        if (v.len > 0) return &.{};
+    }
+    const config_dir = try glyphwire.configDirPath(arena, environ_map);
+    const path = try std.fs.path.join(arena, &.{ config_dir, "z.db" });
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(8 << 20)) catch |err| switch (err) {
+        error.FileNotFound => return &.{},
+        else => return err,
+    };
+    // Never deinit'd: its lists and strings all come out of `arena`.
+    const db = try zjump.Db.parse(arena, bytes);
+
+    const now = std.Io.Timestamp.now(io, .real).toSeconds();
+    const ranked = try zjump.byFrecency(arena, db.entries.items, now);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd: ?[]const u8 = if (std.process.currentPath(io, &cwd_buf)) |n| cwd_buf[0..n] else |_| null;
+    const home = environ_map.get("HOME");
+
+    var out: std.ArrayList([]const u8) = .empty;
+    var tilde_buf: [std.fs.max_path_bytes]u8 = undefined;
+    for (ranked) |e| {
+        if (cwd) |c| if (std.mem.eql(u8, c, e.path)) continue;
+        var d = std.Io.Dir.cwd().openDir(io, e.path, .{}) catch continue;
+        d.close(io);
+        try out.append(arena, try arena.dupe(u8, homepath.collapseHome(e.path, home, &tilde_buf)));
+    }
+    return out.items;
+}
+
 const Ui = struct {
     alloc: std.mem.Allocator,
     client: *glyphwire.Client,
@@ -151,7 +232,11 @@ const Ui = struct {
     header_layer: glyphwire.LayerHandle,
     list_layer: glyphwire.LayerHandle,
 
-    entries: []const []const u8,
+    /// History lines, oldest-first (the file's order).
+    history_entries: []const []const u8,
+    /// Directories, best frecency first (`loadDirs`).
+    dir_entries: []const []const u8,
+    mode: Mode,
     query: std.ArrayList(u8) = .empty,
     filtered: std.ArrayList([]const u8) = .empty,
     /// Reused across renders so drawing a line never allocates on the hot
@@ -178,7 +263,9 @@ const Ui = struct {
         alloc: std.mem.Allocator,
         client: *glyphwire.Client,
         listener: *glyphwire.InputListener,
-        entries: []const []const u8,
+        history_entries: []const []const u8,
+        dir_entries: []const []const u8,
+        mode: Mode,
         /// The query to open on -- see `seedQuery`. Copied into `query`,
         /// so the caller's storage doesn't have to outlive this.
         seed: []const u8,
@@ -220,7 +307,9 @@ const Ui = struct {
             .context = context,
             .header_layer = header_layer,
             .list_layer = list_layer,
-            .entries = entries,
+            .history_entries = history_entries,
+            .dir_entries = dir_entries,
+            .mode = mode,
             .cols = cols,
             .rows = rows,
             .list_rows = list_rows,
@@ -311,8 +400,20 @@ const Ui = struct {
 
         if (eq(u8, key, "enter")) {
             if (self.filtered.items.len == 0) return;
-            self.picked = try self.alloc.dupe(u8, self.filtered.items[self.selected]);
+            const row = self.filtered.items[self.selected];
+            self.picked = switch (self.mode) {
+                .history => try self.alloc.dupe(u8, row),
+                .dirs => try zjump.cdLine(self.alloc, row),
+            };
             self.quit = true;
+        } else if (eq(u8, key, "tab")) {
+            // The query carries over: `glyph` typed into the history
+            // view is just as likely to be the name of the directory.
+            self.mode = switch (self.mode) {
+                .history => .dirs,
+                .dirs => .history,
+            };
+            try self.onQueryChanged();
         } else if (eq(u8, key, "escape") or (ctrl and eq(u8, key, "c"))) {
             self.quit = true;
         } else if (eq(u8, key, "backspace")) {
@@ -364,17 +465,36 @@ const Ui = struct {
         self.list_dirty = true;
     }
 
-    /// Rewrites `filtered` with every entry of `entries` (oldest-first)
-    /// that fuzzy-matches `query`, newest-first, sorted by `fuzzy.score`
+    /// Rewrites `filtered` from the current view's entries.
+    fn refilter(self: *Ui) !void {
+        self.filtered.clearRetainingCapacity();
+        switch (self.mode) {
+            .history => try self.refilterHistory(),
+            .dirs => try self.refilterDirs(),
+        }
+        if (self.selected >= self.filtered.items.len) self.selected = self.filtered.items.len -| 1;
+    }
+
+    /// Every directory that fuzzy-matches `query`, in the frecency order
+    /// `dir_entries` already has. The match only decides membership --
+    /// see the module doc for why it doesn't re-rank.
+    fn refilterDirs(self: *Ui) !void {
+        for (self.dir_entries) |d| {
+            if (fuzzy.matches(d, self.query.items)) try self.filtered.append(self.alloc, d);
+        }
+    }
+
+    /// Every history line (`history_entries` is oldest-first) that
+    /// fuzzy-matches `query`, newest-first, sorted by `fuzzy.score`
     /// (tighter match first) with a stable sort so equal scores keep the
     /// newest-first order -- the recency tiebreak (see `fuzzy.score`'s
     /// doc comment).
-    fn refilter(self: *Ui) !void {
-        self.filtered.clearRetainingCapacity();
-        var i: usize = self.entries.len;
+    fn refilterHistory(self: *Ui) !void {
+        const entries = self.history_entries;
+        var i: usize = entries.len;
         while (i > 0) {
             i -= 1;
-            if (fuzzy.matches(self.entries[i], self.query.items)) try self.filtered.append(self.alloc, self.entries[i]);
+            if (fuzzy.matches(entries[i], self.query.items)) try self.filtered.append(self.alloc, entries[i]);
         }
         const Ctx = struct {
             query: []const u8,
@@ -385,7 +505,6 @@ const Ui = struct {
             }
         };
         std.mem.sort([]const u8, self.filtered.items, Ctx{ .query = self.query.items }, Ctx.lessThan);
-        if (self.selected >= self.filtered.items.len) self.selected = self.filtered.items.len -| 1;
     }
 
     /// Keeps `view_top` covering `selected`, clamped to the list's actual
@@ -432,7 +551,11 @@ const Ui = struct {
     }
 
     fn renderHeader(self: *Ui, b: *glyphwire.Client.Batch) !void {
-        try self.writeLine(b, self.header_layer, 0, "gw-hist -- fuzzy history search", fg_header, bg_header);
+        const title = switch (self.mode) {
+            .history => "gw-hist -- fuzzy history search   [Tab: directories]",
+            .dirs => "gw-hist -- frecent directories   [Tab: history]",
+        };
+        try self.writeLine(b, self.header_layer, 0, title, fg_header, bg_header);
 
         self.scratch.clearRetainingCapacity();
         try self.scratch.appendSlice(self.alloc, "Search: ");
@@ -455,7 +578,11 @@ const Ui = struct {
         try b.writeTextOpts(" ", .{ .layer = self.header_layer, .fg = bg_header, .bg = fg_header, .max_cols = 1 });
 
         self.scratch.clearRetainingCapacity();
-        try self.scratch.print(self.alloc, "{d} match(es)   Enter picks   Esc/^C cancels   Down/^R next   PgUp/PgDn page", .{self.filtered.items.len});
+        const pick = switch (self.mode) {
+            .history => "Enter picks",
+            .dirs => "Enter: cd",
+        };
+        try self.scratch.print(self.alloc, "{d} match(es)   {s}   Esc/^C cancels   Down/^R next   PgUp/PgDn page", .{ self.filtered.items.len, pick });
         try self.writeLine(b, self.header_layer, 2, self.scratch.items, fg_header, bg_header);
     }
 
