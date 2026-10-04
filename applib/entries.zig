@@ -268,6 +268,9 @@ const extension_mimetypes = [_]struct { ext: []const u8, mime: []const u8 }{
     .{ .ext = ".webm", .mime = "video/webm" },
     .{ .ext = ".avi", .mime = "video/x-msvideo" },
 
+    .{ .ext = ".cbz", .mime = "application/vnd.comicbook+zip" },
+    .{ .ext = ".cbr", .mime = "application/vnd.comicbook+rar" },
+
     .{ .ext = ".zip", .mime = "application/zip" },
     .{ .ext = ".tar", .mime = "application/x-tar" },
     .{ .ext = ".gz", .mime = "application/gzip" },
