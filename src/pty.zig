@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const key_encode = @import("key_encode.zig");
 const c = std.c;
 
 pub const SpawnError = error{ OpenptyFailed, PipeFailed, ForkFailed, CommandNotFound, Unsupported };
@@ -310,8 +311,9 @@ const PtyLinux = struct {
 /// Sniffs a pty master byte stream for the DEC private modes the input
 /// path has to honour, so `shell/main.zig`'s foreground key loop can
 /// encode keys and mouse events the way the running child asked for
-/// without a wire round trip. Only `ESC [ ? <params> h` (set) and
-/// `... l` (reset) are recognized; every other escape is skipped. The
+/// without a wire round trip. Only `ESC [ ? <params> h` (set), `... l`
+/// (reset) and the kitty keyboard protocol's `ESC [ <lead> <params> u`
+/// are recognized; every other escape is skipped. The
 /// small parser state persists across `feed` calls, so a sequence split
 /// across two master reads is still caught.
 ///
@@ -335,6 +337,18 @@ pub const ModeTracker = struct {
     /// `?1006` -- SGR-form reports (`ESC [ < b ; x ; y M|m`) instead of
     /// the legacy `ESC [ M` byte triples.
     mouse_sgr: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// `?1004` -- send `ESC [ I` / `ESC [ O` when the program gains or
+    /// loses keyboard focus (nvim's `FocusGained` / autoread).
+    focus_events: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// The kitty keyboard flags in effect on whichever screen is active
+    /// -- `kitty.flags(on_alt)`, republished after every change so the
+    /// foreground loop reads one atomic instead of the stack.
+    kitty_flags: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
+
+    /// Reader-thread-only state behind `kitty_flags`: the per-screen flag
+    /// stacks and which screen is active (`?1049` / `?47` / `?1047`).
+    kitty: key_encode.KittyKeyboard = .{},
+    on_alt: bool = false,
 
     state: enum { ground, esc, csi } = .ground,
     /// Parameter/intermediate bytes of the CSI being parsed. 32 is plenty
@@ -362,6 +376,7 @@ pub const ModeTracker = struct {
             .csi => {
                 if (b >= 0x40 and b <= 0x7e) {
                     if (b == 'h' or b == 'l') self.applyPrivateMode(b == 'h');
+                    if (b == 'u') self.applyKitty();
                     self.state = .ground;
                     self.params_len = 0;
                 } else if (self.params_len < self.params.len) {
@@ -388,9 +403,25 @@ pub const ModeTracker = struct {
                 1002 => self.mouse_drag.store(set, .monotonic),
                 1003 => self.mouse_any.store(set, .monotonic),
                 1006 => self.mouse_sgr.store(set, .monotonic),
+                1004 => self.focus_events.store(set, .monotonic),
+                47, 1047, 1049 => {
+                    if (set and !self.on_alt) self.kitty.enterAlt();
+                    self.on_alt = set;
+                    self.kitty_flags.store(self.kitty.flags(self.on_alt), .monotonic);
+                },
                 else => {},
             }
         }
+    }
+
+    /// `CSI > f u` / `CSI < n u` / `CSI = f ; m u` -- the kitty keyboard
+    /// protocol's flag stack (see `key_encode.KittyKeyboard`). A bare
+    /// `CSI u` (ANSI.SYS restore cursor) has no lead byte and is ignored.
+    fn applyKitty(self: *ModeTracker) void {
+        const p = self.params[0..self.params_len];
+        if (p.len == 0) return;
+        if (!self.kitty.apply(p[0], p[1..], self.on_alt)) return;
+        self.kitty_flags.store(self.kitty.flags(self.on_alt), .monotonic);
     }
 
     pub fn appCursor(self: *const ModeTracker) bool {
@@ -417,5 +448,15 @@ pub const ModeTracker = struct {
     }
     pub fn sgrMouse(self: *const ModeTracker) bool {
         return self.mouse_sgr.load(.monotonic);
+    }
+    pub fn focusEvents(self: *const ModeTracker) bool {
+        return self.focus_events.load(.monotonic);
+    }
+    /// How keys should be encoded for the child right now.
+    pub fn encodeOpts(self: *const ModeTracker) key_encode.EncodeOpts {
+        return .{
+            .cursor_mode = if (self.app_cursor.load(.monotonic)) .application else .normal,
+            .kitty_flags = self.kitty_flags.load(.monotonic),
+        };
     }
 };

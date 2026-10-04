@@ -525,8 +525,9 @@ fn runPrompt(
     // backlog. `remote` is what `gwssh` waits on: the session's end
     // arrives here, not on the `Client` that asked for it. Free to
     // subscribe to always -- nothing broadcasts it in a session with no
-    // remote panes.
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "shutdown", "clipboard", "terminal", "remote", "context" }) catch |err| {
+    // remote panes. `focus` is only forwarded to a pty child that turned
+    // on `?1004`.
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "shutdown", "clipboard", "terminal", "remote", "context", "focus" }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -4565,6 +4566,11 @@ const Prompt = struct {
                     // host parsed out of the child's own output on the way
                     // to the grid.
                     .terminal_reply => |reply| if (!is_aware) pty.writeAll(reply),
+                    // `?1004`: tell the child it gained or lost the
+                    // keyboard. The server sends `focus` per connection,
+                    // so under gmux this follows the focused pane.
+                    .focus => |fev| if (!is_aware and modes.focusEvents())
+                        pty.writeAll(if (fev.focused) "\x1b[I" else "\x1b[O"),
                     else => {},
                 }
                 continue;
@@ -4652,9 +4658,8 @@ const Prompt = struct {
             // twice. `toPtyBytes` still handles the named keys (Enter,
             // arrows, ...) and ctrl/alt combos, which produce no `text`.
             if (!mods.ctrl and !mods.alt and keyencode.charFromKeyName(ev.key, false) != null) continue;
-            const cursor_mode: keyencode.CursorKeyMode = if (modes.appCursor()) .application else .normal;
-            var kb: [8]u8 = undefined;
-            if (keyencode.toPtyBytes(ev.key, mods, cursor_mode, &kb)) |seq| pty.writeAll(seq);
+            var kb: [32]u8 = undefined;
+            if (keyencode.toPtyBytesOpts(ev.key, mods, modes.encodeOpts(), &kb)) |seq| pty.writeAll(seq);
         }
         return .exited;
     }

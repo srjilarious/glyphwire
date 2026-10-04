@@ -931,6 +931,404 @@ pub fn codepointWidth(cp: u21) u2 {
     return 1;
 }
 
+/// Codepoints a terminal program's `wcwidth` gives no width: nonspacing
+/// and enclosing marks (Mn, Me), format characters (Cf -- ZWJ, ZWNJ,
+/// the bidi controls -- except U+00AD SOFT HYPHEN, which glibc counts as
+/// 1), and the Hangul medial/final jamo. Inclusive `[lo, hi]` ranges,
+/// sorted and non-overlapping, generated from Unicode 16.0.0 the same way
+/// `wide_ranges` is. Variation selectors (U+FE00..FE0F, U+E0100..) are Mn.
+const zero_width_ranges = [_][2]u21{
+    .{ 0x300, 0x36F },
+    .{ 0x483, 0x489 },
+    .{ 0x591, 0x5BD },
+    .{ 0x5BF, 0x5BF },
+    .{ 0x5C1, 0x5C2 },
+    .{ 0x5C4, 0x5C5 },
+    .{ 0x5C7, 0x5C7 },
+    .{ 0x600, 0x605 },
+    .{ 0x610, 0x61A },
+    .{ 0x61C, 0x61C },
+    .{ 0x64B, 0x65F },
+    .{ 0x670, 0x670 },
+    .{ 0x6D6, 0x6DD },
+    .{ 0x6DF, 0x6E4 },
+    .{ 0x6E7, 0x6E8 },
+    .{ 0x6EA, 0x6ED },
+    .{ 0x70F, 0x70F },
+    .{ 0x711, 0x711 },
+    .{ 0x730, 0x74A },
+    .{ 0x7A6, 0x7B0 },
+    .{ 0x7EB, 0x7F3 },
+    .{ 0x7FD, 0x7FD },
+    .{ 0x816, 0x819 },
+    .{ 0x81B, 0x823 },
+    .{ 0x825, 0x827 },
+    .{ 0x829, 0x82D },
+    .{ 0x859, 0x85B },
+    .{ 0x890, 0x891 },
+    .{ 0x897, 0x89F },
+    .{ 0x8CA, 0x902 },
+    .{ 0x93A, 0x93A },
+    .{ 0x93C, 0x93C },
+    .{ 0x941, 0x948 },
+    .{ 0x94D, 0x94D },
+    .{ 0x951, 0x957 },
+    .{ 0x962, 0x963 },
+    .{ 0x981, 0x981 },
+    .{ 0x9BC, 0x9BC },
+    .{ 0x9C1, 0x9C4 },
+    .{ 0x9CD, 0x9CD },
+    .{ 0x9E2, 0x9E3 },
+    .{ 0x9FE, 0x9FE },
+    .{ 0xA01, 0xA02 },
+    .{ 0xA3C, 0xA3C },
+    .{ 0xA41, 0xA42 },
+    .{ 0xA47, 0xA48 },
+    .{ 0xA4B, 0xA4D },
+    .{ 0xA51, 0xA51 },
+    .{ 0xA70, 0xA71 },
+    .{ 0xA75, 0xA75 },
+    .{ 0xA81, 0xA82 },
+    .{ 0xABC, 0xABC },
+    .{ 0xAC1, 0xAC5 },
+    .{ 0xAC7, 0xAC8 },
+    .{ 0xACD, 0xACD },
+    .{ 0xAE2, 0xAE3 },
+    .{ 0xAFA, 0xAFF },
+    .{ 0xB01, 0xB01 },
+    .{ 0xB3C, 0xB3C },
+    .{ 0xB3F, 0xB3F },
+    .{ 0xB41, 0xB44 },
+    .{ 0xB4D, 0xB4D },
+    .{ 0xB55, 0xB56 },
+    .{ 0xB62, 0xB63 },
+    .{ 0xB82, 0xB82 },
+    .{ 0xBC0, 0xBC0 },
+    .{ 0xBCD, 0xBCD },
+    .{ 0xC00, 0xC00 },
+    .{ 0xC04, 0xC04 },
+    .{ 0xC3C, 0xC3C },
+    .{ 0xC3E, 0xC40 },
+    .{ 0xC46, 0xC48 },
+    .{ 0xC4A, 0xC4D },
+    .{ 0xC55, 0xC56 },
+    .{ 0xC62, 0xC63 },
+    .{ 0xC81, 0xC81 },
+    .{ 0xCBC, 0xCBC },
+    .{ 0xCBF, 0xCBF },
+    .{ 0xCC6, 0xCC6 },
+    .{ 0xCCC, 0xCCD },
+    .{ 0xCE2, 0xCE3 },
+    .{ 0xD00, 0xD01 },
+    .{ 0xD3B, 0xD3C },
+    .{ 0xD41, 0xD44 },
+    .{ 0xD4D, 0xD4D },
+    .{ 0xD62, 0xD63 },
+    .{ 0xD81, 0xD81 },
+    .{ 0xDCA, 0xDCA },
+    .{ 0xDD2, 0xDD4 },
+    .{ 0xDD6, 0xDD6 },
+    .{ 0xE31, 0xE31 },
+    .{ 0xE34, 0xE3A },
+    .{ 0xE47, 0xE4E },
+    .{ 0xEB1, 0xEB1 },
+    .{ 0xEB4, 0xEBC },
+    .{ 0xEC8, 0xECE },
+    .{ 0xF18, 0xF19 },
+    .{ 0xF35, 0xF35 },
+    .{ 0xF37, 0xF37 },
+    .{ 0xF39, 0xF39 },
+    .{ 0xF71, 0xF7E },
+    .{ 0xF80, 0xF84 },
+    .{ 0xF86, 0xF87 },
+    .{ 0xF8D, 0xF97 },
+    .{ 0xF99, 0xFBC },
+    .{ 0xFC6, 0xFC6 },
+    .{ 0x102D, 0x1030 },
+    .{ 0x1032, 0x1037 },
+    .{ 0x1039, 0x103A },
+    .{ 0x103D, 0x103E },
+    .{ 0x1058, 0x1059 },
+    .{ 0x105E, 0x1060 },
+    .{ 0x1071, 0x1074 },
+    .{ 0x1082, 0x1082 },
+    .{ 0x1085, 0x1086 },
+    .{ 0x108D, 0x108D },
+    .{ 0x109D, 0x109D },
+    .{ 0x1160, 0x11FF },
+    .{ 0x135D, 0x135F },
+    .{ 0x1712, 0x1714 },
+    .{ 0x1732, 0x1733 },
+    .{ 0x1752, 0x1753 },
+    .{ 0x1772, 0x1773 },
+    .{ 0x17B4, 0x17B5 },
+    .{ 0x17B7, 0x17BD },
+    .{ 0x17C6, 0x17C6 },
+    .{ 0x17C9, 0x17D3 },
+    .{ 0x17DD, 0x17DD },
+    .{ 0x180B, 0x180F },
+    .{ 0x1885, 0x1886 },
+    .{ 0x18A9, 0x18A9 },
+    .{ 0x1920, 0x1922 },
+    .{ 0x1927, 0x1928 },
+    .{ 0x1932, 0x1932 },
+    .{ 0x1939, 0x193B },
+    .{ 0x1A17, 0x1A18 },
+    .{ 0x1A1B, 0x1A1B },
+    .{ 0x1A56, 0x1A56 },
+    .{ 0x1A58, 0x1A5E },
+    .{ 0x1A60, 0x1A60 },
+    .{ 0x1A62, 0x1A62 },
+    .{ 0x1A65, 0x1A6C },
+    .{ 0x1A73, 0x1A7C },
+    .{ 0x1A7F, 0x1A7F },
+    .{ 0x1AB0, 0x1ACE },
+    .{ 0x1B00, 0x1B03 },
+    .{ 0x1B34, 0x1B34 },
+    .{ 0x1B36, 0x1B3A },
+    .{ 0x1B3C, 0x1B3C },
+    .{ 0x1B42, 0x1B42 },
+    .{ 0x1B6B, 0x1B73 },
+    .{ 0x1B80, 0x1B81 },
+    .{ 0x1BA2, 0x1BA5 },
+    .{ 0x1BA8, 0x1BA9 },
+    .{ 0x1BAB, 0x1BAD },
+    .{ 0x1BE6, 0x1BE6 },
+    .{ 0x1BE8, 0x1BE9 },
+    .{ 0x1BED, 0x1BED },
+    .{ 0x1BEF, 0x1BF1 },
+    .{ 0x1C2C, 0x1C33 },
+    .{ 0x1C36, 0x1C37 },
+    .{ 0x1CD0, 0x1CD2 },
+    .{ 0x1CD4, 0x1CE0 },
+    .{ 0x1CE2, 0x1CE8 },
+    .{ 0x1CED, 0x1CED },
+    .{ 0x1CF4, 0x1CF4 },
+    .{ 0x1CF8, 0x1CF9 },
+    .{ 0x1DC0, 0x1DFF },
+    .{ 0x200B, 0x200F },
+    .{ 0x202A, 0x202E },
+    .{ 0x2060, 0x2064 },
+    .{ 0x2066, 0x206F },
+    .{ 0x20D0, 0x20F0 },
+    .{ 0x2CEF, 0x2CF1 },
+    .{ 0x2D7F, 0x2D7F },
+    .{ 0x2DE0, 0x2DFF },
+    .{ 0x302A, 0x302D },
+    .{ 0x3099, 0x309A },
+    .{ 0xA66F, 0xA672 },
+    .{ 0xA674, 0xA67D },
+    .{ 0xA69E, 0xA69F },
+    .{ 0xA6F0, 0xA6F1 },
+    .{ 0xA802, 0xA802 },
+    .{ 0xA806, 0xA806 },
+    .{ 0xA80B, 0xA80B },
+    .{ 0xA825, 0xA826 },
+    .{ 0xA82C, 0xA82C },
+    .{ 0xA8C4, 0xA8C5 },
+    .{ 0xA8E0, 0xA8F1 },
+    .{ 0xA8FF, 0xA8FF },
+    .{ 0xA926, 0xA92D },
+    .{ 0xA947, 0xA951 },
+    .{ 0xA980, 0xA982 },
+    .{ 0xA9B3, 0xA9B3 },
+    .{ 0xA9B6, 0xA9B9 },
+    .{ 0xA9BC, 0xA9BD },
+    .{ 0xA9E5, 0xA9E5 },
+    .{ 0xAA29, 0xAA2E },
+    .{ 0xAA31, 0xAA32 },
+    .{ 0xAA35, 0xAA36 },
+    .{ 0xAA43, 0xAA43 },
+    .{ 0xAA4C, 0xAA4C },
+    .{ 0xAA7C, 0xAA7C },
+    .{ 0xAAB0, 0xAAB0 },
+    .{ 0xAAB2, 0xAAB4 },
+    .{ 0xAAB7, 0xAAB8 },
+    .{ 0xAABE, 0xAABF },
+    .{ 0xAAC1, 0xAAC1 },
+    .{ 0xAAEC, 0xAAED },
+    .{ 0xAAF6, 0xAAF6 },
+    .{ 0xABE5, 0xABE5 },
+    .{ 0xABE8, 0xABE8 },
+    .{ 0xABED, 0xABED },
+    .{ 0xD7B0, 0xD7FF },
+    .{ 0xFB1E, 0xFB1E },
+    .{ 0xFE00, 0xFE0F },
+    .{ 0xFE20, 0xFE2F },
+    .{ 0xFEFF, 0xFEFF },
+    .{ 0xFFF9, 0xFFFB },
+    .{ 0x101FD, 0x101FD },
+    .{ 0x102E0, 0x102E0 },
+    .{ 0x10376, 0x1037A },
+    .{ 0x10A01, 0x10A03 },
+    .{ 0x10A05, 0x10A06 },
+    .{ 0x10A0C, 0x10A0F },
+    .{ 0x10A38, 0x10A3A },
+    .{ 0x10A3F, 0x10A3F },
+    .{ 0x10AE5, 0x10AE6 },
+    .{ 0x10D24, 0x10D27 },
+    .{ 0x10D69, 0x10D6D },
+    .{ 0x10EAB, 0x10EAC },
+    .{ 0x10EFC, 0x10EFF },
+    .{ 0x10F46, 0x10F50 },
+    .{ 0x10F82, 0x10F85 },
+    .{ 0x11001, 0x11001 },
+    .{ 0x11038, 0x11046 },
+    .{ 0x11070, 0x11070 },
+    .{ 0x11073, 0x11074 },
+    .{ 0x1107F, 0x11081 },
+    .{ 0x110B3, 0x110B6 },
+    .{ 0x110B9, 0x110BA },
+    .{ 0x110BD, 0x110BD },
+    .{ 0x110C2, 0x110C2 },
+    .{ 0x110CD, 0x110CD },
+    .{ 0x11100, 0x11102 },
+    .{ 0x11127, 0x1112B },
+    .{ 0x1112D, 0x11134 },
+    .{ 0x11173, 0x11173 },
+    .{ 0x11180, 0x11181 },
+    .{ 0x111B6, 0x111BE },
+    .{ 0x111C9, 0x111CC },
+    .{ 0x111CF, 0x111CF },
+    .{ 0x1122F, 0x11231 },
+    .{ 0x11234, 0x11234 },
+    .{ 0x11236, 0x11237 },
+    .{ 0x1123E, 0x1123E },
+    .{ 0x11241, 0x11241 },
+    .{ 0x112DF, 0x112DF },
+    .{ 0x112E3, 0x112EA },
+    .{ 0x11300, 0x11301 },
+    .{ 0x1133B, 0x1133C },
+    .{ 0x11340, 0x11340 },
+    .{ 0x11366, 0x1136C },
+    .{ 0x11370, 0x11374 },
+    .{ 0x113BB, 0x113C0 },
+    .{ 0x113CE, 0x113CE },
+    .{ 0x113D0, 0x113D0 },
+    .{ 0x113D2, 0x113D2 },
+    .{ 0x113E1, 0x113E2 },
+    .{ 0x11438, 0x1143F },
+    .{ 0x11442, 0x11444 },
+    .{ 0x11446, 0x11446 },
+    .{ 0x1145E, 0x1145E },
+    .{ 0x114B3, 0x114B8 },
+    .{ 0x114BA, 0x114BA },
+    .{ 0x114BF, 0x114C0 },
+    .{ 0x114C2, 0x114C3 },
+    .{ 0x115B2, 0x115B5 },
+    .{ 0x115BC, 0x115BD },
+    .{ 0x115BF, 0x115C0 },
+    .{ 0x115DC, 0x115DD },
+    .{ 0x11633, 0x1163A },
+    .{ 0x1163D, 0x1163D },
+    .{ 0x1163F, 0x11640 },
+    .{ 0x116AB, 0x116AB },
+    .{ 0x116AD, 0x116AD },
+    .{ 0x116B0, 0x116B5 },
+    .{ 0x116B7, 0x116B7 },
+    .{ 0x1171D, 0x1171D },
+    .{ 0x1171F, 0x1171F },
+    .{ 0x11722, 0x11725 },
+    .{ 0x11727, 0x1172B },
+    .{ 0x1182F, 0x11837 },
+    .{ 0x11839, 0x1183A },
+    .{ 0x1193B, 0x1193C },
+    .{ 0x1193E, 0x1193E },
+    .{ 0x11943, 0x11943 },
+    .{ 0x119D4, 0x119D7 },
+    .{ 0x119DA, 0x119DB },
+    .{ 0x119E0, 0x119E0 },
+    .{ 0x11A01, 0x11A0A },
+    .{ 0x11A33, 0x11A38 },
+    .{ 0x11A3B, 0x11A3E },
+    .{ 0x11A47, 0x11A47 },
+    .{ 0x11A51, 0x11A56 },
+    .{ 0x11A59, 0x11A5B },
+    .{ 0x11A8A, 0x11A96 },
+    .{ 0x11A98, 0x11A99 },
+    .{ 0x11C30, 0x11C36 },
+    .{ 0x11C38, 0x11C3D },
+    .{ 0x11C3F, 0x11C3F },
+    .{ 0x11C92, 0x11CA7 },
+    .{ 0x11CAA, 0x11CB0 },
+    .{ 0x11CB2, 0x11CB3 },
+    .{ 0x11CB5, 0x11CB6 },
+    .{ 0x11D31, 0x11D36 },
+    .{ 0x11D3A, 0x11D3A },
+    .{ 0x11D3C, 0x11D3D },
+    .{ 0x11D3F, 0x11D45 },
+    .{ 0x11D47, 0x11D47 },
+    .{ 0x11D90, 0x11D91 },
+    .{ 0x11D95, 0x11D95 },
+    .{ 0x11D97, 0x11D97 },
+    .{ 0x11EF3, 0x11EF4 },
+    .{ 0x11F00, 0x11F01 },
+    .{ 0x11F36, 0x11F3A },
+    .{ 0x11F40, 0x11F40 },
+    .{ 0x11F42, 0x11F42 },
+    .{ 0x11F5A, 0x11F5A },
+    .{ 0x13430, 0x13440 },
+    .{ 0x13447, 0x13455 },
+    .{ 0x1611E, 0x16129 },
+    .{ 0x1612D, 0x1612F },
+    .{ 0x16AF0, 0x16AF4 },
+    .{ 0x16B30, 0x16B36 },
+    .{ 0x16F4F, 0x16F4F },
+    .{ 0x16F8F, 0x16F92 },
+    .{ 0x16FE4, 0x16FE4 },
+    .{ 0x1BC9D, 0x1BC9E },
+    .{ 0x1BCA0, 0x1BCA3 },
+    .{ 0x1CF00, 0x1CF2D },
+    .{ 0x1CF30, 0x1CF46 },
+    .{ 0x1D167, 0x1D169 },
+    .{ 0x1D173, 0x1D182 },
+    .{ 0x1D185, 0x1D18B },
+    .{ 0x1D1AA, 0x1D1AD },
+    .{ 0x1D242, 0x1D244 },
+    .{ 0x1DA00, 0x1DA36 },
+    .{ 0x1DA3B, 0x1DA6C },
+    .{ 0x1DA75, 0x1DA75 },
+    .{ 0x1DA84, 0x1DA84 },
+    .{ 0x1DA9B, 0x1DA9F },
+    .{ 0x1DAA1, 0x1DAAF },
+    .{ 0x1E000, 0x1E006 },
+    .{ 0x1E008, 0x1E018 },
+    .{ 0x1E01B, 0x1E021 },
+    .{ 0x1E023, 0x1E024 },
+    .{ 0x1E026, 0x1E02A },
+    .{ 0x1E08F, 0x1E08F },
+    .{ 0x1E130, 0x1E136 },
+    .{ 0x1E2AE, 0x1E2AE },
+    .{ 0x1E2EC, 0x1E2EF },
+    .{ 0x1E4EC, 0x1E4EF },
+    .{ 0x1E5EE, 0x1E5EF },
+    .{ 0x1E8D0, 0x1E8D6 },
+    .{ 0x1E944, 0x1E94A },
+    .{ 0xE0001, 0xE0001 },
+    .{ 0xE0020, 0xE007F },
+    .{ 0xE0100, 0xE01EF },
+};
+
+/// Whether `cp` takes no cell of its own on a pty stream -- see
+/// `zero_width_ranges` and `Layer.attachZeroWidth`. Separate from
+/// `codepointWidth`, which never answers 0: native clients lay out with
+/// it, and changing its contract would move every column they compute.
+pub fn isZeroWidth(cp: u21) bool {
+    var lo: usize = 0;
+    var hi: usize = zero_width_ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (cp < zero_width_ranges[mid][0]) {
+            hi = mid;
+        } else if (cp > zero_width_ranges[mid][1]) {
+            lo = mid + 1;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Total display width of `text` in terminal cells (sum of
 /// `codepointWidth` over its codepoints). Invalid UTF-8 falls back to the
 /// byte length.
@@ -1128,6 +1526,18 @@ pub const Cell = struct {
 pub const Cursor = struct {
     row: usize = 0,
     col: usize = 0,
+};
+
+/// What DECSC (`ESC 7` / `CSI s`) saves and DECRC (`ESC 8` / `CSI u`)
+/// restores: the cursor, plus the SGR pen and the G0/G1 charset state,
+/// as VT100 specifies. A program that saves, draws a coloured status
+/// line, and restores expects its own colour back with the cursor.
+pub const SavedCursor = struct {
+    cursor: Cursor,
+    pen: SgrPen,
+    shift_out: bool,
+    g0_line_drawing: bool,
+    g1_line_drawing: bool,
 };
 
 /// Where a viewport row index lands after a bottom-anchored resize that
@@ -1817,8 +2227,9 @@ pub const Layer = struct {
     on_alt: bool = false,
     stashed_cursor: Cursor = .{},
     /// DECSC / DECRC (`ESC 7` / `ESC 8`, and the ANSI.SYS `CSI s` /
-    /// `CSI u`) saved cursor, or null if nothing has been saved.
-    saved_cursor: ?Cursor = null,
+    /// `CSI u`) saved state, or null if nothing has been saved. See
+    /// `SavedCursor`.
+    saved_cursor: ?SavedCursor = null,
     /// DECSTBM scroll region, inclusive, in viewport rows. `[0, height-1]`
     /// (the default -- `regionActive()` false) keeps the classic
     /// ring-buffer scroll-into-scrollback on a line feed past the bottom;
@@ -1838,6 +2249,34 @@ pub const Layer = struct {
     /// path has its own copy in `pty.ModeTracker` (a synchronous local
     /// read; this one would need a wire round trip).
     app_cursor_keys: bool = false,
+    /// DECAWM (`CSI ? 7 h/l`): whether printing past the last column
+    /// wraps to the next line. Off, the last column is overwritten in
+    /// place. On by default, like every terminal.
+    autowrap: bool = true,
+    /// IRM (`CSI 4 h/l`): while set, a printed character shifts the rest
+    /// of the row right (`insertCells`) instead of overwriting.
+    insert_mode: bool = false,
+    /// Horizontal tab stops set by HTS / cleared by TBC, one flag per
+    /// column, or null for the default stop every `tab_width` columns.
+    /// Allocated the first time a program edits a stop, and rebuilt on a
+    /// width change (new columns get the default stops). Owned.
+    tab_stops: ?[]bool = null,
+    /// The last graphic character printed, for REP (`CSI n b`, "repeat
+    /// it n more times") -- the grapheme as placed (`last_glyph_len == 0`
+    /// is "nothing printed yet") with the width and resolved style it was
+    /// placed with. ncurses emits REP for runs of one character
+    /// (borders, blank padding) under xterm-256color.
+    last_glyph: [grapheme_inline_len]u8 = undefined,
+    last_glyph_len: u8 = 0,
+    last_glyph_w: u2 = 1,
+    last_glyph_fg: Color = default_style.fg,
+    last_glyph_bg: ?Background = null,
+    last_glyph_ul: UnderlineStyle = .{},
+    /// The kitty keyboard protocol flag stacks, tracked from the same
+    /// stream `pty.ModeTracker` reads, only so `CSI ? u` (the protocol's
+    /// "is this supported?" query) gets an answer here -- the encoding
+    /// itself happens in glyphwire-shell. See `key_encode.KittyKeyboard`.
+    kitty_keys: key_encode.KittyKeyboard = .{},
     /// Bytes this layer owes the program writing to it -- a terminal
     /// reply to a `CSI 6n` / `CSI c` / DECRQM query parsed out of
     /// `writeText`. The dispatcher drains it right after each `write_text`
@@ -2003,6 +2442,7 @@ pub const Layer = struct {
     pub fn deinit(self: *Layer) void {
         self.alloc.free(self.buf);
         if (self.alt_cells) |a| self.alloc.free(a);
+        if (self.tab_stops) |t| self.alloc.free(t);
         var table_it = self.tables.valueIterator();
         while (table_it.next()) |t| t.deinit();
         self.tables.deinit();
@@ -2446,6 +2886,23 @@ pub const Layer = struct {
     /// Scrolls the viewport down by one row: the current top row becomes
     /// history (evicting the oldest history row once `scrollback_rows`
     /// is full), and a fresh blank row appears at the bottom.
+    /// Forgets the scrollback: `history_len` back to 0 and the view back
+    /// on the live tail. The history rows themselves aren't wiped --
+    /// nothing reads past `history_len`, and the next scroll overwrites
+    /// them. A selection reaching into history is dropped with it. Backs
+    /// `ED 3` (`csiEraseDisplay`).
+    pub fn clearHistory(self: *Layer) void {
+        if (self.history_len == 0) return;
+        self.history_len = 0;
+        self.view_scroll = 0;
+        if (self.selection) |s| {
+            if (s.anchor.above > 0 or s.active.above > 0) self.selection = null;
+        }
+        _ = self.setScrollOffset(self.effectiveScrollOffset());
+        self.revision += 1;
+        self.touchRender();
+    }
+
     fn scrollOne(self: *Layer) void {
         self.history_len = @min(self.history_len + 1, self.scrollback_rows);
         // Keep a selection pinned to its content: every row moves one step
@@ -2801,6 +3258,14 @@ pub const Layer = struct {
         }
         self.scroll_top = 0;
         self.scroll_bot = new_height - 1;
+        // Custom tab stops keep their columns; columns a wider grid adds
+        // get the default stops.
+        if (self.tab_stops) |old| {
+            const fresh = try self.alloc.alloc(bool, new_width);
+            for (fresh, 0..) |*s, col| s.* = if (col < old.len) old[col] else col % tab_width == 0;
+            self.alloc.free(old);
+            self.tab_stops = fresh;
+        }
         if (self.stashed_cursor.row >= new_height) self.stashed_cursor.row = new_height - 1;
         if (self.stashed_cursor.col >= new_width) self.stashed_cursor.col = new_width - 1;
         // A smaller content grid can leave the viewport parked past the
@@ -2824,8 +3289,9 @@ pub const Layer = struct {
     /// C0 control bytes in `text` move the cursor instead of being drawn
     /// (see `consumeControl`): `\n` / `\v` / `\f` act as newline (carriage
     /// return + line feed, matching a cooked terminal so `"a\nb"` puts `b`
-    /// at column 0 of the next row rather than staircasing), `\r` returns
-    /// to column 0, `\t` advances to the next `tab_width` stop, `\b` steps
+    /// at column 0 of the next row rather than staircasing; a `pty_mode`
+    /// layer takes them as a plain line feed), `\r` returns
+    /// to column 0, `\t` advances to the next tab stop, `\b` steps
     /// back one column; every other C0 byte and DEL is dropped. `ESC ...`
     /// sequences are recognized and discarded, not interpreted -- glyphwire
     /// has no VT100 layer (see `EscState`). This is baseline terminal
@@ -2971,11 +3437,25 @@ pub const Layer = struct {
                 if (line_drawing and cp_bytes.len == 1 and cp_bytes[0] >= '`' and cp_bytes[0] <= '~') {
                     var buf: [4]u8 = undefined;
                     const n = std.unicode.utf8Encode(acsGraphic(cp_bytes[0]), &buf) catch unreachable;
+                    if (self.insert_mode) self.insertCellsFill(1, .{});
                     if (!self.putRunGlyph(buf[0..n], 1, eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end)) break :runs;
+                    self.noteLastGlyph(buf[0..n], 1, eff.fg, eff.bg, eff.underline);
                     continue;
                 }
                 const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
-                if (!self.putRunGlyph(cp_bytes, codepointWidth(cp), eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end)) break :runs;
+                // A program's own column math (wcwidth) gives combining
+                // marks, ZWJ and variation selectors no width, so on a
+                // pty stream they join the character before them rather
+                // than taking a cell. Only there: a native client lays
+                // out with `codepointWidth`, which still counts them as 1.
+                if (self.pty_mode and isZeroWidth(cp)) {
+                    self.attachZeroWidth(cp_bytes);
+                    continue;
+                }
+                const w = codepointWidth(cp);
+                if (self.insert_mode) self.insertCellsFill(w, .{});
+                if (!self.putRunGlyph(cp_bytes, w, eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end)) break :runs;
+                self.noteLastGlyph(cp_bytes, w, eff.fg, eff.bg, eff.underline);
             }
         }
         if (clip_end) |end| {
@@ -3017,18 +3497,24 @@ pub const Layer = struct {
         }
         switch (byte) {
             0x1b => self.esc_state = .esc, // ESC: start of a sequence to strip
-            '\n', 0x0b, 0x0c => { // LF, VT, FF -- all treated as newline (CR + LF)
-                self.cursor.col = 0;
+            // LF, VT, FF. On an ordinary layer all three are a newline
+            // (CR + LF), the cooked-terminal reading a client's `"a\nb"`
+            // wants. A `pty_mode` layer takes them literally -- down one
+            // row, same column: the kernel's ONLCR already turned a cooked
+            // program's `\n` into `\r\n`, and a raw-mode one (vim, nvim,
+            // Claude Code) that sends a bare LF means "cursor down".
+            '\n', 0x0b, 0x0c => {
+                self.cursor.col = if (self.pty_mode) self.pendingCol() else 0;
                 self.lineFeed();
             },
             '\r' => self.cursor.col = 0, // CR
-            '\t' => { // HT: to the next tab stop, clamped to the last column (no wrap)
-                const stop = ((self.cursor.col / tab_width) + 1) * tab_width;
-                self.cursor.col = @min(stop, self.width - 1);
-            },
-            0x08 => { // BS: back one column, non-destructive; a no-op at column 0
-                if (self.cursor.col > 0) self.cursor.col -= 1;
-            },
+            // HT: to the next tab stop, clamped to the last column (no wrap)
+            '\t' => self.cursor.col = self.nextTabStop(self.cursor.col),
+            // BS: back one column, non-destructive; a no-op at column 0.
+            // From the pending-wrap position past the last column it lands
+            // on the second-to-last, as on a real terminal, where the
+            // cursor was really still on the last column.
+            0x08 => self.cursor.col = self.pendingCol() -| 1,
             0x0e => self.shift_out = true, // SO -- invoke G1 into GL
             0x0f => self.shift_out = false, // SI -- invoke G0 into GL
             // Every other C0 byte (NUL, BEL, DLE..SUB, FS..US) and DEL: dropped.
@@ -3054,16 +3540,24 @@ pub const Layer = struct {
                 ']', 'P', 'X', '^', '_' => self.esc_state = .string,
                 0x1b => {}, // ESC ESC -- stay armed for the real sequence
                 '7' => { // DECSC -- save cursor
-                    self.saved_cursor = self.cursor;
+                    self.saveCursor();
                     self.esc_state = .ground;
                 },
                 '8' => { // DECRC -- restore cursor
-                    if (self.saved_cursor) |c| self.cursor = self.clampCursor(c);
+                    self.restoreCursor();
+                    self.esc_state = .ground;
+                },
+                'H' => { // HTS -- set a tab stop at the cursor column
+                    self.setTabStop(self.pendingCol(), true) catch {};
                     self.esc_state = .ground;
                 },
                 'M' => { // RI -- reverse index (scroll down at the top margin)
-                    if (self.cursor.row <= self.scroll_top) {
-                        self.scrollRange(self.scroll_top, self.scroll_bot, 1, .down);
+                    if (self.cursor.row == self.scroll_top) {
+                        self.scrollRangeFill(self.scroll_top, self.scroll_bot, 1, .down, self.eraseBlank());
+                    } else if (self.cursor.row < self.scroll_top) {
+                        // Above the region (a header over a scrolling
+                        // pane): just move up, stopping at the top row.
+                        self.cursor.row -|= 1;
                     } else {
                         self.cursor.row -= 1;
                     }
@@ -3136,6 +3630,25 @@ pub const Layer = struct {
             self.cursor_visible = true;
             self.saved_cursor = null;
             self.pen = .{};
+            // DECSTR also puts the modes back. Autowrap goes back *on*
+            // here, where the spec says off: the point of the reset in
+            // glyphwire is to hand the layer back to the shell, whose
+            // output wants wrapping.
+            self.autowrap = true;
+            self.insert_mode = false;
+            self.shift_out = false;
+            self.g0_line_drawing = false;
+            self.g1_line_drawing = false;
+            return;
+        }
+
+        // `ESC [ > f u` / `ESC [ < n u` / `ESC [ = f ; m u` -- the kitty
+        // keyboard protocol's flag stack. Kept here only to answer the
+        // `ESC [ ? u` query; glyphwire-shell's `pty.ModeTracker` acts on
+        // the same bytes. Checked first: `ESC [ < u` would otherwise fall
+        // through to the ANSI.SYS restore-cursor `u` below.
+        if (final == 'u' and params.len > 0 and (params[0] == '>' or params[0] == '<' or params[0] == '=')) {
+            _ = self.kitty_keys.apply(params[0], params[1..], self.on_alt);
             return;
         }
 
@@ -3150,32 +3663,229 @@ pub const Layer = struct {
             if (final == 'c') self.queueReply("\x1b[>0;10;1c");
             return;
         }
+        // Any other private-parameter lead (`<`, or an intermediate this
+        // model doesn't know) is not one of the plain finals below.
+        if (params.len > 0 and params[0] >= '<' and params[0] <= '?') return;
 
         const n1 = @max(csiParam(params, 0, 1), 1); // count / distance, default 1
 
         switch (final) {
             'm' => self.pen.applySgr(params),
-            'A', 'B', 'C', 'D', 'G', 'H', 'f', 'd' => self.csiCursor(final, params),
+            'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'f', 'd', '`', 'a', 'e' => self.csiCursor(final, params),
             'J' => self.csiEraseDisplay(csiParam(params, 0, 0)),
             'K' => self.csiEraseLine(csiParam(params, 0, 0)),
             'r' => self.setScrollRegion(params), // DECSTBM
-            'S' => self.scrollRange(self.scroll_top, self.scroll_bot, n1, .up), // SU
-            'T' => self.scrollRange(self.scroll_top, self.scroll_bot, n1, .down), // SD
-            'L' => if (self.rowInRegion(self.cursor.row)) // IL
-                self.scrollRange(self.cursor.row, self.scroll_bot, n1, .down),
-            'M' => if (self.rowInRegion(self.cursor.row)) // DL
-                self.scrollRange(self.cursor.row, self.scroll_bot, n1, .up),
-            '@' => self.insertCells(n1), // ICH
-            'P' => self.deleteCells(n1), // DCH
-            'X' => self.clear(self.cursor.row, self.cursor.col, 1, n1), // ECH
-            's' => self.saved_cursor = self.cursor, // ANSI.SYS save cursor
-            'u' => if (self.saved_cursor) |c| { // ANSI.SYS restore cursor
-                self.cursor = self.clampCursor(c);
+            'S' => self.scrollRangeFill(self.scroll_top, self.scroll_bot, n1, .up, self.eraseBlank()), // SU
+            'T' => self.scrollRangeFill(self.scroll_top, self.scroll_bot, n1, .down, self.eraseBlank()), // SD
+            'L' => if (self.rowInRegion(self.cursor.row)) { // IL
+                self.scrollRangeFill(self.cursor.row, self.scroll_bot, n1, .down, self.eraseBlank());
+                self.cursor.col = 0;
             },
+            'M' => if (self.rowInRegion(self.cursor.row)) { // DL
+                self.scrollRangeFill(self.cursor.row, self.scroll_bot, n1, .up, self.eraseBlank());
+                self.cursor.col = 0;
+            },
+            '@' => { // ICH
+                self.cursor.col = self.pendingCol();
+                self.insertCellsFill(n1, self.eraseBlank());
+            },
+            'P' => { // DCH
+                self.cursor.col = self.pendingCol();
+                self.deleteCellsFill(n1, self.eraseBlank());
+            },
+            'X' => self.clearFill(self.cursor.row, self.pendingCol(), 1, n1, self.eraseBg()), // ECH
+            'b' => self.repeatLastGlyph(n1), // REP
+            'I' => { // CHT -- forward n tab stops
+                var i: usize = 0;
+                while (i < n1) : (i += 1) self.cursor.col = self.nextTabStop(self.cursor.col);
+            },
+            'Z' => { // CBT -- back n tab stops
+                var i: usize = 0;
+                while (i < n1) : (i += 1) self.cursor.col = self.prevTabStop(self.pendingCol());
+            },
+            'g' => switch (csiParam(params, 0, 0)) { // TBC
+                0 => self.setTabStop(self.pendingCol(), false) catch {},
+                3 => self.clearAllTabStops() catch {},
+                else => {},
+            },
+            // SM / RM: the one ANSI (non-DEC) mode a full-screen program
+            // still uses is IRM (4), insert vs. replace.
+            'h', 'l' => {
+                var it = std.mem.splitScalar(u8, params, ';');
+                while (it.next()) |tok| {
+                    if (std.mem.eql(u8, tok, "4")) self.insert_mode = final == 'h';
+                }
+            },
+            // ANSI.SYS save / restore cursor. With parameters `CSI s` is
+            // DECSLRM (left/right margins), which this model doesn't do.
+            's' => if (params.len == 0) self.saveCursor(),
+            'u' => if (params.len == 0) self.restoreCursor(),
             'n' => self.csiDsr(csiParam(params, 0, 0)), // DSR
             'c' => self.queueReply("\x1b[?1;2c"), // primary DA -- VT100 + AVO
             else => {}, // discarded, same as the old stripper
         }
+    }
+
+    /// DECSC: saves the cursor with the pen and charset state.
+    fn saveCursor(self: *Layer) void {
+        self.saved_cursor = .{
+            .cursor = self.cursor,
+            .pen = self.pen,
+            .shift_out = self.shift_out,
+            .g0_line_drawing = self.g0_line_drawing,
+            .g1_line_drawing = self.g1_line_drawing,
+        };
+    }
+
+    /// DECRC: restores what `saveCursor` saved. With nothing saved, a
+    /// real terminal homes the cursor and resets the pen; glyphwire has
+    /// always left both alone there, and a program never relies on it.
+    fn restoreCursor(self: *Layer) void {
+        const s = self.saved_cursor orelse return;
+        self.cursor = self.clampCursor(s.cursor);
+        self.pen = s.pen;
+        self.shift_out = s.shift_out;
+        self.g0_line_drawing = s.g0_line_drawing;
+        self.g1_line_drawing = s.g1_line_drawing;
+    }
+
+    /// Puts the VT modes a program can leave behind -- autowrap, insert
+    /// mode, custom tab stops, kitty keyboard flags, the REP character --
+    /// back to their defaults. Part of the `pty_mode` re-arm, so one
+    /// program's settings never reach the next.
+    fn resetVtModes(self: *Layer) void {
+        self.autowrap = true;
+        self.insert_mode = false;
+        if (self.tab_stops) |t| self.alloc.free(t);
+        self.tab_stops = null;
+        self.kitty_keys = .{};
+        self.last_glyph_len = 0;
+    }
+
+    /// The cursor column with the pending-wrap position folded in. After
+    /// a character lands on the last column the cursor sits one *past*
+    /// it (`col == width`) so the next character wraps; a real terminal
+    /// keeps the cursor on the last column with a "wrap next" flag
+    /// instead. Every VT operation that isn't printing -- an erase, a
+    /// cursor report, a relative move -- sees that last column, not the
+    /// phantom one past it.
+    fn pendingCol(self: *const Layer) usize {
+        return @min(self.cursor.col, self.width - 1);
+    }
+
+    /// The background an erase paints with: the SGR pen's current
+    /// background, or null for the transparent default when it has none.
+    /// This is BCE ("background colour erase"), which xterm-256color
+    /// advertises -- nvim paints the rest of a coloured line with `EL`
+    /// rather than spaces, and without it every colorscheme background
+    /// shows holes.
+    fn eraseBg(self: *const Layer) ?Color {
+        const eff = self.pen.resolve(default_style.fg, null, .{});
+        return switch (eff.bg orelse return null) {
+            .color => |c| c,
+            else => null,
+        };
+    }
+
+    /// A blank cell carrying the erase background (`eraseBg`), for the
+    /// rows and cells an `IL`/`DL`/`SU`/`SD`/`ICH`/`DCH` or a scrolling
+    /// line feed brings in.
+    fn eraseBlank(self: *const Layer) Cell {
+        var blank: Cell = .{};
+        if (self.eraseBg()) |c| blank.style.bg = .{ .color = c };
+        return blank;
+    }
+
+    /// Remembers a just-printed glyph for REP (`repeatLastGlyph`).
+    fn noteLastGlyph(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, ul: UnderlineStyle) void {
+        if (bytes.len > self.last_glyph.len) return;
+        @memcpy(self.last_glyph[0..bytes.len], bytes);
+        self.last_glyph_len = @intCast(bytes.len);
+        self.last_glyph_w = w;
+        self.last_glyph_fg = fg;
+        self.last_glyph_bg = bg;
+        self.last_glyph_ul = ul;
+    }
+
+    /// REP (`CSI n b`): prints the last graphic character `n` more times,
+    /// wrapping like ordinary output. A no-op before anything is printed.
+    fn repeatLastGlyph(self: *Layer, n: usize) void {
+        if (self.last_glyph_len == 0) return;
+        // A REP longer than the screen only repaints the same cells.
+        const count = @min(n, self.width * self.height);
+        const bytes = self.last_glyph[0..self.last_glyph_len];
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            if (self.insert_mode) self.insertCellsFill(self.last_glyph_w, .{});
+            self.putAtCursor(bytes, self.last_glyph_w, self.last_glyph_fg, self.last_glyph_bg, null, .x1, self.last_glyph_ul);
+        }
+    }
+
+    /// Joins a zero-width codepoint (`isZeroWidth`) onto the character
+    /// printed just before it -- the cell left of the cursor, or the lead
+    /// of a wide pair. Dropped when there is nothing to its left on the
+    /// row, or when the cluster would outgrow the cell's inline buffer
+    /// (a long ZWJ emoji sequence keeps its first few codepoints).
+    fn attachZeroWidth(self: *Layer, bytes: []const u8) void {
+        if (self.cursor.col == 0) return;
+        const row = self.cursor.row;
+        var col = @min(self.cursor.col, self.width) - 1;
+        if (self.cell(row, col).wide == .wide_spacer and col > 0) col -= 1;
+        const c = self.cell(row, col);
+        const len: usize = c.grapheme_len;
+        if (len == 0 or len + bytes.len > grapheme_inline_len) return;
+        @memcpy(c.grapheme_bytes[len..][0..bytes.len], bytes);
+        c.grapheme_len = @intCast(len + bytes.len);
+        if (self.last_glyph_len != 0 and self.last_glyph_len + bytes.len <= self.last_glyph.len) {
+            @memcpy(self.last_glyph[self.last_glyph_len..][0..bytes.len], bytes);
+            self.last_glyph_len += @intCast(bytes.len);
+        }
+    }
+
+    fn isTabStop(self: *const Layer, col: usize) bool {
+        if (self.tab_stops) |t| return t[col];
+        return col % tab_width == 0;
+    }
+
+    /// The next tab stop right of `col`, or the last column if there is
+    /// none (a tab never wraps).
+    fn nextTabStop(self: *const Layer, col: usize) usize {
+        var c = col + 1;
+        while (c < self.width) : (c += 1) {
+            if (self.isTabStop(c)) return c;
+        }
+        return self.width - 1;
+    }
+
+    /// The previous tab stop left of `col`, or column 0.
+    fn prevTabStop(self: *const Layer, col: usize) usize {
+        var c = col;
+        while (c > 0) {
+            c -= 1;
+            if (self.isTabStop(c)) return c;
+        }
+        return 0;
+    }
+
+    /// The per-column stop table, allocated with the default stops the
+    /// first time a program edits one.
+    fn ensureTabStops(self: *Layer) ![]bool {
+        if (self.tab_stops) |t| return t;
+        const t = try self.alloc.alloc(bool, self.width);
+        for (t, 0..) |*s, col| s.* = col % tab_width == 0;
+        self.tab_stops = t;
+        return t;
+    }
+
+    /// HTS (`on`) / TBC 0 (`!on`) at `col`.
+    fn setTabStop(self: *Layer, col: usize, on: bool) !void {
+        const t = try self.ensureTabStops();
+        t[col] = on;
+    }
+
+    /// TBC 3: no tab stops at all -- a tab then runs to the last column.
+    fn clearAllTabStops(self: *Layer) !void {
+        @memset(try self.ensureTabStops(), false);
     }
 
     /// `ESC [ ? <params> <final>` -- DEC private modes (`h`/`l`) and
@@ -3190,6 +3900,15 @@ pub const Layer = struct {
             self.replyDecrqm(params[0 .. params.len - 1]);
             return;
         }
+        // `CSI ? u` -- kitty keyboard protocol query: answer with the
+        // flags in effect (masked to what glyphwire supports), which is
+        // how a program learns the protocol is there at all.
+        if (final == 'u') {
+            var b: [16]u8 = undefined;
+            const s = std.fmt.bufPrint(&b, "\x1b[?{d}u", .{self.kitty_keys.flags(self.on_alt)}) catch return;
+            self.queueReply(s);
+            return;
+        }
         if (final != 'h' and final != 'l') return;
         const set = final == 'h';
         var it = std.mem.splitScalar(u8, params, ';');
@@ -3197,8 +3916,10 @@ pub const Layer = struct {
             const n = std.fmt.parseInt(u32, tok, 10) catch continue;
             switch (n) {
                 1 => self.app_cursor_keys = set, // DECCKM (see the field doc)
+                7 => self.autowrap = set, // DECAWM
                 25 => self.cursor_visible = set, // DECTCEM
                 47, 1047, 1049 => if (set) {
+                    if (!self.on_alt) self.kitty_keys.enterAlt();
                     self.enterAltScreen() catch {};
                 } else self.exitAltScreen(),
                 else => {},
@@ -3244,6 +3965,13 @@ pub const Layer = struct {
     /// margin are gone. Backs a line feed at the bottom margin, `SU`/`SD`,
     /// `IL`/`DL` and `RI`.
     fn scrollRange(self: *Layer, top: usize, bot: usize, n_in: usize, dir: ScrollDir) void {
+        self.scrollRangeFill(top, bot, n_in, dir, .{});
+    }
+
+    /// `scrollRange`, with the rows it brings in set to `blank` rather
+    /// than the default cell -- the VT paths pass `eraseBlank` so new
+    /// rows take the pen's background (BCE).
+    fn scrollRangeFill(self: *Layer, top: usize, bot: usize, n_in: usize, dir: ScrollDir, blank: Cell) void {
         if (bot < top or bot >= self.height) return;
         const span = bot - top + 1;
         const n = @min(n_in, span);
@@ -3253,7 +3981,7 @@ pub const Layer = struct {
                 var r = top;
                 while (r + n <= bot) : (r += 1) @memcpy(self.liveRow(r), self.liveRow(r + n));
                 r = bot + 1 - n;
-                while (r <= bot) : (r += 1) blankRow(self.liveRow(r));
+                while (r <= bot) : (r += 1) @memset(self.liveRow(r), blank);
             },
             .down => {
                 var r = bot + 1;
@@ -3264,16 +3992,12 @@ pub const Layer = struct {
                 r = top + n;
                 while (r > top) {
                     r -= 1;
-                    blankRow(self.liveRow(r));
+                    @memset(self.liveRow(r), blank);
                 }
             },
         }
         self.revision += 1;
         self.render_gen +%= 1;
-    }
-
-    fn blankRow(row: []Cell) void {
-        for (row) |*c| c.* = .{};
     }
 
     /// Shifts a band of the content grid vertically in place -- the wire
@@ -3296,16 +4020,24 @@ pub const Layer = struct {
     /// A line feed (`\n` / VT / FF, and index past the bottom margin).
     /// With a scroll region set (or on the alt screen) it stays inside
     /// `[scroll_top, scroll_bot]`; otherwise it's the classic ring-buffer
-    /// advance that feeds the primary screen's scrollback.
+    /// advance that feeds the primary screen's scrollback. Only a line
+    /// feed *on* the bottom margin scrolls the region: below it (a status
+    /// line under a scrolling pane) the cursor just moves down, stopping
+    /// at the last row. Either way the row scrolled in takes the pen's
+    /// background (`eraseBg`, BCE).
     fn lineFeed(self: *Layer) void {
         if (self.on_alt or self.regionActive()) {
-            if (self.cursor.row >= self.scroll_bot) {
-                self.scrollRange(self.scroll_top, self.scroll_bot, 1, .up);
+            if (self.cursor.row == self.scroll_bot) {
+                self.scrollRangeFill(self.scroll_top, self.scroll_bot, 1, .up, self.eraseBlank());
             } else if (self.cursor.row + 1 < self.height) {
                 self.cursor.row += 1;
             }
         } else {
+            const scrolls = self.cursor.row + 1 >= self.height;
             self.cursor.row = self.resolveRow(self.cursor.row + 1);
+            if (scrolls) {
+                if (self.eraseBg()) |bg| self.clearFill(self.cursor.row, 0, 1, self.width, bg);
+            }
         }
     }
 
@@ -3345,10 +4077,10 @@ pub const Layer = struct {
     fn csiDsr(self: *Layer, ps: usize) void {
         switch (ps) {
             5 => self.queueReply("\x1b[0n"), // "terminal OK"
-            6 => { // CPR -- 1-based row;col
+            6 => { // CPR -- 1-based row;col, never past the last column
                 var b: [32]u8 = undefined;
                 const s = std.fmt.bufPrint(&b, "\x1b[{d};{d}R", .{
-                    self.cursor.row + 1, self.cursor.col + 1,
+                    self.cursor.row + 1, self.pendingCol() + 1,
                 }) catch return;
                 self.queueReply(s);
             },
@@ -3363,6 +4095,7 @@ pub const Layer = struct {
         const n = std.fmt.parseInt(u32, std.mem.trim(u8, ps_tok, " ;"), 10) catch return;
         const v: u8 = switch (n) {
             1 => if (self.app_cursor_keys) 1 else 2,
+            7 => if (self.autowrap) 1 else 2,
             25 => if (self.cursor_visible) 1 else 2,
             47, 1047, 1049 => if (self.on_alt) 1 else 2,
             else => 0,
@@ -3416,14 +4149,26 @@ pub const Layer = struct {
     /// progress-bar output, but a full-screen program that positions to
     /// its last row -- `less`'s status line -- would scroll the whole
     /// primary layer one row per keypress.)
+    ///
+    /// Any move also ends a pending wrap (`pendingCol`): a relative move
+    /// starts from the last column, not from one past it.
     fn csiCursor(self: *Layer, final: u8, params: []const u8) void {
         const last_row = self.height - 1;
+        self.cursor.col = self.pendingCol();
         switch (final) {
             'A' => self.cursor.row -|= @max(csiParam(params, 0, 1), 1),
-            'B' => self.cursor.row = @min(self.cursor.row + @max(csiParam(params, 0, 1), 1), last_row),
-            'C' => self.cursor.col = @min(self.cursor.col + @max(csiParam(params, 0, 1), 1), self.width - 1),
+            'B', 'e' => self.cursor.row = @min(self.cursor.row + @max(csiParam(params, 0, 1), 1), last_row), // CUD / VPR
+            'C', 'a' => self.cursor.col = @min(self.cursor.col + @max(csiParam(params, 0, 1), 1), self.width - 1), // CUF / HPR
             'D' => self.cursor.col -|= @max(csiParam(params, 0, 1), 1),
-            'G' => self.cursor.col = @min(@max(csiParam(params, 0, 1), 1) - 1, self.width - 1),
+            'E' => { // CNL -- down n lines, to column 0
+                self.cursor.row = @min(self.cursor.row + @max(csiParam(params, 0, 1), 1), last_row);
+                self.cursor.col = 0;
+            },
+            'F' => { // CPL -- up n lines, to column 0
+                self.cursor.row -|= @max(csiParam(params, 0, 1), 1);
+                self.cursor.col = 0;
+            },
+            'G', '`' => self.cursor.col = @min(@max(csiParam(params, 0, 1), 1) - 1, self.width - 1), // CHA / HPA
             'd' => self.cursor.row = @min(@max(csiParam(params, 0, 1), 1) - 1, last_row),
             'H', 'f' => {
                 self.cursor.row = @min(@max(csiParam(params, 0, 1), 1) - 1, last_row);
@@ -3435,32 +4180,45 @@ pub const Layer = struct {
 
     /// `ESC [ <n> K` -- erase in line: 0 = cursor to end of line
     /// (default), 1 = start of line to cursor, 2 = whole line. Blanks
-    /// cells in the cursor's row only; doesn't move the cursor.
+    /// cells in the cursor's row only; doesn't move the cursor. Erased
+    /// cells take the pen's background (`eraseBg`, BCE), and a cursor in
+    /// the pending-wrap position erases from the last column.
     fn csiEraseLine(self: *Layer, mode: usize) void {
+        const col = self.pendingCol();
+        const bg = self.eraseBg();
         switch (mode) {
-            0 => self.clear(self.cursor.row, self.cursor.col, 1, self.width),
-            1 => self.clear(self.cursor.row, 0, 1, self.cursor.col + 1),
-            2 => self.clear(self.cursor.row, 0, 1, self.width),
+            0 => self.clearFill(self.cursor.row, col, 1, self.width, bg),
+            1 => self.clearFill(self.cursor.row, 0, 1, col + 1, bg),
+            2 => self.clearFill(self.cursor.row, 0, 1, self.width, bg),
             else => {},
         }
     }
 
     /// `ESC [ <n> J` -- erase in display: 0 = cursor to end of screen
-    /// (default), 1 = start of screen to cursor, 2/3 = whole screen.
-    /// Blanks cells; doesn't move the cursor (a program that wants the
-    /// cursor homed sends `ESC [ H` too, which `csiCursor` handles).
+    /// (default), 1 = start of screen to cursor, 2 = whole screen, with
+    /// the same BCE / pending-wrap rules as `csiEraseLine`. Doesn't move
+    /// the cursor (a program that wants the cursor homed sends `ESC [ H`
+    /// too, which `csiCursor` handles).
+    ///
+    /// 3 erases the *scrollback*, not the screen (`clearHistory`) --
+    /// xterm's extension, and how `clear` and Claude Code drop a stale
+    /// transcript before redrawing (`2J 3J H`). It used to be read as 2,
+    /// which left every earlier copy of the redrawn screen in history.
     fn csiEraseDisplay(self: *Layer, mode: usize) void {
+        const col = self.pendingCol();
+        const bg = self.eraseBg();
         switch (mode) {
             0 => {
-                self.clear(self.cursor.row, self.cursor.col, 1, self.width);
+                self.clearFill(self.cursor.row, col, 1, self.width, bg);
                 if (self.cursor.row + 1 < self.height)
-                    self.clear(self.cursor.row + 1, 0, self.height, self.width);
+                    self.clearFill(self.cursor.row + 1, 0, self.height, self.width, bg);
             },
             1 => {
-                if (self.cursor.row > 0) self.clear(0, 0, self.cursor.row, self.width);
-                self.clear(self.cursor.row, 0, 1, self.cursor.col + 1);
+                if (self.cursor.row > 0) self.clearFill(0, 0, self.cursor.row, self.width, bg);
+                self.clearFill(self.cursor.row, 0, 1, col + 1, bg);
             },
-            2, 3 => self.clear(0, 0, self.height, self.width),
+            2 => self.clearFill(0, 0, self.height, self.width, bg),
+            3 => self.clearHistory(),
             else => {},
         }
     }
@@ -3556,10 +4314,21 @@ pub const Layer = struct {
     /// resolves the same. A width-2 cluster that would straddle the right
     /// edge wraps to the next row first. Overwriting either half of an
     /// existing wide pair blanks its orphaned partner.
+    ///
+    /// The wrap is a line feed (`lineFeed`), so on the alt screen or
+    /// inside a scroll region it scrolls the region at its bottom margin
+    /// like any other; it used to just step the row, which on the alt
+    /// screen's last row overwrote that row in place. With autowrap off
+    /// (DECAWM, `?7l`) there is no wrap: the glyph lands on the last
+    /// column(s) and the cursor stays there.
     fn putAtCursor(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale, ul: UnderlineStyle) void {
         if (self.cursor.col + w > self.width) {
-            self.cursor.col = 0;
-            self.cursor.row += 1;
+            if (self.autowrap) {
+                self.cursor.col = 0;
+                self.lineFeed();
+            } else {
+                self.cursor.col = self.width -| w;
+            }
         }
         self.cursor.row = self.resolveRow(self.cursor.row);
 
@@ -3655,13 +4424,19 @@ pub const Layer = struct {
     /// clamped to the cells remaining in the row; a cursor already at or
     /// past the row's right edge is a no-op.
     pub fn insertCells(self: *Layer, count: usize) void {
+        self.insertCellsFill(count, .{});
+    }
+
+    /// `insertCells`, with the inserted cells set to `blank` -- ICH
+    /// passes `eraseBlank` (BCE).
+    fn insertCellsFill(self: *Layer, count: usize, blank: Cell) void {
         if (count == 0 or self.cursor.col >= self.width) return;
         const row = self.liveRow(self.cursor.row);
         const col = self.cursor.col;
         const n = @min(count, self.width - col);
         const tail_len = self.width - col - n;
         std.mem.copyBackwards(Cell, row[col + n ..][0..tail_len], row[col..][0..tail_len]);
-        for (row[col..][0..n]) |*c| c.* = .{};
+        @memset(row[col..][0..n], blank);
         self.sanitizeWidePairs(self.cursor.row);
         self.revision += 1;
         self.render_gen +%= 1;
@@ -3674,13 +4449,19 @@ pub const Layer = struct {
     /// cells remaining in the row; a cursor already at or past the row's
     /// right edge is a no-op.
     pub fn deleteCells(self: *Layer, count: usize) void {
+        self.deleteCellsFill(count, .{});
+    }
+
+    /// `deleteCells`, with the cells shifted in at the row's tail set to
+    /// `blank` -- DCH passes `eraseBlank` (BCE).
+    fn deleteCellsFill(self: *Layer, count: usize, blank: Cell) void {
         if (count == 0 or self.cursor.col >= self.width) return;
         const row = self.liveRow(self.cursor.row);
         const col = self.cursor.col;
         const n = @min(count, self.width - col);
         const tail_len = self.width - col - n;
         std.mem.copyForwards(Cell, row[col..][0..tail_len], row[col + n ..][0..tail_len]);
-        for (row[col + tail_len ..][0..n]) |*c| c.* = .{};
+        @memset(row[col + tail_len ..][0..n], blank);
         self.sanitizeWidePairs(self.cursor.row);
         self.revision += 1;
         self.render_gen +%= 1;
@@ -4066,6 +4847,7 @@ pub const Layer = struct {
                 self.g0_line_drawing = false;
                 self.g1_line_drawing = false;
                 self.pen = .{};
+                self.resetVtModes();
             },
             .mouse_select => |v| self.mouse_select = v,
             .mouse_report => |v| self.mouse_report = v,

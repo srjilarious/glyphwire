@@ -2300,6 +2300,255 @@ pub fn writeTextNewlineScrollsAtBottomRowTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectEqualStr("t", layer.scrollbackRow(0).?[0].grapheme());
 }
 
+// --- B2 screen model: BCE, wrap, pending wrap, ED 3, zero-width, REP,
+//     tab stops, IRM, DECAWM, DECSC pen, kitty keyboard query ---------------
+
+const vt_fg = glyphwire.default_style.fg;
+const vt_bg = glyphwire.default_style.bg;
+
+/// BCE: an erase paints with the pen's background, not the transparent
+/// default -- what nvim relies on to fill a colorscheme's background.
+pub fn eraseUsesPenBackgroundTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 8, 4, 0);
+    defer layer.deinit();
+    // The pen has to outlive one `writeText`, as it does for a pty child.
+    layer.setProperty(.{ .pty_mode = true });
+
+    try layer.writeText("\x1b[44mX\x1b[K", vt_fg, vt_bg);
+    const blue = layer.cell(0, 0).style.bg;
+    try testz.expectTrue(std.meta.eql(layer.cell(0, 5).style.bg, blue));
+
+    // ECH and IL take it too.
+    try layer.writeText("\x1b[2;3H\x1b[2X\x1b[3;1H\x1b[L", vt_fg, vt_bg);
+    try testz.expectTrue(std.meta.eql(layer.cell(1, 3).style.bg, blue));
+    try testz.expectTrue(std.meta.eql(layer.cell(2, 7).style.bg, blue));
+
+    // With the pen reset, an erase is transparent again.
+    try layer.writeText("\x1b[0m\x1b[4;1H\x1b[2K", vt_fg, vt_bg);
+    try testz.expectTrue(std.meta.eql(layer.cell(3, 0).style.bg, glyphwire.default_style.bg));
+}
+
+/// Autowrap at the alt screen's last row scrolls it, rather than
+/// overwriting that row in place.
+pub fn wrapOnAltScreenBottomRowScrollsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 4, 2, 0);
+    defer layer.deinit();
+
+    try layer.writeText("\x1b[?1049habcdEFGHij", vt_fg, vt_bg);
+    try testz.expectEqualStr("E", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("i", layer.cell(1, 0).grapheme());
+    try testz.expectEqualStr("j", layer.cell(1, 1).grapheme());
+}
+
+/// A line feed below the scroll region moves the cursor down without
+/// scrolling the region; reverse index above it moves up.
+pub fn lineFeedOutsideRegionDoesNotScrollTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 4, 5, 0);
+    defer layer.deinit();
+
+    try layer.writeText("A\nB\nC\nD\nE", vt_fg, vt_bg);
+    try layer.writeText("\x1b[2;3r\x1b[4;1H\n", vt_fg, vt_bg);
+    try testz.expectEqual(layer.cursor.row, 4);
+    try testz.expectEqualStr("B", layer.cell(1, 0).grapheme());
+    try testz.expectEqualStr("C", layer.cell(2, 0).grapheme());
+
+    try layer.writeText("\x1b[1;1H\x1bM", vt_fg, vt_bg);
+    try testz.expectEqual(layer.cursor.row, 0);
+    try testz.expectEqualStr("A", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("B", layer.cell(1, 0).grapheme());
+}
+
+/// After the last column is written the cursor is in the pending-wrap
+/// position; reports, backspace and erases treat it as the last column.
+pub fn pendingWrapActsOnLastColumnTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 5, 3, 0);
+    defer layer.deinit();
+
+    try layer.writeText("abcde\x1b[6n", vt_fg, vt_bg);
+    try testz.expectEqualStr("\x1b[1;5R", layer.takeReply().?);
+
+    try layer.writeText("\x08X", vt_fg, vt_bg);
+    try testz.expectEqualStr("X", layer.cell(0, 3).grapheme());
+
+    try layer.writeText("\x1b[2;1Hvwxyz\x1b[K", vt_fg, vt_bg);
+    try testz.expectEqual(layer.cell(1, 4).grapheme().len, 0);
+    try testz.expectEqualStr("y", layer.cell(1, 3).grapheme());
+
+    // A relative move ends the pending wrap: CUB 1 from it lands on the
+    // second-to-last column.
+    try layer.writeText("\x1b[3;1Hlmnop\x1b[DQ", vt_fg, vt_bg);
+    try testz.expectEqualStr("Q", layer.cell(2, 3).grapheme());
+}
+
+/// `ED 3` drops the scrollback and leaves the screen alone.
+pub fn eraseDisplay3ClearsScrollbackOnlyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 4, 2, 4);
+    defer layer.deinit();
+
+    try layer.writeText("a\nb\nc\nd", vt_fg, vt_bg);
+    try testz.expectEqual(layer.history_len, 2);
+    try layer.writeText("\x1b[3J", vt_fg, vt_bg);
+    try testz.expectEqual(layer.history_len, 0);
+    try testz.expectEqualStr("c", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("d", layer.cell(1, 0).grapheme());
+}
+
+/// On a pty layer a zero-width codepoint joins the character before it
+/// (the program's wcwidth gave it no column); elsewhere it still takes
+/// a cell, matching `codepointWidth`.
+pub fn zeroWidthJoinsPreviousCellOnPtyLayerTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 2, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+
+    try layer.writeText("e\u{301}x", vt_fg, vt_bg);
+    try testz.expectEqualStr("e\u{301}", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("x", layer.cell(0, 1).grapheme());
+    try testz.expectEqual(layer.cursor.col, 2);
+
+    // Onto the lead of a wide pair, past its spacer.
+    try layer.writeText("\r\n\u{4E16}\u{FE0F}a", vt_fg, vt_bg);
+    try testz.expectEqualStr("\u{4E16}\u{FE0F}", layer.cell(1, 0).grapheme());
+    try testz.expectEqualStr("a", layer.cell(1, 2).grapheme());
+
+    var plain = try glyphwire.Layer.init(alloc, 10, 1, 0);
+    defer plain.deinit();
+    try plain.writeText("e\u{301}x", vt_fg, vt_bg);
+    try testz.expectEqualStr("x", plain.cell(0, 2).grapheme());
+
+    try testz.expectTrue(glyphwire.isZeroWidth(0x200D)); // ZWJ
+    try testz.expectFalse(glyphwire.isZeroWidth('a'));
+    try testz.expectFalse(glyphwire.isZeroWidth(0xAD)); // soft hyphen
+}
+
+/// A bare LF on a pty layer keeps the column -- a raw-mode program's
+/// "cursor down"; an ordinary layer still reads it as a newline.
+pub fn ptyLineFeedKeepsColumnTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+
+    try layer.writeText("ab\ncd", vt_fg, vt_bg);
+    try testz.expectEqualStr("c", layer.cell(1, 2).grapheme());
+    try layer.writeText("\r\nef", vt_fg, vt_bg);
+    try testz.expectEqualStr("e", layer.cell(2, 0).grapheme());
+}
+
+pub fn cursorLineAndColumnFinalsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 6, 0);
+    defer layer.deinit();
+
+    try layer.writeText("\x1b[2;5H\x1b[2E", vt_fg, vt_bg); // CNL
+    try testz.expectEqual(layer.cursor.row, 3);
+    try testz.expectEqual(layer.cursor.col, 0);
+    try layer.writeText("\x1b[4G\x1b[F", vt_fg, vt_bg); // CPL
+    try testz.expectEqual(layer.cursor.row, 2);
+    try testz.expectEqual(layer.cursor.col, 0);
+    try layer.writeText("\x1b[7`", vt_fg, vt_bg); // HPA
+    try testz.expectEqual(layer.cursor.col, 6);
+    try layer.writeText("\x1b[2a\x1b[2e", vt_fg, vt_bg); // HPR, VPR
+    try testz.expectEqual(layer.cursor.col, 8);
+    try testz.expectEqual(layer.cursor.row, 4);
+}
+
+/// REP repeats the last printed character, line-drawing glyphs included
+/// (how ncurses draws a border run).
+pub fn repRepeatsLastGlyphTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 2, 0);
+    defer layer.deinit();
+
+    try layer.writeText("x\x1b[3b", vt_fg, vt_bg);
+    try testz.expectEqualStr("x", layer.cell(0, 3).grapheme());
+    try testz.expectEqual(layer.cursor.col, 4);
+
+    try layer.writeText("\r\n\x1b(0q\x1b[2b", vt_fg, vt_bg);
+    try testz.expectEqualStr("\u{2500}", layer.cell(1, 2).grapheme());
+    try testz.expectEqual(layer.cursor.col, 3);
+}
+
+pub fn tabStopsSetClearAndBackTabTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 2, 0);
+    defer layer.deinit();
+
+    try layer.writeText("\tX", vt_fg, vt_bg);
+    try testz.expectEqualStr("X", layer.cell(0, 8).grapheme());
+    try layer.writeText("\x1b[1;11H\x1b[Z", vt_fg, vt_bg); // CBT
+    try testz.expectEqual(layer.cursor.col, 8);
+
+    // Clear every stop, set one at column 3, tab to it.
+    try layer.writeText("\x1b[3g\x1b[2;4H\x1bH\r\tY", vt_fg, vt_bg);
+    try testz.expectEqualStr("Y", layer.cell(1, 3).grapheme());
+    // No stop past it: a tab runs to the last column.
+    try layer.writeText("\t", vt_fg, vt_bg);
+    try testz.expectEqual(layer.cursor.col, 19);
+}
+
+pub fn insertModeShiftsRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 6, 1, 0);
+    defer layer.deinit();
+
+    try layer.writeText("abc\r\x1b[4hX\x1b[4lY", vt_fg, vt_bg);
+    try testz.expectEqualStr("X", layer.cell(0, 0).grapheme());
+    try testz.expectEqualStr("Y", layer.cell(0, 1).grapheme()); // replaced "a"
+    try testz.expectEqualStr("b", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("c", layer.cell(0, 3).grapheme());
+}
+
+pub fn autowrapOffOverwritesLastColumnTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 4, 2, 0);
+    defer layer.deinit();
+
+    try layer.writeText("\x1b[?7labcdef", vt_fg, vt_bg);
+    try testz.expectEqualStr("c", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("f", layer.cell(0, 3).grapheme());
+    try testz.expectEqual(layer.cursor.row, 0);
+    try layer.writeText("\x1b[?7$p", vt_fg, vt_bg);
+    try testz.expectEqualStr("\x1b[?7;2$y", layer.takeReply().?);
+}
+
+/// DECSC saves the pen with the cursor; DECRC brings both back.
+pub fn decscSavesPenTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 1, 0);
+    defer layer.deinit();
+
+    try layer.writeText("\x1b[31mR\x1b7\x1b[0m\x1b[5Gn\x1b8S", vt_fg, vt_bg);
+    try testz.expectEqualStr("S", layer.cell(0, 1).grapheme());
+    try testz.expectTrue(std.meta.eql(layer.cell(0, 1).style.fg, layer.cell(0, 0).style.fg));
+    try testz.expectFalse(std.meta.eql(layer.cell(0, 4).style.fg, layer.cell(0, 0).style.fg));
+}
+
+/// `CSI ? u` answers with the kitty flags in effect, masked to what
+/// glyphwire supports; `CSI < u` pops and is not a cursor restore.
+pub fn kittyKeyboardQueryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
+    defer layer.deinit();
+
+    try layer.writeText("\x1b[?u", vt_fg, vt_bg);
+    try testz.expectEqualStr("\x1b[?0u", layer.takeReply().?);
+    try layer.writeText("\x1b[>31u\x1b[?u", vt_fg, vt_bg);
+    try testz.expectEqualStr("\x1b[?1u", layer.takeReply().?);
+
+    try layer.writeText("\x1b7\x1b[3;4H\x1b[<u", vt_fg, vt_bg);
+    try testz.expectEqual(layer.cursor.row, 2);
+    try testz.expectEqual(layer.cursor.col, 3);
+    try layer.writeText("\x1b[?u", vt_fg, vt_bg);
+    try testz.expectEqualStr("\x1b[?0u", layer.takeReply().?);
+}
+
 // --- East Asian wide characters -----------------------------------------
 
 pub fn codepointWidthClassifiesWideAndNarrowTest(io: std.Io, alloc: std.mem.Allocator) !void {
