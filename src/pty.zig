@@ -308,6 +308,89 @@ const PtyLinux = struct {
     }
 };
 
+/// Turns a pty master byte stream, read in arbitrary chunks, into valid
+/// UTF-8 for `write_text`, which rejects a whole message over one bad
+/// byte. Two things make raw chunks invalid:
+///
+///  - A read that ends partway through a multi-byte character. A
+///    full-screen redraw (nvim's box drawing and icon glyphs) easily
+///    crosses a read boundary mid-character; those leading bytes are held
+///    back and joined to the next chunk.
+///  - Bytes that are not UTF-8 at all (a Latin-1 file `cat`'d to the
+///    screen). Each becomes U+FFFD, as a terminal shows it, rather than
+///    costing the chunk -- and the escape sequences in it -- its place on
+///    the grid.
+pub const Utf8Carry = struct {
+    /// The leading bytes of a character the last chunk ended inside.
+    tail: [3]u8 = undefined,
+    tail_len: usize = 0,
+    /// `tail` + the incoming chunk, joined. Scratch, kept for reuse.
+    joined: std.ArrayList(u8) = .empty,
+
+    const replacement = "\u{FFFD}";
+
+    pub fn deinit(self: *Utf8Carry, alloc: std.mem.Allocator) void {
+        self.joined.deinit(alloc);
+    }
+
+    /// Replaces `out`'s contents with the valid UTF-8 `chunk` completes,
+    /// holding back an incomplete character at its end for the next call.
+    pub fn feed(self: *Utf8Carry, alloc: std.mem.Allocator, chunk: []const u8, out: *std.ArrayList(u8)) !void {
+        out.clearRetainingCapacity();
+        self.joined.clearRetainingCapacity();
+        try self.joined.appendSlice(alloc, self.tail[0..self.tail_len]);
+        try self.joined.appendSlice(alloc, chunk);
+        self.tail_len = 0;
+
+        const in = self.joined.items;
+        var i: usize = 0;
+        while (i < in.len) {
+            const len: usize = std.unicode.utf8ByteSequenceLength(in[i]) catch {
+                try out.appendSlice(alloc, replacement);
+                i += 1;
+                continue;
+            };
+            if (i + len > in.len) {
+                // Runs off the end: hold it if what's there could still
+                // become a character, otherwise the lead byte is bad.
+                if (allContinuation(in[i + 1 ..])) {
+                    @memcpy(self.tail[0 .. in.len - i], in[i..]);
+                    self.tail_len = in.len - i;
+                    return;
+                }
+                try out.appendSlice(alloc, replacement);
+                i += 1;
+                continue;
+            }
+            const seq = in[i..][0..len];
+            if (std.unicode.utf8Decode(seq)) |_| {
+                try out.appendSlice(alloc, seq);
+                i += len;
+            } else |_| {
+                try out.appendSlice(alloc, replacement);
+                i += 1;
+            }
+        }
+    }
+
+    /// The end of the stream: a character still held back never got its
+    /// remaining bytes, so it is shown as U+FFFD. `out` is replaced, and
+    /// left empty when nothing was held.
+    pub fn finish(self: *Utf8Carry, alloc: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
+        out.clearRetainingCapacity();
+        if (self.tail_len == 0) return;
+        self.tail_len = 0;
+        try out.appendSlice(alloc, replacement);
+    }
+
+    fn allContinuation(bytes: []const u8) bool {
+        for (bytes) |b| {
+            if (b & 0xC0 != 0x80) return false;
+        }
+        return true;
+    }
+};
+
 /// Sniffs a pty master byte stream for the DEC private modes the input
 /// path has to honour, so `shell/main.zig`'s foreground key loop can
 /// encode keys and mouse events the way the running child asked for
