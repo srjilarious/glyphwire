@@ -6515,19 +6515,14 @@ const Prompt = struct {
         const scan_dir = try self.completionDir(dp.dir);
         defer alloc.free(scan_dir);
 
-        if (std.Io.Dir.cwd().openDir(io, scan_dir, .{ .iterate = true })) |*dir| {
-            defer dir.close(io);
-            const want_hidden = dp.prefix.len > 0 and dp.prefix[0] == '.';
-            var it = dir.iterate();
-            while (it.next(io) catch null) |entry| {
-                if (!std.mem.startsWith(u8, entry.name, dp.prefix)) continue;
-                if (!want_hidden and std.mem.startsWith(u8, entry.name, ".")) continue;
-                try cands.append(alloc, .{
-                    .name = try alloc.dupe(u8, entry.name),
-                    .source = if (entry.kind == .directory) .dir else .file,
-                });
-            }
-        } else |_| {}
+        const matches = try complete.scanDir(alloc, io, scan_dir, dp.prefix);
+        defer complete.freeMatches(alloc, matches);
+        for (matches) |m| {
+            try cands.append(alloc, .{
+                .name = try alloc.dupe(u8, m.name),
+                .source = if (m.is_dir) .dir else .file,
+            });
+        }
 
         // In command position (`argv[0]`, no `dir/` part) completion also
         // offers the names the plain directory scan can't see: aliases,

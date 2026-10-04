@@ -988,6 +988,42 @@ pub fn collapseHomeRewritesExactHomeAsBareTildeTest(_: std.Io, _: std.mem.Alloca
     try testz.expectEqualStr("~", homepath.collapseHome("/home/jeff", "/home/jeff", &buf));
 }
 
+// ─── pathcomplete.scanDir: the directory read behind Tab ──────────────
+
+pub fn scanDirMatchesPrefixSortedAndSkipsDotfilesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const pathcomplete = @import("applib").pathcomplete;
+    const rel = try std.fmt.allocPrint(alloc, "shell-test-scandir-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(rel);
+    const cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(io, rel) catch {};
+    defer cwd.deleteTree(io, rel) catch {};
+    try cwd.createDirPath(io, rel);
+    var d = try cwd.openDir(io, rel, .{});
+    defer d.close(io);
+    try d.createDirPath(io, "core");
+    try d.writeFile(io, .{ .sub_path = "core.zig", .data = "" });
+    try d.writeFile(io, .{ .sub_path = "client.zig", .data = "" });
+    try d.writeFile(io, .{ .sub_path = ".cache", .data = "" });
+
+    const m = try pathcomplete.scanDir(alloc, io, rel, "c");
+    defer pathcomplete.freeMatches(alloc, m);
+    try testz.expectEqual(m.len, 3);
+    try testz.expectEqualStr(m[0].name, "client.zig");
+    try testz.expectEqualStr(m[1].name, "core");
+    try testz.expectTrue(m[1].is_dir);
+    try testz.expectEqualStr(m[2].name, "core.zig");
+
+    // A leading `.` asks for the dotfiles.
+    const dots = try pathcomplete.scanDir(alloc, io, rel, ".");
+    defer pathcomplete.freeMatches(alloc, dots);
+    try testz.expectEqual(dots.len, 1);
+
+    // An unreadable directory is no matches, not an error.
+    const none = try pathcomplete.scanDir(alloc, io, "no/such/dir", "");
+    defer pathcomplete.freeMatches(alloc, none);
+    try testz.expectEqual(none.len, 0);
+}
+
 // ─── homepath.expandHome: `~` in a path typed on zoe's `:` line
 
 pub fn expandHomeReadsTildeSlashAsHomeTest(_: std.Io, _: std.mem.Allocator) !void {

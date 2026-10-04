@@ -157,6 +157,20 @@ All normal-mode motions move the free end. Then:
 Line editing: Home / Ctrl+A, End / Ctrl+E, Ctrl+Left / Right (by path
 segment), Ctrl+Backspace, Ctrl+U, Ctrl+K, Backspace on an empty line leaves.
 
+History: Up / Down walk earlier `:` lines, only those starting with what
+is already typed (vim's rule); Down past the newest puts the typed text
+back. `/` and `?` keep a history of their own. Both are shared by every
+tab and persist across sessions in `zoe_history` and `zoe_search_history`
+in the config directory (`GLYPHWIRE_NO_HISTORY=1` keeps them in memory).
+
+Filenames: Tab on the path of `:e`, `:w`, `:wq`/`:x`, `:sp`, `:vs` or
+`:cd` (directories only) completes it. One match is filled in, a
+directory with its `/`; several fill in what they share and open a list
+over the line, where Tab / Shift+Tab / Up / Down pick, Enter takes the
+pick into the line (a directory then lists its own entries) and Escape
+closes the list. Dotfiles are offered once the name starts with `.`.
+`~` means `$HOME` in every path argument.
+
 | Command | Action |
 |---|---|
 | `:{n}` `:$` `:.` `:+n` `:-n` `:{n}{motion}` | Jump to a line / run a motion |
@@ -185,6 +199,21 @@ edits is left alone and the status line shows `W11` once per change, so
 `j` `k` / Up Down, PageUp / PageDown, `g` `G` / Home End, Enter / Space /
 `l` open, `h` up one row, `f` jump by name prefix, `/` deep search, `q` or
 Escape back to the buffer.
+
+| Key | Action |
+|---|---|
+| `a` / Shift+F4 | New file in the folder under the cursor (or the cursor file's folder). End the name with `/` for a folder; `sub/new.zig` makes `sub` too. A new file opens in a tab. |
+| F7 | New folder there |
+| `r` / F2 | Rename in place, caret before the extension |
+
+The name is typed into the row itself; Enter commits, Escape (or leaving
+the tree) abandons it. A name that already exists keeps the field open
+with the reason on the status line. Renaming a file or folder retargets
+any open tab inside it.
+
+The tree follows the disk: a file or folder created, deleted or renamed
+in the root or any open folder shows up within about a second, keeping
+open folders and the cursor's entry.
 
 ### Mouse
 

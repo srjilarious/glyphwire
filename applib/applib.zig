@@ -24,7 +24,13 @@
 //!   `shellpanel` an embedded `gw-shell` panel (salacommander, zoe)
 //!   `wordsplit`  shell-style word splitting and quoting (gw-shell,
 //!                salacommander)
-//!   `history`    the shared command history file (gw-shell, gw-hist)
+//!   `history`    the command history file format (gw-shell, gw-hist,
+//!                zoe's `:` and `/` lines)
+//!   `pathcomplete` filename completion of a typed word (gw-shell's
+//!                Tab, zoe's `:` line)
+//!   `fsops`      make a directory / file, rename in place
+//!                (salacommander, zoe's sidebar)
+//!   `homepath`   `~` <-> `$HOME` (gw-shell, zoe)
 //!   `zjump`      the `zj` frecency directory database (gw-shell,
 //!                gw-hist --dirs)
 //!   `fuzzy`      the subsequence matcher (gw-hist, zoe, salacommander)
@@ -65,6 +71,8 @@ pub const format = @import("format.zig");
 pub const gridlayout = @import("gridlayout.zig");
 pub const icons = @import("icons.zig");
 pub const homepath = @import("homepath.zig");
+pub const fsops = @import("fsops.zig");
+pub const pathcomplete = @import("pathcomplete.zig");
 pub const syntax = @import("syntax.zig");
 pub const theme = @import("glyphwire").theme;
 

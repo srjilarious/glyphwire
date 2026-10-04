@@ -600,6 +600,37 @@ pub fn renameInDirTakesANameNotAPathTest(io: std.Io, alloc: std.mem.Allocator) !
     try testz.expectFalse(s.exists("sub/a.txt"));
 }
 
+pub fn makeFileCreatesParentsAndNeverTruncatesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const fsops = @import("applib").fsops;
+    var s = try Scratch.init(io, alloc, "mkfile");
+    defer s.deinit();
+    const nested = try s.abs("a/b/new.zig");
+    defer alloc.free(nested);
+    try fsops.makeFile(io, nested);
+    try testz.expectTrue(s.exists("a/b/new.zig"));
+
+    try s.file("keep.txt", "body");
+    const keep = try s.abs("keep.txt");
+    defer alloc.free(keep);
+    try testz.expectError(fsops.makeFile(io, keep), error.PathAlreadyExists);
+    const after = try s.dir.readFileAlloc(io, "keep.txt", alloc, .limited(64));
+    defer alloc.free(after);
+    try testz.expectEqualStr(after, "body");
+}
+
+pub fn checkNewPathStaysUnderTheDirectoryTest(_: std.Io, _: std.mem.Allocator) !void {
+    const fsops = @import("applib").fsops;
+    try fsops.checkNewPath("new.zig");
+    try fsops.checkNewPath("sub/dir/");
+    try fsops.checkNewPath("sub/new.zig");
+    try testz.expectError(fsops.checkNewPath("/etc/x"), error.InvalidName);
+    try testz.expectError(fsops.checkNewPath("../x"), error.InvalidName);
+    try testz.expectError(fsops.checkNewPath("a/./b"), error.InvalidName);
+    try testz.expectError(fsops.checkNewPath("a//b"), error.InvalidName);
+    try testz.expectError(fsops.checkNewPath("/"), error.EmptyName);
+    try testz.expectError(fsops.checkNewPath(""), error.EmptyName);
+}
+
 pub fn renameCaretSitsBeforeTheExtensionTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(sala.ui.renameCaret("photo.jpg", false), 5);
     try testz.expectEqual(sala.ui.renameCaret("notes.tar.gz", false), 9);
