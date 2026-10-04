@@ -16,6 +16,7 @@ const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 const zoe = @import("zoe_support");
 const interrupt = @import("applib").interrupt;
+const homepath = @import("applib").homepath;
 
 // const usage =
 //     \\usage: zoe [--keys <script>] [--quiet] [file|directory]
@@ -212,7 +213,7 @@ pub fn main(init: std.process.Init) !void {
             .diag_list,
             .theme,
             => {},
-            .write, .write_quit, .edit => |dest| try headlessSave(io, &ed, dest),
+            .write, .write_quit, .edit => |dest| try headlessSave(io, &ed, dest, init.environ_map.get("HOME")),
         }
     }
 
@@ -288,7 +289,9 @@ fn runUi(
 
 /// The headless `:w` -- the UI has its own, since it also refreshes the
 /// statusline.
-fn headlessSave(io: std.Io, ed: *zoe.Editor, target: ?[]const u8) !void {
+fn headlessSave(io: std.Io, ed: *zoe.Editor, raw_target: ?[]const u8, home: ?[]const u8) !void {
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = if (raw_target) |t| homepath.expandHome(t, home, &home_buf) else null;
     const dest = target orelse ed.path orelse {
         ed.setStatus("E32: No file name", .{});
         return;

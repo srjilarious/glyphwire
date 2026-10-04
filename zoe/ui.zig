@@ -3166,12 +3166,21 @@ pub const Ui = struct {
 
     // ── Editor outcomes ─────────────────────────────────────────────────
 
+    /// A path typed on the `:` line, with `~` read the way the shell reads
+    /// it. Without this `:e ~/x` opened an empty buffer for a file
+    /// literally named `./~/x`, which `:w` then had no directory to write.
+    fn expandArg(self: *const Ui, arg: ?[]const u8, buf: []u8) ?[]const u8 {
+        const a = arg orelse return null;
+        return homepath.expandHome(a, self.environ.get("HOME"), buf);
+    }
+
     fn applyOutcome(self: *Ui, outcome: editor.Outcome) !void {
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
         switch (outcome) {
             .none => {},
-            .write => |target| self.save(target),
+            .write => |target| self.save(self.expandArg(target, &home_buf)),
             .write_quit => |target| {
-                self.save(target);
+                self.save(self.expandArg(target, &home_buf));
                 if (self.buf.ed.buf.dirty) return;
                 if (self.refuseQuitForDirtyBuffer()) return;
                 self.quit = true;
@@ -3182,11 +3191,11 @@ pub const Ui = struct {
             },
             // `:e <path>` opens a tab; a bare `:e` re-reads this one.
             .edit => |target| {
-                if (target) |t| try self.openFile(t) else try self.reloadCurrent();
+                if (self.expandArg(target, &home_buf)) |t| try self.openFile(t) else try self.reloadCurrent();
             },
             .buffer_step => |b| self.stepBuffer(b.forward),
             .buffer_close => |b| try self.closeBuffer(self.grp.active, b.force),
-            .split => |sp| try self.splitGroup(if (sp.vertical) .vertical else .horizontal, sp.path),
+            .split => |sp| try self.splitGroup(if (sp.vertical) .vertical else .horizontal, self.expandArg(sp.path, &home_buf)),
             .close_group => try self.closeGroup(),
             .chdir => |target| self.changeDir(target),
             .pwd => {
@@ -3245,12 +3254,7 @@ pub const Ui = struct {
                 self.buf.ed.setStatus("E: no previous directory", .{});
                 return;
             };
-            if (std.mem.eql(u8, t, "~") or std.mem.startsWith(u8, t, "~/")) {
-                const h = self.environ.get("HOME") orelse break :blk t;
-                const rest = if (t.len > 1) t[2..] else "";
-                break :blk std.fmt.bufPrint(&home_buf, "{s}/{s}", .{ h, rest }) catch t;
-            }
-            break :blk t;
+            break :blk homepath.expandHome(t, self.environ.get("HOME"), &home_buf);
         };
 
         // Remember the current directory before leaving it.
