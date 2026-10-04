@@ -159,6 +159,60 @@ pub const ThemeWire = struct {
     }
 };
 
+/// `set_divider_style`'s params: a preset name and/or single-glyph
+/// overrides for the bands in the issuing connection's context, both
+/// optional. Neither (or both null) goes back to the host's style.
+pub const DividerStyleWire = struct {
+    /// A `core.divider_style.Preset` name.
+    style: ?[]const u8 = null,
+    chars: ?DividerCharsWire = null,
+
+    pub const DividerCharsWire = struct {
+        h: ?[]const u8 = null,
+        v: ?[]const u8 = null,
+        cross: ?[]const u8 = null,
+        t_down: ?[]const u8 = null,
+        t_up: ?[]const u8 = null,
+        t_left: ?[]const u8 = null,
+        t_right: ?[]const u8 = null,
+        tl: ?[]const u8 = null,
+        tr: ?[]const u8 = null,
+        bl: ?[]const u8 = null,
+        br: ?[]const u8 = null,
+    };
+
+    pub const Error = error{ UnknownDividerStyle, InvalidDividerChar };
+
+    /// The override this describes. The result owns its glyphs (they are
+    /// copied inline), so it outlives the parsed message.
+    pub fn toOverride(self: DividerStyleWire) Error!core.divider_style.Override {
+        var out: core.divider_style.Override = .{};
+        if (self.style) |name| {
+            out.preset = std.meta.stringToEnum(core.divider_style.Preset, name) orelse return error.UnknownDividerStyle;
+        }
+        if (self.chars) |chars| {
+            inline for (@typeInfo(DividerCharsWire).@"struct".field_names) |name| {
+                if (@field(chars, name)) |text| {
+                    @field(out.chars, name) = core.divider_style.Glyph.init(text) orelse return error.InvalidDividerChar;
+                }
+            }
+        }
+        return out;
+    }
+
+    /// `o` on the wire. Borrows `o`'s glyphs.
+    pub fn fromOverride(o: *const core.divider_style.Override) DividerStyleWire {
+        var out: DividerStyleWire = .{ .style = if (o.preset) |p| @tagName(p) else null };
+        if (o.chars.isEmpty()) return out;
+        var chars: DividerCharsWire = .{};
+        inline for (@typeInfo(DividerCharsWire).@"struct".field_names) |name| {
+            if (@field(o.chars, name)) |*g| @field(chars, name) = g.slice();
+        }
+        out.chars = chars;
+        return out;
+    }
+};
+
 /// An image background reference in a `get_cells` cell -- the handle, the
 /// sub-image pixel offset the cell samples from, and the uniform scale the
 /// image is drawn at (`1.0` for a natural-size draw, `< 1.0` when it was

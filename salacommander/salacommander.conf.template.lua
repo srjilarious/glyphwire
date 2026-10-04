@@ -151,4 +151,13 @@
 --     -- table, in the shapes theme.lua takes (see host/theme.template.lua),
 --     -- and it may name a theme theme.lua defines.
 --     theme = nil,
+--
+--     -- How the host draws the line between the two panes (drag it to
+--     -- resize them). Absent, it follows host.conf.lua's
+--     -- pane_divider_style and pane_divider_chars. Same values: "single",
+--     -- "heavy", "double" or "block", and any subset of h, v, cross,
+--     -- t_down, t_up, t_left, t_right, tl, tr, bl, br, each one cell wide.
+--     -- divider_chars alone lays its glyphs over the host's style.
+--     divider_style = nil,
+--     divider_chars = nil,  -- e.g. { v = "┃" }
 -- }

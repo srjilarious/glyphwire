@@ -2609,6 +2609,59 @@ pub fn resizeEdgePropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(ctx.layerPtr(panel).?.resize_edge, .none);
 }
 
+/// `set_divider_style` stores a preset and glyphs on the context; a bad
+/// preset or glyph is refused and leaves it as it was; no params goes
+/// back to inheriting the host's style.
+pub fn setDividerStyleRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try testz.expectTrue(ctx.divider_style.inherits());
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_divider_style","params":{"style":"heavy","chars":{"v":"┇"}}}
+    );
+    try testz.expectTrue(ctx.divider_style.preset.? == .heavy);
+    try testz.expectEqualStr("┇", ctx.divider_style.chars.v.?.slice());
+    const gen = ctx.divider_style_gen;
+
+    const bad_style = try roundTripThroughWire(alloc,
+        \\{"jsonrpc":"2.0","method":"set_divider_style","params":{"style":"wavy"}}
+    );
+    defer alloc.free(bad_style);
+    try testz.expectError(d.handle(alloc, bad_style), dispatch.DispatchError.UnknownDividerStyle);
+    const bad_char = try roundTripThroughWire(alloc,
+        \\{"jsonrpc":"2.0","method":"set_divider_style","params":{"chars":{"h":"--"}}}
+    );
+    defer alloc.free(bad_char);
+    try testz.expectError(d.handle(alloc, bad_char), dispatch.DispatchError.InvalidDividerChar);
+    try testz.expectTrue(ctx.divider_style.preset.? == .heavy);
+    try testz.expectEqual(ctx.divider_style_gen, gen);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_divider_style","params":{}}
+    );
+    try testz.expectTrue(ctx.divider_style.inherits());
+}
+
+/// What `Client.setDividerStyle` puts on the wire reads back as the same
+/// override.
+pub fn dividerStyleWireRoundTripsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const ds = glyphwire.divider_style;
+    const sent: ds.Override = .{ .preset = .double, .chars = .{ .tl = ds.Glyph.init("╭").? } };
+    const on_wire = glyphwire.protocol.DividerStyleWire.fromOverride(&sent);
+    try testz.expectEqualStr("double", on_wire.style.?);
+    try testz.expectTrue(on_wire.chars.?.h == null);
+    const back = try on_wire.toOverride();
+    try testz.expectTrue(back.preset.? == .double);
+    try testz.expectEqualStr("╭", back.chars.tl.?.slice());
+    try testz.expectTrue(back.chars.br == null);
+
+    const none = glyphwire.protocol.DividerStyleWire.fromOverride(&.{});
+    try testz.expectTrue(none.style == null and none.chars == null);
+}
+
 /// `layer_resize` rides the `layout` stream, and can be asked for by its
 /// own name.
 pub fn layerResizeSubscribesThroughLayoutTest(io: std.Io, alloc: std.mem.Allocator) !void {

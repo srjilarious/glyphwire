@@ -203,6 +203,9 @@ fn headerLabel(buf: []u8, text: []const u8, sort: pane_mod.Sort, key: pane_mod.S
     return std.fmt.bufPrint(buf, "{s} {s}", .{ text, arrow }) catch text;
 }
 
+/// A layer's rect as the split tree laid it out, in context cells.
+const Bounds = struct { row: usize = 0, col: usize = 0, cols: usize = 0, rows: usize = 0 };
+
 pub const Ui = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -222,6 +225,11 @@ pub const Ui = struct {
 
     win: struct { cols: usize, rows: usize },
     cell: struct { w: u32, h: u32 },
+    /// Where the split tree put each pane layer, in context cells. The
+    /// server lays them out (the band between them is the host's, and
+    /// draggable), so these only ever come from a `layout` notification
+    /// or `readBounds` -- never from arithmetic on `win`.
+    pane_bounds: [2]Bounds = .{ .{}, .{} },
 
     cfg: config_mod.Config,
     keymap: actions.Keymap,
@@ -407,7 +415,28 @@ pub const Ui = struct {
             .keymap = keymap,
             .panes = .{ left, right },
         };
-        try self.placeLayers();
+
+        // The panes side by side over the one-row key bar. The pane split
+        // is user-resizable, so the host draws the band between them --
+        // in `salacommander.conf.lua`'s `divider_style`, or the host's
+        // own -- and lets it be dragged. The column split is not: a drag
+        // handle above a fixed one-row bar is a wasted row.
+        const pane_split = try client.createSplit(.row, true);
+        const root_split = try client.createSplit(.column, false);
+        try client.setSplitChildren(pane_split, &.{
+            glyphwire.SplitChildInput.layerWeighted(left_layer, 1),
+            glyphwire.SplitChildInput.layerWeighted(right_layer, 1),
+        });
+        try client.setSplitChildren(root_split, &.{
+            glyphwire.SplitChildInput.splitWeighted(pane_split, 1),
+            glyphwire.SplitChildInput.layerFixed(bar_layer, 1),
+        });
+        try client.setRootSplit(root_split);
+        if (!self.cfg.divider_style.inherits()) try client.setDividerStyle(&self.cfg.divider_style);
+
+        // The listener will get a `layout` for this too, but reading the
+        // bounds back now keeps the first frame off guessed geometry.
+        try self.readBounds();
         return self;
     }
 
@@ -449,6 +478,7 @@ pub const Ui = struct {
         if (self.shell.reapIfExited()) self.markAllDirty();
         switch (ev) {
             .resize => |r| try self.handleResize(r),
+            .layout => |l| try self.handleLayout(l),
             // The shell panel's top edge was dragged. It floats over the
             // panes rather than squeezing them, so nothing else moves.
             .layer_resize => |lr| _ = self.shell.handleLayerResize(lr, .{ .cols = self.win.cols, .rows = self.win.rows }),
@@ -506,7 +536,24 @@ pub const Ui = struct {
         if (self.client.getCellMetrics()) |m| {
             self.cell = .{ .w = m.w, .h = m.h };
         } else |_| {}
-        try self.placeLayers();
+        // No pane geometry from this: the `layout` that comes with it
+        // carries the new pane rects. Only the floating panel, which is
+        // outside the split tree, is placed against the window here.
+        self.shell.place(.{ .cols = self.win.cols, .rows = self.win.rows }) catch {};
+        self.markAllDirty();
+    }
+
+    /// The split tree was re-laid-out: a window resize, or the band
+    /// between the panes dragged.
+    fn handleLayout(self: *Ui, l: glyphwire.LayoutEvent) !void {
+        var moved = false;
+        for (self.pane_layers, 0..) |layer, i| {
+            const b = l.boundsFor(layer) orelse continue;
+            self.pane_bounds[i] = .{ .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
+            moved = true;
+        }
+        if (!moved) return;
+        try self.sizeLayers();
         self.markAllDirty();
     }
 
@@ -796,7 +843,7 @@ pub const Ui = struct {
         if (self.client.getCellMetrics()) |m| {
             self.cell = .{ .w = m.w, .h = m.h };
         } else |_| {}
-        try self.placeLayers();
+        try self.readBounds();
         try self.reloadBoth();
         self.markAllDirty();
     }
@@ -1088,7 +1135,7 @@ pub const Ui = struct {
         if (!left and !right) return;
         if (m.cell.row >= self.paneHeight()) return;
 
-        const i: usize = if (m.cell.col < self.leftWidth()) 0 else 1;
+        const i = self.paneAtCol(m.cell.col) orelse return;
         if (i != self.active) {
             self.active = i;
             self.pane_dirty = .{ .full, .full };
@@ -1473,20 +1520,26 @@ pub const Ui = struct {
 
     // ── Geometry ────────────────────────────────────────────────────────
 
-    fn leftWidth(self: *const Ui) usize {
-        return self.win.cols / 2;
-    }
-
+    /// Both panes share one row split, so they are always the same height.
     fn paneHeight(self: *const Ui) usize {
-        return self.win.rows -| 1;
+        return self.pane_bounds[0].rows;
     }
 
     fn paneCol(self: *const Ui, i: usize) usize {
-        return if (i == 0) 0 else self.leftWidth();
+        return self.pane_bounds[i].col;
     }
 
     fn paneWidth(self: *const Ui, i: usize) usize {
-        return if (i == 0) self.leftWidth() else self.win.cols - self.leftWidth();
+        return self.pane_bounds[i].cols;
+    }
+
+    /// The pane under window column `col`, or null on the band between
+    /// them (the host takes a press there for the drag anyway).
+    fn paneAtCol(self: *const Ui, col: usize) ?usize {
+        for (self.pane_bounds, 0..) |b, i| {
+            if (col >= b.col and col < b.col + b.cols) return i;
+        }
+        return null;
     }
 
     /// The field open on pane `i`'s title row, if that's where it is.
@@ -1511,15 +1564,28 @@ pub const Ui = struct {
         return @max(list_rows / self.panes[i].view.rowHeight(), 1);
     }
 
-    fn placeLayers(self: *Ui) !void {
+    /// Asks the server where the split tree put the panes, for when no
+    /// `layout` is on its way: startup, and taking the screen back from a
+    /// child (`resync`).
+    fn readBounds(self: *Ui) !void {
+        for (self.pane_layers, 0..) |l, i| {
+            const cell = try self.client.getLayerCellPosition(l);
+            const vp = try self.client.getLayerViewport(l);
+            self.pane_bounds[i] = .{ .row = cell.row, .col = cell.col, .cols = vp.cols, .rows = vp.rows };
+        }
+        try self.sizeLayers();
+    }
+
+    /// Keeps each layer's content grid the size of the pane it was laid
+    /// out in. Where the layers sit is the split tree's business; what
+    /// they hold is ours.
+    fn sizeLayers(self: *Ui) !void {
         var b = self.client.batch();
         defer b.deinit();
         for (self.pane_layers, 0..) |l, i| {
             try b.setLayerSize(l, self.paneWidth(i), self.paneHeight());
-            try b.setLayerCellPosition(l, 0, self.paneCol(i));
         }
         try b.setLayerSize(self.bar_layer, self.win.cols, 1);
-        try b.setLayerCellPosition(self.bar_layer, self.paneHeight(), 0);
         var sent = try b.send();
         sent.deinit();
         self.pushed_scroll = .{ .{ std.math.maxInt(usize), 0 }, .{ std.math.maxInt(usize), 0 } };

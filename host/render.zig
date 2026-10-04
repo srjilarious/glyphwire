@@ -492,7 +492,9 @@ pub const Renderer = struct {
     last_image_gen: u64 = 0,
 
     /// How the bands between panes are drawn (`host.conf.lua`'s
-    /// `pane_divider_style` / `pane_divider_chars`). Set by `main`.
+    /// `pane_divider_style` / `pane_divider_chars`), and the bands inside
+    /// a program's split tree unless it sent `set_divider_style`. Set by
+    /// `main`.
     pane_divider: dividers.Style = dividers.default_style,
     /// The glyph for every pane-divider cell, worked out once per pane
     /// layout (`divider_cells_gen`) rather than every frame: the junction
@@ -500,11 +502,19 @@ pub const Renderer = struct {
     divider_cells: std.ArrayList(dividers.Cell) = .empty,
     divider_lines: std.ArrayList(dividers.Line) = .empty,
     divider_cells_gen: ?u64 = null,
+    /// Scratch for one context's layer bands in a glyph style (see
+    /// `drawLayerDividers`). Not cached across frames: the glyphs can
+    /// point into the context's own `divider_style`, which only lives
+    /// while `ctx_mutex` is held.
+    layer_divider_cells: std.ArrayList(dividers.Cell) = .empty,
+    layer_divider_lines: std.ArrayList(dividers.Line) = .empty,
 
     pub fn deinit(self: *Renderer) void {
         const alloc = self.app.alloc;
         self.divider_cells.deinit(alloc);
         self.divider_lines.deinit(alloc);
+        self.layer_divider_cells.deinit(alloc);
+        self.layer_divider_lines.deinit(alloc);
         self.deferred_icons.deinit(alloc);
         self.deferred_scaled_text.deinit(alloc);
         if (self.scaled_atlas_1_5x) |*a| a.deinit();
@@ -1778,7 +1788,7 @@ pub const Renderer = struct {
         // *floats* (a popup, the Ctrl+` shell panel) then covers them the
         // way it covers everything else it is laid over. Drawn in the
         // chrome pass, zoe's tree divider ran straight down the panel.
-        self.drawLayerDividers(eng, ctx_handle, themeColor(&ctx.theme, .divider));
+        self.drawLayerDividers(eng, ctx_handle, ctx);
 
         // The caret follows `ctx.caret_layer` when a client set one --
         // otherwise the root cursor. Drawn here, on top of root's content
@@ -1841,12 +1851,26 @@ pub const Renderer = struct {
     /// the cache down to the context being composited and draws those
     /// where they are. The cache is refreshed each frame by the mouse
     /// handler, which runs before any of this.
-    fn drawLayerDividers(self: *Renderer, eng: *Engine, ctx_handle: glyphwire.ContextHandle, color: host_eng.Color) void {
+    ///
+    /// The style is the host's `pane_divider` with the context's own
+    /// `set_divider_style` laid over it; the colour is always the
+    /// context theme's dimmer `divider` role, so the seam between
+    /// programs still reads as the bigger boundary.
+    fn drawLayerDividers(self: *Renderer, eng: *Engine, ctx_handle: glyphwire.ContextHandle, ctx: *const glyphwire.Context) void {
         // `render` holds `ctx_mutex` around this whole pass, which is what
         // `syncLocked` wants. Refreshing here rather than relying on the
         // mouse handler keeps the bands right in a session that has never
         // seen a pointer.
         self.app.panes.syncLocked();
+        const color = themeColor(&ctx.theme, .divider);
+        const style = ctx.divider_style.resolve(self.pane_divider);
+        const glyphs: ?*const dividers.Glyphs = switch (style) {
+            .block => null,
+            .glyphs => |*g| g,
+        };
+
+        const alloc = self.app.alloc;
+        self.layer_divider_lines.clearRetainingCapacity();
         var drawing = false;
         defer if (drawing) eng.renderer.end();
         for (self.app.panes.bands.items) |d| {
@@ -1858,12 +1882,22 @@ pub const Renderer = struct {
                 drawing = true;
                 eng.renderer.begin(eng.projMat);
             }
+            // A glyph covers only part of its cell, so a glyph band gets
+            // the context's background under it, as a pane band gets the
+            // window's.
             const r = geometry.cellRectPx(d.rect);
             eng.renderer.drawFilledRect(
                 host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-                color,
+                if (glyphs == null) color else themeColor(&ctx.theme, .bg),
             );
+            if (glyphs != null) {
+                self.layer_divider_lines.append(alloc, .{ .rect = d.rect, .vertical = d.axis == .row }) catch return;
+            }
         }
+        const g = glyphs orelse return;
+        if (self.layer_divider_lines.items.len == 0) return;
+        dividers.layout(alloc, self.layer_divider_lines.items, g, &self.layer_divider_cells) catch return;
+        for (self.layer_divider_cells.items) |c| _ = drawCellText(eng, c.glyph, c.col, c.row, 1, color);
     }
 
     /// Paints whichever modal list dialog is open (`host/modal_list.zig`:

@@ -78,6 +78,8 @@ pub fn contextSig(ctx: *const glyphwire.Context) ContextSig {
     topo = mix(topo, ctx.caret_layer orelse 0);
     // The caret's shape changes what is drawn without touching a cell.
     topo = mix(topo, if (ctx.caret_shape) |shape| @as(u64, @intFromEnum(shape)) + 1 else 0);
+    // So does `set_divider_style`: it restyles the split bands only.
+    topo = mix(topo, ctx.divider_style_gen);
     sig.topo = topo;
 
     sig.root_view = ctx.root.view_scroll;

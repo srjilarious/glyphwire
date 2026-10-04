@@ -205,6 +205,17 @@
 --     -- the window's, and `:theme` alone names the current one.
 --     theme = nil,
 --
+--     ---- Dividers -----------------------------------------------------
+--
+--     -- How the host draws the lines between zoe's panes (the tree, each
+--     -- :split). Absent, they follow host.conf.lua's pane_divider_style
+--     -- and pane_divider_chars. Same values: "single", "heavy",
+--     -- "double" or "block", and any subset of h, v, cross, t_down,
+--     -- t_up, t_left, t_right, tl, tr, bl, br, each one cell wide.
+--     -- divider_chars alone lays its glyphs over the host's style.
+--     divider_style = nil,
+--     divider_chars = nil,  -- e.g. { v = "┃" }
+--
 --     -- Named themes for `theme` and `:theme`, as in theme.lua.
 --     themes = {
 --         -- mine = { base = "nord", palette = { bg = "#262a33" } },

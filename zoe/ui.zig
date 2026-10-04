@@ -947,6 +947,11 @@ pub const Ui = struct {
             try client.setTheme(&t);
             break :blk .init(t);
         } else try client.getTheme();
+        // `zoe.conf.lua`'s `divider_style` / `divider_chars` for the
+        // tree|editor band and every `:split`. Sent only when set, so a
+        // zoe without one draws whatever the host's `pane_divider_style`
+        // is.
+        if (!cfg_owned.?.divider_style.inherits()) try client.setDividerStyle(&cfg_owned.?.divider_style);
 
         const size = try client.getSize();
         const metrics = try client.getCellMetrics();
