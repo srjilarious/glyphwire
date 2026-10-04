@@ -9,6 +9,33 @@ Transport & Wire Format and Protocol Shape sections for framing basics
 (`Content-Length` + JSON-RPC 2.0 request/response/notification) before
 reading this.
 
+## Wire encodings
+
+Every message below exists in two encodings, chosen per connection by the
+client — see protocol.md §2.2 and §3.1 for the normative rules.
+
+| | JSON | MessagePack |
+|---|---|---|
+| Opening bytes | none | preamble `c1 47 57 4d` (`0xc1` + `GWM`), client only |
+| Framing | `Content-Length: N\r\n\r\n` + body | big-endian `u32` length + body |
+| Envelope | `{jsonrpc: "2.0", id?, method, params}` / `{jsonrpc, id, result}` | the same maps without `jsonrpc` |
+| Image bytes | side channel after the header frame (`bytes: N`) | inline `data: bin` |
+| Host detects it by | any first byte but `0xc1` | first byte `0xc1` |
+
+- The host answers each connection in its own encoding, including every
+  notification pushed to it. Pushed events are built once as JSON and
+  transcoded for a MessagePack subscriber (`codec.jsonToMsgpack`).
+- The reference `Client` / `InputListener` default to **MessagePack**;
+  `GLYPHWIRE_WIRE=json` switches a process back, and
+  `Client.connectAs(.., format)` / `connectFromEnvAs` pick per
+  connection. `glyphwire-probe` always speaks JSON, since it sends and
+  prints raw JSON.
+- Params decode identically in both: unknown members ignored, omitted
+  members take their defaults, an omitted optional member and a nil one
+  are the same.
+- `zig build bench-wire -Doptimize=ReleaseFast` compares the two on the
+  hot messages (see protocol.md §11 for the numbers).
+
 ## Status legend
 
 - ✅ **Implemented** — built and tested (see `src/dispatch.zig`).
@@ -333,8 +360,8 @@ them, exactly as it does for a glyphwire-aware pty child.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `load_image` | request (binary side-channel: JSON header + raw bytes) | `format, bytes` | image handle | ✅ `format` is parsed — `"png"`, `"jpeg"` (also `"jpg"`), `"bmp"`, `"gif"` — and selects the header parser that measures the image (`core.imageDimensions`); an unknown format, or bytes that don't match the declared one, fails the request. Bytes are stored verbatim; pixel decoding stays renderer-only (glyphwire-host's stb_image auto-detects all four) |
-| `update_image` | request (binary side-channel: JSON header + raw bytes) | `handle, format, bytes` | the same image handle back | ✅ replaces the bytes behind an existing handle instead of allocating a new one — for a client that redraws the same slot repeatedly (a `.cbz` page reader, a refreshing plot), where `load_image` per step would leave one dead image behind each time. Rides the same side-channel framing `load_image` does, and `format` is parsed and the payload measured identically; a payload that doesn't match its declared format fails the request and leaves the **old** image intact. The replacement may have different natural dimensions than the image it replaces: cells already drawn from this handle keep the per-cell sampling offsets `draw_image` computed from the *old* size, so a caller that changes the size is expected to `draw_image` again with a span sized for the new dimensions — see decisions.md's Image lifecycle section for why the server doesn't auto-repaint. Errors `UnknownImage` for a handle that isn't loaded (or is missing entirely), `ImageIsIcon` for a catalog handle |
+| `load_image` | request (JSON: binary side-channel, header + raw bytes; MessagePack: bytes inline) | JSON `format, bytes`; MessagePack `format, data` (`bin`) | image handle | ✅ On MessagePack the payload is the `data` member and `bytes` is omitted; a message without `data` fails with `MissingImageData`. `format` is parsed — `"png"`, `"jpeg"` (also `"jpg"`), `"bmp"`, `"gif"` — and selects the header parser that measures the image (`core.imageDimensions`); an unknown format, or bytes that don't match the declared one, fails the request. Bytes are stored verbatim; pixel decoding stays renderer-only (glyphwire-host's stb_image auto-detects all four) |
+| `update_image` | request (same transport as `load_image`) | JSON `handle, format, bytes`; MessagePack `handle, format, data` | the same image handle back | ✅ replaces the bytes behind an existing handle instead of allocating a new one — for a client that redraws the same slot repeatedly (a `.cbz` page reader, a refreshing plot), where `load_image` per step would leave one dead image behind each time. Rides the same side-channel framing `load_image` does, and `format` is parsed and the payload measured identically; a payload that doesn't match its declared format fails the request and leaves the **old** image intact. The replacement may have different natural dimensions than the image it replaces: cells already drawn from this handle keep the per-cell sampling offsets `draw_image` computed from the *old* size, so a caller that changes the size is expected to `draw_image` again with a span sized for the new dimensions — see decisions.md's Image lifecycle section for why the server doesn't auto-repaint. Errors `UnknownImage` for a handle that isn't loaded (or is missing entirely), `ImageIsIcon` for a catalog handle |
 | `get_image_info` | request | `handle` | natural pixel dimensions (read from the format's header — PNG IHDR / JPEG SOF / BMP DIB header / GIF screen descriptor — not a real decode) | ✅ |
 | `destroy_image` | notification | `handle` | — | ✅ frees a loaded image's bytes and drops its handle. Cells still backed by it are deliberately **left alone** and simply render nothing from then on — the same "report the dangling reference rather than chase it" treatment `get_metadata` gives a destroyed `metadata_id`; clear the region first if a blank matters. Errors `UnknownImage` for an unknown handle and `ImageIsIcon` for one registered in the icon catalog (icons are session-wide infrastructure shared through `asset_fallback`, and `get_cells` exposes their handles, so a client can't be allowed to release one). Mostly unnecessary for a short-lived program — an image loaded over a connection is reclaimed automatically once that connection is gone and the image has scrolled out of the scrollback (see **Image reclamation** below); this is for a long-running client that wants its memory back at a moment of its choosing. Batchable, unlike `load_image`/`update_image`, since it carries no side-channel payload |
 | `draw_image` | notification | `layer?, handle, row?, col?, row_span, col_span, scale?, src_x?, src_y?, src_w?, src_h?` | — | ✅ clips to the given span rather than stretching to fill it; see decisions.md. `row`/`col` default to the layer's cursor when omitted, same convention as `write_text`. `scale` (default `1.0`) is the uniform, aspect-preserving factor the image is drawn at: `1.0` is natural pixel size (the original behavior), `< 1.0` shrinks it — `glyphwire-view` sends `target_width_px / image_width_px` so the image fits the layer's width, and still sizes `row_span`/`col_span` itself from the scaled dimensions (aspect-ratio-aware placement stays the client's job). Each covered cell then samples `cell_px / scale` source pixels; a non-positive `scale` is treated as `1.0`. `src_x`/`src_y`/`src_w`/`src_h` (all pixels, all default `0`) restrict sampling to a sub-rectangle of the source image instead of the whole thing — general sprite-sheet/sub-image support, e.g. one frame of a strip; `src_w`/`src_h` of `0` means "to the image's own right/bottom edge from `(src_x, src_y)`", so omitting all four is the original whole-image behavior. Clamped to the image's own bounds first, and clips at the source rect's own edge rather than the whole image's, so a sprite drawn from the middle of a sheet doesn't bleed into a neighbour at its partial edge cell; a rect that starts past the image's own edge draws nothing. Exposed back through `get_cells` on every image-backed cell (`bg_image.scale`, `bg_image.src_right`/`src_bottom` — the resolved clip bound, both defaulting to `maxInt` when no source rect was used) |
@@ -877,10 +904,13 @@ band at a time. See decisions.md's Batch section for the reasoning.
   get results back.
 - **Request form** (outer `id` present): `responses` has one entry per
   sub-message that carried an `id` *and* whose handler produced a result,
-  in sub-message order. Each entry is a complete JSON-RPC response object
-  (`{jsonrpc, id, result}`) tagged with that sub-message's own
-  batch-local `id` — correlate by matching ids. An id absent from
-  `responses` means that sub-message was a notification, or it failed.
+  in sub-message order. Each entry is a complete response object in the
+  connection's encoding (`{jsonrpc, id, result}`, or `{id, result}` on
+  MessagePack) tagged with that sub-message's own batch-local `id` —
+  correlate by matching ids. An id absent from `responses` means that
+  sub-message was a notification, or it failed. The host splices each
+  handler's encoded response into the reply as-is rather than decoding
+  and re-encoding it.
 - **Sub-message `id`s are batch-local** — the caller's own numbering,
   scoped to this `messages` array, unrelated to the outer request `id` or
   any other frame's `id`.
@@ -891,8 +921,10 @@ band at a time. See decisions.md's Batch section for the reasoning.
   support), matching how a standalone notification's dispatch error is
   already just logged rather than severing the connection.
 - **Disallowed sub-methods:** `batch` (no nesting) and
-  `load_image`/`update_image` (their binary side-channel payload can't be
-  framed inside the array) — all skipped with a log line. `destroy_image`
+  `load_image`/`update_image` (on JSON their binary side-channel payload
+  can't be framed inside the array; they stay out of a batch on
+  MessagePack too, so the rule is the same on both) — all skipped with a
+  log line. `destroy_image`
   *is* allowed: it carries no payload, so a client can clear a region and
   release the image it held in one frame. Input / subscription messages (`report_*`,
   `subscribe`, `scroll_view`, …) are accepted but their server→client

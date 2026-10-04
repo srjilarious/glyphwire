@@ -41,7 +41,9 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len < 2 or eq(args[1], "-h") or eq(args[1], "--help")) return write(io, usage);
 
-    var client = glyphwire.Client.connectFromEnv(io, alloc, init.environ_map) catch {
+    // Always JSON: the probe sends the params you type and prints the
+    // responses verbatim, so the bytes have to be the readable encoding.
+    var client = glyphwire.Client.connectFromEnvAs(io, alloc, init.environ_map, .json) catch {
         return fail(io, "glyphwire-probe: no session -- set GLYPHWIRE_SOCK\n");
     };
     defer client.deinit();
