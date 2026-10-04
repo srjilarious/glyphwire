@@ -100,6 +100,7 @@ pub const Underline = core.Underline;
 pub const UnderlineStyle = core.UnderlineStyle;
 pub const scaledPitch = core.scaledPitch;
 pub const codepointWidth = core.codepointWidth;
+pub const isZeroWidth = core.isZeroWidth;
 pub const stringWidth = core.stringWidth;
 pub const WrapIterator = core.WrapIterator;
 pub const wrapLineCount = core.wrapLineCount;

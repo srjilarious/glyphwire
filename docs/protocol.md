@@ -790,6 +790,44 @@ followed by an italic (still ignored). A sequence that is a *query*
 (`CSI 6n`, device attributes, DECRQM) produces a `terminal_reply`
 notification (section 7) rather than a grid change.
 
+Beyond colour, the escape machine is a screen model good enough for the
+full-screen programs people actually run in a terminal — vim, nvim,
+htop, `less`, and Claude Code — rather than a complete VT. What decided
+each piece:
+
+- **BCE.** Under `TERM=xterm-256color` (what glyphwire-shell exports), a
+  program may erase with a background colour set and expect the erased
+  cells to take it. nvim does exactly that to fill a colorscheme's
+  background, so erases and scrolled-in rows paint with the pen's
+  background.
+- **The pending-wrap column is kept as `col == width`**, not as a
+  separate flag. Native clients already rely on the cursor stepping past
+  the last column, so the VT operations that must not see it (reports,
+  erases, relative moves, backspace) fold it back to the last column
+  instead.
+- **Zero-width codepoints join the previous cell only on a `pty_mode`
+  layer.** A pty program lays out with `wcwidth`, which gives combining
+  marks and variation selectors no width; giving them a cell made every
+  column after them drift. A native client lays out with
+  `codepointWidth`, which never answers 0, and changing that contract
+  would move every column those clients compute.
+- **A bare LF keeps the column on a `pty_mode` layer.** A cooked program's
+  `\n` reaches the layer as `\r\n` (the kernel's ONLCR), so the old
+  newline reading was only ever right by accident; a raw-mode program
+  sends a bare LF to mean "cursor down".
+- **`ED 3` clears scrollback, not the screen.** Programs that redraw
+  their whole transcript (Claude Code, `clear`) send `2J 3J` to stop old
+  copies piling up in history; reading 3 as 2 kept every one of them.
+- **Kitty keyboard protocol, flag 1 only.** Legacy key encoding can't
+  tell Shift+Enter from Enter, or Escape from the start of a sequence;
+  flag 1 ("disambiguate") is the smallest step that fixes both, and
+  nvim and Claude Code both ask for it. The query is answered with the
+  flags masked to what is supported, which is how the protocol lets a
+  program discover a partial implementation. The stack is tracked twice
+  from the same bytes: in the layer, to answer the query, and in
+  glyphwire-shell's `pty.ModeTracker`, which does the encoding without a
+  wire round trip.
+
 `clear` with `bg` leaves the region blank but opaque in that colour.
 
 `set_underline` takes the same region again and repaints only the
