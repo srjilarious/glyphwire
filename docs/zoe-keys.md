@@ -165,7 +165,8 @@ tab and persist across sessions in `zoe_history` and `zoe_search_history`
 in the config directory (`GLYPHWIRE_NO_HISTORY=1` keeps them in memory).
 
 Filenames: Tab on the path of `:e`, `:w`, `:wq`/`:x`, `:sp`, `:vs`, or
-`:cd` / `:addfolder` / `:rmfolder` (directories only) completes it. One match is filled in, a
+`:wssave` / `:wsopen`, or `:cd` / `:addfolder` / `:rmfolder` (directories
+only) completes it. One match is filled in, a
 directory with its `/`; several fill in what they share and open a list
 over the line, where Tab / Shift+Tab / Up / Down pick, Enter takes the
 pick into the line (a directory then lists its own entries) and Escape
@@ -185,6 +186,8 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:cd [dir]` `:pwd` | Working directory (in a workspace, `:cd` leaves the sidebar's folders alone) |
 | `:addfolder dir` | Add a folder to the sidebar's workspace |
 | `:rmfolder [dir]` | Take a folder out of the workspace (bare: the one the tree cursor is in) |
+| `:wssave [file]` | Save the workspace to a `.zoe-workspace` (bare: the one opened from or last saved to) |
+| `:wsopen file` `:wsopen! file` | Open a saved workspace, closing every tab (`!` discards changes) |
 | `:noh` | Clear the search highlight |
 | `:set lineno=off\|absolute\|relative` | Line numbers |
 | `:set tabwidth=N`, `expandtab=on\|off`, `whitespace=on\|off` | Indent and whitespace display |
@@ -221,17 +224,32 @@ open folders and the cursor's entry.
 
 ### Workspaces
 
-`zoe dir1 dir2 ...` or `zoe project.code-workspace` opens several folders
-at once, the way VS Code's multi-root workspaces do. Each folder gets a
-header row in the tree (Enter collapses it, like any folder) with its
-contents beneath; with a single folder the tree has no header, as before.
-zoe starts in the first folder.
+`zoe dir1 dir2 ...`, `zoe project.zoe-workspace` or
+`zoe project.code-workspace` opens several folders at once, the way VS
+Code's multi-root workspaces do. Each folder gets a header row in the tree
+(Enter collapses it, like any folder) with its contents beneath; with a
+single folder the tree has no header, as before. zoe starts in the first
+folder.
 
-- **Workspace files** are read, never written: only the `folders` list
-  (`path`, relative to the file, and optional `name`) is used. Comments and
-  trailing commas are fine; `settings` and the rest, and remote `uri`
-  folders, are ignored.
-- `:addfolder` / `:rmfolder` change the folders for this session only.
+- **`.zoe-workspace` files** are zoe's own. `:wssave [file]` writes one:
+  the folders, the editor groups (how they are split and in what
+  proportions), each group's open files and shown tab, which group has
+  the keyboard, and the theme if `:theme <name>` or `zoe.conf.lua` chose
+  one. A theme that follows the window's is left out, so the file opens
+  in whatever zoe would normally pick. Paths are relative to the file when
+  they are in its folder, under it or in a sibling folder, else absolute.
+  A bare `:wssave` writes back to the file zoe was opened from (or last
+  saved to). `:wsopen file` swaps the running session over to a saved
+  one: folders, groups, tabs and theme. It closes every open tab, so it
+  refuses over unsaved changes unless given as `:wsopen!`. A saved file
+  that has since gone is skipped rather than reopened empty.
+- **`.code-workspace` files** (VS Code's) are read, never written: only
+  the `folders` list (`path`, relative to the file, and optional `name`)
+  is used. Comments and trailing commas are fine; `settings` and the
+  rest, and remote `uri` folders, are ignored. `:wssave` to a new
+  `.zoe-workspace` keeps such a session.
+- `:addfolder` / `:rmfolder` change the folders for this session; a
+  `:wssave` afterwards is what keeps them.
 - Ctrl+P and the tree's `/` search cover every folder; Ctrl+P prefixes
   each result with its folder's name, so typing the name narrows to it.
 - The shell panel (Ctrl+`) opens in the folder that holds the current
@@ -249,7 +267,8 @@ from either grows the selection a word or line at a time; wheel and scrollbar th
 scrolls a tab strip; click a tab to switch, its `×` to close; drag a tab
 onto another group's strip (dropped in front of the tab under the pointer)
 or pane (added at the end) to move it there, or along its own strip to
-reorder it; hover a tab for its full path; drag a divider to resize
+reorder it, with a bar marking the gap it would land in on a strip and a
+tint over a pane it would move to; hover a tab for its full path; drag a divider to resize
 groups or the shell panel.
 
 ## Gaps

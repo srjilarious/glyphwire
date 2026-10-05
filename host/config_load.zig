@@ -170,6 +170,12 @@ pub fn loadConfig(
     }
     readDividerChars(lua, arena, &cfg.pane_divider);
 
+    if (luaNumField(lua, "drop_target_opacity")) |v| {
+        cfg.drop_target_opacity = config.clampDropTargetOpacity(v);
+        if (cfg.drop_target_opacity != v)
+            std.log.warn("glyphwire-host: host.conf.lua drop_target_opacity {d} out of range; clamped to {d}", .{ v, cfg.drop_target_opacity });
+    }
+
     const clamped = config.clampFontSize(cfg.font.size);
     if (clamped != cfg.font.size) {
         std.log.warn("glyphwire-host: host.conf.lua font_size {d} out of range; clamped to {d}", .{ cfg.font.size, clamped });

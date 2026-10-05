@@ -67,13 +67,16 @@ pub fn main(init: std.process.Init) !void {
         \\the file tree with an empty buffer; anything else is a file to open.
         \\--line N (before the file) starts the cursor on line N.
         \\
-        \\Several directory arguments, or one VS Code .code-workspace file,
-        \\open a workspace: every folder gets its own collapsible section in
-        \\the sidebar, and Ctrl+P and the tree's / search cover all of them.
-        \\Only the workspace file's "folders" list is read, and zoe never
-        \\writes it. :addfolder <dir> and :rmfolder [dir] change the folders
-        \\for this session (a bare :rmfolder drops the one the tree cursor is
-        \\in).
+        \\Several directory arguments, or one workspace file (zoe's own
+        \\.zoe-workspace or VS Code's .code-workspace), open a workspace:
+        \\every folder gets its own collapsible section in the sidebar, and
+        \\Ctrl+P and the tree's / search cover all of them. Only a
+        \\.code-workspace's "folders" list is read, and zoe never writes one.
+        \\:addfolder <dir> and :rmfolder [dir] change the folders for this
+        \\session (a bare :rmfolder drops the one the tree cursor is in).
+        \\:wssave [file] writes the folders, and the theme if :theme or
+        \\zoe.conf.lua chose one, to a .zoe-workspace (bare: the one zoe was
+        \\opened from or last saved to); :wsopen <file> switches to another.
         \\
         \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
         \\glyphwire display server. Ctrl+W is vim's window prefix: then v or s
@@ -152,12 +155,17 @@ pub fn main(init: std.process.Init) !void {
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
     const start_cwd = cwd_buf[0..cwd_len];
 
-    // A workspace: one `.code-workspace` file, or more than one argument
+    // A workspace: one workspace file, or more than one argument
     // (which then all have to be directories -- zoe opens one file, not
     // a list of them). Resolved against the cwd zoe was started in,
     // before anything changes it.
     var ws: ?workspace.Workspace = null;
     defer if (ws) |*w| w.deinit();
+    // A `.zoe-workspace` argument, absolute: where a bare `:wssave`
+    // writes. A `.code-workspace` is VS Code's and never written, so it
+    // leaves this null.
+    var ws_file: ?[]u8 = null;
+    defer if (ws_file) |f| alloc.free(f);
     if (args.positional.items.len > 1) {
         for (args.positional.items) |p| {
             if (!isDirectory(io, p)) return fail(io, "zoe: with several arguments, each must be a directory\n");
@@ -170,6 +178,7 @@ pub fn main(init: std.process.Init) !void {
                 const msg = std.fmt.bufPrint(&buf, "zoe: can't read workspace {s}: {t}\n", .{ p, err }) catch "zoe: can't read workspace\n";
                 return fail(io, msg);
             };
+            if (workspace.formatOf(p) == .zoe) ws_file = try std.fs.path.resolve(alloc, &.{ start_cwd, p });
         }
     }
     // What glyphwire-shell's default text `open_actions` entry passes
@@ -211,7 +220,7 @@ pub fn main(init: std.process.Init) !void {
     // would be neither. The UI opens the target itself: it owns every
     // buffer in its tab strip, and the first one is no different.
     if (script == null) {
-        if (try runUi(alloc, io, target, if (ws) |*w| w else null, init.environ_map)) return;
+        if (try runUi(alloc, io, target, if (ws) |*w| w else null, ws_file, init.environ_map)) return;
     }
 
     // A missing file is a new buffer, not an error -- `zoe newfile.txt`
@@ -250,6 +259,8 @@ pub fn main(init: std.process.Init) !void {
             .pwd,
             .add_folder,
             .remove_folder,
+            .ws_save,
+            .ws_open,
             .set_clipboard,
             .paste,
             .buffer_step,
@@ -296,6 +307,7 @@ fn runUi(
     io: std.Io,
     target: zoe.Target,
     ws: ?*const workspace.Workspace,
+    ws_file: ?[]const u8,
     environ: *const std.process.Environ.Map,
 ) !bool {
     var client = glyphwire.Client.connectFromEnv(io, alloc, environ) catch {
@@ -339,7 +351,11 @@ fn runUi(
         try folders.append(alloc, .{ .path = cwd, .name = workspace.defaultName(cwd) });
     }
 
-    const ui = try zoe.Ui.init(alloc, io, &client, listener, target, folders.items, environ);
+    const ui = try zoe.Ui.init(alloc, io, &client, listener, target, folders.items, .{
+        .file = ws_file,
+        .theme = if (ws) |w| w.theme else null,
+        .editors = if (ws) |w| (if (w.editors) |e| e.root else null) else null,
+    }, environ);
     defer ui.deinit();
 
     try ui.run();

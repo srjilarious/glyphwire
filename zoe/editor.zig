@@ -133,6 +133,17 @@ pub const Outcome = union(enum) {
     /// `:rmfolder [dir]` -- drop a workspace folder: the named one, or
     /// with null the one the tree's cursor is in. Borrows `cmd_arg`.
     remove_folder: ?[]const u8,
+    /// `:wssave [file]` -- write the sidebar's folders (and this editor's
+    /// own theme, if it has one) to a `.zoe-workspace`. Null means the
+    /// workspace file this session was opened from or last saved to.
+    /// Borrows `cmd_arg`.
+    ws_save: ?[]const u8,
+    /// `:wsopen[!] <file>` -- replace the sidebar's folders, the editor
+    /// groups and their tabs, and the theme with a workspace file's.
+    /// Every open tab closes, so a modified buffer refuses it unless
+    /// `force` (the `!` form) -- the UI checks, since only it sees every
+    /// buffer. `path` borrows `cmd_arg`; null when no file was given.
+    ws_open: struct { path: ?[]const u8, force: bool },
     /// `:bn` / `:bp` -- move to the next / previous open buffer. An
     /// `Editor` *is* one buffer and knows nothing about the others, so
     /// the list lives in `zoe/ui.zig` and these just name the direction.
@@ -2494,6 +2505,9 @@ pub const Editor = struct {
         if (eq(u8, name, "pwd")) return .pwd;
         if (eq(u8, name, "addfolder")) return .{ .add_folder = arg_opt };
         if (eq(u8, name, "rmfolder")) return .{ .remove_folder = arg_opt };
+        if (eq(u8, name, "wssave")) return .{ .ws_save = arg_opt };
+        if (eq(u8, name, "wsopen")) return .{ .ws_open = .{ .path = arg_opt, .force = false } };
+        if (eq(u8, name, "wsopen!")) return .{ .ws_open = .{ .path = arg_opt, .force = true } };
         if (eq(u8, name, "set")) {
             self.applySet(arg_opt);
             return .none;

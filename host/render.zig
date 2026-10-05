@@ -496,6 +496,11 @@ pub const Renderer = struct {
     /// a program's split tree unless it sent `set_divider_style`. Set by
     /// `main`.
     pane_divider: dividers.Style = dividers.default_style,
+    /// How opaque a `set_drop_target` wash of a pane or cell block is
+    /// (`host.conf.lua`'s `drop_target_opacity`). Set by `main`. The
+    /// insertion bar ignores it: a two-pixel line has to be solid to be
+    /// seen at all.
+    drop_target_opacity: f32 = 0.25,
     /// The glyph for every pane-divider cell, worked out once per pane
     /// layout (`divider_cells_gen`) rather than every frame: the junction
     /// rule looks at each cell's neighbours.
@@ -1278,6 +1283,48 @@ pub const Renderer = struct {
                     addRect(&lb.rects, host_eng.RectF.fromPosSize(rx, ry + lw, lw, rh - 2 * lw), col);
                     addRect(&lb.rects, host_eng.RectF.fromPosSize(rx + rw - lw, ry + lw, lw, rh - 2 * lw), col);
                 }
+            }
+        }
+
+        // The drop-target highlight (`set_drop_target`), after the overlay
+        // rects so it sits over everything the layer paints. Content cells
+        // go to screen pixels through the same scroll offset as above.
+        if (layer.drop_target) |dt| {
+            const rc = th.resolve(glyphwire.Color.role(.drop_target));
+            const cw = geometry.cell_w;
+            const ch = geometry.cell_h;
+            const scroll_col: i32 = @intCast(off.col);
+            const scroll_row: i32 = @intCast(off.row);
+            switch (dt) {
+                .layer, .cells => {
+                    const wash = fade(host_eng.Color.from(rc.r, rc.g, rc.b, rc.a), alpha * self.drop_target_opacity);
+                    const r: host_eng.RectF = switch (dt) {
+                        .layer => .fromPosSize(origin_x, origin_y, @as(i32, @intCast(vp_cols)) * cw, @as(i32, @intCast(vp_rows)) * ch),
+                        .cells => |c| .fromPosSize(
+                            origin_x + (@as(i32, @intCast(c.col)) - scroll_col) * cw,
+                            origin_y + (@as(i32, @intCast(c.row)) - scroll_row) * ch,
+                            @as(i32, @intCast(c.cols)) * cw,
+                            @as(i32, @intCast(c.rows)) * ch,
+                        ),
+                        .insert => unreachable,
+                    };
+                    addRect(&lb.rects, r, wash);
+                },
+                .insert => |ins| {
+                    // A quarter of a cell, at least two pixels, centred on
+                    // the column boundary -- but never left of the layer,
+                    // where a bar at column 0 would be half cut off.
+                    const bar_w: i32 = @max(2, @divTrunc(cw, 4));
+                    const edge = origin_x + (@as(i32, @intCast(ins.col)) - scroll_col) * cw;
+                    const x = @max(origin_x, edge - @divTrunc(bar_w, 2));
+                    const solid = fade(host_eng.Color.from(rc.r, rc.g, rc.b, rc.a), alpha);
+                    addRect(&lb.rects, host_eng.RectF.fromPosSize(
+                        x,
+                        origin_y + (@as(i32, @intCast(ins.row)) - scroll_row) * ch,
+                        bar_w,
+                        @as(i32, @intCast(ins.rows)) * ch,
+                    ), solid);
+                },
             }
         }
 

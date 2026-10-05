@@ -130,6 +130,13 @@
 --     -- rest come from "single".
 --     pane_divider_chars = { h = "─", v = "│" },
 --
+--     -- How strongly a drag's drop target is highlighted (zoe's tab
+--     -- moving onto another pane, say): the pane or cells it would land
+--     -- on are washed in the theme's `drop_target` colour at this
+--     -- opacity. The insertion bar between two tabs is always solid.
+--     -- Clamped to 0.05..1.
+--     drop_target_opacity = 0.25,
+--
 --     ---- Grid --------------------------------------------------------
 --
 --     -- Initial grid size in cells. The window opens this many cells

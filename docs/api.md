@@ -700,6 +700,22 @@ the layer paints — unlike the selection/highlight tints, which are drawn
 *under* text so the text pass stays readable over them. There is no
 `get_rect`/`rect_get_state` yet; nothing has needed to read a rect back.
 
+### Drop target
+
+The highlight a drag-and-drop shows over where it would land
+(`core.Layer.drop_target`, one per layer). glyphwire-host never sees the
+drag itself: the client tracks the button and pointer, works out the
+target and sends it. What the host adds over a client drawing its own
+`create_rect` is consistency and cell coordinates: every program's drop
+target is the theme's `drop_target` colour at `host.conf.lua`'s
+`drop_target_opacity`, with no pixel arithmetic on the client's side.
+zoe uses it while a tab is dragged: an insertion bar between two tabs on
+a strip, or the whole buffer pane of another editor group.
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `set_drop_target` | notification | `layer?, mode, row?, col?, rows?, cols?` | — | ✅ `mode` `"layer"` washes the layer's whole visible area; `"cells"` washes `rows` × `cols` content cells from (`row`, `col`); `"insert"` draws a bar (a quarter of a cell wide, at least 2 px, centred on the boundary but never left of the layer) on the left edge of content column `col`, `rows` tall from `row`, where `col` may be one past the last column; `"none"` clears it. `rows` / `cols` absent or null mean 1. Coordinates are content cells translated by the layer's scroll offset, i.e. screen cells on a `client` scroll-mode layer. The wash is `drop_target` at `drop_target_opacity` (default 0.25, clamped 0.05..1); the bar is solid `drop_target`. Both draw in the layer's `rects` batch after its overlay rects, so over everything the layer paints, and fade with the layer's `opacity`. Re-sending the current target leaves the layer's render cache alone (a drag sends one per pointer move). A `cells` / `insert` target missing `row` or `col`, or an unknown `mode`, is `InvalidDropTarget`; an unknown layer `UnknownLayer`. Batchable. `Client.setDropTarget(layer, ?DropTarget)` / `Batch.setDropTarget` |
+
 ## Nine-patch
 
 A panel background drawn from one `.9.png` image and placed on a cell

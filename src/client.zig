@@ -2443,6 +2443,33 @@ pub const Client = struct {
         try self.notify("destroy_rect", .{ .layer = layer, .rect = handle });
     }
 
+    /// `set_drop_target(layer?, mode, row?, col?, rows?, cols?)` -- a
+    /// notification. Highlights where a drag would drop on `layer`, in
+    /// the theme's `drop_target` colour, or clears it with null. Cheap
+    /// to repeat: the host ignores a target it already shows.
+    pub fn setDropTarget(self: *Client, layer: ?core.LayerHandle, target: ?core.DropTarget) !void {
+        try self.notify("set_drop_target", dropTargetParams(layer, target));
+    }
+
+    const DropTargetWire = struct {
+        layer: ?core.LayerHandle,
+        mode: []const u8,
+        row: ?usize = null,
+        col: ?usize = null,
+        rows: ?usize = null,
+        cols: ?usize = null,
+    };
+
+    /// `set_drop_target`'s wire params. Shared with `Batch.setDropTarget`.
+    fn dropTargetParams(layer: ?core.LayerHandle, target: ?core.DropTarget) DropTargetWire {
+        const t = target orelse return .{ .layer = layer, .mode = "none" };
+        return switch (t) {
+            .layer => .{ .layer = layer, .mode = "layer" },
+            .cells => |c| .{ .layer = layer, .mode = "cells", .row = c.row, .col = c.col, .rows = c.rows, .cols = c.cols },
+            .insert => |i| .{ .layer = layer, .mode = "insert", .row = i.row, .col = i.col, .rows = i.rows },
+        };
+    }
+
     /// `create_nine_patch(layer?, row, col, rows, cols, style)` -- a
     /// request. Frames the `rows x cols` cell rect at `row`/`col` with the
     /// registered `.9.png` named `style` (corners at native pixel size,
@@ -3165,6 +3192,11 @@ pub const Client = struct {
         /// Batched `destroy_rect` -- see `Client.destroyRect`.
         pub fn destroyRect(self: *Batch, layer: ?core.LayerHandle, handle: core.RectHandle) !void {
             try self.notify("destroy_rect", .{ .layer = layer, .rect = handle });
+        }
+
+        /// Batched `set_drop_target` -- see `Client.setDropTarget`.
+        pub fn setDropTarget(self: *Batch, layer: ?core.LayerHandle, target: ?core.DropTarget) !void {
+            try self.notify("set_drop_target", Client.dropTargetParams(layer, target));
         }
 
         /// Batched `create_nine_patch` -- see `Client.createNinePatch`.
