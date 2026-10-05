@@ -3596,7 +3596,10 @@ const Prompt = struct {
 
     /// While a command runs, the title is the command line itself, as
     /// typed (`sudo htop -d 5`) -- what is running says more than where.
-    /// Cut to the title cap on a UTF-8 boundary.
+    /// Set before the handshake can tell a plain program from a
+    /// glyphwire-aware one; `foregroundJob` puts the prompt title back
+    /// once it knows the child is aware. Cut to the title cap on a UTF-8
+    /// boundary.
     fn syncCommandTitle(self: *Prompt, line: []const u8) void {
         const text = std.mem.trimEnd(u8, line, " \t\r\n");
         if (text.len == 0) return;
@@ -3608,9 +3611,11 @@ const Prompt = struct {
     /// Names this shell's context, which glyphwire-host shows in the
     /// window title when this pane has focus and the context switcher
     /// lists. A glyphwire program started from here makes and names a
-    /// context of its own, so this only ever shows for the shell itself
-    /// and plain terminal programs. Embedded, the context is the host
-    /// program's, and its title is not ours to set. Sends only on change.
+    /// context of its own, so once the handshake says so the shell goes
+    /// back to its prompt title (see `foregroundJob`) and the command
+    /// line only stays up for plain terminal programs. Embedded, the
+    /// context is the host program's, and its title is not ours to set.
+    /// Sends only on change.
     fn setTitle(self: *Prompt, title: []const u8) void {
         if (self.layer != null) return;
         if (std.mem.eql(u8, title, self.title_buf[0..self.title_len])) return;
@@ -4550,6 +4555,11 @@ const Prompt = struct {
             // child the reader thread is drawing through it.
             if (is_aware and stack_dirty) {
                 stack_dirty = false;
+                // The command-line title `dispatchLineText` set is now the
+                // program's own context's job; left on this one, the
+                // switcher would list two near-identical entries. Back to
+                // `gw-shell <cwd>` (a no-op after the first time).
+                self.syncPromptTitle();
                 if (self.noteVisibleContext(job)) return .backgrounded;
             }
 
