@@ -29,8 +29,13 @@ const zoe = @import("zoe_support");
 //     \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
 //     \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
 //     \\(or Ctrl+Left / Ctrl+Right) focus the pane that way; Ctrl+N toggles
-//     \\the file tree; Ctrl+Tab / Ctrl+Shift+Tab walk the open buffers (also
-//     \\:bn / :bp, closed with :bd or a tab's ×).
+//     \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
+//     \\buffers (also :bn / :bp, closed with :bd or a tab's ×).
+//     \\
+//     \\In the file tree, j/k/arrows and Page Up/Page Down move and Enter or
+//     \\Space opens. f jumps to the next name starting with what you type; /
+//     \\does the same over the whole tree, opening whatever folders that
+//     \\takes; Tab cycles the matches.
 //     \\
 // ;
 
@@ -49,8 +54,13 @@ pub fn main(init: std.process.Init) !void {
         \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
         \\glyphwire display server. Ctrl+W switches panes and Ctrl+H / Ctrl+L
         \\(or Ctrl+Left / Ctrl+Right) focus the pane that way; Ctrl+N toggles
-        \\the file tree; Ctrl+Tab / Ctrl+Shift+Tab walk the open buffers (also
-        \\:bn / :bp, closed with :bd or a tab's ×).
+        \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
+        \\buffers (also :bn / :bp, closed with :bd or a tab's ×).
+        \\
+        \\In the file tree, j/k/arrows and Page Up/Page Down move and Enter or
+        \\Space opens. f jumps to the next name starting with what you type; /
+        \\does the same over the whole tree, opening whatever folders that
+        \\takes; Tab cycles the matches.
         ,
         .opts = &.{
             .{

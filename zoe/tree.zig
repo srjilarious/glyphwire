@@ -16,6 +16,12 @@
 //! that touches the filesystem. Everything the *rendering* needs
 //! (`row`, `widestCols`) is pure, which is what `tests/zoe_tests.zig`
 //! exercises.
+//!
+//! The pane's two searches are both served from here. `f` walks the
+//! flattened list (`rowStartingWith`) -- the rows already on screen. `/`
+//! walks a `DeepList`, every path under the root whether its folder is
+//! open or not, and `reveal` then opens whatever it takes for the hit to
+//! become a row the cursor can sit on.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -108,9 +114,7 @@ pub const Tree = struct {
     /// after it that is deeper than it, which by construction is exactly
     /// its subtree.
     fn collapse(self: *Tree, index: usize) void {
-        const depth = self.entries.items[index].depth;
-        var end = index + 1;
-        while (end < self.entries.items.len and self.entries.items[end].depth > depth) end += 1;
+        const end = self.subtreeEnd(index);
 
         for (self.entries.items[index + 1 .. end]) |e| {
             self.alloc.free(e.name);
@@ -161,8 +165,204 @@ pub const Tree = struct {
         listing.clearRetainingCapacity();
     }
 
+    /// Directories first, then case-insensitively by name -- so
+    /// `Downloads` and `downloads` sit next to each other rather than in
+    /// two blocks with every capitalised name in between, which is what a
+    /// raw byte compare gives. Names that are equal ignoring case fall
+    /// back to the byte order, so the sort stays total and two files
+    /// differing only in case keep a repeatable order.
     fn lessThan(_: void, a: Entry, b: Entry) bool {
         if (a.is_dir != b.is_dir) return a.is_dir;
-        return std.mem.lessThan(u8, a.name, b.name);
+        return switch (std.ascii.orderIgnoreCase(a.name, b.name)) {
+            .lt => true,
+            .gt => false,
+            .eq => std.mem.lessThan(u8, a.name, b.name),
+        };
+    }
+
+    // ── Type to find ────────────────────────────────────────────────────
+
+    /// The first visible entry at or after `from` whose name starts with
+    /// `prefix`, case-insensitively, wrapping back to the top so the
+    /// search always covers the whole listing. Null when nothing matches.
+    ///
+    /// Pure, and the whole of what the tree pane's `f` search needs: the
+    /// flattened list *is* what is on screen, so "the next match" is just
+    /// the next index.
+    pub fn rowStartingWith(self: *const Tree, prefix: []const u8, from: usize) ?usize {
+        const n = self.entries.items.len;
+        if (n == 0 or prefix.len == 0) return null;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const index = (from + i) % n;
+            if (std.ascii.startsWithIgnoreCase(self.entries.items[index].name, prefix)) return index;
+        }
+        return null;
+    }
+
+    /// One past the last entry nested under `index` -- the end of the run
+    /// `collapse` removes.
+    pub fn subtreeEnd(self: *const Tree, index: usize) usize {
+        const depth = self.entries.items[index].depth;
+        var end = index + 1;
+        while (end < self.entries.items.len and self.entries.items[end].depth > depth) end += 1;
+        return end;
+    }
+
+    /// Expands whatever it takes for `rel` -- a path relative to the tree
+    /// root, `/`-separated -- to be a visible row, and returns its index.
+    /// Null if any component is missing: the tree is a snapshot and the
+    /// deep listing behind a `/` search is another one, so they can
+    /// disagree about a file that has just been removed.
+    ///
+    /// This is what lets a `/` search land on a file inside a folder that
+    /// was never opened: the search finds the path, this turns it into a
+    /// row. The expansion stays afterwards -- the row has to remain
+    /// visible for the cursor to be on it.
+    pub fn reveal(self: *Tree, io: std.Io, rel: []const u8) !?usize {
+        // The window of entries the next component must be found in:
+        // first the whole listing, then the children of whatever the
+        // previous component resolved to.
+        var lo: usize = 0;
+        var hi: usize = self.entries.items.len;
+        var depth: usize = 0;
+        var found: ?usize = null;
+
+        var it = std.mem.splitScalar(u8, rel, '/');
+        while (it.next()) |seg| {
+            if (seg.len == 0) continue;
+            const index = self.indexOfName(seg, depth, lo, hi) orelse return null;
+            found = index;
+            if (it.rest().len == 0) break;
+
+            // More components to go, so this one has to be a directory,
+            // and open before its children exist as rows at all.
+            if (!self.entries.items[index].is_dir) return null;
+            if (!self.entries.items[index].expanded) try self.toggle(io, index);
+            lo = index + 1;
+            hi = self.subtreeEnd(index);
+            depth += 1;
+        }
+        return found;
+    }
+
+    fn indexOfName(self: *const Tree, name: []const u8, depth: usize, lo: usize, hi: usize) ?usize {
+        var i = lo;
+        const end = @min(hi, self.entries.items.len);
+        while (i < end) : (i += 1) {
+            const e = self.entries.items[i];
+            if (e.depth == depth and std.mem.eql(u8, e.name, name)) return i;
+        }
+        return null;
     }
 };
+
+// ── Deep listing ────────────────────────────────────────────────────────
+
+/// The walk behind a `/` search stops after this many entries: generous
+/// enough for a real source tree, and a bound on a root that turns out to
+/// be `/`. Deliberately the same shape of guard `zoe/finder.zig` puts on
+/// the Ctrl+P scan.
+pub const deep_max_entries: usize = 20_000;
+
+/// How deep that walk goes -- a guard against a pathological tree rather
+/// than a limit a source tree should reach.
+pub const deep_max_depth: usize = 16;
+
+/// Every path under the tree root, whether or not its folder is open:
+/// what a `/` search matches against, and what `Tree.reveal` is handed to
+/// turn a hit into a row.
+///
+/// Read once when the search starts and thrown away when it ends, for the
+/// reason the Ctrl+P finder rescans on every open: a listing that stayed
+/// live would need a directory watcher to stay honest.
+pub const DeepList = struct {
+    alloc: std.mem.Allocator,
+    /// Paths relative to the root, `/`-separated, owned. Sorted
+    /// case-insensitively, which inside one directory is the tree's own
+    /// order; a directory still sits immediately before its children,
+    /// since its path is a prefix of theirs.
+    paths: std.ArrayList([]u8) = .empty,
+    /// The walk hit `deep_max_entries` and stopped early, so the listing
+    /// is a prefix of the tree rather than the whole of it.
+    truncated: bool = false,
+
+    pub fn deinit(self: *DeepList) void {
+        for (self.paths.items) |p| self.alloc.free(p);
+        self.paths.deinit(self.alloc);
+        self.* = undefined;
+    }
+
+    /// The final component of `paths[index]` -- what a query is matched
+    /// against, since what is being typed is a name and not a path.
+    pub fn nameAt(self: *const DeepList, index: usize) []const u8 {
+        const p = self.paths.items[index];
+        const slash = std.mem.lastIndexOfScalar(u8, p, '/') orelse return p;
+        return p[slash + 1 ..];
+    }
+
+    /// Adds one path relative to the root. `deepScan` is the only caller
+    /// in the program; tests use it to build a listing directly.
+    pub fn addPath(self: *DeepList, rel: []const u8) !void {
+        const owned = try self.alloc.dupe(u8, rel);
+        errdefer self.alloc.free(owned);
+        try self.paths.append(self.alloc, owned);
+    }
+};
+
+/// Walks `root` and collects every path under it. Directories are listed
+/// too, so a `/` search can land on a folder; one that can't be read is
+/// skipped rather than failing the walk, the rule the rest of the tree
+/// uses.
+pub fn deepList(alloc: std.mem.Allocator, io: std.Io, root: []const u8) !DeepList {
+    var self: DeepList = .{ .alloc = alloc };
+    errdefer self.deinit();
+    try deepScan(&self, io, root, "", 0);
+    std.mem.sort([]u8, self.paths.items, {}, lessThanPath);
+    return self;
+}
+
+fn lessThanPath(_: void, a: []u8, b: []u8) bool {
+    return switch (std.ascii.orderIgnoreCase(a, b)) {
+        .lt => true,
+        .gt => false,
+        .eq => std.mem.lessThan(u8, a, b),
+    };
+}
+
+fn deepScan(self: *DeepList, io: std.Io, dir: []const u8, rel: []const u8, depth: usize) !void {
+    if (depth >= deep_max_depth) return;
+
+    var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
+    defer handle.close(io);
+
+    var it = handle.iterate();
+    while (it.next(io) catch null) |raw| {
+        if (self.paths.items.len >= deep_max_entries) {
+            self.truncated = true;
+            return;
+        }
+        // Dotfiles are hidden here for the reason they are hidden in the
+        // listing: a `/` search that landed on a row the tree will never
+        // show would have nowhere to put the cursor.
+        if (raw.name.len > 0 and raw.name[0] == '.') continue;
+
+        const child_rel = if (rel.len == 0)
+            try self.alloc.dupe(u8, raw.name)
+        else
+            try std.fmt.allocPrint(self.alloc, "{s}/{s}", .{ rel, raw.name });
+        {
+            errdefer self.alloc.free(child_rel);
+            try self.paths.append(self.alloc, child_rel);
+        }
+
+        // Only a real directory is descended into: a symlink reports as
+        // `.sym_link` whatever it points at, so it is never followed and
+        // a link back up the tree can't turn the walk into a loop.
+        if (raw.kind == .directory) {
+            const child_dir = try std.fs.path.join(self.alloc, &.{ dir, raw.name });
+            defer self.alloc.free(child_dir);
+            try deepScan(self, io, child_dir, child_rel, depth + 1);
+        }
+    }
+}

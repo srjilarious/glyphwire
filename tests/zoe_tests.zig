@@ -1215,6 +1215,99 @@ pub fn treeCollapsePullsTheCursorBackTest(io: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqual(t.cursor, 1);
 }
 
+pub fn treeSortsCaseInsensitivelyWithDirectoriesFirstTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "sort");
+    defer s.deinit();
+    try s.file("downloads", "");
+    try s.file("Zebra", "");
+    try s.file("Downloads", "");
+    try s.file("apple", "");
+    try s.file("src/x", "");
+    try s.file("Bin/x", "");
+
+    var t = try zoe.Tree.init(alloc, io, s.path);
+    defer t.deinit();
+
+    // Directories still lead, and inside each group `Downloads` sits next
+    // to `downloads` rather than ahead of every lower-case name. Two
+    // names equal ignoring case fall back to the byte order, which puts
+    // the capital first.
+    try testz.expectEqualStr(t.at(0).?.name, "Bin");
+    try testz.expectEqualStr(t.at(1).?.name, "src");
+    try testz.expectEqualStr(t.at(2).?.name, "apple");
+    try testz.expectEqualStr(t.at(3).?.name, "Downloads");
+    try testz.expectEqualStr(t.at(4).?.name, "downloads");
+    try testz.expectEqualStr(t.at(5).?.name, "Zebra");
+}
+
+pub fn treeRowStartingWithSearchesForwardAndWrapsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var t = try fakeTree(alloc);
+    defer t.deinit();
+
+    // src, core.zig, sub, deep.zig, README.
+    try testz.expectEqual(t.rowStartingWith("s", 0).?, 0);
+    // Forward from past `src` finds `sub`, not `src` again.
+    try testz.expectEqual(t.rowStartingWith("s", 1).?, 2);
+    // And past `sub` it wraps back round to `src`.
+    try testz.expectEqual(t.rowStartingWith("s", 3).?, 0);
+    // Case-insensitive, in both directions.
+    try testz.expectEqual(t.rowStartingWith("readme", 0).?, 4);
+    try testz.expectEqual(t.rowStartingWith("DEEP", 0).?, 3);
+    try testz.expectTrue(t.rowStartingWith("zzz", 0) == null);
+    // An empty prefix describes nothing, so it matches nothing.
+    try testz.expectTrue(t.rowStartingWith("", 0) == null);
+}
+
+pub fn treeRevealExpandsAncestorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "reveal");
+    defer s.deinit();
+    try s.file("a.txt", "");
+    try s.file("sub/deep/c.zig", "");
+
+    var t = try zoe.Tree.init(alloc, io, s.path);
+    defer t.deinit();
+    // Only the root's own entries to start with: `sub` and `a.txt`.
+    try testz.expectEqual(t.len(), 2);
+
+    const index = (try t.reveal(io, "sub/deep/c.zig")).?;
+    // Both folders on the way down were opened, and the file is the row
+    // the walk ended on: sub, deep, c.zig, a.txt.
+    try testz.expectEqual(t.len(), 4);
+    try testz.expectEqual(index, 2);
+    try testz.expectEqualStr(t.at(index).?.name, "c.zig");
+    try testz.expectTrue(t.at(0).?.expanded);
+    try testz.expectTrue(t.at(1).?.expanded);
+
+    // A path that isn't there leaves the tree as it found it.
+    try testz.expectTrue((try t.reveal(io, "sub/deep/missing.zig")) == null);
+    try testz.expectEqual(t.len(), 4);
+}
+
+pub fn treeDeepListWalksCollapsedFoldersTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try ScanScratch.init(io, alloc, "deeplist");
+    defer s.deinit();
+    try s.file("a.txt", "");
+    try s.file("sub/deep/c.zig", "");
+    try s.file(".hidden/x.txt", "");
+
+    var d = try zoe.tree.deepList(alloc, io, s.path);
+    defer d.deinit();
+
+    // Directories are listed as well as walked -- a `/` search can land
+    // on a folder -- and dotfiles are skipped, since the tree would never
+    // show a row for one.
+    try testz.expectEqual(d.paths.items.len, 4);
+    try testz.expectEqualStr(d.paths.items[0], "a.txt");
+    try testz.expectEqualStr(d.paths.items[1], "sub");
+    try testz.expectEqualStr(d.paths.items[2], "sub/deep");
+    try testz.expectEqualStr(d.paths.items[3], "sub/deep/c.zig");
+
+    // A query is matched against the name, not the path.
+    try testz.expectEqualStr(d.nameAt(3), "c.zig");
+    try testz.expectEqualStr(d.nameAt(0), "a.txt");
+    try testz.expectFalse(d.truncated);
+}
+
 // ─── Display cells: tabs, spaces and column slicing ────────────────────
 
 /// `display.appendCols` into a fresh list, so a test reads as one
