@@ -564,7 +564,7 @@ append-only):
 | Status | `success`, `message`, `message_error`, `diag_error`, `diag_warning`, `diag_info`, `diag_hint` |
 | Search | `match`, `match_bg`, `match_current_bg` |
 | Files | `file`, `dir`, `symlink`, `exec`, `special`, `hidden`, `hidden_dir`, `marked` |
-| Chrome | `sidebar_bg`, `status_bg`, `status_fg`, `mode`, `tab_bar_bg`, `tab_bg`, `shell_bg`, `whitespace`, `title_bg`, `title_fg`, `title_inactive_bg`, `title_inactive_fg`, `list_cursor_bg`, `list_cursor_inactive_bg`, `list_cursor_fg`, `list_cursor_inactive_fg`, `keybar_bg`, `keybar_key`, `keybar_label_bg`, `keybar_label`, `suggestion`, `divider`, `pane_divider` |
+| Chrome | `sidebar_bg`, `status_bg`, `status_fg`, `mode`, `tab_bar_bg`, `tab_bg`, `shell_bg`, `whitespace`, `title_bg`, `title_fg`, `title_inactive_bg`, `title_inactive_fg`, `list_cursor_bg`, `list_cursor_inactive_bg`, `list_cursor_fg`, `list_cursor_inactive_fg`, `keybar_bg`, `keybar_key`, `keybar_label_bg`, `keybar_label`, `suggestion`, `divider`, `pane_divider`, `drop_target` |
 | Popups and dialogs | `popup_bg`, `popup_fg`, `popup_code_bg`, `popup_rule`, `popup_border`, `popup_selected_bg`, `popup_label`, `popup_kind`, `popup_detail`, `finder_header_bg`, `finder_header_fg`, `finder_selected_bg`, `finder_selected_fg`, `dialog_bg`, `dialog_fg`, `dialog_title_bg`, `dialog_title_fg`, `danger_bg`, `input_bg`, `button_bg`, `button_focus_bg` |
 | Documents | `heading1`–`heading6`, `strong`, `emphasis`, `strike`, `code`, `code_bg`, `code_block`, `code_block_bg`, `quote`, `list_marker`, `rule` |
 | Tables | `table_header`, `table_header_bg`, `table_alt_row_bg`, `outline_marker` |
@@ -1149,6 +1149,39 @@ reports `UnknownRect`. All three are batchable. There is no read-back
 message, and no ownership check — a rect is layer-scoped passive
 presentation data, the same treatment tables get.
 
+#### 6.10.1 Drop target
+
+| Method | Kind | Params | Result |
+|---|---|---|---|
+| `set_drop_target` | notification | `layer?`, `mode`, `row?`, `col?`, `rows?` = 1, `cols?` = 1 | — |
+
+Highlights where a drag in progress would drop if released over `layer`.
+The host never sees the drag: the client tracks the button and pointer,
+decides the target and sends it, typically on each pointer move. Each
+layer has at most one drop target. `mode` is one of:
+
+- `"layer"` — the layer's whole visible area.
+- `"cells"` — `rows` × `cols` content cells from (`row`, `col`).
+- `"insert"` — an insertion marker: a narrow bar on the left edge of
+  content column `col`, `rows` rows tall from `row`. `col` MAY be one past
+  the last column. This is the slot between two tabs on a tab strip.
+- `"none"` — clears the layer's drop target.
+
+Coordinates are content cells, translated by `scroll_offset` like every
+other cell-addressed component (they are screen cells on a `client`
+scroll-mode layer, whose offset is virtual). `"layer"` and `"cells"` are
+washed in the theme role `drop_target` at the host's configured opacity
+(glyphwire-host: `host.conf.lua`'s `drop_target_opacity`, default 0.25).
+`"insert"` is drawn in `drop_target` at full opacity. Either way it sits
+over everything the layer paints, rects included, and fades with the
+layer's `opacity`.
+
+A `cells` or `insert` target without `row` or `col`, or an unknown `mode`,
+reports `InvalidDropTarget`; an unresolvable `layer` reports
+`UnknownLayer`. Re-sending the target already shown is a no-op, so a
+client need not deduplicate pointer moves. Batchable. A client SHOULD
+send `"none"` when the drag ends or leaves the layer.
+
 ### 6.11 Outlines
 
 | Method | Kind | Params | Result |
@@ -1672,6 +1705,7 @@ client **SHOULD** ignore a name it does not recognise.
 | sort `direction` | `none`, `ascending`, `descending` |
 | `move_content` `direction` | `up`, `down` |
 | `find_metadata` `direction` | `next`, `prev` |
+| `set_drop_target` `mode` | `none`, `layer`, `cells`, `insert` |
 | cell `wide` | `lead`, `spacer`, absent |
 
 ## 9. A minimal client

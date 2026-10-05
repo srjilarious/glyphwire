@@ -2331,6 +2331,11 @@ pub const Layer = struct {
     /// the cell grid at all), so there's no "which one wins" question to
     /// answer.
     rects: std.AutoHashMap(RectHandle, Rect),
+    /// Where a drag in progress would drop if released over this layer
+    /// (`set_drop_target`), or null for none -- the default, and what a
+    /// client sets again when the pointer leaves or the button comes up.
+    /// One per layer: a drop lands in one place.
+    drop_target: ?DropTarget = null,
     /// Nine-patch panels drawn on this layer (`create_nine_patch`), keyed
     /// by handle -- a component of the layer like `rects`, with the same
     /// shared-counter handles (`Context.next_nine_patch_handle`). No
@@ -5389,6 +5394,29 @@ pub const RectUpdate = struct {
     color: ?Color = null,
     line_width: ?u32 = null,
     filled: ?bool = null,
+};
+
+// ─── Drop target ────────────────────────────────────────────────────────
+//
+// The highlight a drag-and-drop shows over where it would land: a whole
+// pane, a block of cells in it, or the slot between two tabs. The host
+// never sees the drag itself -- a client tracks the button and pointer,
+// works out the target and says so with `set_drop_target` -- so this is
+// presentation only, like `Rect`. What it adds over a client drawing its
+// own rect is consistency: every program's drop target is the theme's
+// `drop_target` colour at `host.conf.lua`'s `drop_target_opacity`, in
+// cell coordinates with no pixel arithmetic on the client's side.
+
+pub const DropTarget = union(enum) {
+    /// The layer's whole visible area: "drop here" with no finer place.
+    layer,
+    /// `rows` x `cols` content cells from `(row, col)`.
+    cells: struct { row: usize, col: usize, rows: usize, cols: usize },
+    /// An insertion marker: a bar a couple of pixels wide on the left
+    /// edge of content column `col`, spanning `rows` rows from `row`.
+    /// Where a tab dropped on a tab strip would go. `col` may be one past
+    /// the last column for "at the end".
+    insert: struct { row: usize, col: usize, rows: usize },
 };
 
 // ─── Nine-patch ─────────────────────────────────────────────────────────
@@ -8565,6 +8593,17 @@ pub const Context = struct {
     pub fn destroyRect(self: *Context, layer_handle: ?LayerHandle, handle: RectHandle) !void {
         const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
         _ = layer.rects.fetchRemove(handle) orelse return RectError.UnknownRect;
+        layer.touchRender();
+    }
+
+    /// `set_drop_target`: replaces the layer's drop-target highlight, or
+    /// clears it with null. Setting what is already there leaves the
+    /// layer's render cache alone, since a drag sends this on every
+    /// pointer move and most of those don't change the target.
+    pub fn setDropTarget(self: *Context, layer_handle: ?LayerHandle, target: ?DropTarget) !void {
+        const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
+        if (std.meta.eql(layer.drop_target, target)) return;
+        layer.drop_target = target;
         layer.touchRender();
     }
 

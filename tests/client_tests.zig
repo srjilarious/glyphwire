@@ -654,6 +654,43 @@ pub fn clientCreateUpdateDestroyRectRoundTripTest(io: std.Io, alloc: std.mem.All
     try testz.expectEqual(cursor.col, 2);
 }
 
+/// `Client.setDropTarget`'s wire form -- null fields and all -- parses on
+/// the server for every shape, and null clears it.
+pub fn clientSetDropTargetRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    try client.setDropTarget(null, .{ .insert = .{ .row = 0, .col = 7, .rows = 1 } });
+    // A request after it: the notification has been applied by the time
+    // its answer comes back.
+    _ = try client.getCursor();
+    try testz.expectEqual(ctx.root.drop_target.?.insert.col, 7);
+
+    try client.setDropTarget(null, .{ .cells = .{ .row = 1, .col = 2, .rows = 3, .cols = 4 } });
+    _ = try client.getCursor();
+    try testz.expectEqual(ctx.root.drop_target.?.cells.cols, 4);
+
+    try client.setDropTarget(null, .layer);
+    _ = try client.getCursor();
+    try testz.expectTrue(ctx.root.drop_target.? == .layer);
+
+    try client.setDropTarget(null, null);
+    _ = try client.getCursor();
+    try testz.expectTrue(ctx.root.drop_target == null);
+}
+
 /// A request-form `Client.Batch` (it used a request adder) sends one
 /// frame, reads one response, and hands back each sub-request's result
 /// keyed by the slot it returned at add time.

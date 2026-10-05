@@ -39,6 +39,9 @@ pub const DispatchError = error{
     /// `set_property "resize_edge"` with an `edge` other than `"top"` /
     /// `"none"`.
     InvalidResizeEdge,
+    /// `set_drop_target`'s `mode` wasn't `"none"` / `"layer"` / `"cells"`
+    /// / `"insert"`, or a `cells` / `insert` target left out `row` / `col`.
+    InvalidDropTarget,
     /// `write_text` carried both `text` and `spans`, or neither.
     InvalidSpans,
     NotARequest,
@@ -1001,6 +1004,19 @@ const DestroyRectParams = struct {
     rect: core.RectHandle,
 };
 
+/// `set_drop_target`: `mode` picks the shape (see `core.DropTarget`), and
+/// the cell fields it needs come alongside. `rows` / `cols` absent (or
+/// null) mean one, so a single-row strip or a one-cell target needn't
+/// spell them.
+const SetDropTargetParams = struct {
+    layer: ?core.LayerHandle = null,
+    mode: []const u8,
+    row: ?usize = null,
+    col: ?usize = null,
+    rows: ?usize = null,
+    cols: ?usize = null,
+};
+
 // ─── Nine-patch ──────────────────────────────────────────────────────────
 //
 // See core.zig's Nine-patch section. Same create/update/destroy shape as
@@ -1869,6 +1885,7 @@ pub const Dispatcher = struct {
         .{ "create_rect", catResultId(handleCreateRect) },
         .{ "update_rect", catVoid(handleUpdateRect) },
         .{ "destroy_rect", catVoid(handleDestroyRect) },
+        .{ "set_drop_target", catVoid(handleSetDropTarget) },
         .{ "create_nine_patch", catResultId(handleCreateNinePatch) },
         .{ "update_nine_patch", catVoid(handleUpdateNinePatch) },
         .{ "destroy_nine_patch", catVoid(handleDestroyNinePatch) },
@@ -3957,6 +3974,34 @@ pub const Dispatcher = struct {
         self.ctx.destroyRect(self.surfaceOr(p.layer), p.rect) catch |err| switch (err) {
             error.UnknownLayer => return DispatchError.UnknownLayer,
             error.UnknownRect => return DispatchError.UnknownRect,
+        };
+    }
+
+    /// `set_drop_target`: shows, moves or (`mode: "none"`) clears the
+    /// layer's drop-target highlight. See `core.DropTarget`.
+    fn handleSetDropTarget(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(SetDropTargetParams, alloc, params_value);
+        defer parsed.deinit();
+        const p = parsed.value;
+        const Mode = enum { none, layer, cells, insert };
+        const mode = std.meta.stringToEnum(Mode, p.mode) orelse return DispatchError.InvalidDropTarget;
+        const target: ?core.DropTarget = switch (mode) {
+            .none => null,
+            .layer => .layer,
+            .cells => .{ .cells = .{
+                .row = p.row orelse return DispatchError.InvalidDropTarget,
+                .col = p.col orelse return DispatchError.InvalidDropTarget,
+                .rows = p.rows orelse 1,
+                .cols = p.cols orelse 1,
+            } },
+            .insert => .{ .insert = .{
+                .row = p.row orelse return DispatchError.InvalidDropTarget,
+                .col = p.col orelse return DispatchError.InvalidDropTarget,
+                .rows = p.rows orelse 1,
+            } },
+        };
+        self.ctx.setDropTarget(self.surfaceOr(p.layer), target) catch |err| switch (err) {
+            error.UnknownLayer => return DispatchError.UnknownLayer,
         };
     }
 

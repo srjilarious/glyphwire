@@ -2775,6 +2775,64 @@ pub fn setCaretShapeSetsAndClearsTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqual(ctx.caret_shape, null);
 }
 
+/// `set_drop_target`'s three shapes land on the layer, `"none"` clears
+/// it, a cell shape missing its `row` / `col` or an unknown `mode` is
+/// refused and leaves what was there, and repeating the target already
+/// shown doesn't invalidate the layer's render cache.
+pub fn setDropTargetSetsMovesAndClearsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    try testz.expectTrue(ctx.root.drop_target == null);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_drop_target","params":{"mode":"layer"}}
+    );
+    try testz.expectTrue(ctx.root.drop_target.? == .layer);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_drop_target","params":{"mode":"cells","row":2,"col":3,"rows":4,"cols":5}}
+    );
+    const c = ctx.root.drop_target.?.cells;
+    try testz.expectEqual(c.row, 2);
+    try testz.expectEqual(c.col, 3);
+    try testz.expectEqual(c.rows, 4);
+    try testz.expectEqual(c.cols, 5);
+
+    // `rows` left out (or null, as `Client.setDropTarget` sends it) is one.
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_drop_target","params":{"mode":"insert","row":0,"col":12,"rows":null}}
+    );
+    const ins = ctx.root.drop_target.?.insert;
+    try testz.expectEqual(ins.col, 12);
+    try testz.expectEqual(ins.rows, 1);
+
+    // The same target again: nothing for the renderer to rebuild.
+    const gen = ctx.root.renderGeneration();
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_drop_target","params":{"mode":"insert","row":0,"col":12}}
+    );
+    try testz.expectEqual(ctx.root.renderGeneration(), gen);
+
+    const bad_mode = try roundTripThroughWire(alloc,
+        \\{"jsonrpc":"2.0","method":"set_drop_target","params":{"mode":"sideways"}}
+    );
+    defer alloc.free(bad_mode);
+    if (d.handle(alloc, bad_mode)) |_| return error.ExpectedFailure else |_| {}
+    const no_col = try roundTripThroughWire(alloc,
+        \\{"jsonrpc":"2.0","method":"set_drop_target","params":{"mode":"cells","row":1}}
+    );
+    defer alloc.free(no_col);
+    if (d.handle(alloc, no_col)) |_| return error.ExpectedFailure else |_| {}
+    try testz.expectEqual(ctx.root.drop_target.?.insert.col, 12);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_drop_target","params":{"mode":"none"}}
+    );
+    try testz.expectTrue(ctx.root.drop_target == null);
+}
+
 pub fn setKeyRepeatSetsAndClearsOverrideTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);

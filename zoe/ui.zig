@@ -427,6 +427,24 @@ pub const Target = union(enum) {
     workspace,
 };
 
+/// A drop-target highlight and the layer it is on.
+const DropShown = struct {
+    layer: glyphwire.LayerHandle,
+    target: glyphwire.DropTarget,
+};
+
+/// What a `.zoe-workspace` on the command line adds beyond its folders.
+/// All borrowed for the length of `Ui.init`.
+pub const WorkspaceStart = struct {
+    /// The workspace file, absolute: where a bare `:wssave` writes.
+    file: ?[]const u8 = null,
+    /// The theme to start in, by name, over `zoe.conf.lua`'s and the
+    /// window's. One that doesn't resolve is reported and ignored.
+    theme: ?[]const u8 = null,
+    /// The editor groups and tabs to bring back.
+    editors: ?*const zoe_workspace.EditorNode = null,
+};
+
 /// Which way a Ctrl+direction chord moves the focus.
 pub const Direction = groups.Direction;
 
@@ -796,6 +814,11 @@ pub const Ui = struct {
         start: glyphwire.CellPos,
         moved: bool = false,
     } = null,
+    /// The drop-target highlight a tab drag is showing (`set_drop_target`):
+    /// the slot between two tabs on a strip, or a whole pane. Kept so a
+    /// pointer move that stays on the same target sends nothing, and so
+    /// the layer showing it can be cleared when the target moves off it.
+    drop_shown: ?DropShown = null,
 
     /// The Ctrl+P file finder popup. Its layers float *outside* the split
     /// tree -- placed over the buffer pane by `render`, hidden the rest of
@@ -972,6 +995,14 @@ pub const Ui = struct {
     /// whatever `:theme` switched to (see the colour note at the top of
     /// this file).
     th: themes.Stored,
+    /// Whether `th` is this context's own theme (`zoe.conf.lua`'s, a
+    /// workspace's, or `:theme <name>`) rather than the window's it
+    /// follows. Only an own theme is written by `:wssave`: one that
+    /// follows the window should go on following it when reopened.
+    theme_own: bool,
+    /// The `.zoe-workspace` this session was opened from or last saved
+    /// to, absolute and owned: where a bare `:wssave` writes.
+    ws_file: ?[]u8 = null,
 
     /// tree-sitter syntax highlighting: the config, the grammar registry
     /// every buffer's highlighter resolves through, and the search path
@@ -1022,6 +1053,7 @@ pub const Ui = struct {
         /// The sidebar's folders, at least one: just the cwd, or a
         /// workspace's list. Copied.
         folders: []const Tree.RootSpec,
+        start: WorkspaceStart,
         environ: *const std.process.Environ.Map,
     ) !*Ui {
         const self = try alloc.create(Ui);
@@ -1031,7 +1063,11 @@ pub const Ui = struct {
         // below. Owned here until `loadConfig` hands it to `self`.
         var cfg_owned: ?langconf.Config = langconf.load(alloc, io, environ);
         errdefer if (cfg_owned) |*c| c.deinit();
-        const own_theme = cfg_owned.?.ownTheme();
+        // A workspace's theme wins over `zoe.conf.lua`'s; one that doesn't
+        // resolve falls back to the usual choice, and says so once the
+        // first buffer exists to carry the message.
+        const ws_theme: ?themes.Theme = if (start.theme) |name| cfg_owned.?.findTheme(name) else null;
+        const own_theme = ws_theme orelse cfg_owned.?.ownTheme();
 
         var keymaps = try actions.Keymaps.initDefaults(alloc);
         errdefer keymaps.deinit(alloc);
@@ -1183,10 +1219,12 @@ pub const Ui = struct {
             .environ = environ,
             .prof = .init(io, environ.get("ZOE_PROFILE")),
             .th = th,
+            .theme_own = own_theme != null,
         };
         errdefer self.tree.deinit();
         errdefer self.layout.deinit();
         try self.group_list.append(alloc, first_group);
+        if (start.file) |f| self.ws_file = try alloc.dupe(u8, f);
 
         // Best-effort: highlighting off is a valid state, never a reason
         // to fail bringing the editor up. Done before the first buffer,
@@ -1242,6 +1280,16 @@ pub const Ui = struct {
             glyphwire.SplitChildInput.layerFixed(status_layer, 1),
         });
         try client.setRootSplit(root_split);
+
+        // A saved workspace's groups and tabs, once the first group is on
+        // screen to grow them from. Best-effort: a layout that can't be
+        // rebuilt still leaves a working editor over the right folders.
+        if (start.editors) |e| self.restoreEditors(e) catch |err| {
+            self.buf.ed.setStatus("E: couldn't restore the workspace's editors ({t})", .{err});
+        };
+        if (start.theme != null and ws_theme == null) {
+            self.buf.ed.setStatus("E185: Cannot find color scheme '{s}' (workspace theme ignored)", .{start.theme.?});
+        }
 
         // The `layout` broadcast goes to *other* connections, and the
         // listener is one -- but reading the bounds back directly avoids
@@ -1663,6 +1711,7 @@ pub const Ui = struct {
         if (self.find) |*f| f.deinit(self.alloc);
         if (self.tree_edit) |*te| te.deinit(self.alloc);
         if (self.prev_cwd) |p| self.alloc.free(p);
+        if (self.ws_file) |p| self.alloc.free(p);
 
         // Every open buffer's text and parse tree, not just the visible
         // one -- that is the bargain multiple buffers made.
@@ -1724,9 +1773,13 @@ pub const Ui = struct {
 
     /// The host split child a layout node stands for.
     fn layoutChild(self: *const Ui, node: *const groups.Node) glyphwire.SplitChildInput {
+        return self.layoutChildWeighted(node, 1);
+    }
+
+    fn layoutChildWeighted(self: *const Ui, node: *const groups.Node, weight: f32) glyphwire.SplitChildInput {
         return switch (node.kind) {
-            .group => |id| glyphwire.SplitChildInput.splitWeighted(self.groupById(id).col_split, 1),
-            .split => |s| glyphwire.SplitChildInput.splitWeighted(s.handle, 1),
+            .group => |id| glyphwire.SplitChildInput.splitWeighted(self.groupById(id).col_split, weight),
+            .split => |s| glyphwire.SplitChildInput.splitWeighted(s.handle, weight),
         };
     }
 
@@ -1809,6 +1862,29 @@ pub const Ui = struct {
         }
         errdefer if (fresh) |f| f.deinit(self.alloc);
 
+        const g = try self.insertGroup(from, orientation, side);
+        // Should filling it fail, the group must not stay on screen with
+        // no tab: every other path assumes a group has one.
+        errdefer if (g.buffers.items.len == 0) {
+            if (self.layout.remove(g.id)) |removed| self.dropGroup(g, removed) catch {};
+        };
+
+        if (fresh) |f| {
+            try g.buffers.append(self.alloc, f);
+            fresh = null;
+        } else if (moved) |m| {
+            try self.moveSlot(m, g, null);
+        }
+        self.focusGroup(g);
+        // Every group's pane just changed size; the `layout` that follows
+        // repaints them, but the new one has never drawn at all.
+        for (self.group_list.items) |each| each.markRedraw();
+    }
+
+    /// A new, empty group split off `from` on `side`, in the layout and on
+    /// screen. Its buffer list is empty: the caller gives it a tab before
+    /// anything draws, or takes it back out.
+    fn insertGroup(self: *Ui, from: *Group, orientation: groups.Orientation, side: groups.Side) !*Group {
         const size = try self.client.getSize();
         const g = try makeGroup(self.alloc, self.client, self.next_group_id, size);
         self.next_group_id += 1;
@@ -1821,24 +1897,10 @@ pub const Ui = struct {
 
         const handle = try self.client.createSplit(orientation.axis(), true);
         const node = try self.layout.splitSide(from.id, g.id, orientation, handle, side);
-        // Should filling it fail, the group must not stay on screen with
-        // no tab: every other path assumes a group has one.
-        errdefer if (g.buffers.items.len == 0) {
-            if (self.layout.remove(g.id)) |removed| self.dropGroup(g, removed) catch {};
-        };
+        errdefer if (self.layout.remove(g.id)) |removed| self.dropGroup(g, removed) catch {};
         try self.sendSplit(node);
         try self.sendListHolding(node);
-
-        if (fresh) |f| {
-            try g.buffers.append(self.alloc, f);
-            fresh = null;
-        } else if (moved) |m| {
-            try self.moveSlot(m, g, null);
-        }
-        self.focusGroup(g);
-        // Every group's pane just changed size; the `layout` that follows
-        // repaints them, but the new one has never drawn at all.
-        for (self.group_list.items) |each| each.markRedraw();
+        return g;
     }
 
     /// Moves `slot` from whichever group holds it into `to`'s tabs at
@@ -2010,6 +2072,10 @@ pub const Ui = struct {
         self.client.destroySplit(g.col_split) catch {};
         self.client.destroyLayer(g.tabs_layer) catch {};
         self.client.destroyLayer(g.buffer_layer) catch {};
+        // Its highlight went with the layer it was on.
+        if (self.drop_shown) |d| {
+            if (d.layer == g.tabs_layer or d.layer == g.buffer_layer) self.drop_shown = null;
+        }
         if (self.tab_tip_group == g) {
             self.tab_tip_group = null;
             self.tab_tip_index = null;
@@ -3486,6 +3552,7 @@ pub const Ui = struct {
         // Released.
         if (self.tab_drag) |td| {
             self.tab_drag = null;
+            self.showDropTarget(null);
             if (td.moved) try self.dropTab(td.slot, ev.cell);
             return;
         }
@@ -3510,14 +3577,17 @@ pub const Ui = struct {
             // Closed from the keyboard with the button still down.
             if (self.findSlot(td.slot) == null) {
                 self.tab_drag = null;
+                self.showDropTarget(null);
                 return;
             }
             if (!td.moved and (ev.cell.row != td.start.row or ev.cell.col != td.start.col)) {
                 td.moved = true;
-                // The only sign a drag is on: there is no ghost tab.
+                // There is no ghost tab; the status line and the drop
+                // target are what show a drag is on.
                 self.buf.ed.setStatus("Moving tab \"{s}\" -- release over a tab strip or editor pane", .{tabs.labelFor(td.slot.ed.path)});
                 self.status_dirty = true;
             }
+            if (td.moved) self.showDropTarget(self.tabDropTarget(ev.cell));
             return;
         }
         if (self.drag) |*d| {
@@ -3571,6 +3641,44 @@ pub const Ui = struct {
         } else if (to != self.grp) {
             try self.moveTab(slot, to, null);
         }
+    }
+
+    /// What a dragged tab released over `cell` would do, as the highlight
+    /// that shows it -- the same cases `dropTab` acts on. On a strip, a
+    /// bar at the gap the tab would land in (`tabs.dropIndex`), in screen
+    /// columns since the strip is client-scrolled; on another group's
+    /// pane, the whole pane. Null where the drop does nothing.
+    fn tabDropTarget(self: *const Ui, cell: glyphwire.CellPos) ?DropShown {
+        const to = self.groupAt(cell) orelse return null;
+        const strip = to.tabs_bounds;
+        const on_strip = cell.row >= strip.row and cell.row < strip.row + strip.rows and
+            cell.col >= strip.col and cell.col < strip.col + strip.cols;
+        if (on_strip) {
+            const spans = to.tab_spans.items;
+            const index = tabs.dropIndex(spans, cell.col - strip.col + to.tab_scroll);
+            // The left edge of the tab it would go in front of, or the
+            // right edge of the last one for the end.
+            const at: usize = if (index < spans.len)
+                spans[index].start
+            else if (spans.len > 0)
+                spans[spans.len - 1].end
+            else
+                0;
+            return .{ .layer = to.tabs_layer, .target = .{ .insert = .{ .row = 0, .col = at -| to.tab_scroll, .rows = strip.rows } } };
+        }
+        if (to != self.grp) return .{ .layer = to.buffer_layer, .target = .layer };
+        return null;
+    }
+
+    /// Moves the drop-target highlight to `want`, clearing it off the
+    /// layer it was on if that changed. Silent when nothing did.
+    fn showDropTarget(self: *Ui, want: ?DropShown) void {
+        if (std.meta.eql(self.drop_shown, want)) return;
+        if (self.drop_shown) |old| {
+            if (want == null or want.?.layer != old.layer) self.client.setDropTarget(old.layer, null) catch {};
+        }
+        if (want) |w| self.client.setDropTarget(w.layer, w.target) catch {};
+        self.drop_shown = want;
     }
 
     /// The offset of the last character in the `[start, end)` span of the
@@ -4054,6 +4162,16 @@ pub const Ui = struct {
             .chdir => |target| self.changeDir(target),
             .add_folder => |target| try self.addFolder(self.expandArg(target, &home_buf)),
             .remove_folder => |target| try self.removeFolder(self.expandArg(target, &home_buf)),
+            .ws_save => |target| self.workspaceSave(self.expandArg(target, &home_buf)),
+            .ws_open => |o| {
+                const path = self.expandArg(o.path, &home_buf) orelse {
+                    self.buf.ed.setStatus("E471: Argument required", .{});
+                    self.status_dirty = true;
+                    return;
+                };
+                if (!o.force and self.refuseQuitForDirtyBuffer()) return;
+                try self.workspaceOpen(path);
+            },
             .pwd => {
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
                 const n = std.process.currentPath(self.io, &buf) catch {
@@ -4243,6 +4361,357 @@ pub const Ui = struct {
         if (self.lsp_pool) |*pool| pool.removeFolder(path);
         try self.treeChanged();
         self.buf.ed.setStatus("removed folder {s}", .{path});
+    }
+
+    // ── Workspace files ─────────────────────────────────────────────────
+    //
+    // `:wssave` writes the session to a `.zoe-workspace` (zoe/workspace.zig):
+    // the sidebar's folders, the editor groups with their tabs, which group
+    // has the keyboard, and the theme when it is this editor's own.
+    // `:wsopen` and `zoe x.zoe-workspace` bring one back.
+
+    /// `:wssave [file]`: the named file, or the one this session was
+    /// opened from or last saved to. A name with no workspace extension
+    /// gets `.zoe-workspace`.
+    fn workspaceSave(self: *Ui, target: ?[]const u8) void {
+        self.status_dirty = true;
+        const path = target orelse self.ws_file orelse {
+            self.buf.ed.setStatus("E32: No workspace file name (:wssave <file>)", .{});
+            return;
+        };
+        var arena_state = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena_state.deinit();
+        const snap = self.workspaceSnapshot(arena_state.allocator()) catch |err| {
+            self.buf.ed.setStatus("E: can't save the workspace ({t})", .{err});
+            return;
+        };
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_n = std.process.currentPath(self.io, &cwd_buf) catch {
+            self.buf.ed.setStatus("E: cannot read working directory", .{});
+            return;
+        };
+        const abs = zoe_workspace.save(self.alloc, self.io, cwd_buf[0..cwd_n], path, snap) catch |err| {
+            switch (err) {
+                error.VscodeWorkspace => self.buf.ed.setStatus("E: zoe doesn't write .code-workspace files; save to a .zoe-workspace", .{}),
+                else => self.buf.ed.setStatus("E212: Can't write workspace {s} ({t})", .{ path, err }),
+            }
+            return;
+        };
+        // `path` may be the old `ws_file`; it isn't read past `save`.
+        if (self.ws_file) |old| self.alloc.free(old);
+        self.ws_file = abs;
+        self.buf.ed.setStatus("workspace saved: {s}", .{abs});
+    }
+
+    /// What `:wssave` writes, borrowing from the tree, the slots and `th`
+    /// -- valid until any of them changes. `arena` holds the rest.
+    fn workspaceSnapshot(self: *Ui, arena: std.mem.Allocator) !zoe_workspace.Snapshot {
+        const folders = try arena.alloc(zoe_workspace.FolderSpec, self.tree.roots.items.len);
+        for (self.tree.roots.items, folders) |r, *f| f.* = .{ .path = r.path, .name = r.name };
+        return .{
+            .folders = folders,
+            .theme = if (self.theme_own) self.th.name() else null,
+            .editors = try self.snapshotNode(arena, self.layout.root),
+        };
+    }
+
+    fn snapshotNode(self: *Ui, arena: std.mem.Allocator, node: *const groups.Node) !*const zoe_workspace.EditorNode {
+        const out = try arena.create(zoe_workspace.EditorNode);
+        switch (node.kind) {
+            .split => |s| {
+                // The proportions the user dragged the band to, read back
+                // off the panes' bounds: zoe never sees the weights.
+                const a = self.nodeRect(s.first);
+                const b = self.nodeRect(s.second);
+                const ea: usize, const eb: usize = switch (s.orientation) {
+                    .vertical => .{ a.cols, b.cols },
+                    .horizontal => .{ a.rows, b.rows },
+                };
+                const ratio: f32 = if (ea + eb == 0) 0.5 else @as(f32, @floatFromInt(ea)) / @as(f32, @floatFromInt(ea + eb));
+                out.* = .{ .split = .{
+                    .orientation = switch (s.orientation) {
+                        .vertical => .vertical,
+                        .horizontal => .horizontal,
+                    },
+                    .ratio = ratio,
+                    .first = try self.snapshotNode(arena, s.first),
+                    .second = try self.snapshotNode(arena, s.second),
+                } };
+            },
+            .group => |id| {
+                const g = self.groupById(id);
+                var files: std.ArrayList([]const u8) = .empty;
+                var active: usize = 0;
+                for (g.buffers.items, 0..) |slot, i| {
+                    // A scratch buffer has no file to come back from.
+                    const abs = self.slotAbs(slot) orelse continue;
+                    if (i == g.active) active = files.items.len;
+                    try files.append(arena, abs);
+                }
+                out.* = .{ .group = .{ .files = files.items, .active = active, .focused = g == self.grp } };
+            },
+        }
+        return out;
+    }
+
+    /// The cells a layout node covers: its group's, or the union of every
+    /// group under a split.
+    fn nodeRect(self: *const Ui, node: *const groups.Node) groups.Rect {
+        switch (node.kind) {
+            .group => |id| return self.groupById(id).rect(),
+            .split => |s| {
+                const a = self.nodeRect(s.first);
+                const b = self.nodeRect(s.second);
+                const row = @min(a.row, b.row);
+                const col = @min(a.col, b.col);
+                return .{
+                    .row = row,
+                    .col = col,
+                    .rows = @max(a.row + a.rows, b.row + b.rows) - row,
+                    .cols = @max(a.col + a.cols, b.col + b.cols) - col,
+                };
+            },
+        }
+    }
+
+    /// `:wsopen <file>`: the workspace's folders replace the sidebar's,
+    /// every tab closes and its editor groups come back in their place,
+    /// and its theme (or, when it names none, zoe's usual choice) applies.
+    /// The caller has already refused it over a modified buffer.
+    fn workspaceOpen(self: *Ui, path: []const u8) !void {
+        self.status_dirty = true;
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_n = std.process.currentPath(self.io, &cwd_buf) catch {
+            self.buf.ed.setStatus("E: cannot read working directory", .{});
+            return;
+        };
+        const cwd = cwd_buf[0..cwd_n];
+        var ws = zoe_workspace.load(self.alloc, self.io, cwd, path) catch |err| {
+            self.buf.ed.setStatus("E: can't read workspace {s} ({t})", .{ path, err });
+            return;
+        };
+        defer ws.deinit();
+        // From here on only `abs` names the file: `path` may borrow the
+        // `:` line of an editor `resetEditors` is about to free.
+        const abs = try std.fs.path.resolve(self.alloc, &.{ cwd, path });
+        errdefer self.alloc.free(abs);
+
+        try self.replaceFolders(ws.folders.items);
+        // The first folder becomes the cwd, as it does on the command line.
+        std.process.setCurrentPath(self.io, ws.folders.items[0].path) catch {};
+        try self.resetEditors();
+        var restore_err: ?anyerror = null;
+        if (ws.editors) |e| self.restoreEditors(e.root) catch |err| {
+            restore_err = err;
+        };
+        const theme_found = self.applyWorkspaceTheme(ws.theme);
+
+        if (!theme_found) {
+            self.buf.ed.setStatus("E185: Cannot find color scheme '{s}' (workspace theme ignored)", .{ws.theme.?});
+        } else if (restore_err) |err| {
+            self.buf.ed.setStatus("E: couldn't restore the workspace's editors ({t})", .{err});
+        } else {
+            self.buf.ed.setStatus("workspace: {s}", .{abs});
+        }
+
+        // Only zoe's own format is somewhere a bare `:wssave` may write.
+        if (self.ws_file) |old| self.alloc.free(old);
+        self.ws_file = null;
+        if (zoe_workspace.formatOf(abs) == .zoe) self.ws_file = abs else self.alloc.free(abs);
+    }
+
+    /// Re-roots the sidebar on `folders`, telling the language servers
+    /// which folders came and went.
+    fn replaceFolders(self: *Ui, folders: []const zoe_workspace.Folder) !void {
+        const specs = try self.alloc.alloc(Tree.RootSpec, folders.len);
+        defer self.alloc.free(specs);
+        for (folders, specs) |f, *s| s.* = .{ .path = f.path, .name = f.name };
+        const fresh = try Tree.initRoots(self.alloc, self.io, specs, self.tree.visible);
+
+        // Row indices are about to mean nothing.
+        self.cancelFind();
+        self.cancelTreeEdit();
+        if (self.lsp_pool) |*pool| {
+            // New folders first, so a server never sees an empty workspace.
+            for (folders) |f| {
+                if (self.tree.rootIndex(f.path) == null) pool.addFolder(f.path, f.name) catch {};
+            }
+            for (self.tree.roots.items) |r| {
+                const kept = for (folders) |f| {
+                    if (std.mem.eql(u8, f.path, r.path)) break true;
+                } else false;
+                if (!kept) pool.removeFolder(r.path);
+            }
+        }
+        self.tree.deinit();
+        self.tree = fresh;
+        self.tree_scroll = .{};
+        self.tree_scroll_pending = null;
+        self.client.setLayerScrollOffset(self.tree_layer, 0, 0) catch {};
+        try self.treeChanged();
+    }
+
+    /// Closes every tab and every group but one, leaving the single group
+    /// with one scratch buffer that a fresh zoe starts with. Modified
+    /// buffers are thrown away: callers check first.
+    fn resetEditors(self: *Ui) !void {
+        self.tab_drag = null;
+        self.showDropTarget(null);
+        self.drag = null;
+        _ = self.closeHover();
+        self.closeCompletion();
+        self.dismissTabTip();
+        self.tab_tip_group = null;
+        self.tab_tip_index = null;
+        while (self.group_list.items.len > 1) {
+            const g = self.group_list.items[self.group_list.items.len - 1];
+            const removed = self.layout.remove(g.id) orelse break;
+            // While `g` still has its tabs: `focusGroup` repaints it.
+            if (g == self.grp) self.focusGroup(self.groupById(removed.focus));
+            self.releaseSlots(g);
+            try self.dropGroup(g, removed);
+        }
+        const g = self.grp;
+        const fresh = try self.newSlot(null);
+        self.releaseSlots(g);
+        g.buffers.append(self.alloc, fresh) catch |err| {
+            fresh.deinit(self.alloc);
+            return err;
+        };
+        g.active = 0;
+        g.tab_scroll = 0;
+        self.buf = fresh;
+        g.markRedraw();
+    }
+
+    /// Closes and frees every buffer in `g`, leaving its list empty.
+    fn releaseSlots(self: *Ui, g: *Group) void {
+        for (g.buffers.items) |slot| {
+            self.lspDidClose(slot);
+            slot.deinit(self.alloc);
+        }
+        g.buffers.clearRetainingCapacity();
+    }
+
+    /// Rebuilds a saved `editors` tree from the single group zoe has at
+    /// startup (or after `resetEditors`): each split grows a group off the
+    /// one before it, each group opens its files, and the saved group gets
+    /// the keyboard. The split proportions go on last, because building
+    /// the tree re-sends lists at even weights as it goes.
+    fn restoreEditors(self: *Ui, root: *const zoe_workspace.EditorNode) !void {
+        std.debug.assert(self.group_list.items.len == 1);
+        var focus: ?*Group = null;
+        try self.restoreNode(root, self.grp, &focus);
+        try self.applyRatios(self.layout.root, root);
+        if (focus) |g| self.focusGroup(g);
+        for (self.group_list.items) |each| each.markRedraw();
+    }
+
+    fn restoreNode(self: *Ui, node: *const zoe_workspace.EditorNode, g: *Group, focus: *?*Group) !void {
+        switch (node.*) {
+            .split => |s| {
+                // `g` keeps the first half, as `:vsplit` / `:split` leave
+                // it, so the layout grows the same shape the file has.
+                const g2 = try self.insertGroup(g, switch (s.orientation) {
+                    .vertical => .vertical,
+                    .horizontal => .horizontal,
+                }, .after);
+                const scratch = try self.newSlot(null);
+                g2.buffers.append(self.alloc, scratch) catch |err| {
+                    scratch.deinit(self.alloc);
+                    return err;
+                };
+                try self.restoreNode(s.first, g, focus);
+                try self.restoreNode(s.second, g2, focus);
+            },
+            .group => |spec| {
+                if (spec.focused) focus.* = g;
+                try self.fillGroup(g, spec);
+            },
+        }
+    }
+
+    /// Opens a saved group's files as `g`'s tabs. A file gone since the
+    /// save is skipped rather than coming back as an empty `[New]` buffer,
+    /// and so is one already open in another group (a file is only ever
+    /// open in one). The untouched scratch buffer `g` started with makes
+    /// way once anything real opens.
+    fn fillGroup(self: *Ui, g: *Group, spec: zoe_workspace.EditorGroup) !void {
+        const scratch: ?*Slot = if (g.buffers.items.len == 1 and isPristineScratch(g.buffers.items[0])) g.buffers.items[0] else null;
+        var shown: ?*Slot = null;
+        for (spec.files, 0..) |path, i| {
+            _ = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch continue;
+            if (self.findPath(path) != null) continue;
+            const slot = self.newSlot(path) catch |err| switch (err) {
+                error.NotTextFile => continue,
+                else => return err,
+            };
+            g.buffers.append(self.alloc, slot) catch |err| {
+                slot.deinit(self.alloc);
+                return err;
+            };
+            if (i == spec.active) shown = slot;
+        }
+        if (scratch) |s| {
+            if (g.buffers.items.len > 1) {
+                _ = g.buffers.orderedRemove(0);
+                s.deinit(self.alloc);
+            }
+        }
+        g.active = 0;
+        for (g.buffers.items, 0..) |s, i| {
+            if (s == shown) g.active = i;
+        }
+        if (g == self.grp) self.buf = g.slot();
+        g.markRedraw();
+    }
+
+    fn isPristineScratch(slot: *const Slot) bool {
+        return slot.ed.path == null and !slot.ed.buf.dirty and slot.ed.buf.len() == 0;
+    }
+
+    /// Sends each saved split's proportions to the host split that
+    /// stands for it. `node` and `spec` have the same shape, since
+    /// `restoreNode` built one from the other.
+    fn applyRatios(self: *Ui, node: *const groups.Node, spec: *const zoe_workspace.EditorNode) !void {
+        const s = switch (node.kind) {
+            .split => |s| s,
+            .group => return,
+        };
+        const ss = switch (spec.*) {
+            .split => |x| x,
+            .group => return,
+        };
+        try self.client.setSplitChildren(s.handle, &.{
+            self.layoutChildWeighted(s.first, ss.ratio),
+            self.layoutChildWeighted(s.second, 1 - ss.ratio),
+        });
+        try self.applyRatios(s.first, ss.first);
+        try self.applyRatios(s.second, ss.second);
+    }
+
+    /// A workspace's theme by name, or -- when it names none -- the choice
+    /// zoe makes at startup: `zoe.conf.lua`'s own theme, else the window's.
+    /// False when `name` doesn't resolve, in which case the usual choice
+    /// applies instead.
+    fn applyWorkspaceTheme(self: *Ui, name: ?[]const u8) bool {
+        var found = true;
+        const want: ?themes.Theme = blk: {
+            if (name) |n| {
+                const t = if (self.hl_config) |*cfg| cfg.findTheme(n) else themes.resolve(n, &.{});
+                if (t) |theme| break :blk theme;
+                found = false;
+            }
+            break :blk if (self.hl_config) |*cfg| cfg.ownTheme() else null;
+        };
+        if (want) |t| {
+            self.applyTheme(t) catch return found;
+            self.theme_own = true;
+        } else {
+            self.followWindowTheme() catch return found;
+            self.theme_own = false;
+        }
+        return found;
     }
 
     /// After the listing changed shape under code that isn't a plain
@@ -5500,6 +5969,7 @@ pub const Ui = struct {
             self.buf.ed.setStatus("E: theme switch failed ({t})", .{err});
             return;
         };
+        self.theme_own = !std.mem.eql(u8, name, "window");
         self.buf.ed.setStatus("theme: {s}", .{self.th.name()});
     }
 

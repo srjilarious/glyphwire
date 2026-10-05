@@ -184,6 +184,7 @@ pub const RectHandle = core.RectHandle;
 pub const RectError = core.RectError;
 pub const Rect = core.Rect;
 pub const RectUpdate = core.RectUpdate;
+pub const DropTarget = core.DropTarget;
 pub const Shadow = core.Shadow;
 pub const ResizeEdge = core.ResizeEdge;
 pub const NinePatchHandle = core.NinePatchHandle;

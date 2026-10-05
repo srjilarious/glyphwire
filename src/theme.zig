@@ -279,6 +279,11 @@ pub const Role = enum(u8) {
     /// cursor is a saturated fill that only this reads well on.
     list_cursor_fg,
     list_cursor_inactive_fg,
+    /// The highlight over where a drag would drop (`set_drop_target`):
+    /// a pane or cell block washed with it at `host.conf.lua`'s
+    /// `drop_target_opacity`, and a tab-slot insertion bar drawn in it
+    /// solid. Opaque, like every role; the host supplies the wash.
+    drop_target,
 };
 
 pub const role_count = std.enums.values(Role).len;
@@ -742,6 +747,9 @@ pub fn derive(p: Palette, dark: bool) Theme {
     set(&t, .accent, R.n(.blue));
     set(&t, .link, R.n(.blue));
     set(&t, .selection_bg, R.h(p.selection));
+    // The accent: a drop target is the one thing on screen asking for
+    // attention, and a translucent wash of it reads on any background.
+    set(&t, .drop_target, R.r(.accent));
     set(&t, .cursor_bg, R.h(p.cursor));
     set(&t, .cursor_fg, R.r(.bg));
 

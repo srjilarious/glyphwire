@@ -5306,7 +5306,7 @@ pub fn workspaceParseResolvesFoldersAgainstTheFileTest(_: std.Io, alloc: std.mem
         \\  "settings": { "editor.tabSize": 2 },
         \\}
     ;
-    var ws = try workspace.parse(alloc, src, "/home/me/proj");
+    var ws = try workspace.parse(alloc, src, "/home/me/proj", .vscode);
     defer ws.deinit();
     // The remote `uri` folder is skipped and `./` is a duplicate of `.`.
     try testz.expectEqual(ws.folders.items.len, 2);
@@ -5317,7 +5317,7 @@ pub fn workspaceParseResolvesFoldersAgainstTheFileTest(_: std.Io, alloc: std.mem
 }
 
 pub fn workspaceWithNoFoldersIsAnErrorTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    if (workspace.parse(alloc, "{\"settings\": {}}", "/x")) |ws| {
+    if (workspace.parse(alloc, "{\"settings\": {}}", "/x", .vscode)) |ws| {
         var w = ws;
         w.deinit();
         return error.TestUnexpectedResult;
@@ -5331,7 +5331,134 @@ pub fn workspaceFromDirsCollapsesDuplicatesTest(_: std.Io, alloc: std.mem.Alloca
     try testz.expectEqualStr(ws.folders.items[0].path, "/w/a");
     try testz.expectEqualStr(ws.folders.items[1].path, "/w/b");
     try testz.expectTrue(workspace.isWorkspacePath("x/proj.code-workspace"));
+    try testz.expectTrue(workspace.isWorkspacePath("x/proj.zoe-workspace"));
     try testz.expectFalse(workspace.isWorkspacePath("proj.code"));
+    try testz.expectTrue(workspace.formatOf("a.zoe-workspace") == .zoe);
+    try testz.expectTrue(workspace.formatOf("a.code-workspace") == .vscode);
+}
+
+pub fn workspaceZoeFormatReadsThemeAndEditorsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\{
+        \\  "version": 1,
+        \\  "folders": [ { "path": "." }, { "path": "../lib", "name": "Library" } ],
+        \\  "theme": "tokyonight",
+        \\  "editors": {
+        \\    "split": "vertical", "ratio": 0.25,
+        \\    "first": { "files": ["src/a.zig"], "active": 0 },
+        \\    "second": {
+        \\      "split": "horizontal",
+        \\      "first": { "files": ["b.zig", "/etc/c.conf"], "active": 1, "focused": true },
+        \\      "second": { "files": [] },
+        \\    },
+        \\  },
+        \\}
+    ;
+    var ws = try workspace.parse(alloc, src, "/home/me/proj", .zoe);
+    defer ws.deinit();
+    try testz.expectEqual(ws.folders.items.len, 2);
+    try testz.expectEqualStr(ws.theme.?, "tokyonight");
+
+    const root = ws.editors.?.root.split;
+    try testz.expectTrue(root.orientation == .vertical);
+    try testz.expectTrue(@abs(root.ratio - 0.25) < 0.001);
+    try testz.expectEqualStr(root.first.group.files[0], "/home/me/proj/src/a.zig");
+    const right = root.second.split;
+    try testz.expectTrue(right.orientation == .horizontal);
+    // An omitted ratio is an even split.
+    try testz.expectTrue(@abs(right.ratio - 0.5) < 0.001);
+    const top = right.first.group;
+    try testz.expectEqual(top.files.len, 2);
+    try testz.expectEqualStr(top.files[1], "/etc/c.conf");
+    try testz.expectEqual(top.active, 1);
+    try testz.expectTrue(top.focused);
+    try testz.expectEqual(right.second.group.files.len, 0);
+    try testz.expectFalse(right.second.group.focused);
+}
+
+pub fn workspaceVscodeFormatIgnoresZoeKeysTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\{ "folders": [ { "path": "." } ], "theme": "x", "editors": { "files": ["a"] } }
+    ;
+    var ws = try workspace.parse(alloc, src, "/p", .vscode);
+    defer ws.deinit();
+    try testz.expectTrue(ws.theme == null);
+    try testz.expectTrue(ws.editors == null);
+}
+
+pub fn workspaceZoeFormatRefusesANewerVersionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    if (workspace.parse(alloc, "{\"version\": 2, \"folders\": [{\"path\": \".\"}]}", "/x", .zoe)) |ws| {
+        var w = ws;
+        w.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| try testz.expectTrue(err == error.UnsupportedVersion);
+}
+
+pub fn workspaceZoeFormatRejectsAMalformedSplitTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src =
+        \\{ "folders": [ { "path": "." } ], "editors": { "split": "diagonal", "first": {}, "second": {} } }
+    ;
+    if (workspace.parse(alloc, src, "/x", .zoe)) |ws| {
+        var w = ws;
+        w.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| try testz.expectTrue(err == error.BadEditors);
+}
+
+pub fn workspaceSerializeRoundTripsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const left: workspace.EditorNode = .{ .group = .{ .files = &.{"/home/me/proj/src/a.zig"}, .active = 0 } };
+    const right: workspace.EditorNode = .{ .group = .{
+        .files = &.{ "/home/me/lib/b.zig", "/usr/share/x.txt" },
+        .active = 1,
+        .focused = true,
+    } };
+    const root: workspace.EditorNode = .{ .split = .{ .orientation = .horizontal, .ratio = 0.6, .first = &left, .second = &right } };
+    const text = try workspace.serialize(alloc, "/home/me/proj", .{
+        .folders = &.{
+            .{ .path = "/home/me/proj", .name = "proj" },
+            .{ .path = "/home/me/lib", .name = "Library" },
+            .{ .path = "/opt/far/away", .name = "away" },
+        },
+        .theme = "gruvbox",
+        .editors = &root,
+    });
+    defer alloc.free(text);
+
+    // The project folder is ".", a sibling is "../x", anything further is
+    // absolute; a default name isn't written.
+    try testz.expectTrue(std.mem.indexOf(u8, text, "\"path\": \".\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, text, "\"path\": \"../lib\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, text, "\"path\": \"/opt/far/away\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, text, "\"name\": \"proj\"") == null);
+    try testz.expectTrue(std.mem.indexOf(u8, text, "\"/usr/share/x.txt\"") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, text, "\"src/a.zig\"") != null);
+    // Only the focused group says so.
+    try testz.expectEqual(std.mem.count(u8, text, "\"focused\""), 1);
+    try testz.expectTrue(text[text.len - 1] == '\n');
+
+    var ws = try workspace.parse(alloc, text, "/home/me/proj", .zoe);
+    defer ws.deinit();
+    try testz.expectEqual(ws.folders.items.len, 3);
+    try testz.expectEqualStr(ws.folders.items[1].name, "Library");
+    try testz.expectEqualStr(ws.folders.items[2].path, "/opt/far/away");
+    try testz.expectEqualStr(ws.theme.?, "gruvbox");
+    const s = ws.editors.?.root.split;
+    try testz.expectTrue(s.orientation == .horizontal);
+    try testz.expectTrue(@abs(s.ratio - 0.6) < 0.001);
+    try testz.expectEqualStr(s.first.group.files[0], "/home/me/proj/src/a.zig");
+    try testz.expectEqualStr(s.second.group.files[0], "/home/me/lib/b.zig");
+    try testz.expectEqual(s.second.group.active, 1);
+    try testz.expectTrue(s.second.group.focused);
+}
+
+pub fn workspaceSerializeLeavesOutAFollowedThemeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const text = try workspace.serialize(alloc, "/p", .{ .folders = &.{.{ .path = "/p", .name = "p" }} });
+    defer alloc.free(text);
+    try testz.expectTrue(std.mem.indexOf(u8, text, "theme") == null);
+    try testz.expectTrue(std.mem.indexOf(u8, text, "editors") == null);
+    var ws = try workspace.parse(alloc, text, "/p", .zoe);
+    defer ws.deinit();
+    try testz.expectTrue(ws.theme == null);
 }
 
 /// Two scratch folders, `one` holding `src/a.zig` and `two` holding

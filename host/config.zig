@@ -262,7 +262,20 @@ pub const HostConfig = struct {
     /// preset, with any `pane_divider_chars` glyphs laid over it. Glyph
     /// strings are `arena`-owned when set from `host.conf.lua`.
     pane_divider: dividers.Style = dividers.default_style,
+    /// `drop_target_opacity`: how strongly a `set_drop_target` washes a
+    /// pane or cell block in the theme's `drop_target` colour, already
+    /// clamped to `[drop_target_opacity_min, 1]`.
+    drop_target_opacity: f32 = drop_target_opacity_default,
 };
+
+pub const drop_target_opacity_default: f32 = 0.25;
+/// Below this a wash stops reading as a highlight at all.
+pub const drop_target_opacity_min: f32 = 0.05;
+
+/// `drop_target_opacity` clamped to `[drop_target_opacity_min, 1]`.
+pub fn clampDropTargetOpacity(v: f32) f32 {
+    return std.math.clamp(v, drop_target_opacity_min, 1.0);
+}
 
 /// Maps `config.cursor_shape`'s string to a `CursorShape`, or null for an
 /// unrecognized value (the caller warns and keeps the default).

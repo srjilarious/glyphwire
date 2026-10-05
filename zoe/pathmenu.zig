@@ -45,6 +45,9 @@ const path_commands = [_]struct { name: []const u8, dirs_only: bool }{
     .{ .name = "chdir", .dirs_only = true },
     .{ .name = "addfolder", .dirs_only = true },
     .{ .name = "rmfolder", .dirs_only = true },
+    .{ .name = "wssave", .dirs_only = false },
+    .{ .name = "wsopen", .dirs_only = false },
+    .{ .name = "wsopen!", .dirs_only = false },
 };
 
 /// Where the path being completed sits on the `:` line.
