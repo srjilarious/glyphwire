@@ -860,13 +860,18 @@ A toggle that changes the outline's height **reflows the layer**: rows at
 and above the outline shift up by the difference, the topmost passing
 into scrollback, and rows below it do not move.
 
-A toggle that leaves the outline's top row off screen then **scrolls the
+A toggle that leaves the **toggled node** off screen then **scrolls the
 layer's view** back to it, and **MUST** report that move as a `scroll`
 notification (section 7) so subscribers stay in step. This moves
-`view_scroll` — the display-only scrollback offset — not the content. It
-is ensure-visible: the nearest offset that puts the top row in the
-window, so a toggle needing no scroll does not move the view. A layer
-with no scrollback has nothing to move and is left alone. Rows pushed past
+`view_scroll` — the display-only scrollback offset — not the content.
+
+The target is that node together with its currently-visible descendants,
+so expanding reveals the whole block it just opened; when the block is
+taller than the window its own row takes the top. It is ensure-visible:
+the nearest offset that fits the block, so a toggle needing no scroll
+does not move the view. `outline_set_all_collapsed` has no one node to
+point at and anchors on the outline's top row instead. A layer with no
+scrollback has nothing to move and is left alone. Rows pushed past
 `scrollback_rows` are evicted and a later collapse cannot recover them; a
 collapse with less than the needed history takes the shortfall off the
 bottom instead. On the alternate screen, which has no scrollback, the
