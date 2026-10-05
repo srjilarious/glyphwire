@@ -20,6 +20,11 @@ pub const LayerTarget = struct {
     row: usize,
     col: usize,
     is_root: bool,
+    /// The layer's own handle, or null for the root layer -- exactly what
+    /// `Server.reportLayerScroll` and the `scroll` notification's `layer`
+    /// field want, so a caller that has to move this layer's view doesn't
+    /// have to re-walk `layer_order` looking for it.
+    handle: ?glyphwire.LayerHandle,
 };
 
 /// Top-most visible `create_layer` layer whose bounds contain the pixel,
@@ -52,8 +57,9 @@ pub fn layerUnder(ctx: *glyphwire.Context, px: f32, py: f32) ?LayerTarget {
             .row = layer.scroll_off.row + vrow,
             .col = layer.scroll_off.col + vcol,
             .is_root = false,
+            .handle = ctx.layer_order.items[i],
         };
     }
     const cell = geometry.cellFromPixel(px, py);
-    return .{ .layer = &ctx.root, .row = cell.row, .col = cell.col, .is_root = true };
+    return .{ .layer = &ctx.root, .row = cell.row, .col = cell.col, .is_root = true, .handle = null };
 }

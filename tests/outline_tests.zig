@@ -505,3 +505,157 @@ pub fn outlineUnknownHandleAndBadNodeAreReportedTest(io: std.Io, alloc: std.mem.
     try testz.expectEqualStr("UnknownOutline", entries[0].code);
     try testz.expectEqualStr("OutlineNodeOutOfRange", entries[1].code);
 }
+
+// ─── Following the outline's top ───────────────────────────────────────
+//
+// Expanding pushes the rows above the split up into scrollback, so a node
+// opened near the top of a tall outline can shove the header you just
+// clicked off the window. `desiredViewScroll` is what pulls the view back
+// to it; the caller applies it (see its doc comment for why it is
+// computed rather than applied here).
+
+/// A file node with `hits` hits under it, each carrying `ctx` context
+/// lines -- enough rows to actually overflow a short window.
+fn tallNodes(alloc: std.mem.Allocator, hits: usize, ctx_lines: usize) ![]glyphwire.OutlineNode {
+    var list: std.ArrayList(glyphwire.OutlineNode) = .empty;
+    try list.append(alloc, try node(alloc, 0, "file.zig", true, false));
+    for (0..hits) |_| {
+        try list.append(alloc, try node(alloc, 1, "hit", true, true));
+        for (0..ctx_lines) |_| try list.append(alloc, try node(alloc, 2, "ctx", false, false));
+    }
+    return list.toOwnedSlice(alloc);
+}
+
+pub fn outlineDesiredViewScrollIsNullWhileTheTopIsVisibleTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 12, 40);
+    defer ctx.deinit();
+
+    // Anchored five rows down, so growing by two still leaves the top row
+    // inside the window -- a toggle that needs no scrolling must not jolt
+    // the view.
+    const h = try ctx.createOutline(null, 5, 0, 40, try style(alloc, null));
+    const outline = ctx.root.outlines.getPtr(h).?;
+    outline.setNodes(try grepNodes(alloc, true));
+    try outline.render(&ctx.root, &ctx);
+    try testz.expectEqual(outline.top_live, 5);
+
+    try outline.setNodeCollapsed(&ctx.root, &ctx, 1, false);
+    try testz.expectEqual(outline.top_live, 3);
+    try testz.expectTrue(outline.desiredViewScroll(&ctx.root) == null);
+}
+
+pub fn outlineDesiredViewScrollPullsTheTopBackOnScreenTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // An eight-row window and an outline that grows well past it.
+    var ctx = try glyphwire.Context.init(alloc, 40, 8, 60);
+    defer ctx.deinit();
+
+    const h = try ctx.createOutline(null, 0, 0, 40, try style(alloc, null));
+    const outline = ctx.root.outlines.getPtr(h).?;
+    outline.setNodes(try tallNodes(alloc, 4, 6));
+    try outline.render(&ctx.root, &ctx);
+    try testz.expectEqual(outline.visibleRows(), 5);
+    try testz.expectEqual(outline.top_live, 0);
+
+    // Open the first hit: six more rows. Growth goes upward, so the six
+    // rows come off the *top* -- the outline's bottom stays on row 4
+    // where it was, and its top is now six rows into scrollback. That is
+    // the whole complaint this addresses: the header you clicked leaves
+    // the window while the bottom of the screen sits unchanged.
+    try outline.setNodeCollapsed(&ctx.root, &ctx, 1, false);
+    try testz.expectEqual(outline.visibleRows(), 11);
+    try testz.expectEqual(outline.top_live, -6);
+
+    // Scrolling the view back by six puts the top row at screen row 0,
+    // which is what the caller applies.
+    const want = outline.desiredViewScroll(&ctx.root) orelse return testz.expectTrue(false);
+    try testz.expectEqual(want, 6);
+    _ = ctx.root.scrollView(want, null);
+    try testz.expectTrue(outline.desiredViewScroll(&ctx.root) == null);
+    // The top row is now genuinely on screen at offset 3.
+    const top = ctx.root.viewRow(ctx.root.view_scroll, 0);
+    try testz.expectEqualStr("\u{25BE}", top[0].grapheme());
+}
+
+pub fn outlineDesiredViewScrollComesBackOnCollapseTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 8, 60);
+    defer ctx.deinit();
+
+    const h = try ctx.createOutline(null, 0, 0, 40, try style(alloc, null));
+    const outline = ctx.root.outlines.getPtr(h).?;
+    outline.setNodes(try tallNodes(alloc, 4, 6));
+    try outline.render(&ctx.root, &ctx);
+
+    try outline.setNodeCollapsed(&ctx.root, &ctx, 1, false);
+    if (outline.desiredViewScroll(&ctx.root)) |off| _ = ctx.root.scrollView(off, null);
+    try testz.expectEqual(ctx.root.view_scroll, 6);
+
+    // Collapsing pulls those rows back out of history, and `unscrollOne`
+    // walks `view_scroll` down in step with them -- so the view returns
+    // to the live tail on its own and there is nothing left to correct.
+    try outline.setNodeCollapsed(&ctx.root, &ctx, 1, true);
+    try testz.expectEqual(outline.top_live, 0);
+    try testz.expectEqual(ctx.root.view_scroll, 0);
+    try testz.expectTrue(outline.desiredViewScroll(&ctx.root) == null);
+}
+
+pub fn outlineDesiredViewScrollIsNullWithoutScrollbackTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    // A TUI pane with no ring has no view to move -- the client owns its
+    // own scrolling there.
+    var ctx = try glyphwire.Context.init(alloc, 40, 8, 0);
+    defer ctx.deinit();
+
+    const h = try ctx.createOutline(null, 0, 0, 40, try style(alloc, null));
+    const outline = ctx.root.outlines.getPtr(h).?;
+    outline.setNodes(try tallNodes(alloc, 4, 6));
+    try outline.render(&ctx.root, &ctx);
+
+    try outline.setNodeCollapsed(&ctx.root, &ctx, 1, false);
+    try testz.expectTrue(outline.desiredViewScroll(&ctx.root) == null);
+}
+
+pub fn outlineSetCollapsedOverTheWireFollowsTheTopTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 8, 60);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-outline-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const outline = try client.createOutline(null, 0, 0, null, .{});
+    try client.outlineSetNodes(null, outline, &.{
+        .{ .depth = 0, .runs = &.{.{ .text = "file.zig" }}, .collapsible = true },
+        .{ .depth = 1, .runs = &.{.{ .text = "hit" }}, .collapsible = true, .collapsed = true },
+        .{ .depth = 2, .runs = &.{.{ .text = "c1" }} },
+        .{ .depth = 2, .runs = &.{.{ .text = "c2" }} },
+        .{ .depth = 2, .runs = &.{.{ .text = "c3" }} },
+        .{ .depth = 2, .runs = &.{.{ .text = "c4" }} },
+        .{ .depth = 2, .runs = &.{.{ .text = "c5" }} },
+        .{ .depth = 2, .runs = &.{.{ .text = "c6" }} },
+        .{ .depth = 1, .runs = &.{.{ .text = "hit2" }}, .collapsible = true, .collapsed = true },
+    });
+    try testz.expectEqual(ctx.root.view_scroll, 0);
+
+    // The handler itself moves the view, so a client that only sends the
+    // toggle still gets the top of its outline back. `outline_set_collapsed`
+    // is a notification, so follow it with a request to make sure the
+    // server has actually run it before reading the context back.
+    try client.outlineSetCollapsed(null, outline, 1, false);
+    var state = try client.outlineGetState(null, outline);
+    defer state.deinit(alloc);
+    try testz.expectEqual(state.visible_rows, 9);
+    try testz.expectTrue(ctx.root.view_scroll > 0);
+    const top = ctx.root.viewRow(ctx.root.view_scroll, 0);
+    try testz.expectEqualStr("\u{25BE}", top[0].grapheme());
+}

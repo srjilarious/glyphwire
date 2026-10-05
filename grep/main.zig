@@ -22,7 +22,9 @@ const nodes_mod = @import("nodes.zig");
 /// Because the process is gone by the time you expand anything, every
 /// hit's context has to be sent up front. ripgrep has no function-scoped
 /// context (only `-A`/`-B`/`-C`), so a window of lines is what a hit can
-/// show; `-B 3 -A 10` is the default.
+/// show; `-B 3 -A 10` is the default. The hit's own line sits among that
+/// window with its line number in the match colour, so the block reads as
+/// a contiguous piece of the file rather than one with a hole in it.
 ///
 /// Without a session it falls back to plain stdout, like `gw-ls` does.
 const usage =
@@ -35,8 +37,8 @@ const usage =
     \\  -w, --word             Match whole words only
     \\  -F, --fixed-strings    Treat the pattern as a literal, not a regex
     \\      --hidden           Search hidden files and directories
-    \\  -A, --after <n>        Context lines after a hit (default 10)
-    \\  -B, --before <n>       Context lines before a hit (default 3)
+    \\  -A, --after <n>        Context lines shown after a hit (default 10)
+    \\  -B, --before <n>       Context lines shown before a hit (default 3)
     \\  -C, --context <n>      Shorthand for the same value before and after
     \\      --expand           Start with every hit expanded
     \\      --collapse         Start with every file collapsed

@@ -6,11 +6,19 @@
 //! Three levels, which is what the flat-list-plus-depth model makes cheap:
 //!
 //! ```
-//! ▾ src/core.zig                    12        depth 0, the file
-//!   ▸ 890  pub fn init() !Layer {             depth 1, one hit
-//!       891     const self = ...             depth 2, its context
-//!       892     self.buf = ...
+//! ▾ src/core.zig                  (12)        depth 0, the file
+//!   ▾ 890  pub fn init() !Layer {             depth 1, one hit
+//!       888   }                              depth 2, its context
+//!       889
+//!       890   pub fn init() !Layer {         the hit itself, number lit
+//!       891       const self = ...
 //! ```
+//!
+//! The hit's own line is repeated **inside** its context block, with its
+//! line number in the match colour. Without it the block has a hole
+//! exactly where the interesting line should be, and the surrounding
+//! lines stop reading as a contiguous piece of the file; the lit number
+//! is what says which of them you searched for.
 //!
 //! Every node's content is built up front rather than filled in when it
 //! expands, because the whole point is that `gw-grep` exits and the
@@ -104,7 +112,7 @@ pub fn build(
 
             try nodes.append(alloc, .{
                 .depth = 1,
-                .runs = try hitRuns(alloc, line, num_width, opts.colors),
+                .runs = try lineRuns(alloc, line, num_width, opts.colors, opts.colors.line_number, opts.colors.text),
                 .metadata_id = id,
                 .collapsible = true,
                 .collapsed = opts.hits_collapsed,
@@ -112,15 +120,20 @@ pub fn build(
 
             const window = rg.windowFor(file, i, opts.ctx);
             for (window.start..window.end) |w| {
-                if (w == i) continue;
                 const cl = file.lines[w];
-                const runs = try alloc.alloc(RunInput, 2);
-                runs[0] = .{
-                    .text = try std.fmt.allocPrint(alloc, "{d: >[1]}  ", .{ cl.number, num_width }),
-                    .fg = opts.colors.line_number,
-                };
-                runs[1] = .{ .text = try alloc.dupe(u8, cl.text), .fg = opts.colors.context };
-                try nodes.append(alloc, .{ .depth = 2, .runs = runs, .metadata_id = id });
+                const is_hit = w == i;
+                try nodes.append(alloc, .{
+                    .depth = 2,
+                    .runs = try lineRuns(
+                        alloc,
+                        cl,
+                        num_width,
+                        opts.colors,
+                        if (is_hit) opts.colors.match else opts.colors.line_number,
+                        if (is_hit) opts.colors.text else opts.colors.context,
+                    ),
+                    .metadata_id = id,
+                });
             }
         }
     }
@@ -128,14 +141,32 @@ pub fn build(
     return .{ .nodes = try nodes.toOwnedSlice(alloc), .arena = arena };
 }
 
-/// A hit's row: right-aligned line number, then the line split so each
-/// matched range gets its own run. This is what `spans` on a node buys --
-/// the match stands out without the server knowing what a match is.
-fn hitRuns(alloc: std.mem.Allocator, line: rg.Line, num_width: usize, colors: Colors) ![]RunInput {
+/// One source line as a row: right-aligned line number in `number_fg`,
+/// then the text split so each matched range gets its own run in the
+/// match colour and everything between it stays `base_fg`. This is what
+/// `spans` on a node buys -- the match stands out without the server
+/// knowing what a match is.
+///
+/// The three callers differ only in those two colours:
+///
+/// - a hit's own label: plain number, `text` base
+/// - that hit repeated inside its body: **number in the match colour**,
+///   `text` base -- the "this is the one" marker
+/// - a context line: plain number, dimmer `context` base. It still
+///   splits on submatches, so a second hit that happens to fall inside
+///   this hit's window is visibly another hit rather than a plain line.
+fn lineRuns(
+    alloc: std.mem.Allocator,
+    line: rg.Line,
+    num_width: usize,
+    colors: Colors,
+    number_fg: glyphwire.Color,
+    base_fg: glyphwire.Color,
+) ![]RunInput {
     var runs: std.ArrayList(RunInput) = .empty;
     try runs.append(alloc, .{
         .text = try std.fmt.allocPrint(alloc, "{d: >[1]}  ", .{ line.number, num_width }),
-        .fg = colors.line_number,
+        .fg = number_fg,
     });
 
     var cursor: usize = 0;
@@ -143,7 +174,7 @@ fn hitRuns(alloc: std.mem.Allocator, line: rg.Line, num_width: usize, colors: Co
         if (m.start > cursor) {
             try runs.append(alloc, .{
                 .text = try alloc.dupe(u8, line.text[cursor..m.start]),
-                .fg = colors.text,
+                .fg = base_fg,
             });
         }
         try runs.append(alloc, .{
@@ -155,7 +186,7 @@ fn hitRuns(alloc: std.mem.Allocator, line: rg.Line, num_width: usize, colors: Co
     if (cursor < line.text.len) {
         try runs.append(alloc, .{
             .text = try alloc.dupe(u8, line.text[cursor..]),
-            .fg = colors.text,
+            .fg = base_fg,
         });
     }
     return runs.toOwnedSlice(alloc);

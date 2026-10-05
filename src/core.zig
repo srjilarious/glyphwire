@@ -5306,6 +5306,43 @@ pub const Outline = struct {
         layer.touchRender();
     }
 
+    /// The scrollback view offset that would bring the outline's **top
+    /// row** back on screen, or null when it is already visible (or the
+    /// layer has no scrollback to move).
+    ///
+    /// Expanding a node pushes the rows above the split up into
+    /// scrollback (see `Layer.reflowAt`), so a node opened near the top
+    /// of a tall outline can shove the outline's own header off the top
+    /// of the window -- you click a triangle and the thing you clicked
+    /// leaves. Scrolling the view back to it is the fix, and it is the
+    /// *view* that moves, not the content: `view_scroll` is display-only.
+    ///
+    /// Ensure-visible rather than scroll-to-top: it returns the nearest
+    /// offset that puts the top row somewhere in the window, so a toggle
+    /// that needed no scrolling does not jolt the view for nothing.
+    ///
+    /// Deliberately **computed, not applied**. Moving a layer's view is a
+    /// presentation decision belonging to whoever owns it, and both real
+    /// callers have to route the move through the path that also
+    /// broadcasts `scroll` to subscribers (`Server.reportScroll*`, or
+    /// `handleOutlineSetCollapsed`'s own broadcast) -- otherwise
+    /// glyphwire-shell's idea of the scroll position silently goes stale.
+    pub fn desiredViewScroll(self: *const Outline, layer: *const Layer) ?usize {
+        if (layer.history_len == 0) return null;
+
+        // `view_scroll` of V shows live row L at screen row L + V, so the
+        // top row is on screen for any V in [-top_live, height-1-top_live].
+        const height_i: i64 = @intCast(layer.height);
+        const hist: i64 = @intCast(layer.history_len);
+        const lo = std.math.clamp(-self.top_live, 0, hist);
+        const hi = std.math.clamp(height_i - 1 - self.top_live, 0, hist);
+        if (lo > hi) return null;
+
+        const cur: i64 = @intCast(layer.view_scroll);
+        if (cur >= lo and cur <= hi) return null;
+        return @intCast(if (cur < lo) lo else hi);
+    }
+
     /// The node whose marker covers **screen** cell `(screen_row,
     /// screen_col)` given the layer is scrolled back by `view_scroll`
     /// rows, or null when that cell isn't on a marker.
