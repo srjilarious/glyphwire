@@ -48,4 +48,17 @@
 --     -- scrolled with the mouse wheel over that pane, independent of
 --     -- every other pane's.
 --     scrollback_rows = 2000,
+--
+--     -- Rebinds the commands after the prefix, by name, over the
+--     -- defaults; `false` takes one away. A punctuation character or an
+--     -- uppercase letter is that character as your keyboard layout
+--     -- types it; a lowercase letter or digit is read off what you type
+--     -- too; anything else is a key chord ("left", "ctrl+x").
+--     --
+--     --   focusLeft left, focusRight right, focusUp up, focusDown down,
+--     --   splitBelow ", splitRight %, killPane x, zoom z,
+--     --   resizeLeft H, resizeRight L, resizeUp K, resizeDown J, quit q
+--     keys = {
+--         -- ["-"] = "splitBelow", ["|"] = "splitRight",
+--     },
 -- }

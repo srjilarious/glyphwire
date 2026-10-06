@@ -798,11 +798,12 @@ pub fn configReadsSettingsAndKeysTest(_: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectTrue(r.err == null);
     try testz.expectEqual(r.config.view, sala.pane.ViewMode.large);
     try testz.expectTrue(r.config.show_hidden);
-    try testz.expectEqual(r.config.keys.len, 3);
+    // The unknown action is dropped (with a warning) as the file is read.
+    try testz.expectEqual(r.config.keys.len, 2);
 
     var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(config.applyKeys(alloc, &km, r.config.keys), 1);
+    try km.apply(alloc, r.config.keys);
     try testz.expectEqual(km.lookup("up", .{ .ctrl = true }).?, actions.Action.upToParentDir);
     // The default Alt+Up binding is still there alongside it.
     try testz.expectEqual(km.lookup("up", .{ .alt = true }).?, actions.Action.upToParentDir);

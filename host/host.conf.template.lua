@@ -97,8 +97,10 @@
 --     -- focused pane is holding (the shell, zoe, salacommander, ...).
 --     -- Pick one with Up/Down + Enter or its number; Escape closes. It
 --     -- opens on the second row, so the chord then Enter flips between
---     -- the two most recent. Modifiers are ctrl/alt/shift/super, the key
---     -- is named as the host names keys ("f12", "grave_accent", "a").
+--     -- the two most recent. The chord syntax every program's `keys`
+--     -- uses: modifiers ctrl/alt/shift/super (meta means alt), the key
+--     -- named as the host names keys ("f12", "grave_accent", "a") or an
+--     -- alias ("esc", "1").
 --     -- false turns it off. Some desktops grab Super chords for
 --     -- themselves; pick another here if this one never arrives.
 --     context_switcher_key = "super+f12",

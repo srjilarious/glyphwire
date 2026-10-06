@@ -12,6 +12,7 @@ const zoom = @import("read_support").zoom;
 const cache = @import("read_support").cache;
 const state = @import("read_support").state;
 const rconfig = @import("read_support").config;
+const ractions = @import("read_support").actions;
 const mokuro = @import("read_support").mokuro;
 const place = @import("read_support").place;
 const archive = @import("read_support").archive;
@@ -3410,4 +3411,42 @@ pub fn configAnkiFieldsMapsAndSortsBySourceTest(_: std.Io, alloc: std.mem.Alloca
     try testz.expectEqualStr(c.anki_fields[0].field, "Word");
     try testz.expectEqualStr(c.anki_fields[1].field, "Gloss");
     try testz.expectEqualStr(c.anki_fields[2].field, "Picture");
+}
+
+// ─── Keys ────────────────────────────────────────────────────────────────
+
+/// The modes' precedence: the AI states fall through to the page, a card
+/// takes every key.
+pub fn readKeymapModesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try ractions.Keymaps.initDefaults(alloc, ractions.defaults);
+    defer km.deinit(alloc);
+    try testz.expectEqual(km.lookup(.page, "q", .{}).?, ractions.Action.quit);
+    try testz.expectEqual(km.lookup(.page, "g", .{ .shift = true }).?, ractions.Action.lastPage);
+    try testz.expectEqual(km.lookupText(.page, "?").?, ractions.Action.toggleHelp);
+    try testz.expectEqual(km.lookupText(.page, "+").?, ractions.Action.zoomIn);
+    // Confirm binds `a` and Escape itself, and passes `f` to the page.
+    try testz.expectEqual(km.lookup(.confirm, "a", .{}).?, ractions.Action.accept);
+    try testz.expectEqual(km.lookup(.confirm, "f", .{}).?, ractions.Action.fitScreen);
+    try testz.expectEqual(km.lookup(.busy, "escape", .{}).?, ractions.Action.cancel);
+    // A card in progress: no page turn gets through.
+    try testz.expectTrue(km.lookup(.card, "space", .{}) == null);
+    try testz.expectEqual(km.lookup(.card, "h", .{}).?, ractions.Action.nudgeLeft);
+}
+
+pub fn readConfigKeysOverDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc,
+        \\config = { keys = {
+        \\  page = { ["n"] = "nextPage", ["space"] = false, ["x"] = "noSuchAction" },
+        \\  card = { ["y"] = "accept" },
+        \\} }
+    );
+    defer result.deinit(alloc);
+    try testz.expectEqual(result.config.keys.len, 3);
+
+    var km = try ractions.Keymaps.initDefaults(alloc, ractions.defaults);
+    defer km.deinit(alloc);
+    try km.apply(alloc, result.config.keys);
+    try testz.expectEqual(km.lookup(.page, "n", .{}).?, ractions.Action.nextPage);
+    try testz.expectEqual(km.lookup(.page, "space", .{}).?, ractions.Action.none);
+    try testz.expectEqual(km.lookup(.card, "y", .{}).?, ractions.Action.accept);
 }

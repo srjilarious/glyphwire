@@ -20,6 +20,7 @@ const glyphwire = @import("glyphwire");
 const ai = @import("ai.zig");
 const anki = @import("anki.zig");
 const mokuro = @import("mokuro.zig");
+const actions = @import("actions.zig");
 
 pub const conf_name = "read.conf.lua";
 const conf: luaconf.Conf = .{ .prog = "gw-read", .name = conf_name };
@@ -220,6 +221,11 @@ pub const ReadConfig = struct {
     anki_image_max_height: usize = 800,
     anki_image_quality: usize = 85,
 
+    /// `keys`: per-mode tables of chord -> action name (see
+    /// `actions.zig`), validated, applied over the defaults by
+    /// `actions.Keymaps.apply`. Owned; freed by `deinit`.
+    keys: []actions.Override = &.{},
+
     /// `anki_fields` when it came from the Lua file; freed by `deinit`
     /// (the field names themselves are in `owned`).
     owned_fields: ?[]anki.FieldMap = null,
@@ -233,6 +239,7 @@ pub const ReadConfig = struct {
         for (self.owned.items) |s| alloc.free(s);
         self.owned.deinit(alloc);
         if (self.owned_fields) |f| alloc.free(f);
+        alloc.free(self.keys);
         self.* = .{};
     }
 
@@ -385,6 +392,7 @@ const Apply = struct {
         if (conf.uint(lua, usize, "anki_image_max_height", image_side)) |v| cfg.anki_image_max_height = v;
         if (conf.uint(lua, usize, "anki_image_quality", .{ .min = 1, .max = 100 })) |v| cfg.anki_image_quality = v;
         loadAnkiFields(self.alloc, lua, cfg);
+        cfg.keys = conf.scopedKeys(lua, self.alloc, actions.Scope, actions.Action);
 
         // A `cache_pages` smaller than what the prefetch wants resident means
         // every prefetched page evicts the one being read. Nudge rather than

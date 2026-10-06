@@ -57,6 +57,7 @@ const interrupt = @import("applib").interrupt;
 const cli = @import("applib").cli;
 const listcursor = @import("applib").listcursor;
 const ListCursor = listcursor.ListCursor;
+const keybind = @import("applib").keybind;
 const zjump = @import("applib").zjump;
 const homepath = @import("applib").homepath;
 
@@ -224,6 +225,39 @@ fn loadDirs(arena: std.mem.Allocator, io: std.Io, environ_map: *const std.proces
     return out.items;
 }
 
+/// Every named key gw-hist answers to. Typed text is the query, so only
+/// named keys and chords are bound; there's no config file to rebind
+/// them from yet.
+const Action = enum {
+    pick,
+    switchView,
+    quit,
+    deleteBack,
+    clearQuery,
+    up,
+    /// Wraps at the bottom, so repeated Ctrl+R cycles the matches the way
+    /// a shell's reverse search does.
+    down,
+    pageUp,
+    pageDown,
+};
+
+const Keymap = keybind.Keymap(Action);
+
+const key_defaults = [_]keybind.Default(Action){
+    .{ .chord = "enter", .action = .pick },
+    .{ .chord = "tab", .action = .switchView },
+    .{ .chord = "escape", .action = .quit },
+    .{ .chord = "ctrl+c", .action = .quit },
+    .{ .chord = "backspace", .action = .deleteBack },
+    .{ .chord = "ctrl+u", .action = .clearQuery },
+    .{ .chord = "up", .action = .up },
+    .{ .chord = "down", .action = .down },
+    .{ .chord = "ctrl+r", .action = .down },
+    .{ .chord = "page_up", .action = .pageUp },
+    .{ .chord = "page_down", .action = .pageDown },
+};
+
 const Ui = struct {
     alloc: std.mem.Allocator,
     client: *glyphwire.Client,
@@ -258,6 +292,8 @@ const Ui = struct {
     quit: bool = false,
     /// Set on Enter; `main` writes it out once `run` returns.
     picked: ?[]u8 = null,
+    /// Every named key, by action: `key_defaults`.
+    keymap: Keymap = .{},
 
     fn init(
         alloc: std.mem.Allocator,
@@ -300,7 +336,11 @@ const Ui = struct {
         try client.setLayerScrollMode(list_layer, .client);
         try client.setLayerScrollbars(list_layer, true, false);
 
+        var keymap = try Keymap.initDefaults(alloc, &key_defaults);
+        errdefer keymap.deinit(alloc);
+
         self.* = .{
+            .keymap = keymap,
             .alloc = alloc,
             .client = client,
             .listener = listener,
@@ -328,6 +368,7 @@ const Ui = struct {
     }
 
     fn deinit(self: *Ui) void {
+        self.keymap.deinit(self.alloc);
         self.query.deinit(self.alloc);
         self.filtered.deinit(self.alloc);
         self.scratch.deinit(self.alloc);
@@ -392,46 +433,41 @@ const Ui = struct {
     /// OS layout/IME and a search box has no reason to care which
     /// physical key produced what was typed.
     fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
-        // Read off the event, not the live down-set, so a fast Ctrl+C is
+        // Mods off the event, not the live down-set, so a fast Ctrl+C is
         // still Ctrl+C when this loop is behind.
-        const ctrl = k.ctrl();
-        const key = k.key;
-        const eq = std.mem.eql;
-
-        if (eq(u8, key, "enter")) {
-            if (self.filtered.items.len == 0) return;
-            const row = self.filtered.items[self.list.selected];
-            self.picked = switch (self.mode) {
-                .history => try self.alloc.dupe(u8, row),
-                .dirs => try zjump.cdLine(self.alloc, row),
-            };
-            self.quit = true;
-        } else if (eq(u8, key, "tab")) {
-            // The query carries over: `glyph` typed into the history
-            // view is just as likely to be the name of the directory.
-            self.mode = switch (self.mode) {
-                .history => .dirs,
-                .dirs => .history,
-            };
-            try self.onQueryChanged();
-        } else if (eq(u8, key, "escape") or (ctrl and eq(u8, key, "c"))) {
-            self.quit = true;
-        } else if (eq(u8, key, "backspace")) {
-            self.deleteBackward();
-            try self.onQueryChanged();
-        } else if (ctrl and eq(u8, key, "u")) {
-            self.query.clearRetainingCapacity();
-            try self.onQueryChanged();
-        } else if (eq(u8, key, "up")) {
-            self.moveSelection(-1, .clamp);
-        } else if (eq(u8, key, "down") or (ctrl and eq(u8, key, "r"))) {
-            // Down wraps so repeated Ctrl+R cycles the matches, the way
-            // a shell's reverse search does.
-            self.moveSelection(1, .wrap);
-        } else if (eq(u8, key, "page_up")) {
-            self.moveSelection(-@as(isize, @intCast(self.list_rows)), .clamp);
-        } else if (eq(u8, key, "page_down")) {
-            self.moveSelection(@intCast(self.list_rows), .clamp);
+        const action = self.keymap.lookup(k.key, k.mods) orelse return;
+        switch (action) {
+            .pick => {
+                if (self.filtered.items.len == 0) return;
+                const row = self.filtered.items[self.list.selected];
+                self.picked = switch (self.mode) {
+                    .history => try self.alloc.dupe(u8, row),
+                    .dirs => try zjump.cdLine(self.alloc, row),
+                };
+                self.quit = true;
+            },
+            .switchView => {
+                // The query carries over: `glyph` typed into the history
+                // view is just as likely to be the name of the directory.
+                self.mode = switch (self.mode) {
+                    .history => .dirs,
+                    .dirs => .history,
+                };
+                try self.onQueryChanged();
+            },
+            .quit => self.quit = true,
+            .deleteBack => {
+                self.deleteBackward();
+                try self.onQueryChanged();
+            },
+            .clearQuery => {
+                self.query.clearRetainingCapacity();
+                try self.onQueryChanged();
+            },
+            .up => self.moveSelection(-1, .clamp),
+            .down => self.moveSelection(1, .wrap),
+            .pageUp => self.moveSelection(-@as(isize, @intCast(self.list_rows)), .clamp),
+            .pageDown => self.moveSelection(@intCast(self.list_rows), .clamp),
         }
     }
 

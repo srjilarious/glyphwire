@@ -18,6 +18,7 @@ const luaconf = @import("luaconf");
 const Lua = luaconf.Lua;
 const pane_mod = @import("pane.zig");
 const actions = @import("actions.zig");
+const keybind = @import("applib").keybind;
 const openaction = @import("openaction.zig");
 const glyphwire = @import("glyphwire");
 const dividerconf = @import("dividerconf");
@@ -25,12 +26,9 @@ const dividerconf = @import("dividerconf");
 pub const conf_name = "salacommander.conf.lua";
 const conf: luaconf.Conf = .{ .prog = "salacommander", .name = conf_name };
 
-pub const KeyOverride = struct {
-    /// Owned.
-    chord: []u8,
-    /// An action name (owned), or null to unbind the chord.
-    action: ?[]u8,
-};
+/// One `keys` entry, validated: a chord and its action, or null to unbind
+/// the chord (`false`).
+pub const KeyOverride = keybind.Override(actions.Action);
 
 /// One `open_actions` entry, owned: the extension key (lowercased,
 /// no leading dot) and the command template, or null for the `false`
@@ -69,10 +67,6 @@ pub const Config = struct {
     divider_style: glyphwire.divider_style.Override = .{},
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
-        for (self.keys) |k| {
-            alloc.free(k.chord);
-            if (k.action) |a| alloc.free(a);
-        }
         alloc.free(self.keys);
         self.keys = &.{};
         for (self.open_actions) |o| {
@@ -137,7 +131,7 @@ const Apply = struct {
         // 0 is not "a screenful", it is nothing, so the floor is 1 -- the
         // rule zoe's `page_lines` follows too.
         if (conf.uint(lua, usize, "page_lines", .{ .min = 1 })) |v| cfg.page_lines = v;
-        cfg.keys = readKeys(self.alloc, lua) catch &.{};
+        cfg.keys = conf.keys(lua, self.alloc, actions.Action);
         cfg.open_actions = readOpenActions(self.alloc, lua) catch &.{};
         cfg.divider_style = dividerconf.read(lua, conf_name);
         if (conf.string(lua, "editor")) |v| {
@@ -165,84 +159,6 @@ pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, config_dir: []const u8)
     return result.config;
 }
 
-/// Applies `overrides` to `keymap` in order. A chord that doesn't parse or
-/// an action name that doesn't exist is logged and skipped; the rest still
-/// apply. Returns how many were skipped.
-pub fn applyKeys(alloc: std.mem.Allocator, keymap: *actions.Keymap, overrides: []const KeyOverride) usize {
-    var skipped: usize = 0;
-    for (overrides) |o| {
-        if (o.action) |name| {
-            keymap.bindNamed(alloc, o.chord, name) catch |err| {
-                conf.warn("keys[\"{s}\"] = \"{s}\": {t}; ignored", .{ o.chord, name, err });
-                skipped += 1;
-            };
-        } else {
-            keymap.unbindText(o.chord) catch |err| {
-                conf.warn("keys[\"{s}\"] = false: {t}; ignored", .{ o.chord, err });
-                skipped += 1;
-            };
-        }
-    }
-    return skipped;
-}
-
-/// Reads `config.keys`, a table of chord -> action name / false. Assumes
-/// the `config` table is on top of the stack.
-fn readKeys(alloc: std.mem.Allocator, lua: *Lua) ![]KeyOverride {
-    _ = lua.getField(-1, "keys");
-    defer lua.pop(1);
-    if (!lua.isTable(-1)) {
-        if (!lua.isNil(-1)) conf.warn("`keys` is not a table; ignored", .{});
-        return &.{};
-    }
-
-    var out: std.ArrayList(KeyOverride) = .empty;
-    errdefer {
-        for (out.items) |k| {
-            alloc.free(k.chord);
-            if (k.action) |a| alloc.free(a);
-        }
-        out.deinit(alloc);
-    }
-
-    lua.pushNil();
-    while (lua.next(-2)) {
-        // Key at -2, value at -1. Only read with `toString` on an actual
-        // string key: it would convert a number key in place and break
-        // `next`.
-        defer lua.pop(1);
-        if (lua.typeOf(-2) != .string) {
-            conf.warn("`keys` entry with a non-string key; ignored", .{});
-            continue;
-        }
-        const chord = lua.toString(-2) catch continue;
-        const action: ?[]const u8 = switch (lua.typeOf(-1)) {
-            .string => lua.toString(-1) catch continue,
-            .boolean => if (lua.toBoolean(-1)) {
-                conf.warn("keys[\"{s}\"] = true means nothing; use an action name or false", .{ chord });
-                continue;
-            } else null,
-            else => {
-                conf.warn("keys[\"{s}\"] must be an action name or false; ignored", .{ chord });
-                continue;
-            },
-        };
-        const chord_copy = try alloc.dupe(u8, chord);
-        errdefer alloc.free(chord_copy);
-        const action_copy: ?[]u8 = if (action) |a| try alloc.dupe(u8, a) else null;
-        try out.append(alloc, .{ .chord = chord_copy, .action = action_copy });
-    }
-    // Lua's table order is unspecified; sort so the same config always
-    // applies the same way (it only matters if two entries share a chord
-    // under different spellings).
-    std.mem.sort(KeyOverride, out.items, {}, struct {
-        fn lessThan(_: void, a: KeyOverride, b: KeyOverride) bool {
-            return std.mem.lessThan(u8, a.chord, b.chord);
-        }
-    }.lessThan);
-    return out.toOwnedSlice(alloc);
-}
-
 /// Reads `config.open_actions`, a table of extension -> command template
 /// / false. Assumes the `config` table is on top of the stack. Keys are
 /// normalized the way `openaction.extensionKey` normalizes a file's
@@ -266,8 +182,8 @@ fn readOpenActions(alloc: std.mem.Allocator, lua: *Lua) ![]OpenAction {
 
     lua.pushNil();
     while (lua.next(-2)) {
-        // Key at -2, value at -1; only `toString` an actual string key --
-        // see `readKeys` on why a number key would break `next`.
+        // Key at -2, value at -1; only `toString` an actual string key:
+        // it would convert a number key in place and break `next`.
         defer lua.pop(1);
         if (lua.typeOf(-2) != .string) {
             conf.warn("`open_actions` entry with a non-string key; ignored", .{});
@@ -294,7 +210,7 @@ fn readOpenActions(alloc: std.mem.Allocator, lua: *Lua) ![]OpenAction {
         try out.append(alloc, .{ .ext = ext, .command = command_copy });
     }
     // Lua's table order is unspecified and a later entry for the same
-    // extension wins, so sort for a stable outcome, as `readKeys` does.
+    // extension wins, so sort for a stable outcome, as `luaconf.keys` does.
     std.mem.sort(OpenAction, out.items, {}, struct {
         fn lessThan(_: void, a: OpenAction, b: OpenAction) bool {
             return std.mem.lessThan(u8, a.ext, b.ext);

@@ -17,9 +17,17 @@
 //! set is exactly the event's, so `F5` and `shift+F5` are different
 //! bindings.
 //!
+//! A binding can instead name a typed character: with no modifier, one
+//! punctuation character (`"?"`, `"%"`, `"]"`), one uppercase letter
+//! (`"H"`) or one non-ASCII character is that character as the keyboard
+//! layout produces it, matched against `text` events (`lookupText`)
+//! rather than key presses. That is what keeps `?` meaning "help" on a
+//! layout where it isn't Shift+slash. A lowercase letter or a digit alone
+//! is still a key (`"q"`, `"1"` = `one`).
+//!
 //! Nothing here knows about Lua or any one tool's config format: a tool
-//! reads its own `keys = { ["alt+up"] = "upToParentDir" }` table and
-//! hands each pair to `Keymap.bindNamed`.
+//! reads its own `keys = { ["alt+up"] = "upToParentDir" }` table
+//! (`luaconf.keys` / `luaconf.scopedKeys`) and applies it.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -41,18 +49,28 @@ pub const Chord = struct {
     key_buf: [max_key_len]u8 = undefined,
     key_len: u8 = 0,
     mods: Mods = .{},
+    /// A typed character rather than a key: `key()` is the character
+    /// itself, case and all, and `mods` is empty. See the module doc.
+    text: bool = false,
 
     /// The chord's key name, lower-cased and normalized (`"page_up"`,
-    /// `"f5"`).
+    /// `"f5"`), or for a `text` chord the character (`"?"`, `"H"`).
     pub fn key(self: *const Chord) []const u8 {
         return self.key_buf[0..self.key_len];
     }
 
     /// Parses chord text such as `"ctrl+shift+F5"`. The last `+`-separated
-    /// part is the key; every earlier part must be a modifier.
+    /// part is the key; every earlier part must be a modifier. A lone
+    /// typed-character spelling (`"?"`, `"H"`) is a `text` chord.
     pub fn parse(text: []const u8) ParseError!Chord {
         const trimmed = std.mem.trim(u8, text, " \t");
         if (trimmed.len == 0) return error.EmptyChord;
+        if (isTypedChar(trimmed)) {
+            var typed: Chord = .{ .text = true };
+            @memcpy(typed.key_buf[0..trimmed.len], trimmed);
+            typed.key_len = @intCast(trimmed.len);
+            return typed;
+        }
 
         var chord: Chord = .{};
         var key_part: []const u8 = trimmed;
@@ -93,11 +111,16 @@ pub const Chord = struct {
     /// `key_name` is compared case-insensitively, since the host spells
     /// function keys `F5` while chords are stored lower-case.
     pub fn matches(self: *const Chord, key_name: []const u8, mods: Mods) bool {
-        return std.ascii.eqlIgnoreCase(self.key(), key_name) and std.meta.eql(self.mods, mods);
+        return !self.text and std.ascii.eqlIgnoreCase(self.key(), key_name) and std.meta.eql(self.mods, mods);
+    }
+
+    /// True when a `text` event of exactly `typed` is this chord.
+    pub fn matchesText(self: *const Chord, typed: []const u8) bool {
+        return self.text and std.mem.eql(u8, self.key(), typed);
     }
 
     pub fn eql(self: *const Chord, other: *const Chord) bool {
-        return std.mem.eql(u8, self.key(), other.key()) and std.meta.eql(self.mods, other.mods);
+        return self.text == other.text and std.mem.eql(u8, self.key(), other.key()) and std.meta.eql(self.mods, other.mods);
     }
 
     /// The chord as text, for a help line or a function-key bar:
@@ -105,6 +128,10 @@ pub const Chord = struct {
     /// upper-cased and `_` becomes a space; the result borrows `buf`.
     pub fn format(self: *const Chord, buf: []u8) []const u8 {
         var w: std.Io.Writer = .fixed(buf);
+        if (self.text) {
+            w.writeAll(self.key()) catch {};
+            return buf[0..w.end];
+        }
         if (self.mods.ctrl) w.writeAll("Ctrl+") catch return buf[0..w.end];
         if (self.mods.alt) w.writeAll("Alt+") catch return buf[0..w.end];
         if (self.mods.shift) w.writeAll("Shift+") catch return buf[0..w.end];
@@ -116,6 +143,18 @@ pub const Chord = struct {
         return buf[0..w.end];
     }
 };
+
+/// Whether `s` alone spells a typed character rather than a key: one
+/// codepoint that is ASCII punctuation, an uppercase letter, or anything
+/// non-ASCII. `+` counts when it is the whole string; after a modifier
+/// it is still the separator (`ctrl++` doesn't parse).
+fn isTypedChar(s: []const u8) bool {
+    const len = std.unicode.utf8ByteSequenceLength(s[0]) catch return false;
+    if (len != s.len or len > max_key_len) return false;
+    if (len > 1) return std.unicode.utf8ValidateSlice(s);
+    const c = s[0];
+    return std.ascii.isUpper(c) or (std.ascii.isPrint(c) and !std.ascii.isAlphanumeric(c) and c != ' ');
+}
 
 fn eqlAny(s: []const u8, options: []const []const u8) bool {
     for (options) |o| {
@@ -252,10 +291,110 @@ pub fn Keymap(comptime Action: type) type {
             return null;
         }
 
+        /// The action a `text` event means, if any: a typed-character
+        /// binding (`"?"`) of exactly `typed`.
+        pub fn lookupText(self: *const Self, typed: []const u8) ?Action {
+            for (self.bindings.items) |*b| {
+                if (b.chord.matchesText(typed)) return b.action;
+            }
+            return null;
+        }
+
+        /// A config's `keys` over the defaults, in order: an override with
+        /// an action binds its chord, one without (`false`) unbinds it.
+        pub fn apply(self: *Self, alloc: std.mem.Allocator, overrides: []const Override(Action)) !void {
+            for (overrides) |o| {
+                if (o.action) |a| try self.bind(alloc, o.chord, a) else self.unbind(o.chord);
+            }
+        }
+
         /// The first chord bound to `action`, for labelling it on screen.
         pub fn chordFor(self: *const Self, action: Action) ?Chord {
             for (self.bindings.items) |b| {
                 if (b.action == action) return b.chord;
+            }
+            return null;
+        }
+    };
+}
+
+/// One entry of a config's `keys` table, already parsed: the chord and
+/// the action it names, or null for `false`.
+pub fn Override(comptime Action: type) type {
+    return struct {
+        chord: Chord,
+        action: ?Action,
+    };
+}
+
+/// `Override` for a `Scoped` keymap: which table the entry is in.
+pub fn ScopedOverride(comptime Scope: type, comptime Action: type) type {
+    return struct {
+        scope: Scope,
+        chord: Chord,
+        action: ?Action,
+    };
+}
+
+/// One `Keymap` per mode (`Scope`), looked up most specific first: a
+/// key unbound in a mode's own table falls back to `parent(scope)`'s,
+/// and so on up. That fallback chain is the whole of a tool's modal
+/// precedence, written down in one place rather than implied by the order
+/// of an if-chain. zoe's `global` / `normal` / `visual` / `insert`, and
+/// gw-read's page / card / AI-panel modes, are both one.
+///
+/// `none` is the tool's do-nothing action: `false` in a config binds it,
+/// so a mode can hide a parent's chord rather than fall through to it.
+pub fn Scoped(
+    comptime Scope: type,
+    comptime Action: type,
+    comptime parent: fn (Scope) ?Scope,
+    comptime none: Action,
+) type {
+    return struct {
+        const Self = @This();
+        pub const Table = Keymap(Action);
+        pub const Defaults = std.EnumArray(Scope, []const Default(Action));
+
+        tables: std.EnumArray(Scope, Table) = .initFill(.{}),
+
+        pub fn initDefaults(alloc: std.mem.Allocator, defaults: Defaults) !Self {
+            var self: Self = .{};
+            errdefer self.deinit(alloc);
+            for (std.enums.values(Scope)) |s| {
+                self.tables.set(s, try Table.initDefaults(alloc, defaults.get(s)));
+            }
+            return self;
+        }
+
+        pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+            for (std.enums.values(Scope)) |s| self.tables.getPtr(s).deinit(alloc);
+        }
+
+        pub fn table(self: *Self, scope: Scope) *Table {
+            return self.tables.getPtr(scope);
+        }
+
+        /// The config's `keys`, over the defaults, in order.
+        pub fn apply(self: *Self, alloc: std.mem.Allocator, overrides: []const ScopedOverride(Scope, Action)) !void {
+            for (overrides) |o| try self.table(o.scope).bind(alloc, o.chord, o.action orelse none);
+        }
+
+        /// The action a key means in `scope`: its own table's binding,
+        /// else the nearest parent's. Null when none binds it.
+        pub fn lookup(self: *const Self, scope: Scope, key_name: []const u8, mods: Mods) ?Action {
+            var s: ?Scope = scope;
+            while (s) |cur| : (s = parent(cur)) {
+                if (self.tables.getPtrConst(cur).lookup(key_name, mods)) |a| return a;
+            }
+            return null;
+        }
+
+        /// `lookup` for a `text` event.
+        pub fn lookupText(self: *const Self, scope: Scope, typed: []const u8) ?Action {
+            var s: ?Scope = scope;
+            while (s) |cur| : (s = parent(cur)) {
+                if (self.tables.getPtrConst(cur).lookupText(typed)) |a| return a;
             }
             return null;
         }

@@ -214,63 +214,21 @@ pub const insert_defaults = [_]Default{
     .{ .chord = "ctrl+space", .action = .complete },
 };
 
-/// One `zoe.conf.lua` `keys` entry, already validated. `action` is
-/// `.none` for `false`.
-pub const Override = struct {
-    scope: Scope,
-    chord: keybind.Chord,
-    action: Action,
-};
 
-pub const Keymaps = struct {
-    global: Keymap = .{},
-    normal: Keymap = .{},
-    visual: Keymap = .{},
-    insert: Keymap = .{},
+/// One `zoe.conf.lua` `keys` entry, already validated (`luaconf.scopedKeys`).
+/// A null `action` (`false`) binds `.none` in its table.
+pub const Override = keybind.ScopedOverride(Scope, Action);
 
-    pub fn initDefaults(alloc: std.mem.Allocator) !Keymaps {
-        var self: Keymaps = .{};
-        errdefer self.deinit(alloc);
-        self.global = try Keymap.initDefaults(alloc, &global_defaults);
-        self.normal = try Keymap.initDefaults(alloc, &normal_defaults);
-        self.visual = try Keymap.initDefaults(alloc, &visual_defaults);
-        self.insert = try Keymap.initDefaults(alloc, &insert_defaults);
-        return self;
-    }
+/// Every mode table but `global` falls back to `global`.
+fn parentScope(scope: Scope) ?Scope {
+    return if (scope == .global) null else .global;
+}
 
-    pub fn deinit(self: *Keymaps, alloc: std.mem.Allocator) void {
-        self.global.deinit(alloc);
-        self.normal.deinit(alloc);
-        self.visual.deinit(alloc);
-        self.insert.deinit(alloc);
-    }
+pub const Keymaps = keybind.Scoped(Scope, Action, parentScope, .none);
 
-    pub fn table(self: *Keymaps, scope: Scope) *Keymap {
-        return switch (scope) {
-            .global => &self.global,
-            .normal => &self.normal,
-            .visual => &self.visual,
-            .insert => &self.insert,
-        };
-    }
-
-    /// The config's `keys`, over the defaults, in order.
-    pub fn apply(self: *Keymaps, alloc: std.mem.Allocator, overrides: []const Override) !void {
-        for (overrides) |o| try self.table(o.scope).bind(alloc, o.chord, o.action);
-    }
-
-    /// The action a key means in `scope`: that table's binding, else the
-    /// global one. Null when neither binds it.
-    pub fn lookup(self: *const Keymaps, scope: Scope, key: []const u8, mods: keybind.Mods) ?Action {
-        const own: ?*const Keymap = switch (scope) {
-            .global => null,
-            .normal => &self.normal,
-            .visual => &self.visual,
-            .insert => &self.insert,
-        };
-        if (own) |t| {
-            if (t.lookup(key, mods)) |a| return a;
-        }
-        return self.global.lookup(key, mods);
-    }
-};
+pub const defaults: Keymaps.Defaults = .init(.{
+    .global = &global_defaults,
+    .normal = &normal_defaults,
+    .visual = &visual_defaults,
+    .insert = &insert_defaults,
+});

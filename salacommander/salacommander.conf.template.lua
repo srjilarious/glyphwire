@@ -103,7 +103,9 @@
 --     -- Chords are "mod+mod+key", case-insensitive: ctrl, alt, shift,
 --     -- super; keys are glyphwire key names (up, page_down, insert,
 --     -- F5, kp_add, a, one, ...) or the aliases esc, pgup, pgdn, del,
---     -- ins, bs and the digits 0-9.
+--     -- ins, bs and the digits 0-9. One punctuation character,
+--     -- uppercase letter or non-ASCII character alone ("?", "G") is
+--     -- that character as your keyboard layout types it.
 --     --
 --     -- Actions and their default chords:
 --     --   cursorUp            up

@@ -23,6 +23,7 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const homepath = @import("applib").homepath;
+const actions = @import("actions.zig");
 const zmd = @import("zmd");
 const layout_mod = @import("layout.zig");
 const nav = @import("nav.zig");
@@ -161,6 +162,8 @@ pub const Ui = struct {
     message: ?[]u8 = null,
     status_dirty: bool = true,
     quit: bool = false,
+    /// Every key, by action: `actions.defaults`.
+    keymap: actions.Keymap = .{},
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -192,7 +195,11 @@ pub const Ui = struct {
         try client.setLayerBackground(page_layer, bg_page);
         try client.setLayerBackground(status_layer, bg_status);
 
+        var keymap = try actions.Keymap.initDefaults(alloc, &actions.defaults);
+        errdefer keymap.deinit(alloc);
+
         self.* = .{
+            .keymap = keymap,
             .alloc = alloc,
             .io = io,
             .client = client,
@@ -217,6 +224,7 @@ pub const Ui = struct {
         self.back.deinit(alloc);
         self.forward.deinit(alloc);
         if (self.message) |m| alloc.free(m);
+        self.keymap.deinit(alloc);
         self.client.destroyContext(self.context) catch {};
         alloc.destroy(self);
     }
@@ -636,39 +644,27 @@ pub const Ui = struct {
     // ── Input ───────────────────────────────────────────────────────────
 
     fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
-        const key = k.key;
-        const eq = std.mem.eql;
         self.clearMessage();
-
-        if (eq(u8, key, "q")) {
-            self.quit = true;
-            return;
-        }
-        if (eq(u8, key, "escape")) {
+        const action = self.keymap.lookup(k.key, k.mods) orelse return;
+        switch (action) {
+            .quit => self.quit = true,
             // Escape drops a Tab highlight before it quits.
-            if (self.focus != null) return self.setFocus(null);
-            self.quit = true;
-            return;
+            .back => if (self.focus != null) self.setFocus(null) else {
+                self.quit = true;
+            },
+            .historyBack => try self.goBack(),
+            .historyForward => try self.goForward(),
+            .scrollUp => self.scrollBy(-1),
+            .scrollDown => self.scrollBy(1),
+            .pageUp => self.scrollBy(-self.pageStep()),
+            .pageDown => self.scrollBy(self.pageStep()),
+            .top => self.scrollTo(0),
+            .bottom => self.scrollTo(self.maxScroll()),
+            .nextLink => try self.stepFocus(1),
+            .prevLink => try self.stepFocus(-1),
+            .followLink => if (self.focus) |f| try self.follow(self.tab_order[f]),
+            .reload => try self.reload(),
         }
-
-        if (k.alt() and eq(u8, key, "left")) return self.goBack();
-        if (k.alt() and eq(u8, key, "right")) return self.goForward();
-        if (eq(u8, key, "backspace")) return self.goBack();
-
-        if (eq(u8, key, "up") or eq(u8, key, "k")) return self.scrollBy(-1);
-        if (eq(u8, key, "down") or eq(u8, key, "j")) return self.scrollBy(1);
-        if (eq(u8, key, "page_up") or eq(u8, key, "b")) return self.scrollBy(-self.pageStep());
-        if (eq(u8, key, "page_down") or eq(u8, key, "space")) return self.scrollBy(self.pageStep());
-        if (eq(u8, key, "home")) return self.scrollTo(0);
-        if (eq(u8, key, "end")) return self.scrollTo(self.maxScroll());
-        if (eq(u8, key, "g")) return if (k.shift()) self.scrollTo(self.maxScroll()) else self.scrollTo(0);
-
-        if (eq(u8, key, "tab")) return self.stepFocus(if (k.shift()) -1 else 1);
-        if (eq(u8, key, "enter") or eq(u8, key, "kp_enter")) {
-            if (self.focus) |f| try self.follow(self.tab_order[f]);
-            return;
-        }
-        if (eq(u8, key, "r")) return self.reload();
     }
 
     /// Moves the Tab highlight `delta` links along reading order. The

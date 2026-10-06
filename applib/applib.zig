@@ -20,7 +20,9 @@
 //! What's here, and who shares it:
 //!
 //!   `lineedit`   the one-line text field (gw-shell, salacommander, zoe)
-//!   `keybind`    named actions bound to key chords (salacommander, zoe)
+//!   `keybind`    named actions bound to key chords and typed characters
+//!                (salacommander, zoe, gw-read, gwmd, gw-hist, gmux; the
+//!                host's chords, as its own module)
 //!   `shellpanel` an embedded `gw-shell` panel (salacommander, zoe)
 //!   `wordsplit`  shell-style word splitting and quoting (gw-shell,
 //!                salacommander)
@@ -73,7 +75,7 @@
 
 pub const lineedit = @import("lineedit.zig");
 pub const interrupt = @import("interrupt.zig");
-pub const keybind = @import("keybind.zig");
+pub const keybind = @import("keybind");
 pub const shellpanel = @import("shellpanel.zig");
 pub const wordsplit = @import("wordsplit.zig");
 pub const history = @import("history.zig");

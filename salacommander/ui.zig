@@ -320,7 +320,7 @@ pub const Ui = struct {
 
         var keymap = try actions.Keymap.initDefaults(alloc, &actions.defaults);
         errdefer keymap.deinit(alloc);
-        _ = config_mod.applyKeys(alloc, &keymap, cfg.keys);
+        try keymap.apply(alloc, cfg.keys);
 
         const pane_opts: pane_mod.Options = .{ .show_hidden = cfg.show_hidden, .view = cfg.view };
         var left = try Pane.init(alloc, io, opts.left, pane_opts);

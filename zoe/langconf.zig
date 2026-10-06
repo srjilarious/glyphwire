@@ -26,7 +26,6 @@ const syntax = @import("applib").syntax;
 const themes = @import("applib").theme;
 const themeconf = @import("themeconf");
 const dividerconf = @import("dividerconf");
-const keybind = @import("applib").keybind;
 const homepath = @import("applib").homepath;
 const actions = @import("actions.zig");
 const editor = @import("editor.zig");
@@ -175,7 +174,7 @@ pub const Config = struct {
     /// started (see `lsp.Pool.start`).
     lsp_servers: []const lsp.ServerConfig = &default_lsp_servers,
     /// `config.keys`, validated, in the arena: applied over the default
-    /// bindings by `actions.Keymaps.apply`. See `readKeys`.
+    /// bindings by `actions.Keymaps.apply` (`luaconf.scopedKeys`).
     keys: []const actions.Override = &.{},
 
     pub fn deinit(self: *Config) void {
@@ -273,7 +272,10 @@ const Apply = struct {
         if (conf.boolean(lua, "wrap")) |v| cfg.wrap = v;
         if (conf.number(lua, f64, "tab_tooltip_delay_ms", delay)) |v| cfg.tab_tooltip_delay_ms = v;
         readLsp(lua, a, cfg);
-        cfg.keys = readKeys(lua, a);
+        // Per-mode tables (`global`, `normal`, `visual`, `insert`; see
+        // `actions.zig`). `false` binds `.none`, which also hides the
+        // global binding when it is in a mode table.
+        cfg.keys = conf.scopedKeys(lua, a, actions.Scope, actions.Action);
     }
 };
 
@@ -387,90 +389,6 @@ fn readLangs(lua: *Lua, a: std.mem.Allocator) []const syntax.LangDef {
     if (out.items.len == 0) return &syntax.default_langs;
     out.appendSlice(a, &syntax.default_langs) catch {};
     return out.toOwnedSlice(a) catch &syntax.default_langs;
-}
-
-/// `config.keys`: per-mode tables of chord -> action name, or `false` to
-/// take a chord away (binding `.none`, which also hides the global
-/// binding when it's in a mode table):
-///
-///     keys = {
-///         global = { ["ctrl+h"] = false, ["alt+h"] = "toggleHidden" },
-///         insert = { ["ctrl+d"] = "deleteWordForward" },
-///     }
-///
-/// The tables are `global`, `normal`, `visual` and `insert`; see
-/// `actions.zig` for the action names. A chord that doesn't parse, an
-/// unknown action or an unknown table is logged and skipped.
-fn readKeys(lua: *Lua, a: std.mem.Allocator) []const actions.Override {
-    const t = lua.getField(-1, "keys");
-    defer lua.pop(1);
-    if (t != .table) {
-        if (t != .nil) conf.warn("`keys` is not a table; ignored", .{});
-        return &.{};
-    }
-
-    var out: std.ArrayList(actions.Override) = .empty;
-    lua.pushNil();
-    while (lua.next(-2)) {
-        // Key at -2, value at -1. Only read with `toString` on an actual
-        // string key: it would convert a number key in place and break
-        // `next`.
-        defer lua.pop(1);
-        if (lua.typeOf(-2) != .string) continue;
-        const name = lua.toString(-2) catch continue;
-        const scope = std.meta.stringToEnum(actions.Scope, name) orelse {
-            conf.warn("keys.{s}: not a key table (global, normal, visual, insert); ignored", .{ name });
-            continue;
-        };
-        if (lua.typeOf(-1) != .table) {
-            conf.warn("keys.{s} is not a table; ignored", .{ name });
-            continue;
-        }
-        readKeyTable(lua, a, scope, name, &out);
-    }
-    // Lua's table order is unspecified; sort so the same config always
-    // applies the same way (it only matters when two entries spell the
-    // same chord differently).
-    std.mem.sort(actions.Override, out.items, {}, overrideLess);
-    return out.toOwnedSlice(a) catch &.{};
-}
-
-fn overrideLess(_: void, x: actions.Override, y: actions.Override) bool {
-    if (x.scope != y.scope) return @intFromEnum(x.scope) < @intFromEnum(y.scope);
-    return std.mem.lessThan(u8, x.chord.key(), y.chord.key()) or
-        (std.mem.eql(u8, x.chord.key(), y.chord.key()) and @intFromEnum(x.action) < @intFromEnum(y.action));
-}
-
-/// One `keys.<scope>` table, on top of the stack.
-fn readKeyTable(lua: *Lua, a: std.mem.Allocator, scope: actions.Scope, scope_name: []const u8, out: *std.ArrayList(actions.Override)) void {
-    lua.pushNil();
-    while (lua.next(-2)) {
-        defer lua.pop(1);
-        if (lua.typeOf(-2) != .string) continue;
-        const text = lua.toString(-2) catch continue;
-        const chord = keybind.Chord.parse(text) catch |err| {
-            conf.warn("keys.{s}[\"{s}\"]: {t}; ignored", .{ scope_name, text, err });
-            continue;
-        };
-        const action: actions.Action = switch (lua.typeOf(-1)) {
-            .string => blk: {
-                const name = lua.toString(-1) catch continue;
-                break :blk std.meta.stringToEnum(actions.Action, name) orelse {
-                    conf.warn("keys.{s}[\"{s}\"] = \"{s}\": unknown action; ignored", .{ scope_name, text, name });
-                    continue;
-                };
-            },
-            .boolean => if (lua.toBoolean(-1)) {
-                conf.warn("keys.{s}[\"{s}\"] = true means nothing; use an action name or false", .{ scope_name, text });
-                continue;
-            } else .none,
-            else => {
-                conf.warn("keys.{s}[\"{s}\"] must be an action name or false; ignored", .{ scope_name, text });
-                continue;
-            },
-        };
-        out.append(a, .{ .scope = scope, .chord = chord, .action = action }) catch return;
-    }
 }
 
 /// `config.lsp`: the master switch and the server list, merged by name over

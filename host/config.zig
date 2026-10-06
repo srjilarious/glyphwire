@@ -6,6 +6,7 @@ const glyphwire = @import("glyphwire");
 const geometry = @import("geometry.zig");
 const key_repeat = @import("key_repeat.zig");
 const host_eng = @import("host_eng");
+const keybind = @import("keybind");
 const dividers = @import("dividers.zig");
 
 // Font defaults. `host.conf.lua` (a global `config` table with
@@ -192,34 +193,21 @@ pub const context_switcher_default: Chord = .{ .key = .F12, .super = true };
 /// the same reason.
 pub const theme_switcher_default: Chord = .{ .key = .F10, .super = true };
 
-/// Parses a chord written `"super+f12"` / `"ctrl+alt+tab"`: `+`-separated,
-/// case-insensitive, modifiers (`ctrl`/`control`, `alt`, `shift`,
-/// `super`/`win`/`meta`) in any order and the key last, named as
-/// `host_eng.input.Key` names it (`f12`, `grave_accent`, `a`). Null for
-/// anything malformed: an unknown name, no key, or two keys.
+/// Parses a chord written `"super+f12"` / `"ctrl+alt+tab"` in the one
+/// chord grammar every glyphwire config uses (`keybind.Chord.parse`:
+/// modifiers then the key, `+`-separated, case-insensitive, key aliases
+/// like `esc` and `1`), then names the key as `host_eng.input.Key` does.
+/// Null for anything malformed: an unknown modifier or key, no key, or
+/// two keys.
 pub fn parseChord(text: []const u8) ?Chord {
-    var chord: Chord = .{ .key = .unknown };
-    var have_key = false;
-    var it = std.mem.splitScalar(u8, text, '+');
-    while (it.next()) |raw| {
-        const part = std.mem.trim(u8, raw, " ");
-        if (part.len == 0) return null;
-        if (std.ascii.eqlIgnoreCase(part, "ctrl") or std.ascii.eqlIgnoreCase(part, "control")) {
-            chord.ctrl = true;
-        } else if (std.ascii.eqlIgnoreCase(part, "alt")) {
-            chord.alt = true;
-        } else if (std.ascii.eqlIgnoreCase(part, "shift")) {
-            chord.shift = true;
-        } else if (std.ascii.eqlIgnoreCase(part, "super") or std.ascii.eqlIgnoreCase(part, "win") or std.ascii.eqlIgnoreCase(part, "meta")) {
-            chord.super = true;
-        } else {
-            if (have_key) return null;
-            chord.key = keyFromName(part) orelse return null;
-            have_key = true;
-        }
-    }
-    if (!have_key) return null;
-    return chord;
+    const parsed = keybind.Chord.parse(text) catch return null;
+    return .{
+        .key = keyFromName(parsed.key()) orelse return null,
+        .ctrl = parsed.mods.ctrl,
+        .alt = parsed.mods.alt,
+        .shift = parsed.mods.shift,
+        .super = parsed.mods.super,
+    };
 }
 
 /// `host_eng.input.Key` by name, ignoring case (`f12` finds `F12`).

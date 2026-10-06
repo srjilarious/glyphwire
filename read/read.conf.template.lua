@@ -323,6 +323,44 @@
 --     anki_image_max_height = 800,
 --     anki_image_quality = 85,
 --
+--     -- Rebinds keys by action name, per mode, over the built-in
+--     -- bindings (list only what you change). `false` takes a key away.
+--     --
+--     --   page     reading the book (everything below)
+--     --   card     an Anki card in progress: takes every key
+--     --   confirm  the AI panel asking before its first send; keys it
+--     --            doesn't bind fall through to `page`
+--     --   busy     an AI request in flight; falls through to `page`
+--     --
+--     -- Chords are "mod+mod+key", case-insensitive: ctrl, alt, shift,
+--     -- super; keys are glyphwire key names (up, page_down, F5, a, one)
+--     -- or the aliases esc, pgup, pgdn, del, ins, bs and the digits.
+--     -- One punctuation character, uppercase letter or non-ASCII
+--     -- character alone ("?", "]", "G") is that character as your
+--     -- keyboard layout types it.
+--     --
+--     -- page actions and their default keys:
+--     --   quit q, back escape, toggleHelp ?, gotoPage :, goPrefix g (gg),
+--     --   nextPage space, prevPage backspace, pageDown page_down,
+--     --   pageUp page_up (both scroll a long side panel first),
+--     --   firstPage home, lastPage end / shift+g, jumpForward ],
+--     --   jumpBack [, panLeft h, panRight l, panUp k, panDown j,
+--     --   panOrTurnLeft left, panOrTurnRight right, panOrPageUp up,
+--     --   panOrPageDown down, fitScreen f, fitWidth w, fitHeight t,
+--     --   naturalSize 1, zoomIn + / =, zoomOut -, flipDirection d,
+--     --   nextBlock tab, prevBlock shift+tab, toggleHints o,
+--     --   cycleLayout v, peek z (hold), toggleDialogHidden \,
+--     --   cycleDictScale s, cycleOcrScale shift+s, startCard c, startAi a
+--     -- card: accept enter, cancel escape, recrop r, nudgeLeft left / h,
+--     --   nudgeRight right / l, nudgeUp up / k, nudgeDown down / j,
+--     --   cropGrow + / =, cropShrink -, scrollPanelDown page_down,
+--     --   scrollPanelUp page_up
+--     -- confirm: accept enter / a, cancel escape
+--     -- busy: cancel escape
+--     keys = {
+--         -- page = { ["n"] = "nextPage", ["p"] = "prevPage" },
+--     },
+--
 --     -- gw-read's own theme, overriding the window's (theme.lua) for this
 --     -- program alone; absent, it follows the window's. A name or a
 --     -- table, in the shapes theme.lua takes (see host/theme.template.lua),

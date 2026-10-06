@@ -12,6 +12,7 @@
 
 pub const layout = @import("layout.zig");
 pub const config = @import("config.zig");
+pub const actions = @import("actions.zig");
 pub const ui = @import("ui.zig");
 
 pub const Tree = layout.Tree;

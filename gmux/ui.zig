@@ -28,6 +28,8 @@ const glyphwire = @import("glyphwire");
 
 const splittree = @import("applib").splittree;
 const layout = @import("layout.zig");
+const actions = @import("actions.zig");
+const keybind = @import("applib").keybind;
 const config = @import("config.zig");
 
 const Client = glyphwire.Client;
@@ -84,6 +86,9 @@ pub const Ui = struct {
     scrollback_rows: usize,
     /// The program a fresh pane runs. Borrowed from the config's arena.
     shell_cmd: []const u8,
+    /// Every prefix command: `actions.defaults` with the config's `keys`
+    /// over them.
+    keymap: actions.Keymap = .{},
 
     quit: bool = false,
 
@@ -118,6 +123,9 @@ pub const Ui = struct {
             .shell_cmd = config.shellCommand(cfg),
         };
         errdefer self.bounds.deinit();
+        self.keymap = try actions.Keymap.initDefaults(alloc, &actions.defaults);
+        errdefer self.keymap.deinit(alloc);
+        try self.keymap.apply(alloc, cfg.keys);
 
         // The prefix chord the session will enforce for us. From here on
         // every `window_key` / `window_text` we receive is a command, and
@@ -156,6 +164,7 @@ pub const Ui = struct {
 
         self.bounds.deinit();
         self.tree.deinit();
+        self.keymap.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -206,8 +215,8 @@ pub const Ui = struct {
     /// defined the previous design.
     fn handleInput(self: *Ui, ev: glyphwire.InputEvent) !void {
         switch (ev) {
-            .window_key => |k| if (k.pressed) self.command(k.key, null),
-            .window_text => |t| self.command(null, t.text),
+            .window_key => |k| if (k.pressed) self.command(self.keyAction(k)),
+            .window_text => |t| self.command(self.textAction(t.text)),
             .shutdown => self.quit = true,
             // gmux is never in the focused pane, so raw input never arrives.
             // Ignored rather than asserted: a future host that does deliver
@@ -216,56 +225,57 @@ pub const Ui = struct {
         }
     }
 
-    /// One prefix command, named either by a key (arrows) or by committed
-    /// text (everything printable). A failed command is logged, not
-    /// propagated: crashing the multiplexer over one failed split would
-    /// take every other pane's program down with it.
-    fn command(self: *Ui, key: ?[]const u8, text: ?[]const u8) void {
-        // Everything but `z` itself and `q` acts on the real layout, so a
-        // zoom is undone first -- tmux's rule. Silently ignoring a split
-        // while zoomed looked like gmux had stopped listening.
-        if (!isZoomNeutral(key, text)) self.unzoom() catch |err| self.logError("unzoom", err);
-
-        if (key) |k| {
-            if (std.mem.eql(u8, k, "left")) return self.moveFocus(.left);
-            if (std.mem.eql(u8, k, "right")) return self.moveFocus(.right);
-            if (std.mem.eql(u8, k, "up")) return self.moveFocus(.up);
-            if (std.mem.eql(u8, k, "down")) return self.moveFocus(.down);
-            return; // an unbound prefix sequence is swallowed, same as tmux
-        }
-        const t = text orelse return;
-        var it = (std.unicode.Utf8View.init(t) catch return).iterator();
-        const cp = it.nextCodepointSlice() orelse return;
-        if (cp.len != 1) return;
-        switch (cp[0]) {
-            '"' => self.splitFocused(.column) catch |err| self.logError("split", err), // stacked: new pane below
-            '%' => self.splitFocused(.row) catch |err| self.logError("split", err), // side by side: new pane right
-            'x' => self.killFocused() catch |err| self.logError("kill pane", err),
-            'z' => self.zoomToggle() catch |err| self.logError("zoom", err),
-            'H' => self.resizeFocused(.row, false) catch |err| self.logError("resize", err),
-            'L' => self.resizeFocused(.row, true) catch |err| self.logError("resize", err),
-            'K' => self.resizeFocused(.column, false) catch |err| self.logError("resize", err),
-            'J' => self.resizeFocused(.column, true) catch |err| self.logError("resize", err),
-            'q' => self.quit = true,
-            else => {},
-        }
+    /// The command a named key means. A letter or digit with no command
+    /// modifier is skipped here: that keystroke also arrives as typed
+    /// text, and `textAction` takes it from there so it follows the
+    /// keyboard layout and doesn't run twice.
+    fn keyAction(self: *const Ui, k: glyphwire.KeyEvent) ?actions.Action {
+        const typing = !k.mods.ctrl and !k.mods.alt and !k.mods.super;
+        if (typing and (k.key.len == 1 or isDigitName(k.key))) return null;
+        return self.keymap.lookup(k.key, k.mods);
     }
 
-    /// Whether a command leaves a zoom in place: `z` toggles it itself, `q`
-    /// is about to tear everything down, and an unbound sequence does
-    /// nothing at all.
-    fn isZoomNeutral(key: ?[]const u8, text: ?[]const u8) bool {
-        if (key) |k| {
-            const arrow = std.mem.eql(u8, k, "left") or std.mem.eql(u8, k, "right") or
-                std.mem.eql(u8, k, "up") or std.mem.eql(u8, k, "down");
-            return !arrow;
+    /// The command typed text means: a typed-character binding (`%`,
+    /// `H`), else a lone letter or digit as the key of that name (`x`).
+    fn textAction(self: *const Ui, text: []const u8) ?actions.Action {
+        if (self.keymap.lookupText(text)) |a| return a;
+        if (text.len != 1 or !std.ascii.isAlphanumeric(text[0])) return null;
+        var lower: [1]u8 = .{std.ascii.toLower(text[0])};
+        return self.keymap.lookup(keybind.normalizeKey(&lower), .{});
+    }
+
+    fn isDigitName(key: []const u8) bool {
+        const names = [_][]const u8{ "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine" };
+        for (names) |n| if (std.mem.eql(u8, key, n)) return true;
+        return false;
+    }
+
+    /// One prefix command. A failed command is logged, not propagated:
+    /// crashing the multiplexer over one failed split would take every
+    /// other pane's program down with it. An unbound prefix sequence is
+    /// swallowed, same as tmux.
+    fn command(self: *Ui, action: ?actions.Action) void {
+        const a = action orelse return;
+        // Everything but zoom itself and quit acts on the real layout, so
+        // a zoom is undone first -- tmux's rule. Silently ignoring a split
+        // while zoomed looked like gmux had stopped listening.
+        if (!a.keepsZoom()) self.unzoom() catch |err| self.logError("unzoom", err);
+
+        switch (a) {
+            .focusLeft => self.moveFocus(.left),
+            .focusRight => self.moveFocus(.right),
+            .focusUp => self.moveFocus(.up),
+            .focusDown => self.moveFocus(.down),
+            .splitBelow => self.splitFocused(.column) catch |err| self.logError("split", err),
+            .splitRight => self.splitFocused(.row) catch |err| self.logError("split", err),
+            .killPane => self.killFocused() catch |err| self.logError("kill pane", err),
+            .zoom => self.zoomToggle() catch |err| self.logError("zoom", err),
+            .resizeLeft => self.resizeFocused(.row, false) catch |err| self.logError("resize", err),
+            .resizeRight => self.resizeFocused(.row, true) catch |err| self.logError("resize", err),
+            .resizeUp => self.resizeFocused(.column, false) catch |err| self.logError("resize", err),
+            .resizeDown => self.resizeFocused(.column, true) catch |err| self.logError("resize", err),
+            .quit => self.quit = true,
         }
-        const t = text orelse return true;
-        if (t.len != 1) return true;
-        return switch (t[0]) {
-            '"', '%', 'x', 'H', 'L', 'K', 'J' => false,
-            else => true,
-        };
     }
 
     fn logError(self: *Ui, what: []const u8, err: anyerror) void {

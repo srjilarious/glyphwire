@@ -4066,7 +4066,7 @@ pub fn lineCommentForFollowsTheLanguageTest(_: std.Io, alloc: std.mem.Allocator)
 const actions = zoe.actions;
 
 pub fn keymapsLookInTheModeTableFirstTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var km = try actions.Keymaps.initDefaults(alloc);
+    var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
     defer km.deinit(alloc);
     // Ctrl+Left moves focus everywhere but insert mode, where it is a
     // word jump.
@@ -4096,7 +4096,7 @@ pub fn keysConfigRebindsAndUnbindsTest(_: std.Io, alloc: std.mem.Allocator) !voi
     // The two bad entries and the unknown table are dropped.
     try testz.expectEqual(cfg.keys.len, 4);
 
-    var km = try actions.Keymaps.initDefaults(alloc);
+    var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
     defer km.deinit(alloc);
     try km.apply(alloc, cfg.keys);
     try testz.expectEqual(km.lookup(.normal, "h", .{ .ctrl = true }).?, .none);

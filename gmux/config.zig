@@ -3,13 +3,15 @@
 
 //! gmux's optional startup config, `~/.config/glyphwire/gmux.conf.lua` -- a
 //! Lua script assigning a global `config` table, same shape `zoe.conf.lua` /
-//! `ls.conf.lua` / `shell.conf.lua` use. Deliberately tiny for the first version:
-//! the prefix key, the shell to run in a fresh pane, and how much
-//! scrollback each pane's ring keeps. With no file present gmux runs on
-//! Ctrl-B, `gw-shell`, and 2000 rows.
+//! `ls.conf.lua` / `shell.conf.lua` use. Deliberately tiny: the prefix
+//! key, the shell to run in a fresh pane, how much scrollback each pane's
+//! ring keeps, and `keys` to rebind the commands after the prefix (see
+//! `actions.zig`). With no file present gmux runs on Ctrl-B, `gw-shell`,
+//! 2000 rows and the default commands.
 
 const std = @import("std");
 const luaconf = @import("luaconf");
+const actions = @import("actions.zig");
 
 const Lua = luaconf.Lua;
 
@@ -33,6 +35,9 @@ pub const Config = struct {
     /// `config.scrollback_rows` -- the ring every new pane's base context
     /// root layer is created with.
     scrollback_rows: usize = 2000,
+    /// `config.keys`: prefix commands rebound by name (`actions.zig`),
+    /// validated, in the arena.
+    keys: []const actions.Override = &.{},
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -57,6 +62,7 @@ fn apply(cfg: *Config, lua: *Lua) void {
     cfg.prefix_key = readPrefixKey(lua, cfg.prefix_key);
     if (conf.string(lua, "shell")) |s| cfg.shell = cfg.arena.allocator().dupe(u8, s) catch null;
     if (conf.uint(lua, usize, "scrollback_rows", .{})) |v| cfg.scrollback_rows = v;
+    cfg.keys = conf.keys(lua, cfg.arena.allocator(), actions.Action);
 }
 
 /// `config.prefix_key = "a"` -- a single lowercase ASCII letter. Anything

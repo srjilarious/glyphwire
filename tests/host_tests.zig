@@ -249,6 +249,9 @@ pub fn parseChordReadsModifiersAndKeyInAnyCaseTest(_: std.Io, _: std.mem.Allocat
 
     try testz.expectTrue(config.parseChord("win+grave_accent").?.super);
     try testz.expectTrue(config.parseChord("f12").?.matches(false, false, false, false));
+    // The same grammar as every program's `keys`, aliases included.
+    try testz.expectEqual(config.parseChord("super+esc").?.key, .escape);
+    try testz.expectEqual(config.parseChord("ctrl+1").?.key, .one);
 }
 
 pub fn parseChordRejectsMalformedChordsTest(_: std.Io, _: std.mem.Allocator) !void {

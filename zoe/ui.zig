@@ -1069,7 +1069,7 @@ pub const Ui = struct {
         const ws_theme: ?themes.Theme = if (start.theme) |name| cfg_owned.?.findTheme(name) else null;
         const own_theme = ws_theme orelse cfg_owned.?.ownTheme();
 
-        var keymaps = try actions.Keymaps.initDefaults(alloc);
+        var keymaps = try actions.Keymaps.initDefaults(alloc, actions.defaults);
         errdefer keymaps.deinit(alloc);
         try keymaps.apply(alloc, cfg_owned.?.keys);
 

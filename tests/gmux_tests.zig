@@ -36,3 +36,18 @@ pub fn childRefsReadsCurrentChildrenTest(_: std.Io, alloc: std.mem.Allocator) !v
     try expectChildRefPane(refs[0], 1);
     try expectChildRefSplit(refs[1], 43);
 }
+
+/// The punctuation and uppercase commands are typed characters; `x` is a
+/// key name (which `Ui.textAction` also reads off typed text).
+pub fn keymapDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const actions = gmux.actions;
+    var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
+    defer km.deinit(alloc);
+    try testz.expectEqual(km.lookupText("%").?, actions.Action.splitRight);
+    try testz.expectEqual(km.lookupText("\"").?, actions.Action.splitBelow);
+    try testz.expectEqual(km.lookupText("H").?, actions.Action.resizeLeft);
+    try testz.expectEqual(km.lookup("x", .{}).?, actions.Action.killPane);
+    try testz.expectEqual(km.lookup("left", .{}).?, actions.Action.focusLeft);
+    try testz.expectTrue(actions.Action.zoom.keepsZoom());
+    try testz.expectTrue(!actions.Action.splitRight.keepsZoom());
+}

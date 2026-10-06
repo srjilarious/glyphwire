@@ -239,8 +239,11 @@
 --     --
 --     -- Chords are `mod+mod+key`: ctrl, alt, shift, super; keys are
 --     -- glyphwire key names (`left`, `page_down`, `backspace`, `slash`,
---     -- `grave_accent`, `F5`) or the aliases `esc`, `del`, `pgdn`, `/`,
---     -- `-`, ... Modifiers must match exactly: `shift+tab` is not `tab`.
+--     -- `grave_accent`, `F5`) or the aliases `esc`, `del`, `pgdn`, and
+--     -- after a modifier `/`, `-`, ... (`ctrl+/`). Modifiers must match
+--     -- exactly: `shift+tab` is not `tab`. A punctuation character or
+--     -- uppercase letter alone (`?`, `G`) means a typed character, which
+--     -- zoe's keys don't take: spell the key (`slash`, `shift+g`).
 --     --
 --     -- Unmodified letters in normal and visual mode (`dd`, `gg`) are
 --     -- vim's grammar and not rebindable here, nor are Escape, the `:`

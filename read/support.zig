@@ -18,6 +18,7 @@ pub const zoom = @import("glyphwire").zoom;
 pub const cache = @import("cache.zig");
 pub const state = @import("state.zig");
 pub const config = @import("config.zig");
+pub const actions = @import("actions.zig");
 pub const archive = @import("archive.zig");
 pub const mokuro = @import("mokuro.zig");
 pub const place = @import("place.zig");

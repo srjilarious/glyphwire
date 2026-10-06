@@ -53,6 +53,15 @@ pub fn build(b: *std.Build) void {
     });
     applib_mod.addImport("listcursor", listcursor_mod);
 
+    // applib/keybind.zig: chord text and named-action keymaps. Its own
+    // module (re-exported as `applib.keybind`) for the same reason as
+    // `listcursor`: glyphwire-host parses its chords with it.
+    const keybind_mod = b.addModule("keybind", .{
+        .root_source_file = b.path("applib/keybind.zig"),
+    });
+    keybind_mod.addImport("glyphwire", glyphwire_mod);
+    applib_mod.addImport("keybind", keybind_mod);
+
     // Pure prompt helpers shared by gw-shell and its test runner
     // (a Zig module can't be reached across directories via relative
     // `@import`, so tests/ can't pull shell/ files in directly).
@@ -97,6 +106,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("applib/luaconf.zig"),
     });
     luaconf_mod.addImport("glyphwire", glyphwire_mod);
+    luaconf_mod.addImport("keybind", keybind_mod);
 
     // applib/dividerconf.zig: a program's own `divider_style` /
     // `divider_chars` over the host's (`set_divider_style`). Its own
@@ -119,6 +129,7 @@ pub fn build(b: *std.Build) void {
     });
     host_support_mod.addImport("glyphwire", glyphwire_mod);
     host_support_mod.addImport("listcursor", listcursor_mod);
+    host_support_mod.addImport("keybind", keybind_mod);
 
     // zoe's editor core (gap buffer, motions, the modal state machine)
     // shared by the `zoe` binary and its test runner -- same
@@ -542,6 +553,7 @@ pub fn build(b: *std.Build) void {
     host_exe.root_module.addImport("themeconf", themeconf_mod);
     host_exe.root_module.addImport("luaconf", luaconf_mod);
     host_exe.root_module.addImport("listcursor", listcursor_mod);
+    host_exe.root_module.addImport("keybind", keybind_mod);
     b.installArtifact(host_exe);
 
     const run_host = b.addRunArtifact(host_exe);

@@ -24,6 +24,7 @@
 const std = @import("std");
 const ziglua = @import("ziglua");
 const glyphwire = @import("glyphwire");
+const keybind = @import("keybind");
 
 pub const Lua = ziglua.Lua;
 
@@ -223,6 +224,119 @@ pub const Conf = struct {
         return out.toOwnedSlice(alloc) catch null;
     }
 
+    /// `config.keys` as one flat table of chord -> action name, or `false`
+    /// to unbind the chord:
+    ///
+    ///   keys = { ["alt+up"] = "upToParentDir", ["F10"] = false, ["?"] = "help" }
+    ///
+    /// Chords are `keybind.Chord.parse` text and names are `Action`'s tag
+    /// names. One that doesn't parse or names no action is warned about
+    /// and skipped. Owned by `alloc`; empty when the key is absent.
+    pub fn keys(self: Conf, lua: *Lua, alloc: std.mem.Allocator, comptime Action: type) []keybind.Override(Action) {
+        const t = lua.getField(-1, "keys");
+        defer lua.pop(1);
+        if (t != .table) {
+            if (t != .nil) self.warn("`keys` is not a table; ignored", .{});
+            return &.{};
+        }
+        var out: std.ArrayList(keybind.Override(Action)) = .empty;
+        self.readKeyTable(lua, alloc, Action, "keys", &out, {});
+        sortOverrides(keybind.Override(Action), out.items);
+        return out.toOwnedSlice(alloc) catch &.{};
+    }
+
+    /// `config.keys` as one table per mode (`Scope`'s tag names), each
+    /// shaped like `keys`'s flat table:
+    ///
+    ///   keys = { insert = { ["ctrl+d"] = "deleteWordForward" } }
+    pub fn scopedKeys(
+        self: Conf,
+        lua: *Lua,
+        alloc: std.mem.Allocator,
+        comptime Scope: type,
+        comptime Action: type,
+    ) []keybind.ScopedOverride(Scope, Action) {
+        const Out = keybind.ScopedOverride(Scope, Action);
+        const t = lua.getField(-1, "keys");
+        defer lua.pop(1);
+        if (t != .table) {
+            if (t != .nil) self.warn("`keys` is not a table; ignored", .{});
+            return &.{};
+        }
+        var out: std.ArrayList(Out) = .empty;
+        lua.pushNil();
+        while (lua.next(-2)) {
+            // Key at -2, value at -1. Only read with `toString` on an
+            // actual string key: it would convert a number key in place
+            // and break `next`.
+            defer lua.pop(1);
+            if (lua.typeOf(-2) != .string) continue;
+            const name = lua.toString(-2) catch continue;
+            const scope = std.meta.stringToEnum(Scope, name) orelse {
+                self.warn("keys.{s}: not a key table ({s}); ignored", .{ name, comptime tagList(Scope) });
+                continue;
+            };
+            if (lua.typeOf(-1) != .table) {
+                self.warn("keys.{s} is not a table; ignored", .{name});
+                continue;
+            }
+            var label_buf: [64]u8 = undefined;
+            const label = std.fmt.bufPrint(&label_buf, "keys.{s}", .{name}) catch "keys";
+            self.readKeyTable(lua, alloc, Action, label, &out, scope);
+        }
+        sortOverrides(Out, out.items);
+        return out.toOwnedSlice(alloc) catch &.{};
+    }
+
+    /// One chord -> action table, on top of the stack, appended to `out`
+    /// (whose items carry `scope` too when they have the field).
+    fn readKeyTable(
+        self: Conf,
+        lua: *Lua,
+        alloc: std.mem.Allocator,
+        comptime Action: type,
+        label: []const u8,
+        out: anytype,
+        scope: anytype,
+    ) void {
+        lua.pushNil();
+        while (lua.next(-2)) {
+            defer lua.pop(1);
+            if (lua.typeOf(-2) != .string) {
+                self.warn("`{s}` entry with a non-string key; ignored", .{label});
+                continue;
+            }
+            const text = lua.toString(-2) catch continue;
+            const chord = keybind.Chord.parse(text) catch |err| {
+                self.warn("{s}[\"{s}\"]: {t}; ignored", .{ label, text, err });
+                continue;
+            };
+            const action: ?Action = switch (lua.typeOf(-1)) {
+                .string => blk: {
+                    const name = lua.toString(-1) catch continue;
+                    break :blk std.meta.stringToEnum(Action, name) orelse {
+                        self.warn("{s}[\"{s}\"] = \"{s}\": unknown action; ignored", .{ label, text, name });
+                        continue;
+                    };
+                },
+                .boolean => if (lua.toBoolean(-1)) {
+                    self.warn("{s}[\"{s}\"] = true means nothing; use an action name or false", .{ label, text });
+                    continue;
+                } else null,
+                else => {
+                    self.warn("{s}[\"{s}\"] must be an action name or false; ignored", .{ label, text });
+                    continue;
+                },
+            };
+            const Item = @typeInfo(@TypeOf(out.items)).pointer.child;
+            const item: Item = if (@TypeOf(scope) == void)
+                .{ .chord = chord, .action = action }
+            else
+                .{ .scope = scope, .chord = chord, .action = action };
+            out.append(alloc, item) catch return;
+        }
+    }
+
     fn rawNumber(self: Conf, lua: *Lua, key: [:0]const u8) ?f64 {
         const t = lua.getField(-1, key);
         defer lua.pop(1);
@@ -233,6 +347,30 @@ pub const Conf = struct {
         return lua.toNumber(-1) catch null;
     }
 };
+
+/// Lua's table order is unspecified; sorting makes the same config always
+/// apply the same way (it only matters when two entries spell one chord
+/// differently, where the later one wins).
+fn sortOverrides(comptime T: type, items: []T) void {
+    std.mem.sort(T, items, {}, struct {
+        fn lessThan(_: void, a: T, b: T) bool {
+            if (@hasField(T, "scope") and a.scope != b.scope) return @intFromEnum(a.scope) < @intFromEnum(b.scope);
+            const ka = a.chord.key();
+            const kb = b.chord.key();
+            if (!std.mem.eql(u8, ka, kb)) return std.mem.lessThan(u8, ka, kb);
+            const ma: u4 = @bitCast(modBits(a.chord));
+            const mb: u4 = @bitCast(modBits(b.chord));
+            if (ma != mb) return ma < mb;
+            const aa: usize = if (a.action) |x| @intFromEnum(x) + 1 else 0;
+            const ab: usize = if (b.action) |x| @intFromEnum(x) + 1 else 0;
+            return aa < ab;
+        }
+    }.lessThan);
+}
+
+fn modBits(c: keybind.Chord) packed struct { ctrl: bool, alt: bool, shift: bool, super: bool } {
+    return .{ .ctrl = c.mods.ctrl, .alt = c.mods.alt, .shift = c.mods.shift, .super = c.mods.super };
+}
 
 /// `"'a'/'b'/'c'"` for an enum's tags, for a warning.
 fn tagList(comptime E: type) []const u8 {

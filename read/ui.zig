@@ -47,6 +47,7 @@ const glyphwire = @import("glyphwire");
 const archive_mod = @import("archive.zig");
 const cache_mod = @import("cache.zig");
 const config_mod = @import("config.zig");
+const actions = @import("actions.zig");
 const mokuro = @import("mokuro.zig");
 const place = @import("place.zig");
 const dict_mod = @import("dict.zig");
@@ -296,6 +297,9 @@ pub const Ui = struct {
 
     book: *archive_mod.Archive,
     conf: config_mod.ReadConfig,
+    /// Every key, by mode: the defaults with `read.conf.lua`'s `keys`
+    /// over them. See `actions.zig`.
+    keymaps: actions.Keymaps,
     cache: cache_mod.Cache,
 
     context: glyphwire.ContextHandle,
@@ -539,12 +543,17 @@ pub const Ui = struct {
         try client.setLayerVisible(dict_layer, false);
         try client.setLayerVisible(dict_build_layer, false);
 
+        var keymaps = try actions.Keymaps.initDefaults(alloc, actions.defaults);
+        errdefer keymaps.deinit(alloc);
+        try keymaps.apply(alloc, conf.keys);
+
         self.* = .{
             .alloc = alloc,
             .client = client,
             .listener = listener,
             .book = book,
             .conf = conf,
+            .keymaps = keymaps,
             .cache = .init(conf.cache_pages),
             .context = context,
             .page_layer = page_layer,
@@ -742,6 +751,7 @@ pub const Ui = struct {
             .goto_prompt => |*buf| buf.deinit(alloc),
             else => {},
         }
+        self.keymaps.deinit(alloc);
         self.client.destroyContext(self.context) catch {};
         alloc.destroy(self);
     }
@@ -2494,113 +2504,110 @@ pub const Ui = struct {
             // Anything else cancels the prefix and is handled normally.
         }
 
-        // Off the event, as it was pressed -- not the live down-set.
-        const shift = k.shift();
+        const scope = self.keyScope();
+        const action = self.keymaps.lookup(scope, key, k.mods) orelse return;
+        return self.perform(scope, action);
+    }
 
-        // An Anki card in progress takes every key: a page turn or a
-        // closed dialog mid-card would pull the page out from under it.
-        if (self.card != null) return self.handleCardKey(key);
-        if (eq(u8, key, "c")) return self.startCard();
-
-        // ── AI panel ──
-        // The first-send confirmation takes Enter (or `a` again) and
-        // Escape; a request in flight takes Escape as "cancel". Both before
-        // the quit block, so that Escape doesn't close the dialog instead.
+    /// Which `actions.Scope` the keyboard is in: the precedence the modes
+    /// take over the page, see `actions.parentScope`.
+    fn keyScope(self: *const Ui) actions.Scope {
+        if (self.card != null) return .card;
         if (self.ai) |panel| switch (panel.phase) {
-            .confirm => {
-                if (eq(u8, key, "enter") or eq(u8, key, "kp_enter") or eq(u8, key, "a")) return self.confirmAi();
-                if (eq(u8, key, "escape")) return self.clearAi();
-            },
-            .sending => if (eq(u8, key, "escape")) {
-                self.clearAi();
-                try self.setMessage("AI request cancelled", .{});
-                self.status_dirty = true;
-                return;
-            },
+            .confirm => return .confirm,
+            .sending => return .busy,
             else => {},
         };
-        if (eq(u8, key, "a")) return self.startAi();
-        // A side panel taller than its slot captures the page keys for as
-        // long as it has somewhere to scroll -- the same "capture while
-        // there's something to do" rule `]`/`[` follow for lookup hits.
-        if (self.side_max_scroll > 0) {
-            if (eq(u8, key, "page_down")) return self.scrollSide(.down);
-            if (eq(u8, key, "page_up")) return self.scrollSide(.up);
-        }
+        return .page;
+    }
 
-        // ── quit / overlay ──
-        if (eq(u8, key, "q") or eq(u8, key, "escape")) {
-            if (self.help_visible) {
-                try self.setHelp(false);
-                return;
-            }
-            // Escape closes the OCR dialog before it quits; `q` doesn't,
-            // so there is still a one-key way out with the dialog up.
-            if (eq(u8, key, "escape")) {
-                if (self.ocr) |o| {
-                    if (o.at != null) {
-                        self.closeDialog();
-                        return;
-                    }
-                }
-            }
-            self.quit = true;
-            return;
-        }
-        // -- OCR --
-        if (eq(u8, key, "tab")) return self.stepBlock(if (shift) -1 else 1);
-        if (eq(u8, key, "o")) return self.toggleHints();
-        if (eq(u8, key, "v")) return self.cycleLayout();
-        if (eq(u8, key, "z")) return self.setPeek(true);
-        // ── unambiguous page turns ──
-        if (eq(u8, key, "space") or eq(u8, key, "page_down")) return self.stepPage(1);
-        if (eq(u8, key, "backspace") or eq(u8, key, "page_up")) return self.stepPage(-1);
-        if (eq(u8, key, "home")) return self.goToPage(0);
-        if (eq(u8, key, "end")) return self.goToPage(self.book.count() -| 1);
-        if (eq(u8, key, "g")) {
-            if (shift) return self.goToPage(self.book.count() -| 1); // G
-            self.pending = .goto_prefix;
-            return;
-        }
-        // ── pan (always) ──
-        if (eq(u8, key, "h")) return self.panBy(0, -@as(i64, @intCast(self.conf.pan_step)));
-        if (eq(u8, key, "l")) return self.panBy(0, @intCast(self.conf.pan_step));
-        if (eq(u8, key, "k")) return self.panBy(-@as(i64, @intCast(self.conf.pan_step)), 0);
-        if (eq(u8, key, "j")) return self.panBy(@intCast(self.conf.pan_step), 0);
+    /// Does what a bound key or typed character asked for. `scope` is the
+    /// mode it was looked up in, which decides what the dialog actions
+    /// (`accept`, `cancel`, ...) mean.
+    fn perform(self: *Ui, scope: actions.Scope, action: actions.Action) !void {
+        const step: i64 = @intCast(self.conf.pan_step);
+        switch (action) {
+            .none => {},
 
-        // ── arrows: pan the axis if it overflows, else turn the page ──
-        if (eq(u8, key, "left")) {
-            if (self.layout.max_pan_col > 0) return self.panBy(0, -@as(i64, @intCast(self.conf.pan_step)));
-            return self.turn(.left);
-        }
-        if (eq(u8, key, "right")) {
-            if (self.layout.max_pan_col > 0) return self.panBy(0, @intCast(self.conf.pan_step));
-            return self.turn(.right);
-        }
-        if (eq(u8, key, "up")) {
-            if (self.layout.max_pan_row > 0) return self.panBy(-@as(i64, @intCast(self.conf.pan_step)), 0);
-            return self.stepPage(-1);
-        }
-        if (eq(u8, key, "down")) {
-            if (self.layout.max_pan_row > 0) return self.panBy(@intCast(self.conf.pan_step), 0);
-            return self.stepPage(1);
-        }
+            .quit, .back => {
+                if (self.help_visible) return self.setHelp(false);
+                // Escape closes the OCR dialog before it quits; `q`
+                // doesn't, so there is still a one-key way out with the
+                // dialog up.
+                if (action == .back) if (self.ocr) |o| if (o.at != null) return self.closeDialog();
+                self.quit = true;
+            },
+            .toggleHelp => try self.setHelp(!self.help_visible),
+            .gotoPage => self.startGoto(),
+            .goPrefix => self.pending = .goto_prefix,
+            .nextPage => self.stepPage(1),
+            .prevPage => self.stepPage(-1),
+            // A side panel taller than its slot captures the page keys for
+            // as long as it has somewhere to scroll -- the same "capture
+            // while there's something to do" rule `]`/`[` follow for
+            // lookup hits.
+            .pageDown => if (self.side_max_scroll > 0) self.scrollSide(.down) else self.stepPage(1),
+            .pageUp => if (self.side_max_scroll > 0) self.scrollSide(.up) else self.stepPage(-1),
+            .firstPage => self.goToPage(0),
+            .lastPage => self.goToPage(self.book.count() -| 1),
+            // While the lookup panel lists more than one entry, `]`/`[`
+            // move along that list instead of jumping pages.
+            .jumpForward => if (self.lookupHits() > 1) self.cycleLookupHit(1) else self.stepPage(@intCast(self.conf.jump_pages)),
+            .jumpBack => if (self.lookupHits() > 1) self.cycleLookupHit(-1) else self.stepPage(-@as(i64, @intCast(self.conf.jump_pages))),
+            .panLeft => self.panBy(0, -step),
+            .panRight => self.panBy(0, step),
+            .panUp => self.panBy(-step, 0),
+            .panDown => self.panBy(step, 0),
+            .panOrTurnLeft => if (self.layout.max_pan_col > 0) self.panBy(0, -step) else self.turn(.left),
+            .panOrTurnRight => if (self.layout.max_pan_col > 0) self.panBy(0, step) else self.turn(.right),
+            .panOrPageUp => if (self.layout.max_pan_row > 0) self.panBy(-step, 0) else self.stepPage(-1),
+            .panOrPageDown => if (self.layout.max_pan_row > 0) self.panBy(step, 0) else self.stepPage(1),
+            .fitScreen => self.setMode(.fit_screen),
+            .fitWidth => self.setMode(.fit_width),
+            .fitHeight => self.setMode(.fit_height),
+            .naturalSize => self.setMode(.natural),
+            .zoomIn => self.zoomBy(.in),
+            .zoomOut => self.zoomBy(.out),
+            .flipDirection => self.flipDirection(),
+            .nextBlock => self.stepBlock(1),
+            .prevBlock => self.stepBlock(-1),
+            .toggleHints => self.toggleHints(),
+            .cycleLayout => self.cycleLayout(),
+            .peek => self.setPeek(true),
+            .toggleDialogHidden => self.toggleDialogHidden(),
+            .cycleDictScale => self.cycleDictTitleScale(),
+            .cycleOcrScale => self.cycleOcrScale(),
+            .startCard => self.startCard(),
+            .startAi => self.startAi(),
 
-        // ── sizing ──
-        if (eq(u8, key, "f")) return self.setMode(.fit_screen);
-        if (eq(u8, key, "w")) return self.setMode(.fit_width);
-        if (eq(u8, key, "t")) return self.setMode(.fit_height);
-        if (eq(u8, key, "one")) return self.setMode(.natural);
-        if (eq(u8, key, "s")) return if (shift) self.cycleOcrScale() else self.cycleDictTitleScale();
+            .accept, .cancel, .recrop, .nudgeLeft, .nudgeRight, .nudgeUp, .nudgeDown, .cropGrow, .cropShrink, .scrollPanelDown, .scrollPanelUp => switch (scope) {
+                .card => try self.performCard(action),
+                .confirm => if (action == .accept) self.confirmAi() else if (action == .cancel) self.clearAi(),
+                .busy => if (action == .cancel) {
+                    self.clearAi();
+                    try self.setMessage("AI request cancelled", .{});
+                    self.status_dirty = true;
+                },
+                .page => {},
+            },
+        }
+    }
 
-        // ── direction ──
-        if (eq(u8, key, "d")) return self.flipDirection();
+    /// How many entries the open lookup panel lists; 0 with none open.
+    fn lookupHits(self: *const Ui) usize {
+        const lk = self.lookup orelse return 0;
+        return lk.count();
     }
 
     /// The release half of a keystroke. Only the hold-to-peek key cares:
-    /// everything else acts on the press and ignores this.
+    /// everything else acts on the press and ignores this. Matched on the
+    /// key alone, since the modifiers may have changed while it was held.
     fn handleKeyRelease(self: *Ui, key: []const u8) !void {
-        if (std.mem.eql(u8, key, "z")) self.setPeek(false);
+        for (self.keymaps.table(.page).bindings.items) |b| {
+            if (b.action == .peek and !b.chord.text and std.ascii.eqlIgnoreCase(b.chord.key(), key)) {
+                return self.setPeek(false);
+            }
+        }
     }
 
     /// `z` down / up: fade the dialog -- and the lookup panel, when one is
@@ -2669,14 +2676,6 @@ pub const Ui = struct {
     /// everywhere. Letters and named keys stay on `handleKey`, where the
     /// physical position *is* what's wanted (vim-style, same as zoe).
     fn handleText(self: *Ui, text: []const u8) !void {
-        if (self.card) |cd| {
-            // `+`/`-` size the crop box; nothing else types into a card.
-            if (cd.phase == .crop) {
-                if (std.mem.eql(u8, text, "+") or std.mem.eql(u8, text, "=")) self.scaleCrop(1.15);
-                if (std.mem.eql(u8, text, "-")) self.scaleCrop(1.0 / 1.15);
-            }
-            return;
-        }
         if (self.pending == .goto_prompt) {
             var prompt = &self.pending.goto_prompt;
             for (text) |ch| {
@@ -2689,24 +2688,11 @@ pub const Ui = struct {
             return;
         }
 
-        const eq = std.mem.eql;
-        if (eq(u8, text, ":")) return self.startGoto();
-        if (eq(u8, text, "?")) return self.setHelp(!self.help_visible);
-        // `=` as well as `+`: the unshifted key is just as good a "zoom
-        // in" and saves the reach.
-        if (eq(u8, text, "+") or eq(u8, text, "=")) return self.zoomBy(.in);
-        if (eq(u8, text, "-")) return self.zoomBy(.out);
-        if (eq(u8, text, "\\")) return self.toggleDialogHidden();
-        // While the lookup panel is listing more than one entry, `]`/`[`
-        // move the focus down and up that list instead of jumping pages --
-        // the panel "captures" the keys for as long as there's something to
-        // move between, same as `goto_prompt` captures every key above.
-        if (self.lookup) |lk| if (lk.count() > 1) {
-            if (eq(u8, text, "]")) return self.cycleLookupHit(1);
-            if (eq(u8, text, "[")) return self.cycleLookupHit(-1);
-        };
-        if (eq(u8, text, "]")) return self.stepPage(@intCast(self.conf.jump_pages));
-        if (eq(u8, text, "[")) return self.stepPage(-@as(i64, @intCast(self.conf.jump_pages)));
+        // The typed-character bindings (`?`, `:`, `]`, `+` ...), as the
+        // keyboard layout produced them.
+        const scope = self.keyScope();
+        const action = self.keymaps.lookupText(scope, text) orelse return;
+        return self.perform(scope, action);
     }
 
     /// A page turn expressed as a screen direction, resolved against the
@@ -3682,33 +3668,39 @@ pub const Ui = struct {
         self.status_dirty = true;
     }
 
-    fn handleCardKey(self: *Ui, key: []const u8) !void {
-        const eq = std.mem.eql;
-        const enter = eq(u8, key, "enter") or eq(u8, key, "kp_enter");
+    /// A `card`-scope action, which means something different in each
+    /// phase of the card (and nothing in some).
+    fn performCard(self: *Ui, action: actions.Action) !void {
         const cd = &self.card.?;
         switch (cd.phase) {
             .crop => {
-                if (enter) return self.acceptCrop();
-                if (eq(u8, key, "escape")) return self.skipImage();
                 // Nudge one cell's worth, for the last bit of framing.
                 const step_x: i64 = @max(@as(i64, @intFromFloat(@as(f32, @floatFromInt(self.cell.w)) / self.layout.scale)), 1);
                 const step_y: i64 = @max(@as(i64, @intFromFloat(@as(f32, @floatFromInt(self.cell.h)) / self.layout.scale)), 1);
-                if (eq(u8, key, "left") or eq(u8, key, "h")) return self.nudgeCrop(-step_x, 0);
-                if (eq(u8, key, "right") or eq(u8, key, "l")) return self.nudgeCrop(step_x, 0);
-                if (eq(u8, key, "up") or eq(u8, key, "k")) return self.nudgeCrop(0, -step_y);
-                if (eq(u8, key, "down") or eq(u8, key, "j")) return self.nudgeCrop(0, step_y);
+                switch (action) {
+                    .accept => return self.acceptCrop(),
+                    .cancel => return self.skipImage(),
+                    .nudgeLeft => self.nudgeCrop(-step_x, 0),
+                    .nudgeRight => self.nudgeCrop(step_x, 0),
+                    .nudgeUp => self.nudgeCrop(0, -step_y),
+                    .nudgeDown => self.nudgeCrop(0, step_y),
+                    .cropGrow => self.scaleCrop(1.15),
+                    .cropShrink => self.scaleCrop(1.0 / 1.15),
+                    else => {},
+                }
             },
-            .preview => {
-                if (enter) return self.sendCard();
-                if (eq(u8, key, "escape")) {
+            .preview => switch (action) {
+                .accept => return self.sendCard(),
+                .cancel => {
                     self.clearCard();
                     return self.cardMessage("card discarded", .{});
-                }
-                if (eq(u8, key, "r")) return self.enterCrop();
-                if (eq(u8, key, "page_down")) return self.scrollSide(.down);
-                if (eq(u8, key, "page_up")) return self.scrollSide(.up);
+                },
+                .recrop => return self.enterCrop(),
+                .scrollPanelDown => self.scrollSide(.down),
+                .scrollPanelUp => self.scrollSide(.up),
+                else => {},
             },
-            .sending => |p| if (eq(u8, key, "escape")) {
+            .sending => |p| if (action == .cancel) {
                 var future = p.future;
                 future.cancel(self.client.io);
                 p.job.destroy();
@@ -3716,17 +3708,18 @@ pub const Ui = struct {
                 self.side_dirty = true;
                 return self.cardMessage("send cancelled -- the card may still have reached Anki", .{});
             },
-            .failure => |msg| {
-                if (enter) {
+            .failure => |msg| switch (action) {
+                .accept => {
                     self.alloc.free(msg);
                     cd.phase = .preview;
                     return self.sendCard();
-                }
-                if (eq(u8, key, "escape")) return self.clearCard();
-                if (eq(u8, key, "r")) {
+                },
+                .cancel => return self.clearCard(),
+                .recrop => {
                     self.alloc.free(msg);
                     return self.enterCrop();
-                }
+                },
+                else => {},
             },
         }
     }

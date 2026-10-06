@@ -136,6 +136,38 @@ pub fn missingOrNonTableConfigTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectTrue(!wrong.applied);
 }
 
+const KeyAction = enum { up, help, quit };
+
+const KeysOut = struct {
+    alloc: std.mem.Allocator,
+    keys: []@import("applib").keybind.Override(KeyAction) = &.{},
+
+    fn apply(self: *KeysOut, lua: *Lua) void {
+        self.keys = conf.keys(lua, self.alloc, KeyAction);
+    }
+};
+
+/// Parsed and validated as read: a bad chord or an unknown action is
+/// dropped, `false` comes back as a null action, and the result is sorted
+/// so the same file always applies the same way.
+pub fn keysReadsChordsAndActionsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var out: KeysOut = .{ .alloc = alloc };
+    const err = conf.run(alloc,
+        \\config = { keys = {
+        \\  ["up"] = "up", ["?"] = "help", ["F10"] = false,
+        \\  ["hyper+x"] = "quit", ["q"] = "nope", ["w"] = true,
+        \\} }
+    , &out, KeysOut.apply);
+    try testz.expectTrue(err == null);
+    defer alloc.free(out.keys);
+    try testz.expectEqual(out.keys.len, 3);
+    try testz.expectEqualStr(out.keys[0].chord.key(), "?");
+    try testz.expectTrue(out.keys[0].chord.text);
+    try testz.expectEqualStr(out.keys[1].chord.key(), "f10");
+    try testz.expectTrue(out.keys[1].action == null);
+    try testz.expectEqual(out.keys[2].action.?, .up);
+}
+
 pub fn readInMissingFileIsFileNotFoundTest(io: std.Io, alloc: std.mem.Allocator) !void {
     const missing: luaconf.Conf = .{ .prog = "test", .name = "no-such-file.conf.lua" };
     try testz.expectError(missing.readIn(alloc, io, "/nonexistent-glyphwire-dir"), error.FileNotFound);

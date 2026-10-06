@@ -577,7 +577,7 @@ pub const Editor = struct {
     fn lookupKey(self: *Editor, key: []const u8, mods: Mods) ?actions.Action {
         const km: *const actions.Keymaps = self.keymaps orelse blk: {
             if (self.own_keymaps == null) {
-                self.own_keymaps = actions.Keymaps.initDefaults(self.alloc) catch return null;
+                self.own_keymaps = actions.Keymaps.initDefaults(self.alloc, actions.defaults) catch return null;
             }
             break :blk &self.own_keymaps.?;
         };
