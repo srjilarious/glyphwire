@@ -121,7 +121,7 @@ pub const Caret = struct {
     /// foregrounded program), otherwise on the blink phase.
     pub fn visible(self: *const Caret) bool {
         if (!self.app.server.ctx.caret_visible) return false;
-        if (!self.app.server.ctx.root.cursor_visible) return false;
+        if (!self.app.server.ctx.root.vt.cursor_visible) return false;
         return self.blinkOn();
     }
 

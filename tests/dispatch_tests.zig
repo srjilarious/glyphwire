@@ -2733,7 +2733,7 @@ pub fn setCaretVisibleHidesAndShowsTest(io: std.Io, alloc: std.mem.Allocator) !v
         \\{"jsonrpc":"2.0","method":"set_caret_visible","params":{"visible":false}}
     );
     try testz.expectFalse(ctx.caret_visible);
-    try testz.expectTrue(ctx.root.cursor_visible);
+    try testz.expectTrue(ctx.root.vt.cursor_visible);
 
     try notifyThrough(alloc, &d,
         \\{"jsonrpc":"2.0","method":"set_caret_visible","params":{"visible":true}}

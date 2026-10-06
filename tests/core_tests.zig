@@ -1683,7 +1683,7 @@ pub fn writeTextInterpretsSgrColourSequenceTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectEqualStr("D", layer.cell(0, 2).grapheme());
     try testz.expectEqualStr("!", layer.cell(0, 3).grapheme());
     try testz.expectEqual(layer.cursor.col, 4);
-    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+    try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.ground);
 
     // ANSI 31 is the theme's normal red slot -- a reference, not RGB.
     const red = glyphwire.Color.ansi(.normal, .red);
@@ -1721,14 +1721,14 @@ pub fn writeTextDoesNotCarryPartialEscSequenceAcrossCallsTest(io: std.Io, alloc:
     // is the deliberate trade for never letting an unterminated sequence
     // swallow a later write -- see writeText / EscState.
     try layer.writeText("\x1b[1", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+    try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.ground);
     try layer.writeText("2mX", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     try testz.expectEqualStr("2", layer.cell(0, 0).grapheme());
     try testz.expectEqualStr("m", layer.cell(0, 1).grapheme());
     try testz.expectEqualStr("X", layer.cell(0, 2).grapheme());
     try testz.expectEqual(layer.cursor.col, 3);
-    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+    try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.ground);
 }
 
 pub fn writeTextUnterminatedEscSequenceDoesNotSwallowNextCallTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1742,7 +1742,7 @@ pub fn writeTextUnterminatedEscSequenceDoesNotSwallowNextCallTest(io: std.Io, al
     // shell's own prompt would silently vanish. Now the next call draws
     // in full.
     try layer.writeText("out\x1b]2;still-open", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+    try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.ground);
 
     layer.cursor = .{ .row = 1, .col = 0 };
     try layer.writeText("/home/user > ", glyphwire.default_style.fg, glyphwire.default_style.bg);
@@ -1755,7 +1755,7 @@ pub fn writeTextUnterminatedEscSequenceDoesNotSwallowNextCallTest(io: std.Io, al
     // A lone trailing ESC is abandoned the same way.
     layer.cursor = .{ .row = 2, .col = 0 };
     try layer.writeText("tail\x1b", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+    try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.ground);
     layer.cursor = .{ .row = 3, .col = 0 };
     try layer.writeText("next", glyphwire.default_style.fg, glyphwire.default_style.bg);
     try testz.expectEqualStr("n", layer.cell(3, 0).grapheme());
@@ -1867,12 +1867,12 @@ pub fn layerPtyModeCarriesPartialCsiAcrossCallsTest(io: std.Io, alloc: std.mem.A
     // `pty_mode` layer keeps the machine armed: "\x1b[1" leaves it
     // mid-CSI, "2mX" finishes `ESC [ 1 2 m` (SGR) and only "X" prints.
     try layer.writeText("\x1b[1", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.esc_state, glyphwire.EscState.csi);
+    try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.csi);
     try layer.writeText("2mX", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     try testz.expectEqualStr("X", layer.cell(0, 0).grapheme());
     try testz.expectEqual(layer.cursor.col, 1);
-    try testz.expectEqual(layer.esc_state, glyphwire.EscState.ground);
+    try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.ground);
 }
 
 pub fn layerPtyModeKeepsSgrColourAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -2064,19 +2064,19 @@ pub fn dectcemAndDecckmTrackModeStateTest(io: std.Io, alloc: std.mem.Allocator) 
     defer layer.deinit();
 
     // DECTCEM (?25) -> cursor_visible.
-    try testz.expectEqual(layer.cursor_visible, true);
+    try testz.expectEqual(layer.vt.cursor_visible, true);
     try layer.writeText("\x1b[?25l", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.cursor_visible, false);
+    try testz.expectEqual(layer.vt.cursor_visible, false);
     try layer.writeText("\x1b[?25h", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.cursor_visible, true);
+    try testz.expectEqual(layer.vt.cursor_visible, true);
 
     // DECCKM (?1) -> app_cursor_keys, read by the host to tell a
     // full-screen program owns the primary screen.
-    try testz.expectEqual(layer.app_cursor_keys, false);
+    try testz.expectEqual(layer.vt.app_cursor_keys, false);
     try layer.writeText("\x1b[?1h", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.app_cursor_keys, true);
+    try testz.expectEqual(layer.vt.app_cursor_keys, true);
     try layer.writeText("\x1b[?1l", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.app_cursor_keys, false);
+    try testz.expectEqual(layer.vt.app_cursor_keys, false);
 }
 
 pub fn scrollRegionConfinesLineFeedTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -2249,15 +2249,15 @@ pub fn decstrSoftResetRestoresRegionAndCursorVisibleWithoutMovingTest(io: std.Io
     // mid-screen, a cursor saved.
     try layer.writeText("\x1b[2;5r\x1b[?25l\x1b[4;3H\x1b7", glyphwire.default_style.fg, glyphwire.default_style.bg);
     try testz.expectEqual(layer.regionActive(), true);
-    try testz.expectEqual(layer.cursor_visible, false);
+    try testz.expectEqual(layer.vt.cursor_visible, false);
 
     // `CSI ! p` (DECSTR): region back to full, caret shown, saved cursor
     // dropped -- but the cursor itself does NOT move and the screen isn't
     // cleared. This is what glyphwire-shell sends after a pty child exits.
     try layer.writeText("\x1b[!p", glyphwire.default_style.fg, glyphwire.default_style.bg);
     try testz.expectEqual(layer.regionActive(), false);
-    try testz.expectEqual(layer.cursor_visible, true);
-    try testz.expectEqual(layer.saved_cursor, null);
+    try testz.expectEqual(layer.vt.cursor_visible, true);
+    try testz.expectEqual(layer.vt.saved_cursor, null);
     // Cursor stayed where `\x1b[4;3H` put it (row 3, col 2).
     try testz.expectEqual(layer.cursor.row, 3);
     try testz.expectEqual(layer.cursor.col, 2);

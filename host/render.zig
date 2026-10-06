@@ -2161,7 +2161,7 @@ pub const Renderer = struct {
     /// cursor. Not `drawRootCaret`, whose blink clock and scroll pin
     /// belong to the focused context. Hidden by DECTCEM like any caret.
     fn drawIdleRootCaret(eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize, color: host_eng.Color) void {
-        if (!root.cursor_visible) return;
+        if (!root.vt.cursor_visible) return;
         if (root.cursor.row >= root.height or root.cursor.col >= root.width) return;
         eng.renderer.begin(eng.projMat);
         drawCaret(eng, root, origin_x, origin_y, root.cursor.row, root.cursor.col, view_offset, .box, color);
@@ -2179,7 +2179,7 @@ pub const Renderer = struct {
     /// blink clock with the root caret.
     /// `blink` is false for an unfocused pane's caret, which holds still.
     fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin, shape: CursorShape, color: host_eng.Color, blink: bool) void {
-        if (!layer.cursor_visible) return;
+        if (!layer.vt.cursor_visible) return;
         if (blink and !self.app.caret.blinkOn()) return;
         if (layer.view_scroll != 0) return;
 

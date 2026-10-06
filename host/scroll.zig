@@ -26,7 +26,7 @@ const Engine = app_mod.Engine;
 /// already-locked root layer -- for `render.zig`, which holds `ctx_mutex`
 /// itself (the mutex isn't reentrant).
 pub fn rootOwned(root: *const glyphwire.Layer) bool {
-    return root.on_alt or root.regionActive() or root.app_cursor_keys;
+    return root.on_alt or root.regionActive() or root.vt.app_cursor_keys;
 }
 
 /// Mouse-wheel and scrollbar interaction against the root layer's
