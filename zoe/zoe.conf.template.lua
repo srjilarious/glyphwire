@@ -152,6 +152,12 @@
 --     -- path pops up under it. 0 shows it at once.
 --     tab_tooltip_delay_ms = 400,
 --
+--     -- With a .zoe-workspace open (`zoe x.zoe-workspace`, :wsopen or
+--     -- :wssave), rewrite it on the way out: :q, :wq / :x, or the
+--     -- window closing. :q! never does. If the write fails, :q stays
+--     -- and says why; :q! still quits.
+--     workspace_autosave = true,
+--
 --     ---- Language servers (LSP) ---------------------------------------
 --
 --     -- zoe talks to language servers for diagnostics, hover (K) and

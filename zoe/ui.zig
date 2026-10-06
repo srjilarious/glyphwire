@@ -70,6 +70,7 @@ const tabs = @import("tabs.zig");
 const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
 const zoe_workspace = @import("workspace.zig");
+const hangup = @import("hangup.zig");
 const profile = @import("profile.zig");
 const SpanCache = @import("spancache.zig").SpanCache;
 const selection_diff = @import("selection_diff.zig");
@@ -2369,6 +2370,13 @@ pub const Ui = struct {
 
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
+            // The window closed (SIGHUP) or zoe was told to stop: leave
+            // the way `:q` would, minus the dirty-buffer guard -- there's
+            // no one left to answer it.
+            if (hangup.requested()) {
+                _ = self.autosaveWorkspace();
+                break;
+            }
             // Before the frame: everything the language servers have said
             // since the last turn, so an arriving diagnostic is drawn in the
             // frame it arrived for rather than the one after.
@@ -4138,10 +4146,16 @@ pub const Ui = struct {
                 self.save(self.expandArg(target, &home_buf));
                 if (self.buf.ed.buf.dirty) return;
                 if (self.refuseQuitForDirtyBuffer()) return;
+                if (!self.autosaveWorkspace()) return;
                 self.quit = true;
             },
+            // `:q!` leaves the workspace file as it was, the way it
+            // leaves every other file.
             .quit => |q| {
-                if (!q.force and self.refuseQuitForDirtyBuffer()) return;
+                if (!q.force) {
+                    if (self.refuseQuitForDirtyBuffer()) return;
+                    if (!self.autosaveWorkspace()) return;
+                }
                 self.quit = true;
             },
             // `:e <path>` opens a tab; a bare `:e` re-reads this one.
@@ -4155,7 +4169,7 @@ pub const Ui = struct {
             .chdir => |target| self.changeDir(target),
             .add_folder => |target| try self.addFolder(self.expandArg(target, &home_buf)),
             .remove_folder => |target| try self.removeFolder(self.expandArg(target, &home_buf)),
-            .ws_save => |target| self.workspaceSave(self.expandArg(target, &home_buf)),
+            .ws_save => |target| _ = self.workspaceSave(self.expandArg(target, &home_buf)),
             .ws_open => |o| {
                 const path = self.expandArg(o.path, &home_buf) orelse {
                     self.buf.ed.setStatus("E471: Argument required", .{});
@@ -4361,35 +4375,49 @@ pub const Ui = struct {
 
     /// `:wssave [file]`: the named file, or the one this session was
     /// opened from or last saved to. A name with no workspace extension
-    /// gets `.zoe-workspace`.
-    fn workspaceSave(self: *Ui, target: ?[]const u8) void {
+    /// gets `.zoe-workspace`. False when nothing was written; the
+    /// status line says why.
+    fn workspaceSave(self: *Ui, target: ?[]const u8) bool {
         self.status_dirty = true;
         const path = target orelse self.ws_file orelse {
             self.buf.ed.setStatus("E32: No workspace file name (:wssave <file>)", .{});
-            return;
+            return false;
         };
         var arena_state = std.heap.ArenaAllocator.init(self.alloc);
         defer arena_state.deinit();
         const snap = self.workspaceSnapshot(arena_state.allocator()) catch |err| {
             self.buf.ed.setStatus("E: can't save the workspace ({t})", .{err});
-            return;
+            return false;
         };
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_n = std.process.currentPath(self.io, &cwd_buf) catch {
             self.buf.ed.setStatus("E: cannot read working directory", .{});
-            return;
+            return false;
         };
         const abs = zoe_workspace.save(self.alloc, self.io, cwd_buf[0..cwd_n], path, snap) catch |err| {
             switch (err) {
                 error.VscodeWorkspace => self.buf.ed.setStatus("E: zoe doesn't write .code-workspace files; save to a .zoe-workspace", .{}),
                 else => self.buf.ed.setStatus("E212: Can't write workspace {s} ({t})", .{ path, err }),
             }
-            return;
+            return false;
         };
         // `path` may be the old `ws_file`; it isn't read past `save`.
         if (self.ws_file) |old| self.alloc.free(old);
         self.ws_file = abs;
         self.buf.ed.setStatus("workspace saved: {s}", .{abs});
+        return true;
+    }
+
+    /// On the way out (`:q`, `:wq`, the window closing): rewrites the
+    /// `.zoe-workspace` this session was opened from or last saved to,
+    /// unless `workspace_autosave = false`. A session with no such file
+    /// (plain directories, a `.code-workspace`) has nothing to write.
+    /// False when the write failed, which `:q` takes as a reason to stay;
+    /// `:q!` doesn't ask.
+    fn autosaveWorkspace(self: *Ui) bool {
+        if (self.ws_file == null) return true;
+        if (self.hl_config) |cfg| if (!cfg.workspace_autosave) return true;
+        return self.workspaceSave(null);
     }
 
     /// What `:wssave` writes, borrowing from the tree, the slots and `th`

@@ -10,7 +10,7 @@
 //! an `injections` on/off switch, and
 //! the editor's display options (`page_lines`, `line_numbers`,
 //! `tab_width`, `expand_tab`, `show_whitespace`, `wrap`,
-//! `tab_tooltip_delay_ms`).
+//! `tab_tooltip_delay_ms`), and `workspace_autosave`.
 //! With no file present
 //! zoe runs on the built-in languages, the `default` theme, injection
 //! enabled, and a 4-cell expanding Tab.
@@ -164,6 +164,10 @@ pub const Config = struct {
     /// tab before its file's full path pops up under it. Zero shows it
     /// at once; a negative value or a non-number is ignored.
     tab_tooltip_delay_ms: f64 = tab_tooltip_delay_ms_default,
+    /// `config.workspace_autosave` -- rewrite the session's
+    /// `.zoe-workspace` on the way out (`:q`, `:wq`, the window closing;
+    /// never `:q!`). Default true.
+    workspace_autosave: bool = true,
     /// `config.lsp.enabled` -- the master switch. False stops every
     /// language server from starting, whatever `lsp_servers` says.
     lsp_enabled: bool = true,
@@ -271,6 +275,7 @@ const Apply = struct {
         if (conf.boolean(lua, "show_whitespace")) |v| cfg.show_whitespace = v;
         if (conf.boolean(lua, "wrap")) |v| cfg.wrap = v;
         if (conf.number(lua, f64, "tab_tooltip_delay_ms", delay)) |v| cfg.tab_tooltip_delay_ms = v;
+        if (conf.boolean(lua, "workspace_autosave")) |v| cfg.workspace_autosave = v;
         readLsp(lua, a, cfg);
         // Per-mode tables (`global`, `normal`, `visual`, `insert`; see
         // `actions.zig`). `false` binds `.none`, which also hides the

@@ -78,6 +78,8 @@ pub fn main(init: std.process.Init) !void {
         \\:wssave [file] writes the folders, and the theme if :theme or
         \\zoe.conf.lua chose one, to a .zoe-workspace (bare: the one zoe was
         \\opened from or last saved to); :wsopen <file> switches to another.
+        \\That .zoe-workspace is rewritten on :q, :wq and the window closing
+        \\(not :q!); workspace_autosave = false in zoe.conf.lua turns it off.
         \\
         \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
         \\glyphwire display server. Ctrl+W is vim's window prefix: then v or s
@@ -352,6 +354,9 @@ fn runUi(
     }, environ);
     defer ui.deinit();
 
+    // Closing the window sends SIGHUP: catch it so the workspace file
+    // still gets written on the way out.
+    try zoe.hangup.watch(conn.listener);
     try ui.run();
     return true;
 }

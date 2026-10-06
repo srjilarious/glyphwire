@@ -3068,6 +3068,19 @@ pub fn tabTooltipDelayIsConfigurableTest(_: std.Io, alloc: std.mem.Allocator) !v
     }
 }
 
+pub fn workspaceAutosaveIsOnByDefaultTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    {
+        var cfg = try parseConf(alloc, "config = {}");
+        defer cfg.deinit();
+        try testz.expectTrue(cfg.workspace_autosave);
+    }
+    {
+        var cfg = try parseConf(alloc, "config = { workspace_autosave = false }");
+        defer cfg.deinit();
+        try testz.expectFalse(cfg.workspace_autosave);
+    }
+}
+
 // ── Ctrl+P file finder ──────────────────────────────────────────────────
 //
 // The scan is the only part of `applib/finder.zig` that touches a

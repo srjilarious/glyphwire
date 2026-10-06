@@ -186,7 +186,7 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:cd [dir]` `:pwd` | Working directory (in a workspace, `:cd` leaves the sidebar's folders alone) |
 | `:addfolder dir` | Add a folder to the sidebar's workspace |
 | `:rmfolder [dir]` | Take a folder out of the workspace (bare: the one the tree cursor is in) |
-| `:wssave [file]` | Save the workspace to a `.zoe-workspace` (bare: the one opened from or last saved to) |
+| `:wssave [file]` | Save the workspace to a `.zoe-workspace` (bare: the one opened from or last saved to; also done on `:q`, `:wq` and window close) |
 | `:wsopen file` `:wsopen! file` | Open a saved workspace, closing every tab (`!` discards changes) |
 | `:noh` | Clear the search highlight |
 | `:set lineno=off\|absolute\|relative` | Line numbers |
@@ -243,13 +243,18 @@ folder.
   one: folders, groups, tabs and theme. It closes every open tab, so it
   refuses over unsaved changes unless given as `:wsopen!`. A saved file
   that has since gone is skipped rather than reopened empty.
+- **Auto-save on exit**: with a `.zoe-workspace` in hand (opened from,
+  `:wsopen`ed or `:wssave`d), `:q`, `:wq` / `:x` and closing the window
+  write it back, the same as a bare `:wssave`. `:q!` leaves it alone. If
+  the write fails, `:q` stays put with the error; `:q!` still quits.
+  `workspace_autosave = false` in `zoe.conf.lua` turns this off.
 - **`.code-workspace` files** (VS Code's) are read, never written: only
   the `folders` list (`path`, relative to the file, and optional `name`)
   is used. Comments and trailing commas are fine; `settings` and the
   rest, and remote `uri` folders, are ignored. `:wssave` to a new
   `.zoe-workspace` keeps such a session.
 - `:addfolder` / `:rmfolder` change the folders for this session; a
-  `:wssave` afterwards is what keeps them.
+  `:wssave` (or the auto-save on exit) is what keeps them.
 - Ctrl+P and the tree's `/` search cover every folder; Ctrl+P prefixes
   each result with its folder's name, so typing the name narrows to it.
 - The shell panel (Ctrl+`) opens in the folder that holds the current
