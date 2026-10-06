@@ -38,6 +38,7 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const gitignore = @import("applib").gitignore;
+const walk = @import("applib").walk;
 
 /// What a listing or a walk is allowed to show. Lives with the ignore
 /// matcher it consults, in `applib`, so salacommander's F3 finder
@@ -788,12 +789,11 @@ pub fn deepListRoots(alloc: std.mem.Allocator, io: std.Io, roots: []const []cons
 
     for (roots, 0..) |root, i| {
         const start = self.paths.items.len;
-        // Unlike the tree's own reads, this walk descends, so it pushes
-        // each directory's ignore file on the way in and pops it on the
-        // way out rather than re-reading the chain per directory.
-        var ignores: gitignore.Stack = .{ .alloc = alloc };
-        defer ignores.deinit();
-        try deepScan(&self, io, &ignores, root, "", 0);
+        // The same `visible` rule as the listing: a `/` search that
+        // landed on a row the tree will never show would have nowhere to
+        // put the cursor.
+        const opts: walk.Options = .{ .visible = visible, .max_depth = deep_max_depth };
+        if (try walk.walk(alloc, io, root, opts, &self, deepCollect)) self.truncated = true;
 
         std.mem.sort([]u8, self.paths.items[start..], {}, lessThanPath);
         try self.root_of.appendNTimes(alloc, i, self.paths.items.len - start);
@@ -810,54 +810,13 @@ fn lessThanPath(_: void, a: []u8, b: []u8) bool {
     };
 }
 
-fn deepScan(
-    self: *DeepList,
-    io: std.Io,
-    ignores: *gitignore.Stack,
-    dir: []const u8,
-    rel: []const u8,
-    depth: usize,
-) !void {
-    if (depth >= deep_max_depth) return;
-
-    const pushed = try ignores.pushDir(io, dir, rel);
-    defer if (pushed) ignores.pop();
-
-    var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
-    defer handle.close(io);
-
-    var it = handle.iterate();
-    while (it.next(io) catch null) |raw| {
-        if (self.paths.items.len >= deep_max_entries) {
-            self.truncated = true;
-            return;
-        }
-
-        const child_rel = if (rel.len == 0)
-            try self.alloc.dupe(u8, raw.name)
-        else
-            try std.fmt.allocPrint(self.alloc, "{s}/{s}", .{ rel, raw.name });
-        errdefer self.alloc.free(child_rel);
-
-        // Skipped here for the reason they are skipped in the listing: a
-        // `/` search that landed on a row the tree will never show would
-        // have nowhere to put the cursor. An ignored *directory* is not
-        // descended into either, which is what keeps `zig-cache/` from
-        // costing the walk anything.
-        const hidden = self.visible.isHidden(ignores, raw.name, child_rel, raw.kind == .directory);
-        if (self.visible.skips(hidden)) {
-            self.alloc.free(child_rel);
-            continue;
-        }
-        try self.paths.append(self.alloc, child_rel);
-
-        // Only a real directory is descended into: a symlink reports as
-        // `.sym_link` whatever it points at, so it is never followed and
-        // a link back up the tree can't turn the walk into a loop.
-        if (raw.kind == .directory) {
-            const child_dir = try std.fs.path.join(self.alloc, &.{ dir, raw.name });
-            defer self.alloc.free(child_dir);
-            try deepScan(self, io, ignores, child_dir, child_rel, depth + 1);
-        }
-    }
+/// Directories are listed too, so a `/` search can land on a folder.
+/// `root_of` is filled in per root once its walk is done.
+fn deepCollect(self: *DeepList, e: walk.Entry) !walk.Next {
+    if (self.paths.items.len >= deep_max_entries) return .stop;
+    const owned = try self.alloc.dupe(u8, e.rel);
+    errdefer self.alloc.free(owned);
+    try self.paths.append(self.alloc, owned);
+    return .go;
 }
+

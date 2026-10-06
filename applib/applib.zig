@@ -43,6 +43,8 @@
 //!   `fuzzy`      the subsequence matcher (gw-hist, zoe, salacommander)
 //!   `gitignore`  `.gitignore` matching + hidden-file rule (zoe,
 //!                salacommander)
+//!   `walk`       the recursive `.gitignore`-aware directory walk
+//!                (`finder`, zoe's `/` tree search)
 //!   `finder`     the fuzzy file finder model (zoe, salacommander)
 //!   `finderpopup` the framed popup drawn around a `finder` (zoe's
 //!                Ctrl+P, salacommander's F3)
@@ -85,6 +87,7 @@ pub const icons = @import("icons.zig");
 pub const homepath = @import("homepath.zig");
 pub const cli = @import("cli.zig");
 pub const splittree = @import("splittree.zig");
+pub const walk = @import("walk.zig");
 pub const fsops = @import("fsops.zig");
 pub const pathcomplete = @import("pathcomplete.zig");
 pub const syntax = @import("syntax.zig");

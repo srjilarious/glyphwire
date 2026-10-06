@@ -32,6 +32,7 @@ const std = @import("std");
 const fuzzy = @import("fuzzy.zig");
 const gitignore = @import("gitignore.zig");
 const lineedit = @import("lineedit.zig");
+const walk = @import("walk.zig");
 
 /// The walk stops after this many files and says so (`truncated`), rather
 /// than spending an unbounded amount of time and memory on a root that
@@ -111,12 +112,7 @@ pub const Finder = struct {
     pub fn init(alloc: std.mem.Allocator, io: std.Io, root: []const u8, opts: Options) !Finder {
         var self: Finder = .{ .alloc = alloc, .root = try alloc.dupe(u8, root), .opts = opts };
         errdefer self.deinit();
-
-        // Pushed on the way into each directory and popped on the way out,
-        // so a nested `.gitignore` is in scope for exactly its own subtree.
-        var ignores: gitignore.Stack = .{ .alloc = alloc };
-        defer ignores.deinit();
-        try self.scan(io, &ignores, self.root, "", 0);
+        try self.scan(io, self.root);
 
         self.sortPaths();
         try self.refilter();
@@ -140,9 +136,7 @@ pub const Finder = struct {
             try self.roots.append(alloc, .{ .path = path, .label = label });
 
             const start = self.paths.items.len;
-            var ignores: gitignore.Stack = .{ .alloc = alloc };
-            defer ignores.deinit();
-            try self.scan(io, &ignores, spec.path, "", 0);
+            try self.scan(io, spec.path);
 
             // Prefixed after the walk rather than during it: the walk's
             // relative paths are what `.gitignore` patterns match.
@@ -209,57 +203,25 @@ pub const Finder = struct {
         try self.paths.append(self.alloc, owned);
     }
 
-    fn scan(self: *Finder, io: std.Io, ignores: *gitignore.Stack, dir: []const u8, rel: []const u8, depth: usize) !void {
-        if (depth >= max_depth) return;
+    /// Collects `root`'s listing through `walk`, which skips dotfiles and
+    /// `.gitignore`d paths the same way the tree pane does -- what keeps
+    /// `.git/` and `zig-out/` out without the finder knowing what git or
+    /// zig is. Sets `truncated` when `max_files` cut it short.
+    fn scan(self: *Finder, io: std.Io, root: []const u8) !void {
+        const opts: walk.Options = .{ .visible = self.opts.visible, .max_depth = max_depth };
+        if (try walk.walk(self.alloc, io, root, opts, self, collect)) self.truncated = true;
+    }
 
-        const pushed = try ignores.pushDir(io, dir, rel);
-        defer if (pushed) ignores.pop();
-
-        var handle = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
-        defer handle.close(io);
-
-        var it = handle.iterate();
-        while (it.next(io) catch null) |raw| {
-            if (self.paths.items.len >= max_files) {
-                self.truncated = true;
-                return;
-            }
-            const child_rel = if (rel.len == 0)
-                try self.alloc.dupe(u8, raw.name)
-            else
-                try std.fs.path.join(self.alloc, &.{ rel, raw.name });
-            errdefer self.alloc.free(child_rel);
-
-            // Dotfiles and `.gitignore`d paths are skipped, the same rule
-            // the tree pane uses -- which is what keeps `.git/` out of the
-            // listing without the finder having to know what git is, and
-            // `zig-out/` out without it having to know what zig is. An
-            // ignored directory is not walked either, which is most of
-            // what makes this scan cheap on a tree that has been built.
-            const hidden = self.opts.visible.isHidden(ignores, raw.name, child_rel, raw.kind == .directory);
-            if (self.opts.visible.skips(hidden)) {
-                self.alloc.free(child_rel);
-                continue;
-            }
-
-            // Only a real directory is descended into. A symlink reports
-            // as `.sym_link` whatever it points at, so it is listed as a
-            // file and never followed -- which is also how a link back up
-            // the tree can't turn the walk into a loop.
-            if (raw.kind == .directory) {
-                defer self.alloc.free(child_rel);
-                if (self.opts.include_dirs) {
-                    const listed = try std.fmt.allocPrint(self.alloc, "{s}/", .{child_rel});
-                    errdefer self.alloc.free(listed);
-                    try self.paths.append(self.alloc, listed);
-                }
-                const child_dir = try std.fs.path.join(self.alloc, &.{ dir, raw.name });
-                defer self.alloc.free(child_dir);
-                try self.scan(io, ignores, child_dir, child_rel, depth + 1);
-            } else {
-                try self.paths.append(self.alloc, child_rel);
-            }
+    fn collect(self: *Finder, e: walk.Entry) !walk.Next {
+        if (self.paths.items.len >= max_files) return .stop;
+        if (e.kind != .directory) {
+            try self.addPath(e.rel);
+        } else if (self.opts.include_dirs) {
+            const listed = try std.fmt.allocPrint(self.alloc, "{s}/", .{e.rel});
+            errdefer self.alloc.free(listed);
+            try self.paths.append(self.alloc, listed);
         }
+        return .go;
     }
 
     /// Rebuilds `matches` for the current query and puts the cursor back
