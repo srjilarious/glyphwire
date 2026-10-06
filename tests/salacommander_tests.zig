@@ -152,11 +152,11 @@ pub fn paneUpToParentLandsOnTheDirLeftTest(io: std.Io, alloc: std.mem.Allocator)
     p.setCursor(p.rowOf("beta").?);
     try testz.expectTrue((try p.enter()) == .changed_dir);
     try testz.expectEqualStr(std.fs.path.basename(p.path), "beta");
-    try testz.expectEqual(p.cursor, 0);
+    try testz.expectEqual(p.list.selected, 0);
 
     try testz.expectTrue(try p.upToParentDir());
     try testz.expectEqualStr(p.path, s.path);
-    try testz.expectEqualStr(rowName(&p, p.cursor), "beta");
+    try testz.expectEqualStr(rowName(&p, p.list.selected), "beta");
 }
 
 pub fn paneEnterOnParentRowGoesUpTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -168,10 +168,10 @@ pub fn paneEnterOnParentRowGoesUpTest(io: std.Io, alloc: std.mem.Allocator) !voi
 
     var p = try Pane.init(alloc, io, sub, .{});
     defer p.deinit();
-    try testz.expectTrue(p.isParentRow(p.cursor));
+    try testz.expectTrue(p.isParentRow(p.list.selected));
     try testz.expectTrue((try p.enter()) == .changed_dir);
     try testz.expectEqualStr(p.path, s.path);
-    try testz.expectEqualStr(rowName(&p, p.cursor), "sub");
+    try testz.expectEqualStr(rowName(&p, p.list.selected), "sub");
 }
 
 pub fn paneReloadKeepsCursorAndMarksByNameTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -189,7 +189,7 @@ pub fn paneReloadKeepsCursorAndMarksByNameTest(io: std.Io, alloc: std.mem.Alloca
     try s.file("a", "");
     try s.file("c", "");
     try p.reload();
-    try testz.expectEqualStr(rowName(&p, p.cursor), "d");
+    try testz.expectEqualStr(rowName(&p, p.list.selected), "d");
     try testz.expectTrue(p.isMarked(p.rowOf("b").?));
     try testz.expectFalse(p.isMarked(p.rowOf("a").?));
     try testz.expectEqual(p.markedCount(), 1);
@@ -240,7 +240,7 @@ pub fn paneSortKeepsCursorAndMarksOnTheirEntriesTest(io: std.Io, alloc: std.mem.
     p.setSort(.{ .key = .size, .dir = .ascending });
     try testz.expectEqualStr(rowName(&p, 1), "b");
     // Both followed their entry rather than staying on a row index.
-    try testz.expectEqualStr(rowName(&p, p.cursor), "a");
+    try testz.expectEqualStr(rowName(&p, p.list.selected), "a");
     try testz.expectTrue(p.isMarked(p.rowOf("c").?));
     try testz.expectEqual(p.markedCount(), 1);
 }
@@ -293,15 +293,15 @@ pub fn paneScrollKeepsCursorVisibleTest(io: std.Io, alloc: std.mem.Allocator) !v
     // 21 rows (`..` + 20), 5 visible.
     p.setCursor(12);
     p.scrollIntoView(5);
-    try testz.expectEqual(p.top, 8);
+    try testz.expectEqual(p.list.top, 8);
     p.cursorEnd();
     p.scrollIntoView(5);
-    try testz.expectEqual(p.top, 16);
+    try testz.expectEqual(p.list.top, 16);
 
     // A wheel scroll to the top drags the cursor back on screen.
     p.scrollTo(0, 5);
-    try testz.expectEqual(p.top, 0);
-    try testz.expectEqual(p.cursor, 4);
+    try testz.expectEqual(p.list.top, 0);
+    try testz.expectEqual(p.list.selected, 4);
 }
 
 pub fn paneLoadFailureLeavesPaneUnchangedTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1101,11 +1101,11 @@ pub fn paneRevealPutsTheCursorOnTheFoundEntryTest(io: std.Io, alloc: std.mem.All
 
     try p.reveal(sub, "c.txt");
     try testz.expectEqualStr(p.path, sub);
-    try testz.expectEqualStr(rowName(&p, p.cursor), "c.txt");
+    try testz.expectEqualStr(rowName(&p, p.list.selected), "c.txt");
 
     // Gone since the walk: the pane still goes there, cursor at the top.
     try p.reveal(sub, "vanished.txt");
-    try testz.expectEqual(p.cursor, 0);
+    try testz.expectEqual(p.list.selected, 0);
 }
 
 /// F4's refusal: the same NUL-in-the-head test zoe applies, read from the

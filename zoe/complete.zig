@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const lsp = @import("lsp.zig");
+const ListCursor = @import("applib").listcursor.ListCursor;
 
 /// How well an item matched what was typed, best first. The popup sorts by
 /// this before the server's own `sortText`, so an exact-case prefix match
@@ -65,10 +66,9 @@ pub const Menu = struct {
     line: usize,
     /// Indices into `items` that match what is typed, best first. Owned.
     matches: std.ArrayList(usize) = .empty,
-    /// Index into `matches`.
-    selected: usize = 0,
-    /// The first `matches` entry shown, for a list longer than the popup.
-    top: usize = 0,
+    /// The pick (an index into `matches`) and the first entry shown, for
+    /// a list longer than the popup.
+    list: ListCursor = .{},
 
     /// Takes ownership of `items`.
     pub fn init(
@@ -121,8 +121,7 @@ pub const Menu = struct {
             }
         };
         std.mem.sort(usize, self.matches.items, Ctx{ .items = self.items, .tiers = tiers }, Ctx.lessThan);
-        self.selected = 0;
-        self.top = 0;
+        self.list.reset();
     }
 
     pub fn count(self: *const Menu) usize {
@@ -131,13 +130,13 @@ pub const Menu = struct {
 
     /// The selected item, or null with nothing matching.
     pub fn current(self: *const Menu) ?*const lsp.CompletionItem {
-        if (self.selected >= self.matches.items.len) return null;
-        return &self.items[self.matches.items[self.selected]];
+        if (self.list.selected >= self.matches.items.len) return null;
+        return &self.items[self.matches.items[self.list.selected]];
     }
 
     /// The item `row` places down from the top of what `rows` shows.
     pub fn visible(self: *const Menu, row: usize) ?*const lsp.CompletionItem {
-        const idx = self.top + row;
+        const idx = self.list.top + row;
         if (idx >= self.matches.items.len) return null;
         return &self.items[self.matches.items[idx]];
     }
@@ -145,19 +144,9 @@ pub const Menu = struct {
     /// Moves the selection, wrapping at both ends the way every completion
     /// menu does, and scrolls so it stays within `rows`.
     pub fn move(self: *Menu, delta: i64, rows: usize) void {
-        const n = self.matches.items.len;
-        if (n == 0) return;
-        const cur: i64 = @intCast(self.selected);
-        const len: i64 = @intCast(n);
-        self.selected = @intCast(@mod(cur + delta, len));
-        self.follow(rows);
-    }
-
-    /// Scrolls just enough that the selection is on screen.
-    pub fn follow(self: *Menu, rows: usize) void {
-        if (rows == 0) return;
-        if (self.selected < self.top) self.top = self.selected;
-        if (self.selected >= self.top + rows) self.top = self.selected + 1 - rows;
+        if (self.matches.items.len == 0) return;
+        self.list.step(@intCast(delta), self.matches.items.len, .wrap);
+        self.list.follow(rows);
     }
 };
 

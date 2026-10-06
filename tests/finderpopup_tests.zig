@@ -69,16 +69,16 @@ pub fn applyKeyMovesAndClampsTheHighlightTest(_: std.Io, alloc: std.mem.Allocato
     defer f.deinit();
 
     try testz.expectEqual(try popup.applyKey(&f, "down", .{}, 3), .changed);
-    try testz.expectEqual(f.cursor, 1);
+    try testz.expectEqual(f.list.selected, 1);
     try testz.expectEqual(try popup.applyKey(&f, "n", .{ .ctrl = true }, 3), .changed);
-    try testz.expectEqual(f.cursor, 2);
+    try testz.expectEqual(f.list.selected, 2);
     // A page is the list's own height, and clamps at the end rather than
     // wrapping back to the top: the list is ranked.
     _ = try popup.applyKey(&f, "page_down", .{}, 3);
-    try testz.expectEqual(f.cursor, 4);
-    try testz.expectEqual(f.top, 2);
+    try testz.expectEqual(f.list.selected, 4);
+    try testz.expectEqual(f.list.top, 2);
     _ = try popup.applyKey(&f, "p", .{ .ctrl = true }, 3);
-    try testz.expectEqual(f.cursor, 3);
+    try testz.expectEqual(f.list.selected, 3);
 }
 
 pub fn applyKeyAnswersEnterAndEscapeWithoutTouchingTheQueryTest(_: std.Io, alloc: std.mem.Allocator) !void {

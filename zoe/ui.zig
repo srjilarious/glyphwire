@@ -4008,7 +4008,7 @@ pub const Ui = struct {
             try batch.setLayerVisible(self.path_menu_layer, false);
             return;
         }
-        m.follow(rows);
+        m.list.follow(rows);
 
         var want: usize = 12;
         for (0..rows) |r| {
@@ -4026,7 +4026,7 @@ pub const Ui = struct {
 
         for (0..rows) |r| {
             const it = m.visible(r) orelse break;
-            const selected = m.top + r == m.selected;
+            const selected = m.list.top + r == m.list.selected;
             try batch.writeSpans(&.{
                 .{ .text = " " },
                 .{ .text = it.name, .fg = role(if (it.is_dir) .popup_kind else .popup_label) },
@@ -7087,7 +7087,7 @@ pub const Ui = struct {
             try batch.setLayerVisible(self.completion_layer, false);
             return;
         }
-        m.follow(rows);
+        m.list.follow(rows);
 
         // As wide as the widest visible row wants, within the limits.
         var want: usize = 20;
@@ -7125,7 +7125,7 @@ pub const Ui = struct {
         var kind_buf: [complete_kind_cols]u8 = undefined;
         for (0..rows) |r| {
             const it = m.visible(r) orelse break;
-            const selected = m.top + r == m.selected;
+            const selected = m.list.top + r == m.list.selected;
             const bg = if (selected) role(.popup_selected_bg) else role(.popup_bg);
 
             const kind = complete.kindLabel(it.kind);

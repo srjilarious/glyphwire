@@ -45,6 +45,14 @@ pub fn build(b: *std.Build) void {
     });
     applib_mod.addImport("glyphwire", glyphwire_mod);
 
+    // applib/listcursor.zig: a list's pick + scroll arithmetic. Its own
+    // module (re-exported as `applib.listcursor`) so glyphwire-host's
+    // modal lists can use it without linking the rest of `applib`.
+    const listcursor_mod = b.addModule("listcursor", .{
+        .root_source_file = b.path("applib/listcursor.zig"),
+    });
+    applib_mod.addImport("listcursor", listcursor_mod);
+
     // Pure prompt helpers shared by gw-shell and its test runner
     // (a Zig module can't be reached across directories via relative
     // `@import`, so tests/ can't pull shell/ files in directly).
@@ -110,6 +118,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("host/support.zig"),
     });
     host_support_mod.addImport("glyphwire", glyphwire_mod);
+    host_support_mod.addImport("listcursor", listcursor_mod);
 
     // zoe's editor core (gap buffer, motions, the modal state machine)
     // shared by the `zoe` binary and its test runner -- same
@@ -532,6 +541,7 @@ pub fn build(b: *std.Build) void {
     // `theme.lua`: the window's theme.
     host_exe.root_module.addImport("themeconf", themeconf_mod);
     host_exe.root_module.addImport("luaconf", luaconf_mod);
+    host_exe.root_module.addImport("listcursor", listcursor_mod);
     b.installArtifact(host_exe);
 
     const run_host = b.addRunArtifact(host_exe);

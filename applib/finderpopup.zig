@@ -362,9 +362,9 @@ pub const Popup = struct {
         }
         const list_row0 = r.row + header_rows;
         if (cell.row < list_row0 or !r.contains(cell)) return .handled;
-        const row = f.top + (cell.row - list_row0);
+        const row = f.list.top + (cell.row - list_row0);
         if (row >= f.matchCount()) return .handled;
-        f.cursor = row;
+        f.list.selected = row;
         return .accept;
     }
 
@@ -421,7 +421,7 @@ pub const Popup = struct {
         try self.renderList(b, f, r.cols, list_rows);
 
         try b.setLayerContentExtent(self.list_layer, r.cols, f.matchCount());
-        try b.setLayerScrollOffset(self.list_layer, f.top, 0);
+        try b.setLayerScrollOffset(self.list_layer, f.list.top, 0);
 
         try b.setLayerVisible(self.frame_layer, frame != null);
         try b.setLayerVisible(self.header_layer, true);
@@ -435,7 +435,7 @@ pub const Popup = struct {
         var right: [48]u8 = undefined;
         const tail = std.fmt.bufPrint(&right, "{s}{d}/{d} ", .{
             if (f.truncated) "partial " else "",
-            if (f.matchCount() == 0) 0 else f.cursor + 1,
+            if (f.matchCount() == 0) 0 else f.list.selected + 1,
             f.matchCount(),
         }) catch "";
         const tail_w = @min(glyphwire.stringWidth(tail), cols);
@@ -477,8 +477,8 @@ pub const Popup = struct {
             return;
         }
         for (0..rows) |i| {
-            const path = f.matchAt(f.top + i) orelse break;
-            const is_selected = f.top + i == f.cursor;
+            const path = f.matchAt(f.list.top + i) orelse break;
+            const is_selected = f.list.top + i == f.list.selected;
             const is_dir = std.mem.endsWith(u8, path, "/");
             // The name is everything after the last separator that isn't
             // a directory's own trailing one.

@@ -51,13 +51,6 @@ pub fn modalListLayoutScrollsToTheSelectionTest(_: std.Io, _: std.mem.Allocator)
     try testz.expectTrue(modal_list.layout(.{ .rows = 4, .cols = 40 }, view) == null);
 }
 
-pub fn modalListWrapMoveWrapsBothWaysTest(_: std.Io, _: std.mem.Allocator) !void {
-    try testz.expectEqual(modal_list.wrapMove(0, 5, -1), 4);
-    try testz.expectEqual(modal_list.wrapMove(4, 5, 1), 0);
-    try testz.expectEqual(modal_list.wrapMove(2, 5, 1), 3);
-    try testz.expectEqual(modal_list.wrapMove(0, 0, 1), 0);
-}
-
 pub fn themeNamesPutsConfigThemesFirstOnceTest(_: std.Io, alloc: std.mem.Allocator) !void {
     const customs = [_]glyphwire.theme.Custom{
         .{ .name = "mine", .base = "nord" },

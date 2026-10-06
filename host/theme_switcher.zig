@@ -7,6 +7,7 @@ const glyphwire = @import("glyphwire");
 const app_mod = @import("app.zig");
 const config = @import("config.zig");
 const modal_list = @import("modal_list.zig");
+const listcursor = @import("listcursor");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
@@ -88,7 +89,7 @@ pub const ThemeSwitcher = struct {
             .none => {},
             .close => self.cancel(),
             .commit => self.close(),
-            .move => |d| self.select(modal_list.wrapMove(self.selected, self.names.len, d)),
+            .move => |d| self.select(listcursor.wrap(self.selected, self.names.len, d)),
             .pick => |i| if (i < self.names.len) {
                 self.select(i);
                 self.close();

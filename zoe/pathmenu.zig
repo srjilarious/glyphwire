@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const pathcomplete = @import("applib").pathcomplete;
+const ListCursor = @import("applib").listcursor.ListCursor;
 
 /// The commands whose argument is a path, and whether only directories
 /// make sense for it.
@@ -123,9 +124,9 @@ pub const Menu = struct {
     matches: []pathcomplete.Match,
     /// Where on the `:` line the segment being completed starts.
     seg_start: usize,
-    selected: usize = 0,
-    /// The first match shown, for a list longer than the popup.
-    top: usize = 0,
+    /// The pick and the first match shown, for a list longer than the
+    /// popup.
+    list: ListCursor = .{},
 
     /// Takes ownership of `matches`.
     pub fn init(alloc: std.mem.Allocator, matches: []pathcomplete.Match, seg_start: usize) Menu {
@@ -141,30 +142,21 @@ pub const Menu = struct {
     }
 
     pub fn current(self: *const Menu) ?pathcomplete.Match {
-        if (self.selected >= self.matches.len) return null;
-        return self.matches[self.selected];
+        if (self.list.selected >= self.matches.len) return null;
+        return self.matches[self.list.selected];
     }
 
     /// The match `row` places down from the top of the visible window.
     pub fn visible(self: *const Menu, row: usize) ?pathcomplete.Match {
-        const idx = self.top + row;
+        const idx = self.list.top + row;
         if (idx >= self.matches.len) return null;
         return self.matches[idx];
     }
 
     /// Moves the pick, wrapping at both ends, and keeps it within `rows`.
     pub fn move(self: *Menu, delta: i64, rows: usize) void {
-        const n = self.matches.len;
-        if (n == 0) return;
-        const cur: i64 = @intCast(self.selected);
-        self.selected = @intCast(@mod(cur + delta, @as(i64, @intCast(n))));
-        self.follow(rows);
-    }
-
-    /// Scrolls just enough that the pick is on screen.
-    pub fn follow(self: *Menu, rows: usize) void {
-        if (rows == 0) return;
-        if (self.selected < self.top) self.top = self.selected;
-        if (self.selected >= self.top + rows) self.top = self.selected + 1 - rows;
+        if (self.matches.len == 0) return;
+        self.list.step(@intCast(delta), self.matches.len, .wrap);
+        self.list.follow(rows);
     }
 };

@@ -43,6 +43,9 @@
 //!   `fuzzy`      the subsequence matcher (gw-hist, zoe, salacommander)
 //!   `gitignore`  `.gitignore` matching + hidden-file rule (zoe,
 //!                salacommander)
+//!   `listcursor` a list's pick + scroll (zoe's menus, gw-shell's Tab
+//!                picker, gw-hist, `finder`, salacommander's panes; also
+//!                glyphwire-host, as its own module)
 //!   `walk`       the recursive `.gitignore`-aware directory walk
 //!                (`finder`, zoe's `/` tree search)
 //!   `finder`     the fuzzy file finder model (zoe, salacommander)
@@ -88,6 +91,7 @@ pub const homepath = @import("homepath.zig");
 pub const cli = @import("cli.zig");
 pub const splittree = @import("splittree.zig");
 pub const walk = @import("walk.zig");
+pub const listcursor = @import("listcursor");
 pub const fsops = @import("fsops.zig");
 pub const pathcomplete = @import("pathcomplete.zig");
 pub const syntax = @import("syntax.zig");

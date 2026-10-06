@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const listcursor = @import("listcursor");
 
 const theme = glyphwire.theme;
 
@@ -78,8 +79,11 @@ pub fn layout(area: Rect, view: View) ?Layout {
     const visible = @min(view.rows.len, area.rows - 4);
     const rows = visible + 2;
 
-    const selected = @min(view.selected, view.rows.len - 1);
-    const first = if (selected >= visible) selected - visible + 1 else 0;
+    // Scrolled from the top just far enough to show the selection: the
+    // dialog keeps no scroll of its own between frames.
+    var list: listcursor.ListCursor = .{ .selected = @min(view.selected, view.rows.len - 1) };
+    list.follow(visible);
+    const first = list.top;
 
     const frame: Rect = .{
         .row = area.row + (area.rows - (rows + 2)) / 3,
@@ -124,14 +128,6 @@ pub fn readAction(kb: anytype, chord_hit: bool) Action {
         if (kb.pressed(d[0]) or kb.pressed(d[1])) return .{ .pick = i };
     }
     return .none;
-}
-
-/// `selected` moved by `delta`, wrapping at both ends of a `len`-row list.
-pub fn wrapMove(selected: usize, len: usize, delta: isize) usize {
-    if (len == 0) return 0;
-    const n: isize = @intCast(len);
-    const cur: isize = @intCast(selected);
-    return @intCast(@mod(cur + delta, n));
 }
 
 /// The theme switcher's list: `theme.lua`'s own themes first, in the

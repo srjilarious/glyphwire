@@ -10,8 +10,8 @@
 //! Rows are the listing as shown: a `..` row first (except at `/`), then
 //! directories, then everything else, each group ordered by the pane's
 //! own `Sort` -- by name the way `gw-ls` sorts, to start with.
-//! `cursor` and `top` index rows, not `entries`; the `..` row has no
-//! entry and can't be marked.
+//! `list` (the cursor and the scroll) indexes rows, not `entries`; the
+//! `..` row has no entry and can't be marked.
 //!
 //! Marks follow Total Commander: Space toggles the mark on the cursor row,
 //! Insert toggles it and steps down. An operation acts on the marked
@@ -22,6 +22,7 @@ const std = @import("std");
 
 const lsentries = @import("applib").entries;
 const homepath = @import("applib").homepath;
+const ListCursor = @import("applib").listcursor.ListCursor;
 pub const FileEntry = lsentries.FileEntry;
 pub const EntryKind = lsentries.EntryKind;
 
@@ -98,8 +99,8 @@ pub const Pane = struct {
     entries: []FileEntry = &.{},
     /// Parallel to `entries`.
     marked: []bool = &.{},
-    cursor: usize = 0,
-    top: usize = 0,
+    /// The cursor row and the first row shown, as rows (see the module doc).
+    list: ListCursor = .{},
     view: ViewMode = .small,
     show_hidden: bool = false,
     sort: Sort = .{},
@@ -166,7 +167,7 @@ pub const Pane = struct {
     }
 
     pub fn current(self: *const Pane) ?*const FileEntry {
-        return self.entryAt(self.cursor);
+        return self.entryAt(self.list.selected);
     }
 
     /// The row showing an entry named `name`, if there is one.
@@ -209,8 +210,8 @@ pub const Pane = struct {
         self.path = abs;
         self.entries = entries;
         self.marked = marked;
-        self.cursor = 0;
-        self.top = 0;
+        self.list.selected = 0;
+        self.list.top = 0;
     }
 
     /// Re-reads the current directory, keeping the cursor on the entry it
@@ -227,12 +228,12 @@ pub const Pane = struct {
         }
         const old_name: ?[]u8 = if (self.current()) |e| try self.alloc.dupe(u8, e.name) else null;
         defer if (old_name) |n| self.alloc.free(n);
-        const old_cursor = self.cursor;
+        const old_cursor = self.list.selected;
 
         self.freeListing();
         self.entries = entries;
         self.marked = marked;
-        self.cursor = if (old_name) |n| self.rowOf(n) orelse old_cursor else old_cursor;
+        self.list.selected = if (old_name) |n| self.rowOf(n) orelse old_cursor else old_cursor;
         self.clampCursor();
     }
 
@@ -263,7 +264,7 @@ pub const Pane = struct {
         const name: ?[]const u8 = if (self.current()) |e| e.name else null;
         sortMarkedEntries(self.entries, self.marked, sort);
         if (name) |n| {
-            if (self.rowOf(n)) |row| self.cursor = row;
+            if (self.rowOf(n)) |row| self.list.selected = row;
         }
         self.clampCursor();
     }
@@ -271,49 +272,39 @@ pub const Pane = struct {
     // ── Cursor ──────────────────────────────────────────────────────────
 
     fn clampCursor(self: *Pane) void {
-        const n = self.rowCount();
-        self.cursor = if (n == 0) 0 else @min(self.cursor, n - 1);
+        self.list.clamp(self.rowCount());
     }
 
     pub fn setCursor(self: *Pane, row: usize) void {
-        self.cursor = row;
-        self.clampCursor();
+        self.list.set(row, self.rowCount());
     }
 
     pub fn moveCursor(self: *Pane, delta: i64) void {
-        if (delta < 0) {
-            self.cursor -|= @intCast(-delta);
-        } else {
-            self.cursor +|= @intCast(delta);
-        }
-        self.clampCursor();
+        self.list.step(@intCast(delta), self.rowCount(), .clamp);
     }
 
     pub fn cursorHome(self: *Pane) void {
-        self.cursor = 0;
+        self.list.selected = 0;
     }
 
     pub fn cursorEnd(self: *Pane) void {
-        self.cursor = self.rowCount() -| 1;
+        self.list.selected = self.rowCount() -| 1;
     }
 
     /// Scrolls just far enough that the cursor is within the `visible`
     /// rows starting at `top`, and keeps `top` from leaving blank rows at
     /// the bottom when the listing is long enough to fill them.
     pub fn scrollIntoView(self: *Pane, visible: usize) void {
-        const v = @max(visible, 1);
-        if (self.cursor < self.top) self.top = self.cursor;
-        if (self.cursor >= self.top + v) self.top = self.cursor + 1 - v;
-        self.top = @min(self.top, self.rowCount() -| v);
+        self.list.followClamped(@max(visible, 1), self.rowCount());
     }
 
     /// Scrolls to `top` (a wheel or scrollbar drag) and drags the cursor
-    /// along so it stays on screen.
+    /// along so it stays on screen -- unlike the finder's list, where
+    /// scrolling and picking are separate gestures.
     pub fn scrollTo(self: *Pane, top: usize, visible: usize) void {
         const v = @max(visible, 1);
-        self.top = @min(top, self.rowCount() -| v);
-        if (self.cursor < self.top) self.cursor = self.top;
-        if (self.cursor >= self.top + v) self.cursor = self.top + v - 1;
+        self.list.scrollTo(top, v, self.rowCount());
+        self.list.pullOnScreen(v);
         self.clampCursor();
     }
 
@@ -389,7 +380,7 @@ pub const Pane = struct {
     /// Activates the cursor row: `..` goes up, a directory (or a link to
     /// one) is entered, a file is handed back for the caller to open.
     pub fn enter(self: *Pane) !EnterResult {
-        if (self.isParentRow(self.cursor)) {
+        if (self.isParentRow(self.list.selected)) {
             _ = try self.upToParentDir();
             return .changed_dir;
         }
@@ -408,7 +399,7 @@ pub const Pane = struct {
     /// away since the search walked) leaves the cursor at the top.
     pub fn reveal(self: *Pane, dir: []const u8, name: []const u8) !void {
         try self.load(dir);
-        if (self.rowOf(name)) |row| self.cursor = row;
+        if (self.rowOf(name)) |row| self.list.selected = row;
     }
 
     /// Goes to the parent directory with the cursor on the directory just
@@ -420,7 +411,7 @@ pub const Pane = struct {
         const parent = try self.alloc.dupe(u8, std.fs.path.dirname(self.path) orelse "/");
         defer self.alloc.free(parent);
         try self.load(parent);
-        if (self.rowOf(left)) |row| self.cursor = row;
+        if (self.rowOf(left)) |row| self.list.selected = row;
         return true;
     }
 };

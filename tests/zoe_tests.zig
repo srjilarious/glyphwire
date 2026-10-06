@@ -3129,15 +3129,15 @@ pub fn finderCursorClampsAtBothEndsTest(_: std.Io, alloc: std.mem.Allocator) !vo
     var f = try finderOf(alloc, "/repo", &.{ "a.zig", "b.zig", "c.zig" });
     defer f.deinit();
 
-    try testz.expectEqual(f.cursor, 0);
+    try testz.expectEqual(f.list.selected, 0);
     // Clamped, not wrapped: running off the top of a ranked list back to
     // its worst match is never what was meant.
     f.moveCursor(-1);
-    try testz.expectEqual(f.cursor, 0);
+    try testz.expectEqual(f.list.selected, 0);
     f.moveCursor(2);
-    try testz.expectEqual(f.cursor, 2);
+    try testz.expectEqual(f.list.selected, 2);
     f.moveCursor(10);
-    try testz.expectEqual(f.cursor, 2);
+    try testz.expectEqual(f.list.selected, 2);
     try testz.expectEqualStr(f.selected().?, "c.zig");
 
     // A query that matches nothing leaves the cursor somewhere safe and
@@ -3146,7 +3146,7 @@ pub fn finderCursorClampsAtBothEndsTest(_: std.Io, alloc: std.mem.Allocator) !vo
     try f.refilter();
     try testz.expectEqual(f.matchCount(), 0);
     f.moveCursor(1);
-    try testz.expectEqual(f.cursor, 0);
+    try testz.expectEqual(f.list.selected, 0);
     try testz.expectTrue(f.selected() == null);
 }
 
@@ -3157,23 +3157,23 @@ pub fn finderScrollFollowsTheCursorTest(_: std.Io, alloc: std.mem.Allocator) !vo
     // Three visible rows. Moving inside them doesn't scroll.
     f.moveCursor(2);
     f.follow(3);
-    try testz.expectEqual(f.top, 0);
+    try testz.expectEqual(f.list.top, 0);
 
     // Past the bottom: scrolled just far enough to show the cursor.
     f.moveCursor(1);
     f.follow(3);
-    try testz.expectEqual(f.top, 1);
+    try testz.expectEqual(f.list.top, 1);
 
     // Back to the top, and the view comes with it.
     f.moveCursor(-4);
     f.follow(3);
-    try testz.expectEqual(f.top, 0);
+    try testz.expectEqual(f.list.top, 0);
 
     // A host-side scroll (the wheel) moves the view and leaves the cursor
     // alone -- and never past the end of the list.
     f.scrollTo(99, 3);
-    try testz.expectEqual(f.top, 3);
-    try testz.expectEqual(f.cursor, 0);
+    try testz.expectEqual(f.list.top, 3);
+    try testz.expectEqual(f.list.selected, 0);
 }
 
 pub fn finderOpensPathsAgainstItsRootTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -4677,10 +4677,10 @@ pub fn completeMenuSelectionWrapsAndScrollsTest(_: std.Io, alloc: std.mem.Alloca
     m.move(1, 3);
     m.move(1, 3);
     try testz.expectEqualStr("a3", currentLabel(&m));
-    try testz.expectEqual(m.top, 0);
+    try testz.expectEqual(m.list.top, 0);
     // Past the bottom row scrolls one.
     m.move(1, 3);
-    try testz.expectEqual(m.top, 1);
+    try testz.expectEqual(m.list.top, 1);
     try testz.expectEqualStr("a2", m.visible(0).?.label);
     // Up from the first wraps to the last...
     m.move(-4, 3);
@@ -4688,11 +4688,11 @@ pub fn completeMenuSelectionWrapsAndScrollsTest(_: std.Io, alloc: std.mem.Alloca
     // ...and down from the last wraps to the first, scrolling back up.
     m.move(1, 3);
     try testz.expectEqualStr("a1", currentLabel(&m));
-    try testz.expectEqual(m.top, 0);
+    try testz.expectEqual(m.list.top, 0);
     // Refiltering puts the selection back on the best match.
     m.move(2, 3);
     try m.refilter("a");
-    try testz.expectEqual(m.selected, 0);
+    try testz.expectEqual(m.list.selected, 0);
 }
 
 pub fn completeWordStartTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -5092,10 +5092,10 @@ pub fn pathMenuMoveWrapsAndScrollsTest(_: std.Io, alloc: std.mem.Allocator) !voi
 
     m.move(-1, 2);
     try testz.expectEqualStr(m.current().?.name, "d");
-    try testz.expectEqual(m.top, 2);
+    try testz.expectEqual(m.list.top, 2);
     m.move(1, 2);
     try testz.expectEqualStr(m.current().?.name, "a");
-    try testz.expectEqual(m.top, 0);
+    try testz.expectEqual(m.list.top, 0);
 }
 
 // ─── tree: create, rename, auto-refresh ──────────────────────────────────

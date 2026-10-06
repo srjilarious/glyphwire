@@ -33,6 +33,7 @@ const fuzzy = @import("fuzzy.zig");
 const gitignore = @import("gitignore.zig");
 const lineedit = @import("lineedit.zig");
 const walk = @import("walk.zig");
+const ListCursor = @import("listcursor").ListCursor;
 
 /// The walk stops after this many files and says so (`truncated`), rather
 /// than spending an unbounded amount of time and memory on a root that
@@ -87,11 +88,10 @@ pub const Finder = struct {
     /// The current answer: indices into `paths`, best first.
     matches: std.ArrayList(Match) = .empty,
     query: lineedit.LineEdit = .empty,
-    /// The highlighted row, in `matches` indices.
-    cursor: usize = 0,
-    /// The first match drawn in the list's row 0 -- the popup's own
-    /// scroll, mirrored to the host as a `scroll_offset`.
-    top: usize = 0,
+    /// The highlighted row and the first match drawn in the list's row 0,
+    /// in `matches` indices. `top` is the popup's own scroll, mirrored to
+    /// the host as a `scroll_offset`.
+    list: ListCursor = .{},
     /// The walk hit `max_files` and stopped early, so the list is a
     /// prefix of the tree rather than the whole of it. Shown in the
     /// header: a finder that silently can't see half your files is worse
@@ -237,8 +237,7 @@ pub const Finder = struct {
             try self.matches.append(self.alloc, .{ .index = i, .score = s });
         }
         if (q.len > 0) std.mem.sort(Match, self.matches.items, self, lessThanMatch);
-        self.cursor = 0;
-        self.top = 0;
+        self.list.reset();
     }
 
     /// Tighter match first; then the shorter path, so a file near the
@@ -264,7 +263,7 @@ pub const Finder = struct {
 
     /// The highlighted path, relative to the root.
     pub fn selected(self: *const Finder) ?[]const u8 {
-        return self.matchAt(self.cursor);
+        return self.matchAt(self.list.selected);
     }
 
     /// The highlighted path as the caller should open it: joined onto the
@@ -272,8 +271,8 @@ pub const Finder = struct {
     /// lands in the same tab rather than a second one under a different
     /// spelling. Caller owns the result.
     pub fn selectedPath(self: *const Finder, alloc: std.mem.Allocator) !?[]u8 {
-        if (self.cursor >= self.matches.items.len) return null;
-        return try self.absPath(alloc, self.matches.items[self.cursor].index);
+        if (self.list.selected >= self.matches.items.len) return null;
+        return try self.absPath(alloc, self.matches.items[self.list.selected].index);
     }
 
     /// `paths[index]` joined back onto the folder it was found in, the
@@ -289,43 +288,25 @@ pub const Finder = struct {
     /// rather than wrapping: a finder's list is ranked, so running off
     /// the top of it back to the worst match is never what was meant.
     pub fn moveCursor(self: *Finder, delta: isize) void {
-        const n = self.matches.items.len;
-        if (n == 0) {
-            self.cursor = 0;
-            return;
-        }
-        if (delta < 0) {
-            self.cursor -|= @intCast(-delta);
-        } else {
-            self.cursor = @min(self.cursor + @as(usize, @intCast(delta)), n - 1);
-        }
+        self.list.step(delta, self.matches.items.len, .clamp);
     }
 
     /// Keeps `top` covering the cursor for a list `rows` tall, and pulls
     /// it back off the end when the answer shrank under it.
     pub fn follow(self: *Finder, rows: usize) void {
-        if (rows == 0 or self.matches.items.len == 0) {
-            self.top = 0;
-            return;
-        }
-        if (self.cursor < self.top) self.top = self.cursor;
-        if (self.cursor >= self.top + rows) self.top = self.cursor - rows + 1;
-        self.top = @min(self.top, self.matches.items.len -| rows);
+        self.list.followClamped(rows, self.matches.items.len);
     }
 
     /// Follows a host-side scroll (the wheel, a scrollbar drag) without
     /// moving the cursor -- scrolling past a row and picking it are two
     /// different gestures, the same split `gw-hist` makes.
     pub fn scrollTo(self: *Finder, row: usize, rows: usize) void {
-        self.top = row;
-        self.clampScroll(rows);
+        self.list.scrollTo(row, rows, self.matches.items.len);
     }
 
     /// Pulls `top` back inside a list `rows` tall: the popup got shorter,
-    /// or the answer did. Distinct from `follow`, which also drags the
-    /// view onto the cursor -- doing that every frame would undo a wheel
-    /// scroll the moment it was drawn.
+    /// or the answer did. See `ListCursor.clampTop`.
     pub fn clampScroll(self: *Finder, rows: usize) void {
-        self.top = @min(self.top, self.matches.items.len -| rows);
+        self.list.clampTop(rows, self.matches.items.len);
     }
 };

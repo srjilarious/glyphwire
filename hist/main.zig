@@ -55,6 +55,8 @@ const history = @import("applib").history;
 const fuzzy = @import("applib").fuzzy;
 const interrupt = @import("applib").interrupt;
 const cli = @import("applib").cli;
+const listcursor = @import("applib").listcursor;
+const ListCursor = listcursor.ListCursor;
 const zjump = @import("applib").zjump;
 const homepath = @import("applib").homepath;
 
@@ -241,9 +243,9 @@ const Ui = struct {
     /// path -- only `query`/`filtered`, which change shape, do.
     scratch: std.ArrayList(u8) = .empty,
 
-    selected: usize = 0,
-    /// Index of the first entry drawn in the list layer's row 0.
-    view_top: usize = 0,
+    /// The picked entry, and the first one drawn in the list layer's
+    /// row 0.
+    list: ListCursor = .{},
 
     cols: usize,
     rows: usize,
@@ -375,7 +377,7 @@ const Ui = struct {
             // file list without moving your cursor onto every row you
             // pass over.
             .scroll_offset => |so| if (so.layer == self.list_layer) {
-                self.view_top = @min(so.row, self.filtered.items.len -| self.list_rows);
+                self.list.scrollTo(so.row, self.list_rows, self.filtered.items.len);
                 self.list_dirty = true;
             },
             else => {},
@@ -398,7 +400,7 @@ const Ui = struct {
 
         if (eq(u8, key, "enter")) {
             if (self.filtered.items.len == 0) return;
-            const row = self.filtered.items[self.selected];
+            const row = self.filtered.items[self.list.selected];
             self.picked = switch (self.mode) {
                 .history => try self.alloc.dupe(u8, row),
                 .dirs => try zjump.cdLine(self.alloc, row),
@@ -421,24 +423,22 @@ const Ui = struct {
             self.query.clearRetainingCapacity();
             try self.onQueryChanged();
         } else if (eq(u8, key, "up")) {
-            if (self.selected > 0) self.selected -= 1;
-            self.followSelection();
-            self.list_dirty = true;
+            self.moveSelection(-1, .clamp);
         } else if (eq(u8, key, "down") or (ctrl and eq(u8, key, "r"))) {
-            if (self.filtered.items.len > 0) self.selected = (self.selected + 1) % self.filtered.items.len;
-            self.followSelection();
-            self.list_dirty = true;
+            // Down wraps so repeated Ctrl+R cycles the matches, the way
+            // a shell's reverse search does.
+            self.moveSelection(1, .wrap);
         } else if (eq(u8, key, "page_up")) {
-            self.selected = self.selected -| self.list_rows;
-            self.followSelection();
-            self.list_dirty = true;
+            self.moveSelection(-@as(isize, @intCast(self.list_rows)), .clamp);
         } else if (eq(u8, key, "page_down")) {
-            if (self.filtered.items.len > 0) {
-                self.selected = @min(self.selected + self.list_rows, self.filtered.items.len - 1);
-            }
-            self.followSelection();
-            self.list_dirty = true;
+            self.moveSelection(@intCast(self.list_rows), .clamp);
         }
+    }
+
+    fn moveSelection(self: *Ui, delta: isize, ends: listcursor.Ends) void {
+        self.list.step(delta, self.filtered.items.len, ends);
+        self.followSelection();
+        self.list_dirty = true;
     }
 
     fn handleText(self: *Ui, text: []const u8) !void {
@@ -456,7 +456,7 @@ const Ui = struct {
     }
 
     fn onQueryChanged(self: *Ui) !void {
-        self.selected = 0;
+        self.list.selected = 0;
         try self.refilter();
         self.followSelection();
         self.header_dirty = true;
@@ -470,7 +470,7 @@ const Ui = struct {
             .history => try self.refilterHistory(),
             .dirs => try self.refilterDirs(),
         }
-        if (self.selected >= self.filtered.items.len) self.selected = self.filtered.items.len -| 1;
+        self.list.clamp(self.filtered.items.len);
     }
 
     /// Every directory that fuzzy-matches `query`, in the frecency order
@@ -505,17 +505,10 @@ const Ui = struct {
         std.mem.sort([]const u8, self.filtered.items, Ctx{ .query = self.query.items }, Ctx.lessThan);
     }
 
-    /// Keeps `view_top` covering `selected`, clamped to the list's actual
+    /// Keeps the window covering the pick, clamped to the list's actual
     /// extent. `render` pushes the result to the host.
     fn followSelection(self: *Ui) void {
-        if (self.filtered.items.len == 0) {
-            self.view_top = 0;
-        } else {
-            if (self.selected < self.view_top) self.view_top = self.selected;
-            if (self.selected >= self.view_top + self.list_rows) self.view_top = self.selected - self.list_rows + 1;
-            const max_top = self.filtered.items.len -| self.list_rows;
-            if (self.view_top > max_top) self.view_top = max_top;
-        }
+        self.list.followClamped(self.list_rows, self.filtered.items.len);
     }
 
     // ── Rendering ───────────────────────────────────────────────────────
@@ -541,7 +534,7 @@ const Ui = struct {
             // The host only broadcasts a `scroll_offset` that actually
             // moved, so re-sending an unchanged one every frame is silent.
             try b.setLayerContentExtent(self.list_layer, self.cols, self.filtered.items.len);
-            try b.setLayerScrollOffset(self.list_layer, self.view_top, 0);
+            try b.setLayerScrollOffset(self.list_layer, self.list.top, 0);
             self.list_dirty = false;
         }
         var results = try b.send();
@@ -587,13 +580,13 @@ const Ui = struct {
     fn renderList(self: *Ui, b: *glyphwire.Client.Batch) !void {
         var row: usize = 0;
         while (row < self.list_rows) : (row += 1) {
-            const idx = self.view_top + row;
+            const idx = self.list.top + row;
             if (idx < self.filtered.items.len) {
                 self.scratch.clearRetainingCapacity();
                 try self.scratch.append(self.alloc, ' ');
                 try self.scratch.appendSlice(self.alloc, self.filtered.items[idx]);
-                const fg = if (idx == self.selected) fg_selected else fg_list;
-                const bg = if (idx == self.selected) bg_selected else bg_list;
+                const fg = if (idx == self.list.selected) fg_selected else fg_list;
+                const bg = if (idx == self.list.selected) bg_selected else bg_list;
                 try self.writeLine(b, self.list_layer, row, self.scratch.items, fg, bg);
             } else {
                 // Rows past the last match: back to transparent, which

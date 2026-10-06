@@ -16,6 +16,7 @@ const script_engine = @import("shell_support").script_engine;
 const themeconf = @import("themeconf");
 const history = @import("applib").history;
 const homepath = @import("applib").homepath;
+const ListCursor = @import("applib").listcursor.ListCursor;
 const zjump = @import("applib").zjump;
 const flushgate = @import("shell_support").flushgate;
 const crashlog = @import("shell_support").crashlog;
@@ -1060,13 +1061,12 @@ const CompletionCandidate = struct { name: []const u8, source: CompletionSource 
 /// `Prompt.recomputeAndDrawPicker`). The candidate list itself is never
 /// cached here -- every redraw rescans via `collectCompletionCandidates`
 /// from the current buffer/cursor, so typing narrows the list for free
-/// and there's no stale-cache case to handle. `selected`/`scroll` index
-/// into that freshly-scanned list; `drawn_rows` is how many rows are
-/// currently painted below the input line, so a redraw knows how much to
-/// clear first and whether the screen still needs scrolling to make room.
+/// and there's no stale-cache case to handle. `list` indexes into that
+/// freshly-scanned list; `drawn_rows` is how many rows are currently
+/// painted below the input line, so a redraw knows how much to clear
+/// first and whether the screen still needs scrolling to make room.
 const CompletionPickerState = struct {
-    selected: usize = 0,
-    scroll: usize = 0,
+    list: ListCursor = .{},
     drawn_rows: usize = 0,
 };
 
@@ -6651,18 +6651,11 @@ const Prompt = struct {
         const visible = @min(max_items, cands.items.len);
 
         if (move_delta == 0) {
-            st.selected = 0;
-            st.scroll = 0;
+            st.list.reset();
         } else {
-            // `@mod`'s result takes the sign of a positive divisor, so
-            // this wraps cleanly in both directions with no extra
-            // negative-result check.
-            const total: isize = @intCast(cands.items.len);
-            const next: isize = @mod(@as(isize, @intCast(st.selected)) + move_delta, total);
-            st.selected = @intCast(next);
+            st.list.step(move_delta, cands.items.len, .wrap);
         }
-        if (st.selected < st.scroll) st.scroll = st.selected;
-        if (st.selected >= st.scroll + visible) st.scroll = st.selected + 1 - visible;
+        st.list.follow(visible);
 
         if (st.drawn_rows == 0) try self.reservePickerRows(visible);
 
@@ -6672,9 +6665,9 @@ const Prompt = struct {
 
         var i: usize = 0;
         while (i < visible) : (i += 1) {
-            const idx = st.scroll + i;
+            const idx = st.list.top + i;
             const cand = cands.items[idx];
-            const selected = idx == st.selected;
+            const selected = idx == st.list.selected;
             const dim: ?glyphwire.Color = if (selected) null else autocomplete_hint_color;
 
             try self.batchSetCursor(&b, self.line_start_row + 1 + i, 0);
@@ -6749,9 +6742,9 @@ const Prompt = struct {
         try self.collectCompletionCandidates(&cands, line, wr, dp);
 
         try self.closeCompletionPicker();
-        if (st.selected >= cands.items.len) return; // stale -- nothing sane to accept
+        if (st.list.selected >= cands.items.len) return; // stale -- nothing sane to accept
 
-        const chosen = cands.items[st.selected];
+        const chosen = cands.items[st.list.selected];
         const escaped = try wordsplit.escapeSpecial(alloc, chosen.name[dp.prefix.len..]);
         defer alloc.free(escaped);
         try self.insertText(escaped);

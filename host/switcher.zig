@@ -7,6 +7,7 @@ const glyphwire = @import("glyphwire");
 const app_mod = @import("app.zig");
 const config = @import("config.zig");
 const modal_list = @import("modal_list.zig");
+const listcursor = @import("listcursor");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
@@ -173,7 +174,7 @@ pub const Switcher = struct {
 
     fn move(self: *Switcher, delta: isize) void {
         if (self.len == 0) return;
-        self.selected = modal_list.wrapMove(self.selected, self.len, delta);
+        self.selected = listcursor.wrap(self.selected, self.len, delta);
         self.gen +%= 1;
     }
 

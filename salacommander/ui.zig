@@ -683,9 +683,9 @@ pub const Ui = struct {
                 self.pane_dirty = .{ .full, .full };
             },
 
-            .toggleMark => p.toggleMark(p.cursor),
+            .toggleMark => p.toggleMark(p.list.selected),
             .toggleMarkAndDown => {
-                p.toggleMark(p.cursor);
+                p.toggleMark(p.list.selected);
                 p.moveCursor(1);
             },
             .markAll => p.markAll(),
@@ -1046,7 +1046,7 @@ pub const Ui = struct {
         errdefer self.alloc.free(original);
         var line = try LineEdit.init(self.alloc, e.name);
         _ = line.moveTo(renameCaret(e.name, (e.link_target_kind orelse e.kind) == .directory));
-        self.name_edit = .{ .pane = self.active, .row = p.cursor, .original = original, .line = line };
+        self.name_edit = .{ .pane = self.active, .row = p.list.selected, .original = original, .line = line };
         self.markDirty(self.active, .full);
     }
 
@@ -1169,7 +1169,7 @@ pub const Ui = struct {
         if (m.cell.row < list_top) return;
         const slot = (m.cell.row - list_top) / p.view.rowHeight();
         if (slot >= self.visibleRows(i)) return;
-        const row = p.top + slot;
+        const row = p.list.top + slot;
         if (row >= p.rowCount()) return;
 
         p.setCursor(row);
@@ -1661,8 +1661,8 @@ pub const Ui = struct {
         if (self.pathEditFor(i) != null or self.nameEditFor(i) != null) return self.renderPane(i);
 
         const old_top = self.drawn_top[i];
-        const scrolled_down = p.top > old_top;
-        const delta = if (scrolled_down) p.top - old_top else old_top - p.top;
+        const scrolled_down = p.list.top > old_top;
+        const delta = if (scrolled_down) p.list.top - old_top else old_top - p.list.top;
         if (delta >= visible) return self.renderPane(i);
 
         self.pane_dirty[i] = .none;
@@ -1671,7 +1671,7 @@ pub const Ui = struct {
         const h = self.paneHeight();
         const rh = p.view.rowHeight();
         const cols = self.columns(w, p.view);
-        const end = @min(p.top + visible, p.rowCount());
+        const end = @min(p.list.top + visible, p.rowCount());
 
         const before = self.client.bytes_sent;
         const frames_before = self.client.frames_sent;
@@ -1682,8 +1682,8 @@ pub const Ui = struct {
         // Shift what's already on the host rather than resending it. The
         // band is the list area only -- the title, the header and the
         // footer stay put.
-        var exposed_from = p.top;
-        var exposed_to = p.top;
+        var exposed_from = p.list.top;
+        var exposed_to = p.list.top;
         if (delta > 0) {
             try b.moveContent(
                 layer,
@@ -1695,10 +1695,10 @@ pub const Ui = struct {
             // Scrolling toward the end exposes the last `delta` rows;
             // toward the start, the first `delta`.
             if (scrolled_down) {
-                exposed_from = p.top + visible - delta;
-                exposed_to = p.top + visible;
+                exposed_from = p.list.top + visible - delta;
+                exposed_to = p.list.top + visible;
             } else {
-                exposed_to = p.top + delta;
+                exposed_to = p.list.top + delta;
             }
         }
 
@@ -1713,10 +1713,10 @@ pub const Ui = struct {
             try self.writeListRow(&b, i, row, w, cols);
             drawn += 1;
         }
-        const cursor_rows = [2]usize{ self.drawn_cursor[i], p.cursor };
+        const cursor_rows = [2]usize{ self.drawn_cursor[i], p.list.selected };
         for (cursor_rows, 0..) |r, n| {
             if (n == 1 and cursor_rows[0] == cursor_rows[1]) break;
-            if (r < p.top or r >= end) continue;
+            if (r < p.list.top or r >= end) continue;
             if (r >= exposed_from and r < exposed_to) continue; // already drawn
             if (level == .bg) {
                 try self.setRowColors(&b, i, r, cols);
@@ -1733,7 +1733,7 @@ pub const Ui = struct {
         // The scrollbar's position, when the move scrolled. The extent is
         // the listing's and hasn't changed, so only the offset is sent.
         if (delta > 0) {
-            const offset = p.top * rh;
+            const offset = p.list.top * rh;
             if (self.pushed_scroll[i][1] != offset) try b.setLayerScrollOffset(layer, offset, 0);
             self.pushed_scroll[i][1] = offset;
         }
@@ -1741,18 +1741,18 @@ pub const Ui = struct {
         var sent = try b.send();
         sent.deinit();
 
-        self.drawn_cursor[i] = p.cursor;
-        self.drawn_top[i] = p.top;
+        self.drawn_cursor[i] = p.list.selected;
+        self.drawn_top[i] = p.list.top;
         self.reportRedraw(i, drawn, self.client.bytes_sent - before, self.client.frames_sent - frames_before);
     }
 
-    /// One listing row and its icon, at the screen position `p.top` puts
+    /// One listing row and its icon, at the screen position `p.list.top` puts
     /// it. The icon goes last for the same reason the full repaint draws
     /// all of them last: a text write clears a cell's foreground icon.
     fn writeListRow(self: *Ui, b: *Batch, i: usize, row: usize, w: usize, cols: Columns) !void {
         const p = &self.panes[i];
         const rh = p.view.rowHeight();
-        const y = list_top + (row - p.top) * rh;
+        const y = list_top + (row - p.list.top) * rh;
         try writeRow(b, self.pane_layers[i], p, row, y, w, cols, i == self.active);
         const icon = if (p.entryAt(row)) |e| lsentries.iconForEntry(e.*) else "file/folder";
         try b.drawIconOnStyled(self.pane_layers[i], y, cols.icon_col, icon, .{
@@ -1812,17 +1812,17 @@ pub const Ui = struct {
 
         // Rows: text first, icons last -- a text write clears a cell's
         // foreground icon, and a tall icon spills into the row below.
-        const end = @min(p.top + visible, p.rowCount());
-        for (p.top..end) |row| try writeRow(&b, layer, p, row, list_top + (row - p.top) * rh, w, cols, active);
+        const end = @min(p.list.top + visible, p.rowCount());
+        for (p.list.top..end) |row| try writeRow(&b, layer, p, row, list_top + (row - p.list.top) * rh, w, cols, active);
         // The F2 field over its row's name, before the icons for the
         // same reason the rows are.
         if (self.nameEditFor(i)) |e| {
-            if (e.row >= p.top and e.row < end) _ = try writeField(&b, layer, &e.line, list_top + (e.row - p.top) * rh, cols.name_col, cols.name_w);
+            if (e.row >= p.list.top and e.row < end) _ = try writeField(&b, layer, &e.line, list_top + (e.row - p.list.top) * rh, cols.name_col, cols.name_w);
         }
         const icon_px = self.iconPx(p.view);
-        for (p.top..end) |row| {
+        for (p.list.top..end) |row| {
             const icon = if (p.entryAt(row)) |e| lsentries.iconForEntry(e.*) else "file/folder";
-            try b.drawIconOnStyled(layer, list_top + (row - p.top) * rh, cols.icon_col, icon, .{
+            try b.drawIconOnStyled(layer, list_top + (row - p.list.top) * rh, cols.icon_col, icon, .{
                 .scale = .natural,
                 .h_align = .start,
                 .v_align = if (rh > 1) .start else .center,
@@ -1836,7 +1836,7 @@ pub const Ui = struct {
         // The host scrollbar, in list-row units: the extent is the whole
         // listing plus the chrome, so its range matches `top`'s.
         const extent = p.rowCount() * rh + chrome_rows + (self.paneHeight() -| chrome_rows) % rh;
-        const offset = p.top * rh;
+        const offset = p.list.top * rh;
         if (self.pushed_scroll[i][0] != extent) try b.setLayerContentExtent(layer, w, extent);
         if (self.pushed_scroll[i][0] != extent or self.pushed_scroll[i][1] != offset) try b.setLayerScrollOffset(layer, offset, 0);
         self.pushed_scroll[i] = .{ extent, offset };
@@ -1847,9 +1847,9 @@ pub const Ui = struct {
         sent.deinit();
 
         // What the next `.rows` repaint diffs against.
-        self.drawn_cursor[i] = p.cursor;
-        self.drawn_top[i] = p.top;
-        self.reportRedraw(i, end -| p.top, self.client.bytes_sent - before, self.client.frames_sent - frames_before);
+        self.drawn_cursor[i] = p.list.selected;
+        self.drawn_top[i] = p.list.top;
+        self.reportRedraw(i, end -| p.list.top, self.client.bytes_sent - before, self.client.frames_sent - frames_before);
     }
 
     /// One line per pane repaint under `GLYPHWIRE_SALA_PROFILE` -- see
@@ -1879,7 +1879,7 @@ pub const Ui = struct {
     /// without the text -- the two have to agree or a highlight move
     /// would leave the wrong stripe behind.
     fn rowBg(p: *const Pane, row: usize, active_pane: bool) glyphwire.Color {
-        if (row == p.cursor) return if (active_pane) bg_cursor else bg_cursor_inactive;
+        if (row == p.list.selected) return if (active_pane) bg_cursor else bg_cursor_inactive;
         return if (row % 2 == 1) bg_row_alt else bg_pane;
     }
 
@@ -1892,7 +1892,7 @@ pub const Ui = struct {
     const RowFg = struct { name: glyphwire.Color, detail: glyphwire.Color };
 
     fn rowFg(p: *const Pane, row: usize, active_pane: bool) RowFg {
-        if (row == p.cursor) {
+        if (row == p.list.selected) {
             const c = if (active_pane) fg_cursor else fg_cursor_inactive;
             return .{ .name = c, .detail = c };
         }
@@ -1911,7 +1911,7 @@ pub const Ui = struct {
         const p = &self.panes[i];
         const rh = p.view.rowHeight();
         const layer = self.pane_layers[i];
-        const y = list_top + (row - p.top) * rh;
+        const y = list_top + (row - p.list.top) * rh;
         const w = self.paneWidth(i);
         const fg = rowFg(p, row, i == self.active);
         try b.setBg(.{ .layer = layer, .row = y, .rows = rh, .cols = w, .bg = rowBg(p, row, i == self.active) });
