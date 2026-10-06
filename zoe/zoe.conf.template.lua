@@ -83,6 +83,14 @@
 --     -- else is ignored.
 --     page_lines = 10,
 --
+--     -- Rows a PageDown / PageUp moves the cursor in the file tree.
+--     -- Left out (or zero), a page is the sidebar's own height less one
+--     -- row of overlap, so it follows a resized pane on its own; a
+--     -- number >= 1 pins it to that many rows instead. Separate from
+--     -- `page_lines` because a page through a listing and a page through
+--     -- text are not the same distance.
+--     tree_page_lines = 0,
+--
 --     -- Typematic key repeat, in milliseconds: how long a key is held
 --     -- before it starts repeating, then how often it repeats. zoe asks
 --     -- glyphwire-host for these while it is focused, so they apply to
