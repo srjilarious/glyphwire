@@ -18,6 +18,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 const md = @import("md_support");
+const cli = @import("applib").cli;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
@@ -52,12 +53,8 @@ pub fn main(init: std.process.Init) !void {
     });
     defer parser.deinit();
 
-    var args = parser.parse(init.minimal.args) catch |err| {
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "gwmd: error parsing args: {t}\n", .{err}) catch
-            "gwmd: error parsing args\n";
-        return fail(io, msg);
-    };
+    var args = parser.parse(init.minimal.args) catch |err|
+        cli.fail(io, "gwmd: error parsing args: {t}\n", .{err});
     defer args.deinit();
 
     if (args.hasOption("help")) {
@@ -71,7 +68,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (args.positional.items.len < 1) {
-        return fail(io, "usage: gwmd [--dump] [--width N] [--max-width N] <file.md>[#heading]\n");
+        cli.fail(io, "usage: gwmd [--dump] [--width N] [--max-width N] <file.md>[#heading]\n", .{});
     }
     const arg = args.positional.items[0];
 
@@ -91,12 +88,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.hasOption("dump")) return dump(alloc, io, path, dump_width, max_width);
 
-    var client = glyphwire.Client.connectFromEnv(io, alloc, init.environ_map) catch {
-        return dump(alloc, io, path, dump_width, max_width);
-    };
-    defer client.deinit();
-
-    const listener = glyphwire.InputListener.connectFromEnv(io, alloc, init.environ_map, &.{
+    var conn = cli.connect(io, alloc, init.environ_map, &.{
         "key",
         "resize",
         "scroll_offset",
@@ -104,43 +96,32 @@ pub fn main(init: std.process.Init) !void {
         "mouse_move",
         "context",
     }) catch return dump(alloc, io, path, dump_width, max_width);
-    defer listener.deinit();
+    defer conn.deinit();
 
-    const ui = try md.Ui.init(alloc, io, &client, listener, max_width);
+    const ui = try md.Ui.init(alloc, io, &conn.client, conn.listener, max_width);
     defer ui.deinit();
 
     try ui.open(path, fragment);
     if (ui.page == null) {
         // Nothing to show: say why on the terminal rather than leaving an
         // empty window up.
-        var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "gwmd: {s}\n", .{ui.message orelse "could not open file"}) catch "gwmd: could not open file\n";
-        ui.deinit();
-        return fail(io, msg);
+        cli.fail(io, "gwmd: {s}\n", .{ui.message orelse "could not open file"});
     }
     try ui.run();
 }
 
 fn numberOpt(io: std.Io, args: anytype, name: []const u8, default: usize) !usize {
     const v = args.optionVal(name) orelse return default;
-    return std.fmt.parseInt(usize, v, 10) catch {
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "gwmd: --{s} wants a number, got '{s}'\n", .{ name, v }) catch
-            "gwmd: bad number\n";
-        try fail(io, msg);
-        unreachable;
-    };
+    return std.fmt.parseInt(usize, v, 10) catch
+        cli.fail(io, "gwmd: --{s} wants a number, got '{s}'\n", .{ name, v });
 }
 
 /// The headless path: the layout, as text, on stdout. Local images are
 /// measured from their file headers so they're placed as they would be
 /// on screen (at an assumed 8x16 cell).
 fn dump(alloc: std.mem.Allocator, io: std.Io, path: []const u8, width: usize, max_width: usize) !void {
-    const source = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(64 * 1024 * 1024)) catch |err| {
-        var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "gwmd: {s}: {t}\n", .{ path, err }) catch "gwmd: could not read file\n";
-        return fail(io, msg);
-    };
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(64 * 1024 * 1024)) catch |err|
+        cli.fail(io, "gwmd: {s}: {t}\n", .{ path, err });
     defer alloc.free(source);
 
     var doc = try md.Document.parse(alloc, source);
@@ -181,12 +162,4 @@ fn dump(alloc: std.mem.Allocator, io: std.Io, path: []const u8, width: usize, ma
     var w = std.Io.File.stdout().writer(io, &buf);
     try w.interface.writeAll(text);
     try w.interface.flush();
-}
-
-fn fail(io: std.Io, msg: []const u8) !void {
-    var buf: [512]u8 = undefined;
-    var w = std.Io.File.stderr().writer(io, &buf);
-    try w.interface.writeAll(msg);
-    try w.interface.flush();
-    std.process.exit(1);
 }

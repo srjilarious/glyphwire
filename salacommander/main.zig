@@ -27,6 +27,7 @@ const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 const sala = @import("salacommander_support");
 const interrupt = @import("applib").interrupt;
+const cli = @import("applib").cli;
 const themeconf = @import("themeconf");
 
 pub fn main(init: std.process.Init) !void {
@@ -50,12 +51,8 @@ pub fn main(init: std.process.Init) !void {
     });
     defer parser.deinit();
 
-    var args = parser.parse(init.minimal.args) catch |err| {
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "salacommander: error parsing args: {t}\n", .{err}) catch
-            "salacommander: error parsing args\n";
-        return fail(io, msg);
-    };
+    var args = parser.parse(init.minimal.args) catch |err|
+        cli.fail(io, "salacommander: error parsing args: {t}\n", .{err});
     defer args.deinit();
 
     if (args.hasOption("help")) {
@@ -87,13 +84,7 @@ pub fn main(init: std.process.Init) !void {
     defer theme_arena.deinit();
     const own_theme = themeconf.programTheme(theme_arena.allocator(), alloc, io, init.environ_map, sala.config.conf_name);
 
-    var client = glyphwire.Client.connectFromEnv(io, alloc, init.environ_map) catch {
-        cfg.deinit(alloc);
-        return fail(io, "salacommander: needs a glyphwire session (no GLYPHWIRE_SOCK)\n");
-    };
-    defer client.deinit();
-
-    const listener = glyphwire.InputListener.connectFromEnv(io, alloc, init.environ_map, &.{
+    var conn = cli.connectOrFail(io, alloc, init.environ_map, "salacommander", &.{
         "key",
         "text",
         "paste",
@@ -112,32 +103,18 @@ pub fn main(init: std.process.Init) !void {
         // Ctrl+Shift+C with no host selection -- answered with the active
         // pane's paths. See `Ui.copySelectionPaths`.
         "copy_request",
-    }) catch {
-        cfg.deinit(alloc);
-        return fail(io, "salacommander: couldn't subscribe to input\n");
-    };
-    defer listener.deinit();
+    });
+    defer conn.deinit();
 
-    const ui = sala.Ui.init(alloc, io, &client, listener, .{
+    const ui = sala.Ui.init(alloc, io, &conn.client, conn.listener, .{
         .left = left,
         .right = right,
         .home = init.environ_map.get("HOME"),
         .profile = init.environ_map.get("GLYPHWIRE_SALA_PROFILE") != null,
         .cfg = cfg,
         .theme = own_theme,
-    }) catch |err| {
-        var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "salacommander: can't open {s}: {t}\n", .{ left, err }) catch "salacommander: can't start\n";
-        return fail(io, msg);
-    };
+    }) catch |err|
+        cli.fail(io, "salacommander: can't open {s}: {t}\n", .{ left, err });
     defer ui.deinit();
     try ui.run();
-}
-
-fn fail(io: std.Io, msg: []const u8) !void {
-    var buf: [512]u8 = undefined;
-    var w = std.Io.File.stderr().writer(io, &buf);
-    try w.interface.writeAll(msg);
-    try w.interface.flush();
-    std.process.exit(1);
 }

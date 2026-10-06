@@ -22,6 +22,7 @@ const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 const read = @import("read_support");
 const themeconf = @import("themeconf");
+const cli = @import("applib").cli;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
@@ -66,12 +67,8 @@ pub fn main(init: std.process.Init) !void {
     });
     defer parser.deinit();
 
-    var args = parser.parse(init.minimal.args) catch |err| {
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "gw-read: error parsing args: {t}\n", .{err}) catch
-            "gw-read: error parsing args\n";
-        return fail(io, msg);
-    };
+    var args = parser.parse(init.minimal.args) catch |err|
+        cli.fail(io, "gw-read: error parsing args: {t}\n", .{err});
     defer args.deinit();
 
     if (args.hasOption("help")) {
@@ -85,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (args.positional.items.len < 1) {
-        return fail(io, "usage: gw-read [--page N] [--mode fit|fit-width|fit-height|natural] [--direction rtl|ltr] <book>\n");
+        cli.fail(io, "usage: gw-read [--page N] [--mode fit|fit-width|fit-height|natural] [--direction rtl|ltr] <book>\n", .{});
     }
     const path = args.positional.items[0];
 
@@ -100,12 +97,8 @@ pub fn main(init: std.process.Init) !void {
     // so this one deinit is the only free.
     defer conf.deinit(alloc);
 
-    const book = read.archive.open(alloc, io, path) catch |err| {
-        var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "gw-read: {s}: {s}\n", .{ path, describe(err) }) catch
-            "gw-read: could not open that book\n";
-        return fail(io, msg);
-    };
+    const book = read.archive.open(alloc, io, path) catch |err|
+        cli.fail(io, "gw-read: {s}: {s}\n", .{ path, describe(err) });
     defer book.deinit();
 
     // Overrides from the command line beat both the config and the
@@ -113,31 +106,19 @@ pub fn main(init: std.process.Init) !void {
     // bad value fails fast rather than after a window has flashed up.
     var mode = conf.mode;
     if (args.optionVal("mode")) |v| {
-        mode = read.config.parseMode(v) orelse {
-            var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "gw-read: unknown --mode '{s}'\n", .{v}) catch
-                "gw-read: unknown --mode\n";
-            return fail(io, msg);
-        };
+        mode = read.config.parseMode(v) orelse
+            cli.fail(io, "gw-read: unknown --mode '{s}'\n", .{v});
     }
     var direction = conf.direction;
     if (args.optionVal("direction")) |v| {
-        direction = read.Direction.parse(v) orelse {
-            var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "gw-read: unknown --direction '{s}' (want rtl or ltr)\n", .{v}) catch
-                "gw-read: unknown --direction\n";
-            return fail(io, msg);
-        };
+        direction = read.Direction.parse(v) orelse
+            cli.fail(io, "gw-read: unknown --direction '{s}' (want rtl or ltr)\n", .{v});
     }
     var explicit_page: ?usize = null;
     if (args.optionVal("page")) |v| {
         const n = std.fmt.parseInt(usize, v, 10) catch 0;
-        if (n == 0 or n > book.count()) {
-            var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "gw-read: --page {s} is outside 1..{d}\n", .{ v, book.count() }) catch
-                "gw-read: --page out of range\n";
-            return fail(io, msg);
-        }
+        if (n == 0 or n > book.count())
+            cli.fail(io, "gw-read: --page {s} is outside 1..{d}\n", .{ v, book.count() });
         explicit_page = n - 1;
     }
 
@@ -170,17 +151,12 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    var client = glyphwire.Client.connectFromEnv(io, alloc, init.environ_map) catch {
-        // No display server: say what's in the book and leave, the same
-        // shape zoe's headless fallback has.
-        return list(alloc, io, book, conf.ocr);
-    };
-    defer client.deinit();
-
     // Two connections: one for requests and drawing, one subscribed for
     // notifications. `scroll_offset` is what the wheel and the page
-    // layer's scrollbars report the pan back on.
-    const listener = glyphwire.InputListener.connectFromEnv(io, alloc, init.environ_map, &.{
+    // layer's scrollbars report the pan back on. With no display server,
+    // say what's in the book and leave, the same shape zoe's headless
+    // fallback has.
+    var conn = cli.connect(io, alloc, init.environ_map, &.{
         "key",
         "text",
         "resize",
@@ -189,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         "mouse_move",
         "context",
     }) catch return list(alloc, io, book, conf.ocr);
-    defer listener.deinit();
+    defer conn.deinit();
 
     // `read.conf.lua`'s own `theme`, if it names one; otherwise the
     // window's. Borrows from `theme_arena`.
@@ -197,7 +173,7 @@ pub fn main(init: std.process.Init) !void {
     defer theme_arena.deinit();
     const own_theme = themeconf.programTheme(theme_arena.allocator(), alloc, io, init.environ_map, read.config.conf_name);
 
-    const ui = try read.Ui.init(alloc, &client, listener, book, conf, .{
+    const ui = try read.Ui.init(alloc, &conn.client, conn.listener, book, conf, .{
         .page = start_page,
         .mode = mode,
         .direction = direction,
@@ -296,12 +272,4 @@ fn describe(err: anyerror) []const u8 {
         error.FileNotFound => "no such file or directory",
         else => "could not be opened",
     };
-}
-
-fn fail(io: std.Io, msg: []const u8) !void {
-    var buf: [512]u8 = undefined;
-    var w = std.Io.File.stderr().writer(io, &buf);
-    try w.interface.writeAll(msg);
-    try w.interface.flush();
-    std.process.exit(1);
 }

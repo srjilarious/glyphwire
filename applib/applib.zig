@@ -33,6 +33,9 @@
 //!   `homepath`   `~` <-> `$HOME` (gw-shell, zoe), and a typed path
 //!                made absolute (gw-ls, gw-grep, gw-read, gwmd,
 //!                salacommander, zoe)
+//!   `cli`        exit with a message, connect client + listener
+//!                (gwmd, gw-read, gw-grep, gw-hist, gmux, salacommander,
+//!                zoe, glyphwire-probe)
 //!   `zjump`      the `zj` frecency directory database (gw-shell,
 //!                gw-hist --dirs)
 //!   `fuzzy`      the subsequence matcher (gw-hist, zoe, salacommander)
@@ -78,6 +81,7 @@ pub const format = @import("format.zig");
 pub const gridlayout = @import("gridlayout.zig");
 pub const icons = @import("icons.zig");
 pub const homepath = @import("homepath.zig");
+pub const cli = @import("cli.zig");
 pub const fsops = @import("fsops.zig");
 pub const pathcomplete = @import("pathcomplete.zig");
 pub const syntax = @import("syntax.zig");

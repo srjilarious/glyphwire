@@ -454,6 +454,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     probe_exe.root_module.addImport("glyphwire", glyphwire_mod);
+    probe_exe.root_module.addImport("applib", applib_mod);
     b.installArtifact(probe_exe);
 
     const run_probe = b.addRunArtifact(probe_exe);
@@ -658,6 +659,7 @@ pub fn build(b: *std.Build) void {
     read_exe.root_module.addImport("themeconf", themeconf_mod);
     read_exe.root_module.addImport("zargunaught", zargunaught_mod);
     read_exe.root_module.addImport("read_support", read_support_mod);
+    read_exe.root_module.addImport("applib", applib_mod);
     // read_support -> config.zig -> ziglua (read.conf.lua), so the final
     // binary needs the Lua C lib and libc, same as gw-shell / gw-ls / zoe
     // / gmux.
@@ -683,6 +685,7 @@ pub fn build(b: *std.Build) void {
     md_exe.root_module.addImport("glyphwire", glyphwire_mod);
     md_exe.root_module.addImport("zargunaught", zargunaught_mod);
     md_exe.root_module.addImport("md_support", md_support_mod);
+    md_exe.root_module.addImport("applib", applib_mod);
     b.installArtifact(md_exe);
 
     const run_md = b.addRunArtifact(md_exe);

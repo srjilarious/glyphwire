@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const cli = @import("applib").cli;
 
 /// glyphwire-probe: a small command-line client for driving and
 /// inspecting a running glyphwire session by hand -- the thing that was
@@ -44,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
     // Always JSON: the probe sends the params you type and prints the
     // responses verbatim, so the bytes have to be the readable encoding.
     var client = glyphwire.Client.connectFromEnvAs(io, alloc, init.environ_map, .json) catch {
-        return fail(io, "glyphwire-probe: no session -- set GLYPHWIRE_SOCK\n");
+        cli.fail(io, "glyphwire-probe: no session -- set GLYPHWIRE_SOCK\n", .{});
     };
     defer client.deinit();
 
@@ -54,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
     defer out.flush() catch {};
 
     if (eq(args[1], "script")) {
-        if (args.len < 3) return fail(io, "glyphwire-probe: script needs a file\n");
+        if (args.len < 3) cli.fail(io, "glyphwire-probe: script needs a file\n", .{});
         return runScript(&client, alloc, io, out, args[2]);
     }
 
@@ -122,9 +123,10 @@ fn runLine(client: *glyphwire.Client, alloc: std.mem.Allocator, io: std.Io, out:
         const ms = try std.fmt.parseInt(u32, std.mem.trim(u8, rest, " "), 10);
         try std.Io.sleep(io, .fromMilliseconds(ms), .awake);
     } else {
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "glyphwire-probe: unknown command '{s}'\n", .{cmd}) catch "glyphwire-probe: unknown command\n";
-        return fail(io, msg);
+        // Whatever the script printed so far first: exiting skips the
+        // flush `main` defers.
+        out.flush() catch {};
+        cli.fail(io, "glyphwire-probe: unknown command '{s}'\n", .{cmd});
     }
 }
 
@@ -202,9 +204,4 @@ fn write(io: std.Io, text: []const u8) !void {
     var w = std.Io.File.stdout().writer(io, &buf);
     try w.interface.writeAll(text);
     try w.interface.flush();
-}
-
-fn fail(io: std.Io, msg: []const u8) !void {
-    try write(io, msg);
-    return error.InvalidArguments;
 }

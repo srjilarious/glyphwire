@@ -54,6 +54,7 @@ const glyphwire = @import("glyphwire");
 const history = @import("applib").history;
 const fuzzy = @import("applib").fuzzy;
 const interrupt = @import("applib").interrupt;
+const cli = @import("applib").cli;
 const zjump = @import("applib").zjump;
 const homepath = @import("applib").homepath;
 
@@ -90,18 +91,15 @@ pub fn main(init: std.process.Init) !void {
     // the strings live in `arena` for the life of the process.
     const dirs = loadDirs(arena, io, init.environ_map) catch &.{};
 
-    var client = try glyphwire.Client.connectFromEnv(io, alloc, init.environ_map);
-    defer client.deinit();
-
-    const listener = try glyphwire.InputListener.connectFromEnv(io, alloc, init.environ_map, &.{
+    var conn = cli.connectOrFail(io, alloc, init.environ_map, "gw-hist", &.{
         "key",
         "text",
         "resize",
         "scroll_offset",
     });
-    defer listener.deinit();
+    defer conn.deinit();
 
-    const ui = try Ui.init(alloc, &client, listener, entries, dirs, args.mode, args.seed);
+    const ui = try Ui.init(alloc, &conn.client, conn.listener, entries, dirs, args.mode, args.seed);
     defer ui.deinit();
 
     try ui.run();

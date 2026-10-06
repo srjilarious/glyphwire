@@ -17,6 +17,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const gmux = @import("gmux_support");
 const interrupt = @import("applib").interrupt;
+const cli = @import("applib").cli;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
@@ -28,30 +29,21 @@ pub fn main(init: std.process.Init) !void {
     // See `applib.interrupt`.
     interrupt.keep();
 
-    var client = glyphwire.Client.connectFromEnv(io, alloc, init.environ_map) catch {
-        try write(io, "gmux: no glyphwire session (GLYPHWIRE_SOCK not set)\n");
-        return error.NoSession;
-    };
-    defer client.deinit();
-
     // Deliberately *not* subscribed to `key` / `text`: gmux never wants a
     // program's keystrokes, and could not receive them anyway (it is never
     // in the focused pane). `window_keys` is the prefix-command stream the
     // session addresses to us; `panes` carries pane rects and exits.
-    const listener = glyphwire.InputListener.connectFromEnv(io, alloc, init.environ_map, &.{
+    var conn = cli.connectOrFail(io, alloc, init.environ_map, "gmux", &.{
         "window_keys",
         "panes",
         "shutdown",
-    }) catch {
-        try write(io, "gmux: no glyphwire session (GLYPHWIRE_SOCK not set)\n");
-        return error.NoSession;
-    };
-    defer listener.deinit();
+    });
+    defer conn.deinit();
 
     var cfg = gmux.config.load(alloc, io, init.environ_map);
     defer cfg.deinit();
 
-    const ui = gmux.ui.Ui.init(alloc, io, &client, listener, &cfg) catch |err| switch (err) {
+    const ui = gmux.ui.Ui.init(alloc, io, &conn.client, conn.listener, &cfg) catch |err| switch (err) {
         error.WindowManagerTaken => {
             try write(io, "gmux: a multiplexer is already running in this window\n");
             return err;

@@ -7,6 +7,7 @@ const zargs = @import("zargunaught");
 
 const syntax = @import("applib").syntax;
 const homepath = @import("applib").homepath;
+const cli = @import("applib").cli;
 
 const rg = @import("rg.zig");
 const nodes_mod = @import("nodes.zig");
@@ -98,12 +99,12 @@ pub fn main(init: std.process.Init) !void {
     defer parser.deinit();
 
     var args = parser.parse(init.minimal.args) catch {
-        return fail(io, usage);
+        cli.fail(io, "{s}", .{usage});
     };
     defer args.deinit();
 
     if (args.hasOption("help") or args.positional.items.len == 0) {
-        return fail(io, usage);
+        cli.fail(io, "{s}", .{usage});
     }
 
     const both = optU32(args, "context");
@@ -143,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
         .stdout = .pipe,
         .stderr = .ignore,
     }) catch {
-        return fail(io, "gw-grep: could not run `rg` - is ripgrep installed and on your PATH?\n");
+        cli.fail(io, "gw-grep: could not run `rg` - is ripgrep installed and on your PATH?\n", .{});
     };
 
     var p = rg.Parser.init(alloc, max_hits);
@@ -165,7 +166,7 @@ pub fn main(init: std.process.Init) !void {
         child.kill(io);
     } else {
         const term = child.wait(io) catch {
-            return fail(io, "gw-grep: `rg` did not finish cleanly\n");
+            cli.fail(io, "gw-grep: `rg` did not finish cleanly\n", .{});
         };
         try checkExit(io, term);
     }
@@ -177,7 +178,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (files.len == 0) {
-        return fail(io, "gw-grep: no matches\n");
+        cli.fail(io, "gw-grep: no matches\n", .{});
     }
 
     const cap: ?usize = if (p.truncated) max_hits else null;
@@ -229,11 +230,11 @@ fn checkExit(io: std.Io, term: std.process.Child.Term) !void {
         // a failed execve in the forked child -- the same "not really
         // installed" signal `read/archive.zig` keys on.
         .exited => |code| if (code == 127) {
-            return fail(io, "gw-grep: could not run `rg` - is ripgrep installed and on your PATH?\n");
+            cli.fail(io, "gw-grep: could not run `rg` - is ripgrep installed and on your PATH?\n", .{});
         } else if (code > 1) {
-            return fail(io, "gw-grep: `rg` reported an error\n");
+            cli.fail(io, "gw-grep: `rg` reported an error\n", .{});
         },
-        else => return fail(io, "gw-grep: `rg` was killed\n"),
+        else => cli.fail(io, "gw-grep: `rg` was killed\n", .{}),
     }
 }
 
@@ -375,12 +376,4 @@ fn writePlain(io: std.Io, alloc: std.mem.Allocator, files: []const rg.FileHits, 
 fn optU32(args: anytype, name: []const u8) ?u32 {
     const v = args.optionVal(name) orelse return null;
     return std.fmt.parseInt(u32, v, 10) catch null;
-}
-
-fn fail(io: std.Io, msg: []const u8) !void {
-    var buf: [2048]u8 = undefined;
-    var w = std.Io.File.stderr().writer(io, &buf);
-    try w.interface.writeAll(msg);
-    try w.interface.flush();
-    std.process.exit(1);
 }

@@ -17,6 +17,7 @@ const zargs = @import("zargunaught");
 const zoe = @import("zoe_support");
 const interrupt = @import("applib").interrupt;
 const homepath = @import("applib").homepath;
+const cli = @import("applib").cli;
 const workspace = zoe.workspace;
 
 // const usage =
@@ -168,16 +169,13 @@ pub fn main(init: std.process.Init) !void {
     defer if (ws_file) |f| alloc.free(f);
     if (args.positional.items.len > 1) {
         for (args.positional.items) |p| {
-            if (!isDirectory(io, p)) return fail(io, "zoe: with several arguments, each must be a directory\n");
+            if (!isDirectory(io, p)) cli.fail(io, "zoe: with several arguments, each must be a directory\n", .{});
         }
         ws = try workspace.fromDirs(alloc, start_cwd, args.positional.items);
     } else if (path) |p| {
         if (workspace.isWorkspacePath(p) and !isDirectory(io, p)) {
-            ws = workspace.load(alloc, io, start_cwd, p) catch |err| {
-                var buf: [512]u8 = undefined;
-                const msg = std.fmt.bufPrint(&buf, "zoe: can't read workspace {s}: {t}\n", .{ p, err }) catch "zoe: can't read workspace\n";
-                return fail(io, msg);
-            };
+            ws = workspace.load(alloc, io, start_cwd, p) catch |err|
+                cli.fail(io, "zoe: can't read workspace {s}: {t}\n", .{ p, err });
             if (workspace.formatOf(p) == .zoe) ws_file = try std.fs.path.resolve(alloc, &.{ start_cwd, p });
         }
     }
@@ -187,7 +185,7 @@ pub fn main(init: std.process.Init) !void {
     // the file name.
     var start_line: ?usize = null;
     if (args.optionVal("line")) |text| {
-        start_line = std.fmt.parseInt(usize, text, 10) catch return fail(io, "zoe: --line needs a number\n");
+        start_line = std.fmt.parseInt(usize, text, 10) catch cli.fail(io, "zoe: --line needs a number\n", .{});
     }
     const quiet = args.hasOption("quiet");
 
@@ -208,7 +206,7 @@ pub fn main(init: std.process.Init) !void {
         target = .workspace;
     } else if (path) |p| {
         if (isDirectory(io, p)) {
-            std.process.setCurrentPath(io, p) catch return fail(io, "zoe: cannot change directory\n");
+            std.process.setCurrentPath(io, p) catch cli.fail(io, "zoe: cannot change directory\n", .{});
             target = .directory;
         } else {
             target = .{ .file = .{ .path = p, .line = start_line } };
@@ -233,14 +231,14 @@ pub fn main(init: std.process.Init) !void {
     const text: []u8 = if (file_path) |p|
         std.Io.Dir.cwd().readFileAlloc(io, p, alloc, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => try alloc.dupe(u8, ""),
-            else => return fail(io, "zoe: cannot read file\n"),
+            else => cli.fail(io, "zoe: cannot read file\n", .{}),
         }
     else
         try alloc.dupe(u8, "");
     defer alloc.free(text);
     // Same refusal the UI gives, so `zoe --keys` and a live window agree
     // on what zoe will open (see applib/filetype.zig).
-    if (zoe.filetype.looksBinary(text)) return fail(io, "zoe: not a text file\n");
+    if (zoe.filetype.looksBinary(text)) cli.fail(io, "zoe: not a text file\n", .{});
 
     var ed = try zoe.Editor.initFromText(alloc, text, file_path);
     defer ed.deinit();
@@ -310,17 +308,10 @@ fn runUi(
     ws_file: ?[]const u8,
     environ: *const std.process.Environ.Map,
 ) !bool {
-    var client = glyphwire.Client.connectFromEnv(io, alloc, environ) catch {
-        try write(io, "zoe: Requires a glyphwire host with GLYPHWIRE_SOCK set.\n");
-        return false;
-    };
-
-    defer client.deinit();
-
     // Two connections: one for requests and drawing, one subscribed for
     // notifications. `layout` and `scroll_offset` are what the split tree
     // and the tree pane's scrollbars report back on.
-    const listener = glyphwire.InputListener.connectFromEnv(io, alloc, environ, &.{
+    var conn = cli.connect(io, alloc, environ, &.{
         "key",
         "text",
         "clipboard",
@@ -336,8 +327,11 @@ fn runUi(
         // The window theme changed under a zoe that follows it: the
         // popups' nine-patch frame and the capture table catch up.
         "theme",
-    }) catch return false;
-    defer listener.deinit();
+    }) catch |err| {
+        if (err == error.NoSession) try write(io, "zoe: Requires a glyphwire host with GLYPHWIRE_SOCK set.\n");
+        return false;
+    };
+    defer conn.deinit();
 
     // The sidebar's folders: the workspace's, or else just the cwd.
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -351,7 +345,7 @@ fn runUi(
         try folders.append(alloc, .{ .path = cwd, .name = workspace.defaultName(cwd) });
     }
 
-    const ui = try zoe.Ui.init(alloc, io, &client, listener, target, folders.items, .{
+    const ui = try zoe.Ui.init(alloc, io, &conn.client, conn.listener, target, folders.items, .{
         .file = ws_file,
         .theme = if (ws) |w| w.theme else null,
         .editors = if (ws) |w| (if (w.editors) |e| e.root else null) else null,
@@ -388,9 +382,4 @@ fn write(io: std.Io, text: []const u8) !void {
     var w = std.Io.File.stdout().writer(io, &buf);
     try w.interface.writeAll(text);
     try w.interface.flush();
-}
-
-fn fail(io: std.Io, msg: []const u8) !void {
-    try write(io, msg);
-    return error.InvalidArguments;
 }
