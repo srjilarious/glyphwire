@@ -4803,111 +4803,14 @@ pub fn diskWatchIgnoresMissingFilesTest(io: std.Io, alloc: std.mem.Allocator) !v
 }
 
 // ─── Editor groups: layout tree ──────────────────────────────────────────
+//
+// The tree itself is `applib/splittree.zig`, covered in
+// splittree_tests.zig; this is zoe's name for a split's direction.
 
-const groups = zoe.groups;
-
-fn groupOrder(alloc: std.mem.Allocator, layout: *const groups.Layout) ![]groups.GroupId {
-    var out: std.ArrayList(groups.GroupId) = .empty;
-    try layout.groupsInOrder(alloc, &out);
-    return out.toOwnedSlice(alloc);
-}
-
-pub fn groupsSplitTurnsTheLeafIntoASplitTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var layout = try groups.Layout.init(alloc, 1);
-    defer layout.deinit();
-    const root_before = layout.root;
-
-    const s = try layout.split(1, 2, .vertical, 100);
-    // In place: the root node is still the root, now a split, so its
-    // parent's pointer (here, the root slot) never changes.
-    try testz.expectTrue(s == root_before);
-    try testz.expectEqual(s.kind.split.handle, 100);
-    try testz.expectEqual(s.kind.split.orientation.axis(), .row);
-    try testz.expectEqual(layout.count(), 2);
-
-    // Splitting the second half again nests under it.
-    const inner = try layout.split(2, 3, .horizontal, 101);
-    try testz.expectTrue(inner.parent.? == s);
-    const order = try groupOrder(alloc, &layout);
-    defer alloc.free(order);
-    try testz.expectEqual(order.len, 3);
-    try testz.expectEqual(order[0], 1);
-    try testz.expectEqual(order[1], 2);
-    try testz.expectEqual(order[2], 3);
-}
-
-pub fn groupsSplitSideBeforePutsTheNewGroupFirstTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var layout = try groups.Layout.init(alloc, 1);
-    defer layout.deinit();
-    // Ctrl+W Shift+H with nothing to the left: the new group goes left.
-    const s = try layout.splitSide(1, 2, .vertical, 100, .before);
-    try testz.expectEqual(s.kind.split.first.kind.group, 2);
-    try testz.expectEqual(s.kind.split.second.kind.group, 1);
-    const order = try groupOrder(alloc, &layout);
-    defer alloc.free(order);
-    try testz.expectEqual(order[0], 2);
-    try testz.expectEqual(order[1], 1);
-}
-
-pub fn groupsRemoveCollapsesIntoTheSiblingTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var layout = try groups.Layout.init(alloc, 1);
-    defer layout.deinit();
-    // The only group can't be removed.
-    try testz.expectTrue(layout.remove(1) == null);
-
-    _ = try layout.split(1, 2, .vertical, 100);
-    _ = try layout.split(2, 3, .horizontal, 101);
-
-    // Closing 1: the {2 over 3} subtree takes the whole root, focus goes
-    // to its first group, and the root's split is the one destroyed.
-    const r = layout.remove(1).?;
-    try testz.expectEqual(r.destroyed, 100);
-    try testz.expectEqual(r.focus, 2);
-    try testz.expectTrue(r.replacement == layout.root);
-    try testz.expectTrue(layout.root.parent == null);
-    try testz.expectEqual(layout.root.kind.split.handle, 101);
-    // The moved-up split's children point at their new parent.
-    try testz.expectTrue(layout.root.kind.split.first.parent.? == layout.root);
-    try testz.expectTrue(layout.root.kind.split.second.parent.? == layout.root);
-
-    const r2 = layout.remove(3).?;
-    try testz.expectEqual(r2.destroyed, 101);
-    try testz.expectEqual(r2.focus, 2);
-    try testz.expectEqual(layout.count(), 1);
-    try testz.expectEqual(layout.root.kind.group, 2);
-}
-
-pub fn groupsRemoveKeepsTheGrandparentLinkTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var layout = try groups.Layout.init(alloc, 1);
-    defer layout.deinit();
-    _ = try layout.split(1, 2, .vertical, 100);
-    _ = try layout.split(2, 3, .horizontal, 101);
-
-    // Closing 3 puts 2 where the inner split was; the root still holds it.
-    const r = layout.remove(3).?;
-    try testz.expectEqual(r.destroyed, 101);
-    try testz.expectTrue(r.replacement.parent.? == layout.root);
-    try testz.expectTrue(layout.root.kind.split.second == r.replacement);
-    try testz.expectEqual(r.replacement.kind.group, 2);
-}
-
-pub fn groupsNeighborPicksTheFacingPaneTest(_: std.Io, _: std.mem.Allocator) !void {
-    // [0 | 1]
-    // [0 | 2]   -- 0 is full height on the left, 1 over 2 on the right.
-    const rects = [_]groups.Rect{
-        .{ .row = 0, .col = 0, .cols = 40, .rows = 30 },
-        .{ .row = 0, .col = 41, .cols = 40, .rows = 15 },
-        .{ .row = 16, .col = 41, .cols = 40, .rows = 14 },
-    };
-    try testz.expectEqual(groups.neighbor(&rects, 1, .left), 0);
-    try testz.expectEqual(groups.neighbor(&rects, 2, .left), 0);
-    try testz.expectEqual(groups.neighbor(&rects, 1, .down), 2);
-    try testz.expectEqual(groups.neighbor(&rects, 2, .up), 1);
-    // Nothing above 1, and nothing right of either.
-    try testz.expectTrue(groups.neighbor(&rects, 1, .up) == null);
-    try testz.expectTrue(groups.neighbor(&rects, 1, .right) == null);
-    // From the tall pane, the one sharing more of its rows wins.
-    try testz.expectEqual(groups.neighbor(&rects, 0, .right), 1);
+pub fn groupsOrientationIsTheHostAxisTest(_: std.Io, _: std.mem.Allocator) !void {
+    // `:vsplit` lays groups out side by side: a host `row` split.
+    try testz.expectEqual(zoe.groups.Orientation.vertical.axis(), .row);
+    try testz.expectEqual(zoe.groups.Orientation.horizontal.axis(), .column);
 }
 
 // ─── Themes ──────────────────────────────────────────────────────────────

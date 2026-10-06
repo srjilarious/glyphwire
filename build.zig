@@ -136,6 +136,7 @@ pub fn build(b: *std.Build) void {
     });
     // `gmux/ui.zig` is the window-manager client; `layout.zig` stays pure.
     gmux_support_mod.addImport("glyphwire", glyphwire_mod);
+    gmux_support_mod.addImport("applib", applib_mod);
 
     // gw-read's page ordering, fit maths, image-handle LRU and resume
     // state, shared by the `gw-read` binary and its test runner -- same

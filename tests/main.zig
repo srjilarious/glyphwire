@@ -47,6 +47,7 @@ const all_tests = blk: {
         testz.Group{ .name = "Keybind Tests", .tag = "keybind", .mod = @import("./keybind_tests.zig") },
         testz.Group{ .name = "Lua Config Tests", .tag = "luaconf", .mod = @import("./luaconf_tests.zig") },
         testz.Group{ .name = "CLI Tests", .tag = "cli", .mod = @import("./cli_tests.zig") },
+        testz.Group{ .name = "Split Tree Tests", .tag = "splittree", .mod = @import("./splittree_tests.zig") },
         testz.Group{ .name = "Line Edit Tests", .tag = "lineedit", .mod = @import("./lineedit_tests.zig") },
         testz.Group{ .name = "Finder Popup Tests", .tag = "finderpopup", .mod = @import("./finderpopup_tests.zig") },
         testz.Group{ .name = "Salacommander Tests", .tag = "salacommander", .mod = @import("./salacommander_tests.zig") },

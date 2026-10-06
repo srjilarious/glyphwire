@@ -26,6 +26,7 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 
+const splittree = @import("applib").splittree;
 const layout = @import("layout.zig");
 const config = @import("config.zig");
 
@@ -36,9 +37,8 @@ const PaneId = layout.PaneId;
 /// Cells to move a divider per resize keystroke.
 const resize_step: i64 = 2;
 
-const Bounds = struct { row: usize = 0, col: usize = 0, cols: usize = 0, rows: usize = 0 };
-
-const Direction = enum { left, right, up, down };
+const Bounds = splittree.Rect;
+const Direction = splittree.Direction;
 
 pub const Error = error{
     /// Another connection already holds the window-manager role -- there is
@@ -278,44 +278,26 @@ pub const Ui = struct {
         self.client.focusPane(id) catch {};
     }
 
-    /// Nearest pane whose rect is strictly beyond the focused pane's edge
-    /// in `dir`, by the gap between the two edges. Doesn't require
-    /// perpendicular overlap -- a reasonable heuristic, not a full
-    /// tmux-style geometric layout search.
+    /// The pane facing the focused one in `dir`: wholly on that side,
+    /// overlapping it across the other axis, nearest first (see
+    /// `splittree.neighbor`, which zoe's Ctrl+hjkl uses too).
     fn moveFocus(self: *Ui, dir: Direction) void {
-        const cur = self.bounds.get(self.focused) orelse return;
+        const n = self.bounds.count();
+        const ids = self.alloc.alloc(PaneId, n) catch return;
+        defer self.alloc.free(ids);
+        const rects = self.alloc.alloc(Bounds, n) catch return;
+        defer self.alloc.free(rects);
 
-        var best: ?PaneId = null;
-        var best_dist: i64 = std.math.maxInt(i64);
+        var from: ?usize = null;
         var it = self.bounds.iterator();
-        while (it.next()) |entry| {
-            const id = entry.key_ptr.*;
-            if (id == self.focused) continue;
-            const b = entry.value_ptr.*;
-            const dist: i64 = switch (dir) {
-                .left => blk: {
-                    if (b.col + b.cols > cur.col) break :blk null;
-                    break :blk @as(i64, @intCast(cur.col)) - @as(i64, @intCast(b.col + b.cols));
-                },
-                .right => blk: {
-                    if (b.col < cur.col + cur.cols) break :blk null;
-                    break :blk @as(i64, @intCast(b.col)) - @as(i64, @intCast(cur.col + cur.cols));
-                },
-                .up => blk: {
-                    if (b.row + b.rows > cur.row) break :blk null;
-                    break :blk @as(i64, @intCast(cur.row)) - @as(i64, @intCast(b.row + b.rows));
-                },
-                .down => blk: {
-                    if (b.row < cur.row + cur.rows) break :blk null;
-                    break :blk @as(i64, @intCast(b.row)) - @as(i64, @intCast(cur.row + cur.rows));
-                },
-            } orelse continue;
-            if (dist < best_dist) {
-                best_dist = dist;
-                best = id;
-            }
+        var i: usize = 0;
+        while (it.next()) |entry| : (i += 1) {
+            ids[i] = entry.key_ptr.*;
+            rects[i] = entry.value_ptr.*;
+            if (ids[i] == self.focused) from = i;
         }
-        if (best) |id| self.setFocus(id);
+        const hit = splittree.neighbor(rects, from orelse return, dir) orelse return;
+        self.setFocus(ids[hit]);
     }
 
     // ── Commands ────────────────────────────────────────────────────────
@@ -334,12 +316,12 @@ pub const Ui = struct {
         };
     }
 
-    /// Pushes `s`'s *current* two children -- called only for a split node
-    /// whose child set just changed, never for an untouched sibling
-    /// elsewhere in the tree (see the module doc comment).
-    fn pushChildren(self: *Ui, s: *layout.SplitNode) !void {
-        const refs = layout.childRefs(s);
-        try self.client.setPaneSplitChildren(s.wire_id, &.{ childInput(refs[0]), childInput(refs[1]) });
+    /// Pushes split node `node`'s *current* two children -- called only
+    /// for a split whose child set just changed, never for an untouched
+    /// sibling elsewhere in the tree (see the module doc comment).
+    fn pushChildren(self: *Ui, node: *const layout.Node) !void {
+        const refs = layout.childRefs(node);
+        try self.client.setPaneSplitChildren(node.kind.split.handle, &.{ childInput(refs[0]), childInput(refs[1]) });
     }
 
     fn splitFocused(self: *Ui, axis: layout.Axis) !void {
@@ -347,16 +329,17 @@ pub const Ui = struct {
         errdefer self.client.destroyPane(made.pane) catch {};
         try self.bounds.put(made.pane, .{});
 
-        const result = try self.tree.splitLeaf(self.focused, made.pane, axis);
-        result.node.split.wire_id = try self.client.createPaneSplit(toWireAxis(axis), true);
-        try self.pushChildren(&result.node.split);
+        const handle = try self.client.createPaneSplit(toWireAxis(axis), true);
+        errdefer self.client.destroyPaneSplit(handle) catch {};
+        const node = try self.tree.split(self.focused, made.pane, axis, handle, .after);
+        try self.pushChildren(node);
 
-        if (result.parent) |p| {
+        if (node.parent) |p| {
             try self.pushChildren(p);
         } else {
             // The fresh split is now the whole tree -- install it as the
             // real wire root, replacing the single-pane wrapper.
-            try self.installRoot(result.node.split.wire_id);
+            try self.installRoot(handle);
             if (self.single_wrapper) |w| {
                 self.client.destroyPaneSplit(w) catch {};
                 self.single_wrapper = null;
@@ -387,15 +370,8 @@ pub const Ui = struct {
         // goes quietly, underneath it.
         if (self.zoomed) |z| if (z.pane == id) try self.unzoom();
 
-        if (self.tree.leafCount() == 1) {
-            self.quit = true;
-            _ = self.bounds.remove(id);
-            self.client.destroyPane(id) catch {};
-            return;
-        }
-
-        const removal = self.tree.removeLeaf(id) catch |err| switch (err) {
-            error.LastPane => {
+        const removal = self.tree.remove(id) catch |err| switch (err) {
+            error.LastLeaf => {
                 self.quit = true;
                 _ = self.bounds.remove(id);
                 self.client.destroyPane(id) catch {};
@@ -404,10 +380,10 @@ pub const Ui = struct {
             else => return err,
         };
 
-        if (removal.parent) |gp| {
+        if (removal.replacement.parent) |gp| {
             try self.pushChildren(gp);
         } else {
-            switch (removal.sibling.*) {
+            switch (removal.replacement.kind) {
                 .leaf => |only_id| {
                     const wrapper = try self.client.createPaneSplit(.row, true);
                     try self.client.setPaneSplitChildren(wrapper, &.{
@@ -416,12 +392,12 @@ pub const Ui = struct {
                     try self.installRoot(wrapper);
                     self.single_wrapper = wrapper;
                 },
-                .split => |*s| try self.installRoot(s.wire_id),
+                .split => |s| try self.installRoot(s.handle),
             }
         }
-        self.client.destroyPaneSplit(removal.removed_wire_id) catch {};
+        self.client.destroyPaneSplit(removal.handle) catch {};
 
-        if (self.focused == id) self.setFocus(layout.Tree.firstLeaf(removal.sibling));
+        if (self.focused == id) self.setFocus(removal.focus);
 
         _ = self.bounds.remove(id);
         self.client.destroyPane(id) catch {};
@@ -478,12 +454,13 @@ pub const Ui = struct {
     /// `grow`: whether the focused pane should get bigger.
     /// `move_pane_divider`'s `delta` is signed relative to the child at
     /// `index` (always 0 here -- a binary split has exactly one divider):
-    /// positive grows slot `a` and shrinks slot `b`.
+    /// positive grows the first child and shrinks the second.
     fn resizeFocused(self: *Ui, axis: layout.Axis, grow: bool) !void {
-        const info = self.tree.parentOf(self.focused) orelse return;
-        if (info.parent.axis != axis) return; // this key doesn't apply here
-        const grows_a = grow == (info.slot == .a);
-        const delta: i64 = if (grows_a) resize_step else -resize_step;
-        try self.client.movePaneDivider(info.parent.wire_id, 0, delta);
+        const leaf = self.tree.find(self.focused) orelse return;
+        const parent = (leaf.parent orelse return).kind.split;
+        if (parent.axis != axis) return; // this key doesn't apply here
+        const grows_first = grow == (leaf.slot() == .first);
+        const delta: i64 = if (grows_first) resize_step else -resize_step;
+        try self.client.movePaneDivider(parent.handle, 0, delta);
     }
 };

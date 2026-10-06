@@ -1767,7 +1767,7 @@ pub const Ui = struct {
 
     fn layoutChildWeighted(self: *const Ui, node: *const groups.Node, weight: f32) glyphwire.SplitChildInput {
         return switch (node.kind) {
-            .group => |id| glyphwire.SplitChildInput.splitWeighted(self.groupById(id).col_split, weight),
+            .leaf => |id| glyphwire.SplitChildInput.splitWeighted(self.groupById(id).col_split, weight),
             .split => |s| glyphwire.SplitChildInput.splitWeighted(s.handle, weight),
         };
     }
@@ -1855,7 +1855,9 @@ pub const Ui = struct {
         // Should filling it fail, the group must not stay on screen with
         // no tab: every other path assumes a group has one.
         errdefer if (g.buffers.items.len == 0) {
-            if (self.layout.remove(g.id)) |removed| self.dropGroup(g, removed) catch {};
+            if (self.layout.remove(g.id)) |removed| {
+                self.dropGroup(g, removed) catch {};
+            } else |_| {}
         };
 
         if (fresh) |f| {
@@ -1885,8 +1887,10 @@ pub const Ui = struct {
         try self.group_list.append(self.alloc, g);
 
         const handle = try self.client.createSplit(orientation.axis(), true);
-        const node = try self.layout.splitSide(from.id, g.id, orientation, handle, side);
-        errdefer if (self.layout.remove(g.id)) |removed| self.dropGroup(g, removed) catch {};
+        const node = try self.layout.split(from.id, g.id, orientation, handle, side);
+        errdefer if (self.layout.remove(g.id)) |removed| {
+            self.dropGroup(g, removed) catch {};
+        } else |_| {};
         try self.sendSplit(node);
         try self.sendListHolding(node);
         return g;
@@ -1957,7 +1961,7 @@ pub const Ui = struct {
         slot.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
         // Before the group goes: `grp` must not be left pointing at it.
         self.focusGroup(to);
-        const removed = self.layout.remove(from.id) orelse return;
+        const removed = self.layout.remove(from.id) catch return;
         try self.dropGroup(from, removed);
     }
 
@@ -2015,7 +2019,7 @@ pub const Ui = struct {
         }
         const g = self.grp;
         const shown = self.buf;
-        const removed = self.layout.remove(g.id) orelse return;
+        const removed = self.layout.remove(g.id) catch return;
         const to = self.groupById(removed.focus);
 
         // Its tabs go along to `to` -- except a lone, untouched scratch
@@ -2043,7 +2047,7 @@ pub const Ui = struct {
     /// The other way a group goes: its last tab was closed. Nothing to
     /// carry over, and focus goes where `closeGroup`'s would.
     fn closeEmptyGroup(self: *Ui, g: *Group) !void {
-        const removed = self.layout.remove(g.id) orelse return;
+        const removed = self.layout.remove(g.id) catch return;
         // Before the group goes: `grp` must not be left pointing at it.
         // (`buf` already doesn't point anywhere -- its slot was the one
         // just closed -- and `focusGroup` replaces it without reading it.)
@@ -2057,7 +2061,7 @@ pub const Ui = struct {
     /// buffers gone, and `grp` pointing at another group.
     fn dropGroup(self: *Ui, g: *Group, removed: groups.Layout.Removed) !void {
         try self.sendListHolding(removed.replacement);
-        self.client.destroySplit(removed.destroyed) catch {};
+        self.client.destroySplit(removed.handle) catch {};
         self.client.destroySplit(g.col_split) catch {};
         self.client.destroyLayer(g.tabs_layer) catch {};
         self.client.destroyLayer(g.buffer_layer) catch {};
@@ -2125,7 +2129,7 @@ pub const Ui = struct {
     fn cycleFocus(self: *Ui) !void {
         var order: std.ArrayList(groups.GroupId) = .empty;
         defer order.deinit(self.alloc);
-        try self.layout.groupsInOrder(self.alloc, &order);
+        try self.layout.leavesInOrder(self.alloc, &order);
         if (self.focus == .tree) {
             self.focusGroup(self.groupById(order.items[0]));
             return;
@@ -4408,13 +4412,13 @@ pub const Ui = struct {
                 // off the panes' bounds: zoe never sees the weights.
                 const a = self.nodeRect(s.first);
                 const b = self.nodeRect(s.second);
-                const ea: usize, const eb: usize = switch (s.orientation) {
+                const ea: usize, const eb: usize = switch (s.axis) {
                     .vertical => .{ a.cols, b.cols },
                     .horizontal => .{ a.rows, b.rows },
                 };
                 const ratio: f32 = if (ea + eb == 0) 0.5 else @as(f32, @floatFromInt(ea)) / @as(f32, @floatFromInt(ea + eb));
                 out.* = .{ .split = .{
-                    .orientation = switch (s.orientation) {
+                    .orientation = switch (s.axis) {
                         .vertical => .vertical,
                         .horizontal => .horizontal,
                     },
@@ -4423,7 +4427,7 @@ pub const Ui = struct {
                     .second = try self.snapshotNode(arena, s.second),
                 } };
             },
-            .group => |id| {
+            .leaf => |id| {
                 const g = self.groupById(id);
                 var files: std.ArrayList([]const u8) = .empty;
                 var active: usize = 0;
@@ -4443,7 +4447,7 @@ pub const Ui = struct {
     /// group under a split.
     fn nodeRect(self: *const Ui, node: *const groups.Node) groups.Rect {
         switch (node.kind) {
-            .group => |id| return self.groupById(id).rect(),
+            .leaf => |id| return self.groupById(id).rect(),
             .split => |s| {
                 const a = self.nodeRect(s.first);
                 const b = self.nodeRect(s.second);
@@ -4550,7 +4554,7 @@ pub const Ui = struct {
         self.tab_tip_index = null;
         while (self.group_list.items.len > 1) {
             const g = self.group_list.items[self.group_list.items.len - 1];
-            const removed = self.layout.remove(g.id) orelse break;
+            const removed = self.layout.remove(g.id) catch break;
             // While `g` still has its tabs: `focusGroup` repaints it.
             if (g == self.grp) self.focusGroup(self.groupById(removed.focus));
             self.releaseSlots(g);
@@ -4661,7 +4665,7 @@ pub const Ui = struct {
     fn applyRatios(self: *Ui, node: *const groups.Node, spec: *const zoe_workspace.EditorNode) !void {
         const s = switch (node.kind) {
             .split => |s| s,
-            .group => return,
+            .leaf => return,
         };
         const ss = switch (spec.*) {
             .split => |x| x,
