@@ -96,6 +96,14 @@ const bg_selected = Color{ .r = 48, .g = 62, .b = 84, .a = 255 };
 const fg_text = Color{ .r = 210, .g = 210, .b = 218, .a = 255 };
 const fg_dim = Color{ .r = 92, .g = 92, .b = 104, .a = 255 };
 const fg_dir = Color{ .r = 132, .g = 176, .b = 232, .a = 255 };
+/// A tree row that is only on screen because Ctrl+H is on -- a dotfile or
+/// something `.gitignore` excludes. Dimmed rather than marked, so the
+/// listing still reads as one list, and kept distinct for files and
+/// directories so the shape of the tree survives the dimming. Roughly
+/// halfway from the normal colour to the pane background, which is enough
+/// to be obvious next to a real entry and still readable on its own.
+const fg_hidden = Color{ .r = 112, .g = 112, .b = 120, .a = 255 };
+const fg_hidden_dir = Color{ .r = 84, .g = 108, .b = 142, .a = 255 };
 const fg_status = Color{ .r = 226, .g = 226, .b = 236, .a = 255 };
 const fg_mode = Color{ .r = 150, .g = 220, .b = 160, .a = 255 };
 const fg_error = Color{ .r = 240, .g = 140, .b = 140, .a = 255 };
@@ -3129,7 +3137,14 @@ pub const Ui = struct {
                     .layer = self.tree_layer,
                     .row = r,
                     .col = 0,
-                    .fg = if (e.is_dir) fg_dir else fg_text,
+                    // A row that is only here because Ctrl+H is on is
+                    // drawn dim, so "show hidden" reads as a listing with
+                    // extra, lesser entries rather than as a listing that
+                    // mysteriously doubled in length.
+                    .fg = if (e.hidden)
+                        (if (e.is_dir) fg_hidden_dir else fg_hidden)
+                    else
+                        (if (e.is_dir) fg_dir else fg_text),
                     .bg = bg,
                     .max_cols = content_cols,
                     .pad = true,
