@@ -183,6 +183,10 @@ pub const Outcome = union(enum) {
     /// current one. Themes are `zoe/ui.zig`'s, like the language servers:
     /// the editor core paints nothing. Borrows `Editor.cmd_arg`.
     theme: ?[]const u8,
+    /// `:shell [position]` -- move the Ctrl+` shell panel, or (bare)
+    /// report where it is. The panel is `zoe/ui.zig`'s. Borrows
+    /// `Editor.cmd_arg`.
+    shell_position: ?[]const u8,
 };
 
 pub const Editor = struct {
@@ -2548,6 +2552,7 @@ pub const Editor = struct {
         if (eq(u8, name, "lsp")) return .{ .lsp_status = arg_opt };
         if (eq(u8, name, "diag") or eq(u8, name, "diagnostics")) return .diag_list;
         if (eq(u8, name, "theme") or eq(u8, name, "colo") or eq(u8, name, "colorscheme")) return .{ .theme = arg_opt };
+        if (eq(u8, name, "shell")) return .{ .shell_position = arg_opt };
         if (eq(u8, name, "wq") or eq(u8, name, "x")) return .{ .write_quit = arg_opt };
         if (eq(u8, name, "q!") or eq(u8, name, "quit!")) return .{ .quit = .{ .force = true } };
         if (eq(u8, name, "wq!") or eq(u8, name, "x!")) return .{ .write_quit = arg_opt };

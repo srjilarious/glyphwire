@@ -22,6 +22,7 @@ const keybind = @import("applib").keybind;
 const openaction = @import("openaction.zig");
 const glyphwire = @import("glyphwire");
 const dividerconf = @import("dividerconf");
+const shellpanel = @import("applib").shellpanel;
 
 pub const conf_name = "salacommander.conf.lua";
 const conf: luaconf.Conf = .{ .prog = "salacommander", .name = conf_name };
@@ -65,6 +66,12 @@ pub const Config = struct {
     /// between the panes (`applib/dividerconf.zig`). Empty, the default,
     /// inherits the host's `pane_divider_style`.
     divider_style: glyphwire.divider_style.Override = .{},
+    /// `shell_position`: where the Ctrl+` shell panel sits -- `"bottom"`
+    /// (the default), `"top"`, `"left"`, `"right"` or `"float"`.
+    shell_position: shellpanel.Position = .bottom,
+    /// `shell_float_percent`: how much of the window a floating panel
+    /// takes, each way. Default 80; clamped to 10..100.
+    shell_float_percent: u8 = shellpanel.default_float_percent,
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
         alloc.free(self.keys);
@@ -96,6 +103,10 @@ pub const Config = struct {
 pub const icon_px_min: u32 = 8;
 pub const icon_px_max: u32 = 128;
 const icon_px: luaconf.Range(u32) = .{ .min = icon_px_min, .max = icon_px_max };
+const float_percent: luaconf.Range(u8) = .{
+    .min = shellpanel.min_float_percent,
+    .max = shellpanel.max_float_percent,
+};
 
 pub const LoadResult = struct {
     config: Config = .{},
@@ -134,6 +145,8 @@ const Apply = struct {
         cfg.keys = conf.keys(lua, self.alloc, actions.Action);
         cfg.open_actions = readOpenActions(self.alloc, lua) catch &.{};
         cfg.divider_style = dividerconf.read(lua, conf_name);
+        if (conf.enumValue(lua, shellpanel.Position, "shell_position")) |v| cfg.shell_position = v;
+        if (conf.uint(lua, u8, "shell_float_percent", float_percent)) |v| cfg.shell_float_percent = v;
         if (conf.string(lua, "editor")) |v| {
             if (std.mem.trim(u8, v, " ").len == 0) {
                 conf.warn("`editor` is empty; ignored", .{});

@@ -553,7 +553,8 @@ pub const ScrollOffsetParams = struct {
 };
 
 /// `layer_resize` params: the user finished dragging a layer's
-/// `resize_edge` and wants it `rows` tall. A request, not a fact -- the
+/// `resize_edge` and wants it `cols` x `rows`. Only the dragged axis
+/// differs from the layer's current size. A request, not a fact -- the
 /// host has not resized anything, and the client that owns the layer
 /// applies (and clamps) it. `context` because layer handles are
 /// per-context and this is fanned out to every `"layout"` subscriber.
@@ -561,6 +562,9 @@ pub const LayerResizeParams = struct {
     context: core.ContextHandle,
     layer: core.LayerHandle,
     rows: usize,
+    /// Absent from hosts older than side edges, which only ever dragged
+    /// a height; 0 then means "unchanged".
+    cols: usize = 0,
 };
 
 /// One layer's bounds inside a `layout` notification.

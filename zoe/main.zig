@@ -273,6 +273,7 @@ pub fn main(init: std.process.Init) !void {
             .lsp_status,
             .diag_list,
             .theme,
+            .shell_position,
             => {},
             .write, .write_quit, .edit => |dest| try headlessSave(io, &ed, dest, init.environ_map.get("HOME")),
         }

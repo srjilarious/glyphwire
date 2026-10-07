@@ -2603,6 +2603,16 @@ pub fn resizeEdgePropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectError(d.handle(alloc, bad_decoded), dispatch.DispatchError.InvalidResizeEdge);
     try testz.expectEqual(ctx.layerPtr(panel).?.resize_edge, .top);
 
+    // The side and bottom edges a docked panel's other positions use.
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"resize_edge","edge":"left"}}
+    );
+    try testz.expectEqual(ctx.layerPtr(panel).?.resize_edge, .left);
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"resize_edge","edge":"bottom"}}
+    );
+    try testz.expectEqual(ctx.layerPtr(panel).?.resize_edge, .bottom);
+
     try notifyThrough(alloc, &d,
         \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"resize_edge"}}
     );

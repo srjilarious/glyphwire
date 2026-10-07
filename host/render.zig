@@ -1873,13 +1873,13 @@ pub const Renderer = struct {
         }
     }
 
-    /// A floating layer's `resize_edge` band, over the top pixels of its
-    /// own first row (`geometry.resizeEdgeBand`). Drawn with the layer,
+    /// A floating layer's `resize_edge` band, over the outer pixels of
+    /// its own edge row or column (`geometry.resizeEdgeBand`). Drawn with the layer,
     /// like its scrollbars, so a popup over the layer covers it too --
     /// matching `Panes.edgeAt`, which won't grab an edge it can't see.
     fn drawResizeEdge(eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin, color: host_eng.Color) void {
-        if (layer.resize_edge != .top) return;
-        const r = geometry.resizeEdgeBand(geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows()));
+        if (layer.resize_edge == .none) return;
+        const r = geometry.resizeEdgeBand(geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows()), layer.resize_edge);
         eng.renderer.begin(eng.projMat);
         defer eng.renderer.end();
         eng.renderer.drawFilledRect(

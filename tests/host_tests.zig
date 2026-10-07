@@ -76,17 +76,49 @@ pub fn themeNamesPutsConfigThemesFirstOnceTest(_: std.Io, alloc: std.mem.Allocat
 
 pub fn resizeEdgeBandSitsOnTheLayersTopTest(_: std.Io, _: std.mem.Allocator) !void {
     const rect: geometry.RectPx = .{ .x = 0, .y = 200, .w = 640, .h = 160 };
-    const band = geometry.resizeEdgeBand(rect);
+    const band = geometry.resizeEdgeBand(rect, .top);
     // Over the layer's own first row, full width, a few pixels thick.
     try testz.expectEqual(band.y, 200.0);
     try testz.expectEqual(band.w, 640.0);
     try testz.expectEqual(band.h, geometry.resize_edge_px);
     // The grab target reaches past it both ways.
-    const grab = geometry.resizeEdgeHit(rect);
+    const grab = geometry.resizeEdgeHit(rect, .top);
     try testz.expectTrue(grab.contains(10, 200 - geometry.resize_edge_slop_px));
     try testz.expectTrue(grab.contains(10, 200 + geometry.resize_edge_px + geometry.resize_edge_slop_px - 1));
     try testz.expectFalse(grab.contains(10, 200 - geometry.resize_edge_slop_px - 1));
     try testz.expectFalse(grab.contains(10, 220));
+}
+
+pub fn resizeEdgeBandSitsOnTheNamedSideTest(_: std.Io, _: std.mem.Allocator) !void {
+    const rect: geometry.RectPx = .{ .x = 100, .y = 50, .w = 400, .h = 300 };
+
+    // A bottom edge sits inside the layer's last row.
+    const bottom = geometry.resizeEdgeBand(rect, .bottom);
+    try testz.expectEqual(bottom.y, 350 - geometry.resize_edge_px);
+    try testz.expectEqual(bottom.w, 400.0);
+
+    // Side edges run the full height, inside the edge column.
+    const left = geometry.resizeEdgeBand(rect, .left);
+    try testz.expectEqual(left.x, 100.0);
+    try testz.expectEqual(left.w, geometry.resize_edge_px);
+    try testz.expectEqual(left.h, 300.0);
+    // A right edge sits just outside, clear of the layer's scrollbar,
+    // and only grabs outward.
+    const right = geometry.resizeEdgeBand(rect, .right);
+    try testz.expectEqual(right.x, 500.0);
+    const right_grab = geometry.resizeEdgeHit(rect, .right);
+    try testz.expectFalse(right_grab.contains(499, 60));
+    try testz.expectTrue(right_grab.contains(500 + geometry.resize_edge_px + geometry.resize_edge_slop_px - 1, 60));
+
+    // A side edge's slop widens it sideways, not up and down.
+    const grab = geometry.resizeEdgeHit(rect, .left);
+    try testz.expectTrue(grab.contains(100 - geometry.resize_edge_slop_px, 60));
+    try testz.expectFalse(grab.contains(100 - geometry.resize_edge_slop_px - 1, 60));
+    try testz.expectFalse(grab.contains(110, 40));
+
+    // No edge, nothing to grab.
+    const none = geometry.resizeEdgeHit(rect, .none);
+    try testz.expectFalse(none.contains(100, 50));
 }
 
 // ─── geometry.scrollbarGeom ───────────────────────────────────────────

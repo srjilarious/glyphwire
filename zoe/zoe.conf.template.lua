@@ -97,6 +97,15 @@
 --     -- text are not the same distance.
 --     tree_page_lines = 0,
 --
+--     -- Where the Ctrl+` shell panel sits: "bottom", "top", "left" or
+--     -- "right", docked along that edge over the panes with its inner
+--     -- edge draggable, or "float", a framed box in the middle taking
+--     -- shell_float_percent (10..100) of the window each way.
+--     -- `:shell <position>` moves it at runtime; `:shell` alone names
+--     -- the current one.
+--     shell_position = "bottom",
+--     shell_float_percent = 80,
+--
 --     -- Typematic key repeat, in milliseconds: how long a key is held
 --     -- before it starts repeating, then how often it repeats. zoe asks
 --     -- glyphwire-host for these while it is focused, so they apply to

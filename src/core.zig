@@ -1000,17 +1000,17 @@ pub const PropertyName = enum {
     /// default `horizontal`). See `SelectionFlow`.
     selection_flow,
     /// Which edge of a floating layer the host lets the user drag to
-    /// resize it (`{edge: "top" | "none"}`, default `none`). See
-    /// `ResizeEdge`.
+    /// resize it (`{edge: "top" | "bottom" | "left" | "right" | "none"}`,
+    /// default `none`). See `ResizeEdge`.
     resize_edge,
 };
 
 /// A floating layer's draggable edge (`PropertyName.resize_edge`).
 ///
 /// Split dividers already resize the layers *in* a split tree, but a
-/// layer that floats over one -- the Ctrl+` shell panel along the bottom
-/// of zoe and salacommander -- has no divider: nothing sits on its other
-/// side. This gives it one. The host draws a thin band along that edge,
+/// layer that floats over one -- the Ctrl+` shell panel docked along an
+/// edge of zoe or salacommander -- has no divider: nothing sits on its
+/// other side. This gives it one. The host draws a thin band along that edge,
 /// hit-tests it ahead of the layer's own cells, and drags it with the
 /// same ghost preview a split divider gets.
 ///
@@ -1020,9 +1020,22 @@ pub const PropertyName = enum {
 /// layer's placement is the client's arithmetic, redone on every window
 /// resize, and only the client knows what has to stay visible around it.
 ///
-/// Only `top` exists because only a bottom-anchored panel has asked for
-/// one; the other edges are the obvious extension.
-pub const ResizeEdge = enum { none, top };
+/// The edge named is the one that moves: a panel docked to the bottom of
+/// the window drags its `top`, one docked to the left its `right`. `top`
+/// and `bottom` change the layer's height, `left` and `right` its width.
+pub const ResizeEdge = enum {
+    none,
+    top,
+    bottom,
+    left,
+    right,
+
+    /// Whether dragging this edge changes the layer's width (as opposed
+    /// to its height).
+    pub fn horizontal(self: ResizeEdge) bool {
+        return self == .left or self == .right;
+    }
+};
 
 /// How a selection reads the cells of a layer (`PropertyName.selection_flow`).
 ///

@@ -36,8 +36,8 @@ pub const DispatchError = error{
     /// `set_property "selection_flow"` with a `mode` other than
     /// `"horizontal"` / `"vertical_rl"`.
     InvalidSelectionFlow,
-    /// `set_property "resize_edge"` with an `edge` other than `"top"` /
-    /// `"none"`.
+    /// `set_property "resize_edge"` with an `edge` that isn't one of
+    /// `"top"` / `"bottom"` / `"left"` / `"right"` / `"none"`.
     InvalidResizeEdge,
     /// `set_drop_target`'s `mode` wasn't `"none"` / `"layer"` / `"cells"`
     /// / `"insert"`, or a `cells` / `insert` target left out `row` / `col`.
@@ -264,7 +264,8 @@ const PropertyParams = struct {
     color: ?protocol.Color = null,
     /// `"shadow"`'s shape; omitted removes the shadow.
     shadow: ?ShadowJson = null,
-    /// `"resize_edge"`'s `"top"` / `"none"`; omitted is `"none"`.
+    /// `"resize_edge"`'s `"top"` / `"bottom"` / `"left"` / `"right"` /
+    /// `"none"`; omitted is `"none"`.
     edge: ?[]const u8 = null,
 };
 

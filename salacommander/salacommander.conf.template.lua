@@ -80,13 +80,19 @@
 --
 --     ---- The shell panel -------------------------------------------
 --
---     -- Ctrl+` opens a gw-shell across the bottom of the window and
---     -- hands it the keyboard; Ctrl+` again puts it away, leaving the
---     -- shell running with its history and its half-typed line intact.
---     -- It follows the active pane: change directory or switch sides
---     -- and the panel's shell is there before its next prompt. `exit`
---     -- inside it closes the panel, and the next Ctrl+` starts a fresh
---     -- one. Nothing to configure yet beyond rebinding the key below.
+--     -- Ctrl+` opens a gw-shell over the window and hands it the
+--     -- keyboard; Ctrl+` again puts it away, leaving the shell running
+--     -- with its history and its half-typed line intact. It follows the
+--     -- active pane: change directory or switch sides and the panel's
+--     -- shell is there before its next prompt. `exit` inside it closes
+--     -- the panel, and the next Ctrl+` starts a fresh one.
+--     --
+--     -- Where it sits: "bottom", "top", "left" or "right", docked along
+--     -- that edge with its inner edge draggable, or "float", a framed
+--     -- box in the middle taking shell_float_percent (10..100) of the
+--     -- window each way.
+--     shell_position = "bottom",
+--     shell_float_percent = 80,
 --
 --     ---- Keys ------------------------------------------------------
 --

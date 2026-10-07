@@ -265,23 +265,52 @@ pub fn layerRect(pos: glyphwire.PxPos, view_cols: usize, view_rows: usize) RectP
 /// How thick the band drawn along a layer's `resize_edge` is. A split
 /// divider has a whole cell of reserved gap to sit in; a floating layer
 /// has nothing either side of its edge, so the band is drawn over the
-/// top pixels of its own first row -- thin enough to leave the text
-/// there readable.
+/// outermost pixels of its own edge row or column -- thin enough to
+/// leave the text there readable.
 pub const resize_edge_px: f32 = 3;
 
 /// How far past the drawn band a press still grabs the edge, each way.
 /// A 3px target is too fine to hit on purpose.
 pub const resize_edge_slop_px: f32 = 4;
 
-/// The band drawn along the top edge of a layer at `rect`.
-pub fn resizeEdgeBand(rect: RectPx) RectPx {
-    return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = @min(resize_edge_px, rect.h) };
+/// The band drawn along `edge` of a layer at `rect`. Zero-sized for
+/// `.none`.
+///
+/// Inside the rect, except `.right`: a layer's right column is where its
+/// vertical scrollbar lives (`pane_scrollbar_px`, wider than the band and
+/// its slop together), so a right edge sits just outside the layer, over
+/// whatever it floats on, and leaves the scrollbar grabbable.
+pub fn resizeEdgeBand(rect: RectPx, edge: glyphwire.ResizeEdge) RectPx {
+    const tw = @min(resize_edge_px, rect.w);
+    const th = @min(resize_edge_px, rect.h);
+    return switch (edge) {
+        .none => .{ .x = rect.x, .y = rect.y, .w = 0, .h = 0 },
+        .top => .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = th },
+        .bottom => .{ .x = rect.x, .y = rect.y + rect.h - th, .w = rect.w, .h = th },
+        .left => .{ .x = rect.x, .y = rect.y, .w = tw, .h = rect.h },
+        .right => .{ .x = rect.x + rect.w, .y = rect.y, .w = resize_edge_px, .h = rect.h },
+    };
 }
 
-/// Where a press grabs that edge: the band, widened by the slop above
-/// (over whatever the layer floats on) and below (into its first row).
-pub fn resizeEdgeHit(rect: RectPx) RectPx {
-    const band = resizeEdgeBand(rect);
+/// Where a press grabs that edge: the band, widened by the slop across
+/// it both ways (out over whatever the layer floats on, and in over its
+/// edge row or column). A `.right` band only widens outward, away from
+/// the scrollbar it was moved off. Empty for `.none`.
+pub fn resizeEdgeHit(rect: RectPx, edge: glyphwire.ResizeEdge) RectPx {
+    const band = resizeEdgeBand(rect, edge);
+    if (edge == .none) return band;
+    if (edge == .right) return .{
+        .x = band.x,
+        .y = band.y,
+        .w = band.w + resize_edge_slop_px,
+        .h = band.h,
+    };
+    if (edge.horizontal()) return .{
+        .x = band.x - resize_edge_slop_px,
+        .y = band.y,
+        .w = band.w + 2 * resize_edge_slop_px,
+        .h = band.h,
+    };
     return .{
         .x = band.x,
         .y = band.y - resize_edge_slop_px,

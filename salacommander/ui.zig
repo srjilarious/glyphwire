@@ -18,8 +18,9 @@
 //!                  left, the directory's item count and total on the right
 //!
 //! More layers sit over those: the Ctrl+` shell panel -- a `gw-shell
-//! --embed` drawing its own prompt into a layer of ours across the bottom
-//! (see `applib/shellpanel.zig`) -- then F3's finder popup, the same
+//! --embed` drawing its own prompt into a layer of ours, docked along an
+//! edge or floating in the middle (`shell_position`; see
+//! `applib/shellpanel.zig`) -- then F3's finder popup, the same
 //! framed popup as zoe's Ctrl+P (`applib/finderpopup.zig`), and the modal
 //! dialog layer on top.
 //!
@@ -218,8 +219,8 @@ pub const Ui = struct {
     pane_layers: [2]glyphwire.LayerHandle,
     bar_layer: glyphwire.LayerHandle,
     dialog_layer: glyphwire.LayerHandle,
-    /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom. It
-    /// takes every keystroke but Ctrl+` while it's open, and follows the
+    /// Ctrl+`: a `gw-shell` drawing into a layer docked along an edge or
+    /// floating in the middle. It takes every keystroke but Ctrl+` while it's open, and follows the
     /// active pane's directory. See `applib/shellpanel.zig`.
     shell: shellpanel.Panel,
 
@@ -357,7 +358,8 @@ pub const Ui = struct {
         // The Ctrl+` shell panel. `gw-shell --embed` draws its prompt and
         // its commands' output here, so it carries scrollback of its own
         // for the shell's Ctrl+Up browsing -- see `applib/shellpanel.zig`.
-        const shell_layer = try client.createLayer(size.cols, 1, shellpanel.scrollback_rows);
+        const shell_layers = try shellpanel.createLayers(client, size.cols);
+        const shell_layer = shell_layers.shell;
         // F3's popup, over the panes and the panel (it can't be opened
         // while the panel has the keyboard, but the panel stays drawn
         // underneath). Placed per frame by `Popup.render`.
@@ -388,7 +390,6 @@ pub const Ui = struct {
         // user wants to copy -- and `gw-shell --embed` has no use for the
         // press. See `core.Layer.mouse_select`.
         try client.setLayerMouseSelect(shell_layer, true);
-        try client.setLayerVisible(shell_layer, false);
         try client.setLayerBackground(dialog_layer, bg_dialog);
         // Host-drawn, so it follows the dialog as it's resized for each
         // question and hides with it.
@@ -408,7 +409,7 @@ pub const Ui = struct {
             .bar_layer = bar_layer,
             .dialog_layer = dialog_layer,
             .finder = finder,
-            .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
+            .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layers),
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .cfg = cfg,
@@ -433,6 +434,8 @@ pub const Ui = struct {
         });
         try client.setRootSplit(root_split);
         if (!self.cfg.divider_style.inherits()) try client.setDividerStyle(&self.cfg.divider_style);
+        self.shell.setPosition(self.cfg.shell_position, self.cfg.shell_float_percent, .{ .cols = self.win.cols, .rows = self.win.rows });
+        self.shell.setFrameStyle(self.th.panelStyle());
 
         // The listener will get a `layout` for this too, but reading the
         // bounds back now keeps the first frame off guessed geometry.
@@ -479,7 +482,7 @@ pub const Ui = struct {
         switch (ev) {
             .resize => |r| try self.handleResize(r),
             .layout => |l| try self.handleLayout(l),
-            // The shell panel's top edge was dragged. It floats over the
+            // The shell panel's inner edge was dragged. It floats over the
             // panes rather than squeezing them, so nothing else moves.
             .layer_resize => |lr| _ = self.shell.handleLayerResize(lr, .{ .cols = self.win.cols, .rows = self.win.rows }),
             .scroll_offset => |so| {
@@ -527,6 +530,7 @@ pub const Ui = struct {
         var style = finder_style;
         style.frame_style = self.th.panelStyle();
         try self.finder.setStyle(style);
+        self.shell.setFrameStyle(self.th.panelStyle());
     }
 
     fn handleResize(self: *Ui, r: glyphwire.ResizeEvent) !void {
@@ -1589,7 +1593,7 @@ pub const Ui = struct {
         var sent = try b.send();
         sent.deinit();
         self.pushed_scroll = .{ .{ std.math.maxInt(usize), 0 }, .{ std.math.maxInt(usize), 0 } };
-        // The panel spans the bottom of whatever the window is now, and
+        // The panel is placed against whatever the window is now, and
         // the shell inside it re-reads its layer when told.
         self.shell.place(.{ .cols = self.win.cols, .rows = self.win.rows }) catch {};
     }

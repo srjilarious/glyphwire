@@ -193,6 +193,7 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:set tabwidth=N`, `expandtab=on\|off`, `whitespace=on\|off` | Indent and whitespace display |
 | `:set wrap=on\|off` (or `:set wrap` / `:set nowrap`) | Soft-wrap long lines at word breaks |
 | `:theme [name]` (`:colo`) | Switch colour theme |
+| `:shell [bottom\|top\|left\|right\|float]` | Move the Ctrl+` shell panel (bare: report where it is) |
 | `:lsp`, `:lsp restart` | Language server status / restart |
 | `:diag` | List diagnostics |
 

@@ -27,6 +27,7 @@ const themes = @import("applib").theme;
 const themeconf = @import("themeconf");
 const dividerconf = @import("dividerconf");
 const homepath = @import("applib").homepath;
+const shellpanel = @import("applib").shellpanel;
 const actions = @import("actions.zig");
 const editor = @import("editor.zig");
 const lsp = @import("lsp.zig");
@@ -168,6 +169,14 @@ pub const Config = struct {
     /// `.zoe-workspace` on the way out (`:q`, `:wq`, the window closing;
     /// never `:q!`). Default true.
     workspace_autosave: bool = true,
+    /// `config.shell_position` -- where the Ctrl+` shell panel sits:
+    /// `"bottom"` (the default), `"top"`, `"left"`, `"right"`, or
+    /// `"float"` for a framed box in the middle. `:shell <position>`
+    /// moves it at runtime.
+    shell_position: shellpanel.Position = .bottom,
+    /// `config.shell_float_percent` -- how much of the window a floating
+    /// panel takes, each way. Default 80; clamped to 10..100.
+    shell_float_percent: u8 = shellpanel.default_float_percent,
     /// `config.lsp.enabled` -- the master switch. False stops every
     /// language server from starting, whatever `lsp_servers` says.
     lsp_enabled: bool = true,
@@ -245,6 +254,11 @@ pub fn parseSource(
     return cfg;
 }
 
+const float_percent: luaconf.Range(u8) = .{
+    .min = shellpanel.min_float_percent,
+    .max = shellpanel.max_float_percent,
+};
+
 const Apply = struct {
     cfg: *Config,
     environ: *const std.process.Environ.Map,
@@ -276,6 +290,8 @@ const Apply = struct {
         if (conf.boolean(lua, "wrap")) |v| cfg.wrap = v;
         if (conf.number(lua, f64, "tab_tooltip_delay_ms", delay)) |v| cfg.tab_tooltip_delay_ms = v;
         if (conf.boolean(lua, "workspace_autosave")) |v| cfg.workspace_autosave = v;
+        if (conf.enumValue(lua, shellpanel.Position, "shell_position")) |v| cfg.shell_position = v;
+        if (conf.uint(lua, u8, "shell_float_percent", float_percent)) |v| cfg.shell_float_percent = v;
         readLsp(lua, a, cfg);
         // Per-mode tables (`global`, `normal`, `visual`, `insert`; see
         // `actions.zig`). `false` binds `.none`, which also hides the

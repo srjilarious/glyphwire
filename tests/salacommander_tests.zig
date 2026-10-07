@@ -936,12 +936,103 @@ pub fn shellPanelKeepsADraggedHeightTest(_: std.Io, _: std.mem.Allocator) !void 
     try testz.expectEqual(rowsForWanted(3, 40), 1);
 }
 
+pub fn shellPanelDocksAlongEachEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
+    const sp = @import("applib").shellpanel;
+    const win: sp.WinSize = .{ .cols = 100, .rows = 46 };
+
+    // Bottom: full width, its height off the bar row.
+    const bottom = sp.layoutFor(win, .bottom, 80, null, null);
+    try testz.expectEqual(bottom.content.rows, 15);
+    try testz.expectEqual(bottom.content.row, 46 - 15 - 1);
+    try testz.expectEqual(bottom.content.cols, 100);
+    try testz.expectTrue(bottom.frame == null);
+
+    // Top: the same height, from the window's top row.
+    const top = sp.layoutFor(win, .top, 80, 10, null);
+    try testz.expectEqual(top.content.row, 0);
+    try testz.expectEqual(top.content.rows, 10);
+
+    // Sides: two fifths of the width, down to the bar row.
+    const left = sp.layoutFor(win, .left, 80, null, null);
+    try testz.expectEqual(left.content.col, 0);
+    try testz.expectEqual(left.content.cols, 40);
+    try testz.expectEqual(left.content.rows, 45);
+    const right = sp.layoutFor(win, .right, 80, null, 25);
+    try testz.expectEqual(right.content.col, 75);
+    try testz.expectEqual(right.content.cols, 25);
+
+    // Each docked position drags the edge facing the panes.
+    try testz.expectEqual(sp.Position.bottom.resizeEdge(), .top);
+    try testz.expectEqual(sp.Position.top.resizeEdge(), .bottom);
+    try testz.expectEqual(sp.Position.left.resizeEdge(), .right);
+    try testz.expectEqual(sp.Position.right.resizeEdge(), .left);
+    try testz.expectEqual(sp.Position.float.resizeEdge(), .none);
+}
+
+pub fn shellPanelSideWidthTest(_: std.Io, _: std.mem.Allocator) !void {
+    const Panel = @import("applib").shellpanel.Panel;
+    try testz.expectEqual(Panel.colsFor(100), 40);
+    // Floor and ceiling, as for the height.
+    try testz.expectEqual(Panel.colsFor(50), 30);
+    try testz.expectEqual(Panel.colsFor(500), 120);
+    // Ten columns of pane always survive beside it.
+    try testz.expectEqual(Panel.colsFor(35), 25);
+    // A dragged width is the user's, within the room there is.
+    try testz.expectEqual(Panel.colsForWanted(100, 70), 70);
+    try testz.expectEqual(Panel.colsForWanted(100, 95), 90);
+    try testz.expectEqual(Panel.colsForWanted(100, 3), 10);
+}
+
+pub fn shellPanelFloatsCenteredInAFrameTest(_: std.Io, _: std.mem.Allocator) !void {
+    const sp = @import("applib").shellpanel;
+    // 51 rows less the bar is 50 to centre in.
+    const win: sp.WinSize = .{ .cols = 100, .rows = 51 };
+    const l = sp.layoutFor(win, .float, 80, 7, 7);
+    // 80% each way, centred, and a dragged size means nothing here.
+    try testz.expectEqual(l.content.cols, 80);
+    try testz.expectEqual(l.content.rows, 40);
+    try testz.expectEqual(l.content.col, 10);
+    try testz.expectEqual(l.content.row, 5);
+    // The frame is a cell bigger all round.
+    const fr = l.frame.?;
+    try testz.expectEqual(fr.row, 4);
+    try testz.expectEqual(fr.col, 9);
+    try testz.expectEqual(fr.cols, 82);
+    try testz.expectEqual(fr.rows, 42);
+
+    // 100% still leaves the frame on screen.
+    const full = sp.layoutFor(win, .float, 100, null, null);
+    try testz.expectEqual(full.content.cols, 98);
+    try testz.expectEqual(full.frame.?.col, 0);
+    try testz.expectEqual(full.frame.?.row, 0);
+    try testz.expectEqual(full.frame.?.rows, 50);
+    // Out-of-range percentages are held to 10..100.
+    const tiny = sp.layoutFor(win, .float, 1, null, null);
+    try testz.expectEqual(tiny.content.cols, 10);
+}
+
+pub fn shellPanelConfigTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    {
+        var r = config.load(alloc, "config = { shell_position = \"left\", shell_float_percent = 60 }");
+        defer r.deinit(alloc);
+        try testz.expectEqual(r.config.shell_position, .left);
+        try testz.expectEqual(r.config.shell_float_percent, 60);
+    }
+    {
+        // An unknown position keeps the default; a size out of range is
+        // clamped, as every luaconf range is.
+        var r = config.load(alloc, "config = { shell_position = \"diagonal\", shell_float_percent = 300 }");
+        defer r.deinit(alloc);
+        try testz.expectEqual(r.config.shell_position, .bottom);
+        try testz.expectEqual(r.config.shell_float_percent, 100);
+    }
+}
+
 pub fn shellPanelHitTestIsItsRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     const Panel = @import("applib").shellpanel.Panel;
     // `contains` reads only what `place` recorded; no client is touched.
-    var p = Panel.init(alloc, io, undefined, 0, 0);
-    p.top_row = 20;
-    p.rows = 8;
+    var p = Panel.init(alloc, io, undefined, 0, .{ .frame = 0, .shell = 1 });
+    p.bounds = .{ .row = 20, .col = 0, .cols = 600, .rows = 8 };
     // Hidden, it covers nothing.
     try testz.expectFalse(p.contains(.{ .row = 22, .col = 5 }));
 

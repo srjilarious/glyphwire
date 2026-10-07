@@ -40,11 +40,12 @@
 //! caret as a thin bar on the buffer layer (`set_caret_shape`), the way
 //! nvim does; every other mode is zoe's inverted cell, which keeps the
 //! character under it readable, and the host's caret is hidden. See
-//! `syncCaret`. Ctrl+` opens a `gw-shell` panel over the bottom of the
-//! window (`applib/shellpanel.zig`) that takes the keyboard and the caret
-//! until it is closed or clicked away from: a click on the panes above
-//! gives them back while the panel stays up, and a click on the panel (or
-//! Ctrl+` again) returns them to the shell.
+//! `syncCaret`. Ctrl+` opens a `gw-shell` panel docked along an edge of
+//! the window or floating in the middle (`shell_position`, `:shell`;
+//! `applib/shellpanel.zig`) that takes the keyboard and the caret until
+//! it is closed or clicked away from: a click on the panes gives them back
+//! while the panel stays up, and a click on the panel (or Ctrl+` again)
+//! returns them to the shell.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -922,9 +923,9 @@ pub const Ui = struct {
     /// `text` the host sends for the same key is dropped.
     swallow_window_text: bool = false,
     jumps: JumpList = .{},
-    /// Ctrl+`: a `gw-shell` drawing into a layer across the bottom, above
-    /// the statusline, for running builds and tests without leaving the
-    /// editor. It floats outside the split tree like the finder and takes
+    /// Ctrl+`: a `gw-shell` drawing into a layer docked along an edge
+    /// (above the statusline) or floating in the middle, for running
+    /// builds and tests without leaving the editor. It floats outside the split tree like the finder and takes
     /// every keystroke but Ctrl+` while it is open. Rooted at the tree's
     /// directory. See `applib/shellpanel.zig`.
     shell: shellpanel.Panel,
@@ -1125,14 +1126,14 @@ pub const Ui = struct {
         // its commands' output here, so it carries scrollback of its own
         // for the shell's Ctrl+Up browsing. Created before the finder so
         // the popup still composites over it, and outside the split tree:
-        // `Panel.place` puts it across the bottom when it opens.
-        const shell_layer = try client.createLayer(size.cols, 1, shellpanel.scrollback_rows);
+        // `Panel.place` puts it where `shell_position` says when it opens.
+        const shell_layers = try shellpanel.createLayers(client, size.cols);
+        const shell_layer = shell_layers.shell;
         try client.setLayerBackground(shell_layer, role(.shell_bg));
         try client.setLayerScrollbars(shell_layer, true, false);
         // Output the user may want to copy: the host's drag-to-select,
         // which zoe's own drag handling would otherwise never allow here.
         try client.setLayerMouseSelect(shell_layer, true);
-        try client.setLayerVisible(shell_layer, false);
 
         // Every floating popup below gets the same host-drawn drop shadow
         // (`glyphwire.Shadow.dialog`): it follows the layer as it moves and
@@ -1210,7 +1211,7 @@ pub const Ui = struct {
             .tab_tip_layer = tab_tip_layer,
             .tab_tip_patch = tab_tip_patch,
             .diags = diag.Store.init(alloc),
-            .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layer),
+            .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layers),
             .pane_split = pane_split,
             .grp = first_group,
             .layout = try groups.Layout.init(alloc, first_group.id),
@@ -1232,6 +1233,8 @@ pub const Ui = struct {
         // which builds its own highlighter against what this leaves.
         self.loadConfig(cfg_owned.?, environ);
         cfg_owned = null;
+        if (self.hl_config) |*cfg| self.shell.setPosition(cfg.shell_position, cfg.shell_float_percent, self.winSize());
+        self.shell.setFrameStyle(self.th.panelStyle());
         // Best-effort too: a history that can't be read is an empty one.
         self.loadHistories();
 
@@ -1507,7 +1510,7 @@ pub const Ui = struct {
         };
     }
 
-    /// Puts the open panel back across the bottom after a resize.
+    /// Puts the open panel back where it sits after a resize.
     fn replaceShell(self: *Ui) void {
         if (!self.shell.isOpen()) return;
         self.shell.place(self.winSize()) catch |err| {
@@ -4202,6 +4205,7 @@ pub const Ui = struct {
             .lsp_status => |arg| self.lspStatus(arg),
             .diag_list => self.diagList(),
             .theme => |arg| self.themeCommand(arg),
+            .shell_position => |arg| self.shellPositionCommand(arg),
         }
     }
 
@@ -5982,6 +5986,24 @@ pub const Ui = struct {
         self.buf.ed.setStatus("theme: {s}", .{self.th.name()});
     }
 
+    /// `:shell <position>` moves the Ctrl+` panel (`bottom`, `top`,
+    /// `left`, `right`, `float`) for the rest of the run, open or not;
+    /// `:shell` alone names where it is. The float size stays the
+    /// configured one.
+    fn shellPositionCommand(self: *Ui, arg: ?[]const u8) void {
+        self.status_dirty = true;
+        const name = arg orelse {
+            self.buf.ed.setStatus("shell: {t}", .{self.shell.position});
+            return;
+        };
+        const pos = std.meta.stringToEnum(shellpanel.Position, name) orelse {
+            self.buf.ed.setStatus("E475: Invalid argument: {s} (bottom, top, left, right or float)", .{name});
+            return;
+        };
+        self.shell.setPosition(pos, self.shell.float_percent, self.winSize());
+        self.buf.ed.setStatus("shell: {t}", .{pos});
+    }
+
     fn followWindowTheme(self: *Ui) !void {
         try self.client.setTheme(null);
         const st = try self.client.getTheme();
@@ -6024,6 +6046,7 @@ pub const Ui = struct {
         if (frame_changed) {
             self.hover_panel_patch = try self.swapPanelPatch(self.hover_layer, self.hover_panel_patch, 1, hover_max_cols);
             self.tab_tip_patch = try self.swapPanelPatch(self.tab_tip_layer, self.tab_tip_patch, tabs.tip_rows, tab_tip_initial_cols);
+            self.shell.setFrameStyle(self.th.panelStyle());
         }
         try c.setLayerBackground(self.hover_layer, if (self.hover_panel_patch == null) role(.popup_bg) else null);
         try c.setLayerBackground(self.tab_tip_layer, if (self.tab_tip_patch == null) role(.popup_bg) else null);

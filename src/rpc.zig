@@ -131,8 +131,8 @@ pub fn layoutNotification(alloc: std.mem.Allocator, layers: []const protocol.Lay
 
 /// `layer_resize` -- the user dragged a layer's `resize_edge`. See
 /// `protocol.LayerResizeParams`; delivered to `"layout"` subscribers.
-pub fn layerResizeNotification(alloc: std.mem.Allocator, context: core.ContextHandle, layer: core.LayerHandle, rows: usize) ![]u8 {
-    return notification(alloc, "layer_resize", protocol.LayerResizeParams{ .context = context, .layer = layer, .rows = rows });
+pub fn layerResizeNotification(alloc: std.mem.Allocator, context: core.ContextHandle, layer: core.LayerHandle, cols: usize, rows: usize) ![]u8 {
+    return notification(alloc, "layer_resize", protocol.LayerResizeParams{ .context = context, .layer = layer, .rows = rows, .cols = cols });
 }
 
 /// `terminal_reply` -- `bytes` are a terminal query answer a `write_text`

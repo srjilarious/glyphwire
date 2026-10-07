@@ -3968,13 +3968,15 @@ pub const ScrollOffsetEvent = struct {
 };
 
 /// A `layer_resize` notification: the user dragged `layer`'s
-/// `resize_edge` and wants it `rows` tall. Nothing has been resized yet
+/// `resize_edge` and wants it `cols` x `rows` (`cols` is 0 from a host
+/// that predates side edges). Nothing has been resized yet
 /// -- the owning client applies it. Check `context` as well as `layer`:
 /// handles are per-context and every `"layout"` subscriber hears it.
 pub const LayerResizeEvent = struct {
     context: core.ContextHandle,
     layer: core.LayerHandle,
     rows: usize,
+    cols: usize = 0,
 };
 
 /// One pane's bounds from a `layout` notification.
@@ -4806,7 +4808,7 @@ pub const InputListener = struct {
         } else if (eql(u8, method, "layer_resize")) {
             const p = try self.parseParams(protocol.LayerResizeParams, params);
             defer p.deinit();
-            try self.enqueue(.{ .layer_resize = .{ .context = p.value.context, .layer = p.value.layer, .rows = p.value.rows } });
+            try self.enqueue(.{ .layer_resize = .{ .context = p.value.context, .layer = p.value.layer, .rows = p.value.rows, .cols = p.value.cols } });
         } else if (eql(u8, method, "pane_layout")) {
             const p = try self.parseParams(protocol.PaneLayoutParams, params);
             defer p.deinit();

@@ -15,7 +15,7 @@
 //!   panes *within* one program (zoe's sidebar against its buffer).
 //!
 //! A third kind of band rides along: a floating layer's `resize_edge`
-//! (the Ctrl+` shell panel's top). It belongs to no tree, so it isn't in
+//! (the Ctrl+` shell panel's inner edge). It belongs to no tree, so it isn't in
 //! the band cache -- it is found live by `edgeAt` -- and finishing its
 //! drag resizes nothing here, it only tells the layer's client.
 //!
@@ -111,8 +111,12 @@ pub const Band = struct {
     pub const Edge = struct {
         context: glyphwire.ContextHandle,
         layer: glyphwire.LayerHandle,
-        /// The layer's height when the drag started; the drag's travel
-        /// is applied to this.
+        /// Which edge is being dragged, so the travel's sign and axis
+        /// are known on release.
+        edge: glyphwire.ResizeEdge,
+        /// The layer's size when the drag started; the drag's travel is
+        /// applied to whichever of these the edge moves.
+        cols: usize,
         rows: usize,
     };
 };
@@ -296,8 +300,14 @@ pub const Panes = struct {
                 const layer = ctx.layers.getPtr(handle) orelse continue;
                 if (!layer.visible) continue;
                 const rect = geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows());
-                if (layer.resize_edge == .top and geometry.resizeEdgeHit(rect).contains(px, py)) return .{
-                    .edge = .{ .context = ctx_handle, .layer = handle, .rows = layer.viewportRows() },
+                if (layer.resize_edge != .none and geometry.resizeEdgeHit(rect, layer.resize_edge).contains(px, py)) return .{
+                    .edge = .{
+                        .context = ctx_handle,
+                        .layer = handle,
+                        .edge = layer.resize_edge,
+                        .cols = layer.viewportCols(),
+                        .rows = layer.viewportRows(),
+                    },
                     .rect = rect,
                 };
                 if (rect.contains(px, py)) break;
@@ -339,15 +349,16 @@ pub const Panes = struct {
         if (pressed) {
             const band = self.dividerAt(pos.x, pos.y) orelse {
                 const e = self.edgeAt(pos.x, pos.y) orelse return false;
-                const base = geometry.resizeEdgeBand(e.rect);
+                const base = geometry.resizeEdgeBand(e.rect, e.edge.edge);
+                const sideways = e.edge.edge.horizontal();
                 self.drag = .{
                     .level = .{ .edge = e.edge },
                     .split = 0,
                     .index = 0,
-                    // A top edge moves up and down, like the band of a
-                    // column split.
-                    .axis = .column,
-                    .grab_px = pos.y,
+                    // A top or bottom edge moves up and down, like the
+                    // band of a column split; a side edge like a row's.
+                    .axis = if (sideways) .row else .column,
+                    .grab_px = if (sideways) pos.x else pos.y,
                     .base = base,
                 };
                 self.preview = base;
@@ -423,12 +434,25 @@ pub const Panes = struct {
                 };
             },
             .edge => |e| {
-                // Dragging a top edge up (negative travel) makes the layer
-                // taller. Floored at one row so the edge stays grabbable;
-                // every other bound is the client's call.
-                const rows: usize = @intCast(@max(@as(i64, @intCast(e.rows)) - travelled, 1));
-                if (rows == e.rows) return;
-                server.reportLayerResize(self.app.alloc, e.context, e.layer, rows) catch |err| {
+                // Dragging a top or left edge toward the origin (negative
+                // travel) grows the layer; a bottom or right edge grows
+                // it the other way. Floored at one cell so the edge stays
+                // grabbable; every other bound is the client's call.
+                const grow: i64 = switch (e.edge) {
+                    .top, .left => -travelled,
+                    .bottom, .right => travelled,
+                    .none => return,
+                };
+                var cols = e.cols;
+                var rows = e.rows;
+                if (e.edge.horizontal()) {
+                    cols = @intCast(@max(@as(i64, @intCast(e.cols)) + grow, 1));
+                    if (cols == e.cols) return;
+                } else {
+                    rows = @intCast(@max(@as(i64, @intCast(e.rows)) + grow, 1));
+                    if (rows == e.rows) return;
+                }
+                server.reportLayerResize(self.app.alloc, e.context, e.layer, cols, rows) catch |err| {
                     std.log.err("glyphwire-host: reportLayerResize failed: {t}", .{err});
                 };
             },

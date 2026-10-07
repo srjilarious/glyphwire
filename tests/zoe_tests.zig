@@ -4905,6 +4905,34 @@ pub fn commandLineThemeReturnsOutcomeTest(_: std.Io, alloc: std.mem.Allocator) !
     }
 }
 
+pub fn configShellPositionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    {
+        var cfg = try parseConf(alloc, "config = {}");
+        defer cfg.deinit();
+        try testz.expectEqual(cfg.shell_position, .bottom);
+        try testz.expectEqual(cfg.shell_float_percent, 80);
+    }
+    {
+        var cfg = try parseConf(alloc, "config = { shell_position = \"float\", shell_float_percent = 65 }");
+        defer cfg.deinit();
+        try testz.expectEqual(cfg.shell_position, .float);
+        try testz.expectEqual(cfg.shell_float_percent, 65);
+    }
+}
+
+pub fn commandLineShellReturnsOutcomeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    switch (try keys.feed(&ed, ":shell left<cr>")) {
+        .shell_position => |name| try testz.expectEqualStr(name.?, "left"),
+        else => try testz.fail(),
+    }
+    switch (try keys.feed(&ed, ":shell<cr>")) {
+        .shell_position => |name| try testz.expectTrue(name == null),
+        else => try testz.fail(),
+    }
+}
+
 pub fn syntaxThemeIsRoleReferencesTest(_: std.Io, _: std.mem.Allocator) !void {
     // Every coloured capture is its role, for the host to resolve.
     const st = syntax.Theme.initDefault();

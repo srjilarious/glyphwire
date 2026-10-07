@@ -1447,11 +1447,11 @@ pub const Server = struct {
     };
 
     /// Broadcasts a `layer_resize` notification -- glyphwire-host's drag
-    /// of a layer's `resize_edge` ended and the user wants it `rows`
-    /// tall. Touches no context state: the client that owns the layer is
-    /// the one that resizes it (see `core.ResizeEdge`).
-    pub fn reportLayerResize(self: *Server, alloc: std.mem.Allocator, context: core.ContextHandle, layer: core.LayerHandle, rows: usize) !void {
-        const body = try rpc.layerResizeNotification(alloc, context, layer, rows);
+    /// of a layer's `resize_edge` ended and the user wants it `cols` x
+    /// `rows`. Touches no context state: the client that owns the layer
+    /// is the one that resizes it (see `core.ResizeEdge`).
+    pub fn reportLayerResize(self: *Server, alloc: std.mem.Allocator, context: core.ContextHandle, layer: core.LayerHandle, cols: usize, rows: usize) !void {
+        const body = try rpc.layerResizeNotification(alloc, context, layer, cols, rows);
         defer alloc.free(body);
         self.broadcast(null, "layer_resize", body);
     }
