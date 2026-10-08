@@ -1982,7 +1982,7 @@ const Prompt = struct {
         if (sink) |b| try self.batchText(b, text, fg, bg) else try self.drawText(text, fg, bg);
     }
     fn sinkWriteTextTransparent(self: *Prompt, sink: ChainSink, text: []const u8, fg: ?glyphwire.Color) !void {
-        if (sink) |b| try b.writeTextOpts(text, .{ .layer = self.layer, .fg = fg, .transparent_bg = true }) else try self.drawTextTransparent(text, fg);
+        if (sink) |b| try b.writeText(text, .{ .layer = self.layer, .fg = fg, .transparent_bg = true }) else try self.drawTextTransparent(text, fg);
     }
     fn sinkDrawIconStyled(self: *Prompt, sink: ChainSink, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
         if (sink) |b| {
@@ -2070,15 +2070,15 @@ const Prompt = struct {
     // add to, since a `Batch` mirrors `Client` message for message.
 
     fn drawText(self: *Prompt, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
-        try self.client.writeTextOpts(text, .{ .layer = self.layer, .fg = fg, .bg = bg });
+        try self.client.writeText(text, .{ .layer = self.layer, .fg = fg, .bg = bg });
     }
 
     fn drawTextTransparent(self: *Prompt, text: []const u8, fg: ?glyphwire.Color) !void {
-        try self.client.writeTextOpts(text, .{ .layer = self.layer, .fg = fg, .transparent_bg = true });
+        try self.client.writeText(text, .{ .layer = self.layer, .fg = fg, .transparent_bg = true });
     }
 
     fn batchText(self: *Prompt, b: *glyphwire.Client.Batch, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
-        try b.writeTextOpts(text, .{ .layer = self.layer, .fg = fg, .bg = bg });
+        try b.writeText(text, .{ .layer = self.layer, .fg = fg, .bg = bg });
     }
 
     fn drawSetCursor(self: *Prompt, row: usize, col: usize) !void {

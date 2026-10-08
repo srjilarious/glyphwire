@@ -6335,7 +6335,7 @@ pub const Ui = struct {
         fg: Color,
         bg: Color,
     ) !void {
-        try batch.writeTextOpts(text, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg });
+        try batch.writeText(text, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg });
     }
 
     /// Redraws the buffer pane.
@@ -6837,7 +6837,7 @@ pub const Ui = struct {
         if (line >= self.buf.ed.buf.lineCount()) {
             // vim's marker for "past the end of the buffer", the rest of
             // the row padded by the host.
-            try batch.writeTextOpts("~", .{
+            try batch.writeText("~", .{
                 .layer = self.grp.buffer_layer,
                 .row = r,
                 .col = gutter,
@@ -7027,7 +7027,7 @@ pub const Ui = struct {
             const kind: hover_mod.Kind = if (hr) |x| h.doc.lines[x.line].kind else .prose;
 
             if (kind == .rule) {
-                try batch.writeTextOpts(hline.items, .{
+                try batch.writeText(hline.items, .{
                     .layer = self.hover_layer,
                     .row = row,
                     .col = 0,
@@ -7870,7 +7870,7 @@ pub const Ui = struct {
                 try line.appendNTimes(self.alloc, ' ', e.depth * tree_mod.indent_cols + tree_mod.icon_cols);
                 try line.appendSlice(self.alloc, e.name);
                 // The host pads the row to the full content width.
-                try batch.writeTextOpts(line.items, .{
+                try batch.writeText(line.items, .{
                     .layer = self.tree_layer,
                     .row = r,
                     .col = 0,
@@ -7929,7 +7929,7 @@ pub const Ui = struct {
         defer line.deinit(self.alloc);
         try line.appendNTimes(self.alloc, ' ', start);
         try line.appendSlice(self.alloc, text);
-        try batch.writeTextOpts(line.items, .{
+        try batch.writeText(line.items, .{
             .layer = self.tree_layer,
             .row = te.row,
             .col = 0,
@@ -7946,7 +7946,7 @@ pub const Ui = struct {
                 text[te.field.caret..lineedit.nextBoundary(text, te.field.caret)]
             else
                 " ";
-            try batch.writeTextOpts(under, .{
+            try batch.writeText(under, .{
                 .layer = self.tree_layer,
                 .row = te.row,
                 .col = caret_col,
@@ -8238,7 +8238,7 @@ pub const Ui = struct {
                 .{ .text = line.items[mode_end..] },
             }, opts);
         } else {
-            try batch.writeTextOpts(line.items, opts);
+            try batch.writeText(line.items, opts);
         }
 
         // The `:` and `/` lines' caret, as the same inverted block the
@@ -8253,7 +8253,7 @@ pub const Ui = struct {
                     cmd.text()[cmd.caret..lineedit.nextBoundary(cmd.text(), cmd.caret)]
                 else
                     " ";
-                try batch.writeTextOpts(under, .{
+                try batch.writeText(under, .{
                     .layer = self.status_layer,
                     .row = 0,
                     .col = col,

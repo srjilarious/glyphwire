@@ -1556,7 +1556,7 @@ pub const Ui = struct {
         for (shape.lines, 0..) |line, i| {
             const row = 1 + i * pitch;
             try chromeAt(&b, self.dialog_layer, row, 0, box_v_pad, fg_dialog_border, bg_dialog);
-            try b.writeTextOpts(line, .{
+            try b.writeText(line, .{
                 .layer = self.dialog_layer,
                 .row = row,
                 .col = 2,
@@ -1625,7 +1625,7 @@ pub const Ui = struct {
                 // A narrow character (Latin, a digit) fills half a
                 // column; set it as near the middle as whole cells allow.
                 const nudge: usize = if (glyphwire.codepointWidth(cp) < 2) pitch / 2 else 0;
-                try b.writeTextOpts(form orelse ch, .{
+                try b.writeText(form orelse ch, .{
                     .layer = self.dialog_layer,
                     .row = 1 + slot * pitch,
                     .col = x + nudge,
@@ -2204,7 +2204,7 @@ pub const Ui = struct {
         const band_len = @min(self.win.cols, blanks_buf.len);
         @memset(blanks_buf[0..band_len], ' ');
         try c.setCursorOn(self.status_layer, 0, 0);
-        try c.writeTextOn(self.status_layer, blanks_buf[0..band_len], fg_status, bg_status);
+        try c.writeText(blanks_buf[0..band_len], .{ .layer = self.status_layer, .fg = fg_status, .bg = bg_status });
         try c.setCursorOn(self.status_layer, 0, 0);
 
         var buf: [512]u8 = undefined;
@@ -2215,22 +2215,22 @@ pub const Ui = struct {
             self.book.count(),
             self.direction.label(),
         }) catch " ";
-        try c.writeTextOn(self.status_layer, left, fg_status, bg_status);
+        try c.writeText(left, .{ .layer = self.status_layer, .fg = fg_status, .bg = bg_status });
 
         // Middle: the goto prompt while it's open, else the page's own
         // name, else whatever went wrong.
         switch (self.pending) {
             .goto_prompt => |prompt| {
                 const text = std.fmt.bufPrint(&buf, ":{s}_ ", .{prompt.items}) catch ":";
-                try c.writeTextOn(self.status_layer, text, fg_warn, bg_status);
+                try c.writeText(text, .{ .layer = self.status_layer, .fg = fg_warn, .bg = bg_status });
             },
             else => if (self.cropping()) {
-                try c.writeTextOn(self.status_layer, crop_hint, fg_warn, bg_status);
+                try c.writeText(crop_hint, .{ .layer = self.status_layer, .fg = fg_warn, .bg = bg_status });
             } else if (self.message) |m| {
-                try c.writeTextOn(self.status_layer, m, fg_warn, bg_status);
+                try c.writeText(m, .{ .layer = self.status_layer, .fg = fg_warn, .bg = bg_status });
             } else {
                 const name = self.book.pages.items[@min(self.page, self.book.count() -| 1)].name;
-                try c.writeTextOn(self.status_layer, name, fg_dim, bg_status);
+                try c.writeText(name, .{ .layer = self.status_layer, .fg = fg_dim, .bg = bg_status });
             },
         }
 
@@ -2258,7 +2258,7 @@ pub const Ui = struct {
         }) catch "";
         const at: usize = self.win.cols -| right.len;
         try c.setCursorOn(self.status_layer, 0, at);
-        try c.writeTextOn(self.status_layer, right, fg_status, bg_status);
+        try c.writeText(right, .{ .layer = self.status_layer, .fg = fg_status, .bg = bg_status });
 
         if (self.help_visible) try self.renderHelp();
     }
@@ -2346,13 +2346,13 @@ pub const Ui = struct {
     /// the panel tints and copies only the text inside it
     /// (`core.Cell.selectable`).
     fn chromeAt(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, row: usize, col: usize, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
-        try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg, .selectable = false });
+        try b.writeText(text, .{ .layer = layer, .row = row, .col = col, .fg = fg, .bg = bg, .selectable = false });
     }
 
     /// `chromeAt` continuing from wherever the last write left the
     /// cursor.
     fn chromeOn(b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
-        try b.writeTextOpts(text, .{ .layer = layer, .fg = fg, .bg = bg, .selectable = false });
+        try b.writeText(text, .{ .layer = layer, .fg = fg, .bg = bg, .selectable = false });
     }
 
     /// One panel row -- border, text, border -- the piece every bordered
@@ -2385,7 +2385,7 @@ pub const Ui = struct {
         if (line.spans.len > 0) {
             try b.writeSpans(line.spans, opts);
         } else {
-            try b.writeTextOpts(line.text, opts);
+            try b.writeText(line.text, opts);
         }
         try chromeAt(b, layer, row, inner + 2, pad_box_v, fg_dialog_border, bg_dialog);
     }
@@ -2415,7 +2415,7 @@ pub const Ui = struct {
             @memset(line_buf[keep..], ' ');
 
             try chromeAt(b, self.help_layer, i + 1, 0, box_v, fg_status, bg_status);
-            try b.writeTextOpts(&line_buf, .{ .layer = self.help_layer, .fg = fg_status, .bg = bg_status });
+            try b.writeText(&line_buf, .{ .layer = self.help_layer, .fg = fg_status, .bg = bg_status });
             try chromeOn(b, self.help_layer, box_v, fg_status, bg_status);
         }
 

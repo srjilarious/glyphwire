@@ -150,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
             if (listing.header) |h| {
                 const c = try client.getCursor();
                 try client.setCursor(c.row, 0);
-                try client.writeText(h, header_color, null);
+                try client.writeText(h, .{ .fg = header_color });
                 const c2 = try client.getCursor();
                 try client.setCursor(c2.row + 1, 0);
             }
@@ -646,7 +646,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
                 .sym_link => symlink_color,
                 else => file_color,
             };
-            try draw_batch.writeTextTagged(name_text, name_fg, null, metadata_id);
+            try draw_batch.writeText(name_text, .{ .fg = name_fg, .metadata_id = metadata_id });
             // Mark the name's first cell as the entry's focus cell, the
             // same landing point the `-l` table gets from its `focus`
             // Name column. The icon cells ahead of it are blank, so
@@ -791,7 +791,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         std.mem.trim(u8, lsfmt.formatSize(&total_num_buf, total_bytes, raw_bytes), " "),
     }) catch "total ?";
     try client.setCursor(cur.row, cur.col);
-    try client.writeText(total_line, header_color, null);
+    try client.writeText(total_line, .{ .fg = header_color });
     const table_row = cur.row + 1;
 
     // Every heap-allocated display string built below (name, size, owner,
@@ -1020,7 +1020,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         // in, and the shell's own `+1` then puts the prompt below it, the
         // same one-line gap the fits-in-window case leaves.
         try client.setCursor(layer_bottom, 0);
-        try client.writeText("\n", null, null);
+        try client.writeText("\n", .{});
     }
 }
 

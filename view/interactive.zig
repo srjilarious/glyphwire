@@ -327,7 +327,7 @@ pub const Ui = struct {
         try b.clearArea(.{ .layer = layer, .bg = bg_status });
 
         const name = std.fs.path.basename(self.path);
-        try b.writeTextOpts(name, .{ .layer = layer, .row = 0, .col = 1, .fg = fg_name, .bg = bg_status, .max_cols = self.win.cols -| 2 });
+        try b.writeText(name, .{ .layer = layer, .row = 0, .col = 1, .fg = fg_name, .bg = bg_status, .max_cols = self.win.cols -| 2 });
 
         var buf: [96]u8 = undefined;
         const detail = std.fmt.bufPrint(&buf, "{d}x{d}  {s} {d}%  q quit  f/w/t/1 size  +/- zoom", .{
@@ -338,7 +338,7 @@ pub const Ui = struct {
         }) catch "";
         const detail_w = glyphwire.stringWidth(detail);
         if (detail_w > 0 and self.win.cols >= detail_w + glyphwire.stringWidth(name) + 4) {
-            try b.writeTextOpts(detail, .{ .layer = layer, .row = 0, .col = self.win.cols - 1 - detail_w, .fg = fg_detail, .bg = bg_status });
+            try b.writeText(detail, .{ .layer = layer, .row = 0, .col = self.win.cols - 1 - detail_w, .fg = fg_detail, .bg = bg_status });
         }
         var sent = try b.send();
         sent.deinit();

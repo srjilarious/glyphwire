@@ -519,7 +519,7 @@ pub fn tableNearLayerBottomScrollsToFitInsteadOfClippingTest(io: std.Io, alloc: 
     defer client.deinit();
 
     try client.setCursor(0, 0);
-    try client.writeText("!", .{ .r = 255, .g = 255, .b = 255 }, null);
+    try client.writeText("!", .{ .fg = .{ .r = 255, .g = 255, .b = 255 } });
 
     // Anchored at row 3 of a 5-row layer wanting 3 total lines (header +
     // 2 body rows, no separator): only 2 lines of headroom exist there
@@ -736,7 +736,7 @@ pub fn tableOversizedShowsTailTest(io: std.Io, alloc: std.mem.Allocator) !void {
     // A sentinel on row 0, standing in for the shell's prompt / `total`
     // line -- it should scroll into history intact, not get buried.
     try client.setCursor(0, 0);
-    try client.writeText("S", .{ .r = 255, .g = 255, .b = 255 }, null);
+    try client.writeText("S", .{ .fg = .{ .r = 255, .g = 255, .b = 255 } });
 
     // header + 10 body rows * row_height 1 == 11 lines in a 6-row
     // viewport, anchored at row 2.
@@ -1008,7 +1008,7 @@ pub fn tableRepaintAfterScrollKeepsPositionTest(io: std.Io, alloc: std.mem.Alloc
     // three rows, its header into scrollback. Body "c"/"a"/"b" (rows 1-3)
     // are now at live rows -2/-1/0, so live row 0 shows "b".
     try client.setCursor(7, 0);
-    try client.writeText("\n\n\n", null, null);
+    try client.writeText("\n\n\n", .{});
     {
         var snap = try client.getCells();
         defer snap.deinit();

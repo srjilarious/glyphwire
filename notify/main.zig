@@ -150,8 +150,8 @@ fn run(io: std.Io, client: *glyphwire.Client, notify_type: NotifyType, message: 
     try client.setCursorOn(handle, text_row, text_col);
     // `transparent_bg: true` leaves each cell's background exactly as it
     // is, so nothing paints over the panel -- see
-    // `Client.writeTextTransparent`.
-    try client.writeTextOnTransparent(handle, text, .{ .r = 255, .g = 255, .b = 255 });
+    // `Client.TextOpts.transparent_bg`.
+    try client.writeText(text, .{ .layer = handle, .fg = .{ .r = 255, .g = 255, .b = 255 }, .transparent_bg = true });
 
     try slide(io, client, handle, off_x, rest_x);
     try std.Io.sleep(io, .fromMilliseconds(hold_ms), .awake);

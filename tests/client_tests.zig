@@ -5,6 +5,34 @@ const std = @import("std");
 const testz = @import("testz");
 const glyphwire = @import("glyphwire");
 
+/// Every `Client` and `Batch` method has to compile, including the ones no
+/// program calls yet: each one's params are checked against the server's
+/// struct (`protocol.ParamsOf`) only when its body is analysed.
+pub fn clientEveryMethodCompilesTest() !void {
+    // Not `std.testing.refAllDecls`, which does nothing outside `zig test`.
+    inline for (.{ glyphwire.Client, glyphwire.Client.Batch }) |T| {
+        inline for (comptime std.meta.declarations(T)) |d| {
+            if (@typeInfo(@TypeOf(@field(T, d))) == .@"fn") _ = &@field(T, d);
+        }
+    }
+}
+
+/// `Client` leaves null fields off the wire, which is only safe while the
+/// server reads an absent field the same as a null one: every optional in
+/// a method's params has to default to null.
+pub fn protocolParamsOptionalsDefaultToNullTest() !void {
+    const Methods = @typeInfo(glyphwire.protocol.Methods).@"struct";
+    inline for (Methods.field_types) |P| {
+        const S = @typeInfo(P).@"struct";
+        inline for (S.field_types, S.field_attrs) |FT, attrs| {
+            if (@typeInfo(FT) == .optional) {
+                const d = attrs.defaultValue(FT) orelse return error.OptionalWithoutDefault;
+                try testz.expectTrue(d == null);
+            }
+        }
+    }
+}
+
 pub fn clientWriteTextThenGetCellsRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
     defer ctx.deinit();
@@ -27,7 +55,7 @@ pub fn clientWriteTextThenGetCellsRoundTripTest(io: std.Io, alloc: std.mem.Alloc
     const rev_before = try client.getRevision();
     try testz.expectEqual(rev_before, 0);
 
-    try client.writeText("hi", .{ .r = 0, .g = 255, .b = 255, .a = 255 }, .{ .r = 40, .g = 40, .b = 90, .a = 255 });
+    try client.writeText("hi", .{ .fg = .{ .r = 0, .g = 255, .b = 255, .a = 255 }, .bg = .{ .r = 40, .g = 40, .b = 90, .a = 255 } });
 
     const cursor = try client.getCursor();
     try testz.expectEqual(cursor.row, 0);
@@ -87,7 +115,7 @@ pub fn clientDrawsOnTheSurfaceFromGlyphwireLayerTest(io: std.Io, alloc: std.mem.
     var client = try glyphwire.Client.connectFromEnv(io, alloc, &env);
     defer client.deinit();
 
-    try client.writeText("hi", null, null);
+    try client.writeText("hi", .{});
     // A request flushes the notifications before it, so the cells are
     // committed by the time this returns.
     _ = try client.getRevision();
@@ -113,7 +141,7 @@ pub fn clientClearWipesTheWholeLayerByDefaultTest(io: std.Io, alloc: std.mem.All
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     defer client.deinit();
 
-    try client.writeText("hi", null, null);
+    try client.writeText("hi", .{});
     try client.clear(0, 0, null, null);
 
     var snapshot = try client.getCells();
@@ -149,7 +177,7 @@ pub fn clientSetCursorThenWriteTextPositionsAtCursorTest(io: std.Io, alloc: std.
     errdefer client.deinit();
 
     try client.setCursor(1, 3);
-    try client.writeText("x", null, null);
+    try client.writeText("x", .{});
 
     // Explicit sequencing, not just eventual cleanup: the assertion below
     // reads ctx directly rather than over the wire, so it must wait for
@@ -191,9 +219,9 @@ pub fn clientBatchTypedAddersTargetNamedLayerTest(io: std.Io, alloc: std.mem.All
         try b.setLayerSize(popup, 6, 2);
         try b.setLayerCellPosition(popup, 1, 2);
         try b.clearOn(popup, 0, 0, null, null);
-        try b.writeTextOpts("hi", .{ .layer = popup, .row = 0, .col = 0 });
+        try b.writeText("hi", .{ .layer = popup, .row = 0, .col = 0 });
         try b.setCursorOn(popup, 1, 0);
-        try b.writeTextOn(popup, "x", null, null);
+        try b.writeText("x", .{ .layer = popup });
         try b.setLayerVisible(popup, true);
         var results = try b.send();
         results.deinit();
@@ -534,12 +562,12 @@ pub fn clientSpeaksBothWireFormatsTest(io: std.Io, alloc: std.mem.Allocator) !vo
         defer client.deinit();
 
         try client.setCursor(row, 0);
-        try client.writeText(@tagName(format), null, null);
+        try client.writeText(@tagName(format), .{});
 
         var b = client.batch();
         defer b.deinit();
         const slot = try b.createMetadata("{\"k\":1}");
-        try b.writeText("!", null, null);
+        try b.writeText("!", .{});
         var results = try b.send();
         defer results.deinit();
         const meta = try results.metadataHandle(slot);
@@ -607,7 +635,7 @@ pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocato
     // payload proves the decoder correctly resumed normal frame parsing
     // afterward, rather than the raw bytes bleeding into the next frame's
     // header -- see wire.zig's `takeRaw` leaving any excess buffered.
-    try client.writeText("z", null, null);
+    try client.writeText("z", .{});
     const cursor = try client.getCursor();
     try testz.expectEqual(cursor.col, 1);
 }
@@ -649,7 +677,7 @@ pub fn clientCreateUpdateDestroyRectRoundTripTest(io: std.Io, alloc: std.mem.All
 
     // Nothing above should have severed the connection -- a plain
     // notification still lands afterward.
-    try client.writeText("ok", null, null);
+    try client.writeText("ok", .{});
     const cursor = try client.getCursor();
     try testz.expectEqual(cursor.col, 2);
 }
@@ -713,7 +741,7 @@ pub fn clientBatchRequestFormReturnsSlottedResultsTest(io: std.Io, alloc: std.me
     var b = client.batch();
     defer b.deinit();
     const slot_a = try b.createMetadata("{\"path\":\"/a\"}");
-    try b.writeText("hi", null, null);
+    try b.writeText("hi", .{});
     const slot_b = try b.createMetadata("{\"path\":\"/b\"}");
     var results = try b.send();
     defer results.deinit();
@@ -748,7 +776,7 @@ pub fn clientBatchSendSyncedReturnsAfterApplyTest(io: std.Io, alloc: std.mem.All
 
     var b = client.batch();
     defer b.deinit();
-    try b.writeTextOpts("synced", .{ .row = 1, .col = 2 });
+    try b.writeText("synced", .{ .row = 1, .col = 2 });
     var results = try b.sendSynced();
     results.deinit();
 
@@ -823,9 +851,9 @@ pub fn clientBatchNotificationFormAppliesWithoutReplyTest(io: std.Io, alloc: std
     {
         var b = client.batch();
         defer b.deinit();
-        try b.writeText("one", null, null);
+        try b.writeText("one", .{});
         try b.setCursor(2, 1);
-        try b.writeText("two", null, null);
+        try b.writeText("two", .{});
         var results = try b.send();
         results.deinit();
     }
@@ -862,9 +890,9 @@ pub fn clientBatchClearThenRedrawInOneBatchTest(io: std.Io, alloc: std.mem.Alloc
 
     // Seed two rows outside the batch.
     try client.setCursor(0, 0);
-    try client.writeText("stale-left", null, null);
+    try client.writeText("stale-left", .{});
     try client.setCursor(1, 0);
-    try client.writeText("keep-me", null, null);
+    try client.writeText("keep-me", .{});
 
     {
         var b = client.batch();
@@ -872,7 +900,7 @@ pub fn clientBatchClearThenRedrawInOneBatchTest(io: std.Io, alloc: std.mem.Alloc
         // Wipe just row 0, then redraw a shorter string over it.
         try b.clear(0, 0, 1, null);
         try b.setCursor(0, 0);
-        try b.writeText("new", null, null);
+        try b.writeText("new", .{});
         var results = try b.send();
         results.deinit();
     }
@@ -907,7 +935,7 @@ pub fn clientSelectionAndClipboardRoundTripTest(io: std.Io, alloc: std.mem.Alloc
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     defer client.deinit();
 
-    try client.writeText("hello world", null, null);
+    try client.writeText("hello world", .{});
 
     const none = try client.getSelection(null);
     try testz.expectTrue(!none.active);

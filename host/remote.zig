@@ -734,7 +734,7 @@ const AuthClient = struct {
 
         self.clearGrid();
         self.client.setCursor(1, 0) catch {};
-        self.client.writeText(trimForGrid(prompt), null, null) catch {};
+        self.client.writeText(trimForGrid(prompt), .{}) catch {};
 
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(self.alloc);
@@ -778,9 +778,9 @@ const AuthClient = struct {
             var buf: [128]u8 = undefined;
             const n = @min(buf.len, text.len);
             @memset(buf[0..n], '*');
-            self.client.writeText(buf[0..n], null, null) catch {};
+            self.client.writeText(buf[0..n], .{}) catch {};
         } else {
-            self.client.writeText(trimForGrid(text), null, null) catch {};
+            self.client.writeText(trimForGrid(text), .{}) catch {};
         }
     }
 };

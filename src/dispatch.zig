@@ -150,237 +150,6 @@ pub const DispatchError = error{
 
 const Envelope = codec.Envelope;
 
-/// `layer` (omitted, or `root_layer_handle`) means the root layer.
-/// `row`/`col` place the cursor before writing, each defaulting to the
-/// cursor's current value -- the same rule `draw_icon`/`draw_image` use,
-/// so a positioned write is one message rather than a `set_property`
-/// cursor move followed by a write.
-const WriteTextParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: ?usize = null,
-    col: ?usize = null,
-    /// Exactly one of `text` and `spans`.
-    text: ?[]const u8 = null,
-    /// Styled runs written back to back as one write -- a syntax-coloured
-    /// row, or a status line with a highlighted word, in one message.
-    /// Each span's omitted fields fall back to this message's own.
-    spans: ?[]const SpanParams = null,
-    /// See `core.Layer.WriteOpts.max_cols`.
-    max_cols: ?usize = null,
-    /// See `core.Layer.WriteOpts.pad`.
-    pad: bool = false,
-    /// `false` marks every cell this write touches as outside any
-    /// selection -- see `core.Cell.selectable`. Whole-write, like `pad`.
-    selectable: bool = true,
-    /// What a selection copies for each glyph this write draws, instead
-    /// of the glyph -- see `core.Cell.copy_alt`. Whole-write, like `pad`.
-    copy_text: ?[]const u8 = null,
-    fg: ?protocol.Color = null,
-    bg: ?protocol.Color = null,
-    /// See `core.Cell.metadata_id`'s doc comment.
-    metadata_id: ?core.MetadataHandle = null,
-    /// `false` (default): `bg` omitted means "reset to
-    /// `core.default_style.bg`" -- the original, still-default behavior.
-    /// `true`: leaves each touched cell's existing background untouched
-    /// instead (`bg` is ignored either way when this is set), for writing
-    /// text over a background drawn some other way -- e.g. a nine-patch's
-    /// fill -- that needs to stay visible through it rather than being
-    /// approximated with a matching flat color.
-    transparent_bg: bool = false,
-    /// `"x1"` (default), `"x1_5"`, `"x2"`, or `"x3"` -- see `core.TextScale`'s
-    /// doc comment. Wire strings match the enum's tag names exactly, the
-    /// same convention `draw_icon`'s `scale` already uses.
-    scale: ?[]const u8 = null,
-    /// `"none"` (default), `"single"`, `"double"`, `"curly"`, `"dotted"` or
-    /// `"dashed"` -- see `core.Underline`. Tag names again, like `scale`.
-    underline: ?[]const u8 = null,
-    /// The underline's colour; omitted means the text's own `fg`, which is
-    /// what an ordinary underline wants. A diagnostic squiggle sets it so
-    /// the line can be red under syntax-coloured text.
-    underline_color: ?protocol.Color = null,
-};
-
-/// One entry of `write_text`'s `spans`. Every field but `text` is optional
-/// and inherits the enclosing message's value when omitted.
-const SpanParams = struct {
-    text: []const u8,
-    fg: ?protocol.Color = null,
-    bg: ?protocol.Color = null,
-    metadata_id: ?core.MetadataHandle = null,
-    transparent_bg: ?bool = null,
-    scale: ?[]const u8 = null,
-    underline: ?[]const u8 = null,
-    underline_color: ?protocol.Color = null,
-};
-
-/// Params shared by `insert_cells`/`delete_cells` -- also cursor-implicit
-/// like `write_text`, see `WriteTextParams`.
-const CellCountParams = struct {
-    layer: ?core.LayerHandle = null,
-    count: usize,
-};
-
-const MoveContentParams = struct {
-    layer: ?core.LayerHandle = null,
-    /// Inclusive content-grid row range, defaulting to the whole grid.
-    top: ?usize = null,
-    bot: ?usize = null,
-    /// Rows to shift, clamped to the span. Defaults to 1.
-    count: usize = 1,
-    /// `"up"` (default) or `"down"` -- the sense of CSI SU/SD.
-    direction: ?[]const u8 = null,
-};
-
-/// Params shared by `set_property`/`get_property`. Not every field is
-/// meaningful for every `property` value -- `row`/`col` for `"cursor"`
-/// and `"cell_position"`, `x`/`y` for `"position"`, `cols`/`rows` for
-/// `"size"`, `visible` for `"visibility"` -- the handler picks which
-/// subset to read once it knows `property`, the same "flexible bag,
-/// dispatched on a string" shape `ClearParams` already uses for its own
-/// optional fields.
-const PropertyParams = struct {
-    layer: ?core.LayerHandle = null,
-    property: []const u8,
-    row: usize = 0,
-    col: usize = 0,
-    x: f32 = 0,
-    y: f32 = 0,
-    cols: usize = 0,
-    rows: usize = 0,
-    visible: bool = true,
-    vertical: bool = false,
-    horizontal: bool = false,
-    /// `"pty_mode"`'s, `"mouse_select"`'s and `"mouse_report"`'s bool -- kept off `visible`
-    /// so a client setting one property doesn't have to think about the
-    /// other's default.
-    enabled: bool = false,
-    /// `"opacity"`'s 0.0..1.0 factor. Defaults to fully opaque, so a
-    /// client that names the property and forgets the field gets the
-    /// layer back rather than losing it.
-    value: f32 = 1.0,
-    /// `"scroll_mode"`'s `"host"` / `"client"`.
-    mode: ?[]const u8 = null,
-    /// `"background"`'s colour; omitted clears it back to transparent.
-    color: ?protocol.Color = null,
-    /// `"shadow"`'s shape; omitted removes the shadow.
-    shadow: ?ShadowJson = null,
-    /// `"resize_edge"`'s `"top"` / `"bottom"` / `"left"` / `"right"` /
-    /// `"none"`; omitted is `"none"`.
-    edge: ?[]const u8 = null,
-};
-
-/// `core.Shadow` on the wire. Every field is optional with the core's
-/// default, so `{"shadow": {"y": 6, "blur": 10}}` is a whole shadow.
-const ShadowJson = struct {
-    x: i32 = 0,
-    y: i32 = 0,
-    blur: u32 = 0,
-    radius: u32 = 0,
-    spread: i32 = 0,
-    color: protocol.Color = .{ .r = 0, .g = 0, .b = 0, .a = 128 },
-
-    fn toCore(self: ShadowJson) DispatchError!core.Shadow {
-        return .{
-            .x = self.x,
-            .y = self.y,
-            .blur = self.blur,
-            .radius = self.radius,
-            .spread = self.spread,
-            .color = try colorFromJson(self.color),
-        };
-    }
-
-    fn fromCore(sh: core.Shadow) ShadowJson {
-        return .{
-            .x = sh.x,
-            .y = sh.y,
-            .blur = sh.blur,
-            .radius = sh.radius,
-            .spread = sh.spread,
-            .color = colorToJson(sh.color),
-        };
-    }
-};
-
-const CursorResult = struct { row: usize, col: usize };
-const RevisionResult = struct { revision: u64 };
-const PositionResult = struct { x: f32, y: f32 };
-const CellPositionResult = struct { row: usize, col: usize };
-const SizeResult = struct { cols: usize, rows: usize };
-const ScrollResult = struct { offset: usize, max: usize };
-const VisibilityResult = struct { visible: bool };
-const OpacityResult = struct { value: f32 };
-const PtyModeResult = struct { enabled: bool };
-const ScrollModeResult = struct { mode: []const u8 };
-const SelectionFlowResult = struct { mode: []const u8, cols: usize, col: usize };
-const BackgroundResult = struct { color: ?protocol.Color };
-const ShadowResult = struct { shadow: ?ShadowJson };
-const ResizeEdgeResult = struct { edge: []const u8 };
-const ScrollOffsetResult = struct { row: usize, col: usize, max_row: usize, max_col: usize };
-const ScrollbarsResult = struct {
-    vertical: bool,
-    horizontal: bool,
-    row: usize,
-    col: usize,
-    max_row: usize,
-    max_col: usize,
-};
-
-/// `scroll_view` params: `offset` (absolute target, rows) and/or `delta`
-/// (added after), both optional -- omitting both is a pure query. See
-/// `core.Layer.scrollView`.
-const ScrollViewParams = struct {
-    layer: ?core.LayerHandle = null,
-    offset: ?usize = null,
-    delta: ?i64 = null,
-};
-
-const GetCellsParams = struct {
-    layer: ?core.LayerHandle = null,
-    /// Rows of scrollback to read above the live viewport (see
-    /// `core.Layer.viewRow`). 0 (default) is the live viewport -- the
-    /// original behavior. Non-zero lets a client read what the user is
-    /// actually looking at while glyphwire-host is scrolled back.
-    view_offset: usize = 0,
-};
-
-const CreateLayerParams = struct {
-    width: ?usize = null,
-    height: ?usize = null,
-    scrollback_rows: usize = 0,
-};
-
-const CreateLayerResult = struct { handle: core.LayerHandle };
-
-/// `create_context`: an independent context (its own root layer, split
-/// tree, layers, tables -- see `core.Session`), created in the issuing
-/// connection's pane and shown there immediately. `width` / `height`
-/// default to that pane's size.
-const CreateContextParams = struct {
-    width: ?usize = null,
-    height: ?usize = null,
-    scrollback_rows: usize = 0,
-    /// Whether glyphwire-host draws its always-on right-edge scrollbar
-    /// for this context (see `core.Context.window_scrollbar`). Default
-    /// on -- a pure-TUI client passes false.
-    window_scrollbar: bool = true,
-    /// The context's display name (see `core.Context.title`). Optional:
-    /// `set_context_title` can name it, or rename it, later.
-    title: ?[]const u8 = null,
-};
-
-const CreateContextResult = struct { context: core.ContextHandle };
-
-/// `set_context_title`: names the issuing connection's active context.
-const SetContextTitleParams = struct { title: []const u8 };
-
-/// `set_theme`: one of `name` (a built-in) or `theme` (a whole theme the
-/// client resolved itself), or neither to go back to the window's theme.
-const SetThemeParams = struct {
-    name: ?[]const u8 = null,
-    theme: ?protocol.ThemeWire = null,
-};
-
 /// `get_theme`'s result, in `protocol.ThemeWire`'s shape. `roles` is
 /// written by hand (`RolesJson`) because its keys are the enum's tags.
 const GetThemeResult = struct {
@@ -403,385 +172,6 @@ const RolesJson = struct {
         }
         try jw.endObject();
     }
-};
-
-/// `destroy_context` / `activate_context` / `adopt_context` -- all just
-/// name one context handle.
-const ContextHandleParams = struct { context: core.ContextHandle };
-
-/// `set_window_scrollbar`: toggles the always-on window scrollbar on the
-/// issuing connection's active context after the fact -- the runtime
-/// counterpart of `create_context`'s `window_scrollbar`.
-const SetWindowScrollbarParams = struct { visible: bool };
-/// `set_caret_layer`: which layer glyphwire-host draws its caret for, or
-/// `null` for the root cursor. See `core.Context.caret_layer`.
-const SetCaretLayerParams = struct { layer: ?core.LayerHandle = null };
-/// `set_caret_visible`: whether glyphwire-host draws a caret for the
-/// issuing connection's active context. See `core.Context.caret_visible`.
-const SetCaretVisibleParams = struct { visible: bool };
-/// `set_caret_shape`: the shape glyphwire-host draws the caret in, or
-/// `null` for the host's configured one. See `core.Context.caret_shape`.
-const SetCaretShapeParams = struct { shape: ?core.CaretShape = null };
-/// `set_key_repeat`: the typematic key-repeat timing this context's
-/// program wants while it is focused. Both fields absent clears the
-/// override and puts the context back on the host's default; one alone
-/// keeps whatever the other was (the default's value when there was no
-/// override yet). See `core.Context.key_repeat`.
-const SetKeyRepeatParams = struct {
-    delay_ms: ?f64 = null,
-    interval_ms: ?f64 = null,
-};
-
-// ─── Pane params ───────────────────────────────────────────────────────
-//
-// The window-level mirror of the split params above. See core.zig's Panes
-// section for what a pane is and why the two levels are separate types.
-
-/// `request_role`: asks for a privileged role. The only one today is
-/// `"window_manager"`, which gates every message below.
-/// `request_role`: claims a privileged role, or joins one this program's
-/// other connection already holds by presenting its `token`.
-const RequestRoleParams = struct {
-    role: []const u8,
-    token: ?u64 = null,
-};
-
-/// The token is what a program's second connection passes to join the same
-/// role -- see `core.Session.managers`. Null when the role was refused.
-const RequestRoleResult = struct {
-    granted: bool,
-    token: ?u64 = null,
-};
-
-/// `attach_pane`: binds this connection to a pane. Sent as a connection's
-/// first message by anything started with `GLYPHWIRE_PANE` set.
-const AttachPaneParams = struct { pane: core.PaneHandle };
-
-/// `create_pane`: a new pane plus the base context it shows.
-/// `scrollback_rows` is that context's root layer's ring, so a terminal
-/// pane asks for history and a TUI pane asks for none.
-const CreatePaneParams = struct { scrollback_rows: usize = 0 };
-const CreatePaneResult = struct {
-    pane: core.PaneHandle,
-    context: core.ContextHandle,
-};
-
-/// `destroy_pane` / `focus_pane` -- both just name one pane.
-const PaneHandleParams = struct { pane: core.PaneHandle };
-
-/// `create_pane_split`: an empty window-level container.
-const CreatePaneSplitParams = struct {
-    axis: []const u8,
-    /// Whether the bands between this split's children can be dragged.
-    /// See `core.PaneSplit.resizable`.
-    resizable: bool = true,
-};
-const CreatePaneSplitResult = struct { split: core.PaneSplitHandle };
-
-const PaneSplitHandleParams = struct { split: core.PaneSplitHandle };
-
-/// One `set_pane_split_children` entry: exactly one of `pane` / `split`,
-/// and exactly one of `weight` / `fixed` (both omitted means weight 1).
-const PaneSplitChildParams = struct {
-    pane: ?core.PaneHandle = null,
-    split: ?core.PaneSplitHandle = null,
-    weight: ?f32 = null,
-    fixed: ?usize = null,
-};
-
-const SetPaneSplitChildrenParams = struct {
-    split: core.PaneSplitHandle,
-    children: []const PaneSplitChildParams,
-};
-
-/// `set_root_pane_split`: null tears the window layout down, leaving the
-/// root pane as the whole window again.
-const SetRootPaneSplitParams = struct { split: ?core.PaneSplitHandle = null };
-
-const MovePaneDividerParams = struct {
-    split: core.PaneSplitHandle,
-    index: usize,
-    delta: i64,
-};
-
-/// `spawn_in_pane`: starts a program seated in a pane. `argv[0]` is
-/// resolved through `PATH`. The child is handed `GLYPHWIRE_PANE` so it
-/// binds itself to this pane on connect, which is the whole handshake --
-/// see `core.Pane`.
-const SpawnInPaneParams = struct {
-    pane: core.PaneHandle,
-    argv: []const []const u8,
-    /// PTY size for the child. Defaults to the pane's own cells, which is
-    /// what a program should almost always get.
-    cols: ?usize = null,
-    rows: ?usize = null,
-};
-const SpawnInPaneResult = struct { pid: i64 };
-
-/// `start_remote`: brings up an `ssh` trunk to `dest` whose remote clients
-/// draw into *this connection's* pane. Unlike `spawn_in_pane` there is no
-/// pane parameter and no window-manager role: the caller is a program
-/// already seated in the pane it wants to hand over, and naming someone
-/// else's pane is exactly what it must not be able to do.
-const StartRemoteParams = struct {
-    dest: []const u8,
-    /// Extra arguments inserted before `dest` on the `ssh` command line.
-    ssh_args: []const []const u8 = &.{},
-    /// The agent command run on the far side; null means `gw-agent`.
-    remote_command: ?[]const u8 = null,
-};
-const StartRemoteResult = struct { session: u64 };
-
-/// `stop_remote`: tears down a session `start_remote` returned. Idempotent
-/// -- a session that already ended is not an error, because the caller
-/// races the `remote_exit` notification by nature.
-const StopRemoteParams = struct { session: u64 };
-
-/// `set_window_prefix`: the chord after which one keystroke is delivered to
-/// the window manager instead of to the focused pane. Null `key` clears it.
-/// See `core.WindowPrefix`.
-const SetWindowPrefixParams = struct {
-    key: ?[]const u8 = null,
-    ctrl: bool = true,
-    alt: bool = false,
-    shift: bool = false,
-};
-
-const DestroyLayerParams = struct {
-    layer: core.LayerHandle,
-};
-
-/// `raise_layer` / `lower_layer`: `layer` moves in the compositing order,
-/// `above` / `below` names the layer it lands next to. Both references are
-/// optional -- omitted means "all the way to the top" / "all the way to
-/// the bottom". Two field names rather than one shared `ref` so the JSON
-/// reads the way the message does.
-const RaiseLayerParams = struct {
-    layer: core.LayerHandle,
-    above: ?core.LayerHandle = null,
-};
-
-const LowerLayerParams = struct {
-    layer: core.LayerHandle,
-    below: ?core.LayerHandle = null,
-};
-
-const CreateSplitParams = struct {
-    /// `"row"` (children left to right) or `"column"` (top to bottom).
-    axis: []const u8,
-    /// Whether the user may drag this split's dividers (see
-    /// `core.Split.resizable`). Default true; a structural split like an
-    /// editor's buffer-area-over-command-line passes false so the fixed
-    /// child gets no grab band and no wasted row.
-    resizable: bool = true,
-};
-
-const CreateSplitResult = struct { handle: core.SplitHandle };
-
-const DestroySplitParams = struct { split: core.SplitHandle };
-
-/// One entry of `set_split_children`. `layer` and `split` are the two
-/// possible targets and exactly one must be given; `weight` and `fixed`
-/// are the two possible sizes and at most one (defaulting to an equal
-/// weight). Four optional fields rather than a tagged shape because
-/// that's what JSON round-trips cleanly through `parseFromValue` without
-/// a custom parser -- the validation is here instead.
-const SplitChildParams = struct {
-    layer: ?core.LayerHandle = null,
-    split: ?core.SplitHandle = null,
-    weight: ?f32 = null,
-    fixed: ?usize = null,
-};
-
-const SetSplitChildrenParams = struct {
-    split: core.SplitHandle,
-    children: []const SplitChildParams,
-};
-
-const SetRootSplitParams = struct { split: ?core.SplitHandle = null };
-
-const MoveDividerParams = struct {
-    split: core.SplitHandle,
-    index: usize,
-    delta: i64,
-};
-
-/// `adopt_layer` params -- same single-handle shape as `destroy_layer`,
-/// kept as its own type so the two messages stay independently
-/// documented.
-const AdoptLayerParams = struct {
-    layer: core.LayerHandle,
-};
-
-const CreateMetadataParams = struct {
-    json: []const u8,
-};
-
-const CreateMetadataResult = struct { handle: core.MetadataHandle };
-
-const DestroyMetadataParams = struct {
-    id: core.MetadataHandle,
-};
-
-const GetMetadataParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: usize,
-    col: usize,
-    /// Rows of scrollback to resolve `(row, col)` against, above the live
-    /// viewport (see `core.Layer.viewRow`). 0 (default) is the live
-    /// viewport. Non-zero is what lets a mouse click landing on a
-    /// scrolled-back row resolve to the cell the user actually sees
-    /// there, not the live-buffer cell at the same screen position.
-    view_offset: usize = 0,
-};
-
-/// `id`/`json` are both null together (the cell isn't tagged) or `id` is
-/// set with `json` still possibly null (tagged, but the id has since been
-/// `destroy_metadata`'d -- see `Context.destroyMetadata`'s doc comment).
-/// Reporting `id` even when `json` can't be resolved is what lets a
-/// caller like a future mouse-click handler tell those two cases apart.
-const GetMetadataResult = struct {
-    id: ?core.MetadataHandle,
-    json: ?[]const u8,
-};
-
-/// `find_metadata` params: the content cell to start from (`above` in
-/// `core.SelectionPoint`'s scroll-stable coordinate -- positive counts up
-/// into scrollback) and which way to look. `"next"` walks forward in
-/// reading order, `"prev"` backward; anything else -> InvalidMetadataDirection.
-const FindMetadataParams = struct {
-    layer: ?core.LayerHandle = null,
-    above: i64 = 0,
-    col: usize = 0,
-    direction: ?[]const u8 = null,
-};
-
-/// `find_metadata` result: `found` false means there's no further span in
-/// that direction (the other fields are then unset). `above`/`col` are the
-/// first visible character of the neighbouring span, `id` its metadata id.
-const FindMetadataResult = struct {
-    found: bool,
-    above: i64 = 0,
-    col: usize = 0,
-    id: ?core.MetadataHandle = null,
-};
-
-const CellMetricsResult = struct { cell_px_w: u32, cell_px_h: u32 };
-
-const ReportKeyParams = struct {
-    key: []const u8,
-    pressed: bool,
-};
-
-const ReportTextParams = struct {
-    text: []const u8,
-};
-
-const ReportMouseButtonParams = struct {
-    button: []const u8,
-    pressed: bool,
-    px: protocol.PxPos,
-    cell: protocol.CellPos,
-    /// The root layer's scrollback view offset (see `core.Layer.view_scroll`)
-    /// at the moment of the click, so a subscriber resolving `cell` with
-    /// `get_metadata` can pass the same `view_offset` and land on the row
-    /// the user actually clicked while scrolled back. 0 (default) when the
-    /// reporter is at the live tail or doesn't track scrollback.
-    view_offset: usize = 0,
-    /// The press's click count (see `protocol.MouseButtonParams.clicks`),
-    /// passed through to the broadcast. 1 from a reporter that doesn't
-    /// count.
-    clicks: u8 = 1,
-};
-
-const ReportMouseMoveParams = struct {
-    px: protocol.PxPos,
-    cell: protocol.CellPos,
-};
-
-const SubscribeParams = struct {
-    events: []const []const u8,
-    /// Optional: binds this connection to a pane at the same time, exactly
-    /// as `attach_pane` would. Folded into `subscribe` because `subscribe`
-    /// is what arms the broadcast fan-out -- a connection that were
-    /// subscribed but not yet bound would, until the binding landed, be
-    /// gated against the wrong pane and could receive input meant for
-    /// another program. See `InputListener.sendSubscribeAndWaitForAck`.
-    pane: ?core.PaneHandle = null,
-};
-
-const SubscribeResult = struct {
-    subscribed: []const []const u8,
-};
-
-const ImageInfoParams = struct { handle: core.ImageHandle };
-const ImageInfoResult = struct { width: u32, height: u32 };
-const LoadImageResult = struct { handle: core.ImageHandle };
-
-/// `row`/`col` are optional, same as `write_text`'s documented (if not
-/// yet wired in there) convention: omitted means "at the layer's
-/// cursor" -- see `handleDrawImage`/`resolveAnchor`.
-const DrawImageParams = struct {
-    layer: ?core.LayerHandle = null,
-    handle: core.ImageHandle,
-    row: ?usize = null,
-    col: ?usize = null,
-    row_span: usize,
-    col_span: usize,
-    /// Uniform scale the image is drawn at -- `1.0` (the default) is the
-    /// original natural-size placement; `< 1.0` shrinks it (glyphwire-view
-    /// asks for `target_width_px / image_width_px` so the image fits the
-    /// layer's width). The client still computes `row_span`/`col_span` to
-    /// match the scaled size -- aspect-ratio-aware placement stays its job
-    /// per decisions.md. A non-positive value is treated as `1.0`.
-    scale: f32 = 1.0,
-    /// Optional source sub-rectangle (`core.ImageSrcRect`) -- sprite-sheet
-    /// support. All default to `0`, which is the whole image from `(0,0)`
-    /// -- byte-identical to the pre-source-rect behavior.
-    src_x: u32 = 0,
-    src_y: u32 = 0,
-    src_w: u32 = 0,
-    src_h: u32 = 0,
-};
-
-const TagMetadataParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: usize,
-    col: usize,
-    /// Unlike `write_text`/`draw_icon`'s optional `metadata_id`, required
-    /// here -- there'd be no point to a `tag_metadata` call that tags
-    /// with nothing; a client wanting to *clear* a cell's tag can send
-    /// `write_text`/`draw_icon` with `metadata_id` omitted instead, same
-    /// as it already would to change what's drawn there anyway.
-    metadata_id: core.MetadataHandle,
-    /// Mark this cell as its span's focus cell -- where `find_metadata`
-    /// lands instead of the span's first visible character. See
-    /// `core.Cell.meta_focus`. Defaults false, so an existing caller
-    /// tagging overflow cells keeps tagging them as plain span members.
-    focus: bool = false,
-};
-
-const DrawIconParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: ?usize = null,
-    col: ?usize = null,
-    name: []const u8,
-    /// "fit" (default), "natural", or "stretch" -- see `core.IconScale`.
-    scale: ?[]const u8 = null,
-    /// "start"/"center" (default)/"end" -- see `core.HAlign`/`core.VAlign`.
-    h_align: ?[]const u8 = null,
-    v_align: ?[]const u8 = null,
-    /// Only consulted when `scale == "natural"` -- see `core.IconBg`.
-    max_w: ?u32 = null,
-    max_h: ?u32 = null,
-    /// See `core.Cell.metadata_id`'s doc comment.
-    metadata_id: ?core.MetadataHandle = null,
-    /// `false` (default): draws into `Cell.style.bg`, replacing whatever
-    /// background was there, same as always. `true`: draws into
-    /// `Cell.fg_icon` instead -- see that field's doc comment -- so it
-    /// composites over an existing background (e.g. a table border tile)
-    /// rather than replacing it.
-    foreground: bool = false,
 };
 
 /// Parses `draw_icon`'s `scale`/`h_align`/`v_align` wire strings against
@@ -826,16 +216,6 @@ fn parseUnderline(style: ?[]const u8, color: ?protocol.Color) !core.UnderlineSty
     return .{ .style = s, .color = try optColorFromJson(color) };
 }
 
-// ─── Table ───────────────────────────────────────────────────────────────
-//
-// See core.zig's Table section for the object model. Every message here
-// (`create_table`/`destroy_table`/`table_set_rows`/`table_set_sort`/
-// `table_set_style`/`table_get_state`) takes a required `table` handle
-// (except `create_table`, which returns one) alongside the usual optional
-// `layer` -- a table's handle alone doesn't say which layer it's on
-// (unlike a layer handle, which is globally meaningful), since it's
-// stored in that layer's own `tables` map.
-
 const colorFromJson = protocol.colorFromWire;
 
 fn optColorFromJson(c: ?protocol.Color) DispatchError!?core.Color {
@@ -867,236 +247,6 @@ fn parseTableOption(comptime E: type, value: ?[]const u8, default: E) !E {
     const s = value orelse return default;
     return std.meta.stringToEnum(E, s) orelse DispatchError.InvalidTableOption;
 }
-
-const CreateTableParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: ?usize = null,
-    col: ?usize = null,
-    columns: []const protocol.TableColumn,
-    style: protocol.TableStyle = .{},
-};
-
-const CreateTableResult = struct { handle: core.TableHandle };
-
-const DestroyTableParams = struct {
-    layer: ?core.LayerHandle = null,
-    table: core.TableHandle,
-};
-
-const TableSetRowsParams = struct {
-    layer: ?core.LayerHandle = null,
-    table: core.TableHandle,
-    rows: []const []const protocol.TableCell,
-};
-
-const TableSetSortParams = struct {
-    layer: ?core.LayerHandle = null,
-    table: core.TableHandle,
-    column: ?usize = null,
-    /// "none" (default), "ascending", or "descending".
-    direction: ?[]const u8 = null,
-};
-
-const TableSetStyleParams = struct {
-    layer: ?core.LayerHandle = null,
-    table: core.TableHandle,
-    style: protocol.TableStyle,
-};
-
-const TableGetStateParams = struct {
-    layer: ?core.LayerHandle = null,
-    table: core.TableHandle,
-};
-
-// ─── Outline ────────────────────────────────────────────────
-//
-// See core.zig's Outline section for the object model. Same handle
-// convention tables use: every message carries the optional `layer`
-// alongside a required `outline`, because an outline lives in that
-// layer's own `outlines` map rather than being globally addressable.
-
-const CreateOutlineParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: ?usize = null,
-    col: ?usize = null,
-    /// Cells across. Omitted, the outline takes the rest of the layer's
-    /// width from `col` -- the overwhelmingly common case, and it keeps a
-    /// caller from having to read the layer size just to fill a line.
-    width: ?usize = null,
-    style: protocol.OutlineStyle = .{},
-};
-
-const CreateOutlineResult = struct { handle: core.OutlineHandle };
-
-const DestroyOutlineParams = struct {
-    layer: ?core.LayerHandle = null,
-    outline: core.OutlineHandle,
-};
-
-const OutlineSetNodesParams = struct {
-    layer: ?core.LayerHandle = null,
-    outline: core.OutlineHandle,
-    nodes: []const protocol.OutlineNode,
-};
-
-const OutlineSetCollapsedParams = struct {
-    layer: ?core.LayerHandle = null,
-    outline: core.OutlineHandle,
-    node: usize,
-    /// Omitted means toggle -- the host's own marker click and a client
-    /// binding both want "flip it" far more often than a set.
-    collapsed: ?bool = null,
-};
-
-const OutlineSetAllCollapsedParams = struct {
-    layer: ?core.LayerHandle = null,
-    outline: core.OutlineHandle,
-    collapsed: bool,
-    /// Only nodes at this depth; omitted means every depth.
-    depth: ?u8 = null,
-};
-
-const OutlineSetStyleParams = struct {
-    layer: ?core.LayerHandle = null,
-    outline: core.OutlineHandle,
-    style: protocol.OutlineStyle,
-};
-
-const OutlineGetStateParams = struct {
-    layer: ?core.LayerHandle = null,
-    outline: core.OutlineHandle,
-};
-
-// ─── Rect ────────────────────────────────────────────────────────────────
-//
-// See core.zig's Rect section for the object model. `create_rect` returns
-// a handle; `update_rect`/`destroy_rect` take a required `rect` handle
-// alongside the usual optional `layer`, same shape the Table messages use.
-
-const CreateRectParams = struct {
-    layer: ?core.LayerHandle = null,
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-    color: protocol.Color,
-    line_width: u32 = 1,
-    filled: bool = false,
-};
-
-const CreateRectResult = struct { handle: core.RectHandle };
-
-/// Every field but `rect` is optional and `null` (not a default value)
-/// means "leave unchanged" -- see `core.RectUpdate`'s doc comment.
-const UpdateRectParams = struct {
-    layer: ?core.LayerHandle = null,
-    rect: core.RectHandle,
-    x: ?u32 = null,
-    y: ?u32 = null,
-    w: ?u32 = null,
-    h: ?u32 = null,
-    color: ?protocol.Color = null,
-    line_width: ?u32 = null,
-    filled: ?bool = null,
-};
-
-const DestroyRectParams = struct {
-    layer: ?core.LayerHandle = null,
-    rect: core.RectHandle,
-};
-
-/// `set_drop_target`: `mode` picks the shape (see `core.DropTarget`), and
-/// the cell fields it needs come alongside. `rows` / `cols` absent (or
-/// null) mean one, so a single-row strip or a one-cell target needn't
-/// spell them.
-const SetDropTargetParams = struct {
-    layer: ?core.LayerHandle = null,
-    mode: []const u8,
-    row: ?usize = null,
-    col: ?usize = null,
-    rows: ?usize = null,
-    cols: ?usize = null,
-};
-
-// ─── Nine-patch ──────────────────────────────────────────────────────────
-//
-// See core.zig's Nine-patch section. Same create/update/destroy shape as
-// the Rect messages, placed by cell rect instead of pixels.
-
-const CreateNinePatchParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: usize,
-    col: usize,
-    rows: usize,
-    cols: usize,
-    style: []const u8,
-};
-
-const CreateNinePatchResult = struct { handle: core.NinePatchHandle };
-
-/// `null` means "leave unchanged" -- see `core.NinePatchUpdate`.
-const UpdateNinePatchParams = struct {
-    layer: ?core.LayerHandle = null,
-    nine_patch: core.NinePatchHandle,
-    row: ?usize = null,
-    col: ?usize = null,
-    rows: ?usize = null,
-    cols: ?usize = null,
-    style: ?[]const u8 = null,
-};
-
-const DestroyNinePatchParams = struct {
-    layer: ?core.LayerHandle = null,
-    nine_patch: core.NinePatchHandle,
-};
-
-/// `rows`/`cols` are optional: omitted means "the rest of the layer from
-/// `row`/`col`", so a bare `clear()` (every field defaulted) wipes the
-/// whole layer -- see `handleClear`. `bg` fills the cleared cells with an
-/// opaque background instead of leaving them transparent.
-const ClearParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: usize = 0,
-    col: usize = 0,
-    rows: ?usize = null,
-    cols: ?usize = null,
-    bg: ?protocol.Color = null,
-};
-
-/// `set_bg` params: `ClearParams`' region, but `bg` is required -- the
-/// call means "paint this background", so there's no sense in omitting
-/// it. Defaults match `clear`'s, so a bare `set_bg` with just a colour
-/// repaints the whole layer's background without touching its text.
-const SetBgParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: usize = 0,
-    col: usize = 0,
-    rows: ?usize = null,
-    cols: ?usize = null,
-    bg: protocol.Color,
-};
-
-/// `set_fg` params: `set_bg`'s, with the foreground required instead.
-const SetFgParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: usize = 0,
-    col: usize = 0,
-    rows: ?usize = null,
-    cols: ?usize = null,
-    fg: protocol.Color,
-};
-
-/// `set_underline` params: the same region as `set_bg`, and `underline` is
-/// required for the same reason `bg` is. `"none"` is how a mark comes off.
-const SetUnderlineParams = struct {
-    layer: ?core.LayerHandle = null,
-    row: usize = 0,
-    col: usize = 0,
-    rows: ?usize = null,
-    cols: ?usize = null,
-    underline: []const u8,
-    underline_color: ?protocol.Color = null,
-};
 
 /// The header of a request that carries image bytes (`load_image`,
 /// `update_image`). On a JSON connection the bytes ride the binary
@@ -2040,14 +1190,14 @@ pub const Dispatcher = struct {
                 std.log.warn("glyphwire: image sweep failed: {t}", .{err});
             };
         }
-        return try self.respond(alloc, hdr.id, LoadImageResult{ .handle = image_handle });
+        return try self.respond(alloc, hdr.id, protocol.LoadImageResult{ .handle = image_handle });
     }
 
     /// `destroy_image`: releases a loaded image's bytes. A notification,
     /// like every other `destroy_*` — see `handleDestroyImage`'s
     /// registration below.
     fn handleDestroyImage(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(ImageInfoParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ImageInfoParams, alloc, params_value);
         defer parsed.deinit();
         try self.ctx.destroyImage(parsed.value.handle);
     }
@@ -2094,13 +1244,14 @@ pub const Dispatcher = struct {
     }
 
     fn handleWriteText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(WriteTextParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.WriteTextParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
 
+        const transparent_bg = p.transparent_bg orelse false;
         const fg = try resolveFg(p.fg);
-        const bg = try resolveBg(p.bg, p.transparent_bg);
+        const bg = try resolveBg(p.bg, transparent_bg);
         const metadata_id = try self.resolveMetadata(p.metadata_id);
         const scale = try parseTextScale(p.scale);
         const underline = try parseUnderline(p.underline, p.underline_color);
@@ -2120,7 +1271,7 @@ pub const Dispatcher = struct {
                     .text = s.text,
                     .fg = if (s.fg != null) try resolveFg(s.fg) else fg,
                     .bg = if (s.bg != null or s.transparent_bg != null)
-                        try resolveBg(s.bg orelse p.bg, s.transparent_bg orelse p.transparent_bg)
+                        try resolveBg(s.bg orelse p.bg, s.transparent_bg orelse transparent_bg)
                     else
                         bg,
                     .metadata_id = if (s.metadata_id != null) try self.resolveMetadata(s.metadata_id) else metadata_id,
@@ -2145,11 +1296,11 @@ pub const Dispatcher = struct {
         }
         try layer.writeRuns(runs, .{
             .max_cols = p.max_cols,
-            .pad = p.pad,
+            .pad = p.pad orelse false,
             .pad_fg = fg,
             .pad_bg = bg,
             .pad_metadata_id = metadata_id,
-            .selectable = p.selectable,
+            .selectable = p.selectable orelse true,
             .copy_text = p.copy_text,
         });
 
@@ -2164,14 +1315,14 @@ pub const Dispatcher = struct {
     }
 
     fn handleInsertCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(CellCountParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CellCountParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         layer.insertCells(parsed.value.count);
     }
 
     fn handleDeleteCells(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(CellCountParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CellCountParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         layer.deleteCells(parsed.value.count);
@@ -2183,7 +1334,7 @@ pub const Dispatcher = struct {
     /// A notification -- the shift is best-effort and batchable next to
     /// the follow-up redraw of the newly-exposed band.
     fn handleMoveContent(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(MoveContentParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.MoveContentParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -2195,51 +1346,57 @@ pub const Dispatcher = struct {
     }
 
     fn handleSetProperty(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(PropertyParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.PropertyParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
+        // The bag's defaults -- see `protocol.PropertyParams`.
+        const row = p.row orelse 0;
+        const col = p.col orelse 0;
+        const cols = p.cols orelse 0;
+        const rows = p.rows orelse 0;
+        const enabled = p.enabled orelse false;
 
         const value: core.PropertyValue = if (std.mem.eql(u8, p.property, "cursor"))
-            .{ .cursor = .{ .row = p.row, .col = p.col } }
+            .{ .cursor = .{ .row = row, .col = col } }
         else if (std.mem.eql(u8, p.property, "position"))
-            .{ .position = .{ .x = p.x, .y = p.y } }
+            .{ .position = .{ .x = p.x orelse 0, .y = p.y orelse 0 } }
         else if (std.mem.eql(u8, p.property, "cell_position"))
-            .{ .cell_position = .{ .row = p.row, .col = p.col } }
+            .{ .cell_position = .{ .row = row, .col = col } }
         else if (std.mem.eql(u8, p.property, "size"))
-            .{ .size = .{ .cols = p.cols, .rows = p.rows } }
+            .{ .size = .{ .cols = cols, .rows = rows } }
         else if (std.mem.eql(u8, p.property, "visibility"))
-            .{ .visibility = p.visible }
+            .{ .visibility = p.visible orelse true }
         else if (std.mem.eql(u8, p.property, "opacity"))
-            .{ .opacity = p.value }
+            .{ .opacity = p.value orelse 1.0 }
         else if (std.mem.eql(u8, p.property, "viewport"))
-            .{ .viewport = .{ .cols = p.cols, .rows = p.rows } }
+            .{ .viewport = .{ .cols = cols, .rows = rows } }
         else if (std.mem.eql(u8, p.property, "scroll_offset"))
-            .{ .scroll_offset = .{ .row = p.row, .col = p.col } }
+            .{ .scroll_offset = .{ .row = row, .col = col } }
         else if (std.mem.eql(u8, p.property, "scrollbars"))
             // The other four `ScrollbarState` fields are derived, so
             // whatever a client sends for them is ignored -- see
             // `core.PropertyName.scrollbars`.
             .{ .scrollbars = .{
-                .vertical = p.vertical,
-                .horizontal = p.horizontal,
+                .vertical = p.vertical orelse false,
+                .horizontal = p.horizontal orelse false,
                 .row = 0,
                 .col = 0,
                 .max_row = 0,
                 .max_col = 0,
             } }
         else if (std.mem.eql(u8, p.property, "content_extent"))
-            .{ .content_extent = .{ .cols = p.cols, .rows = p.rows } }
+            .{ .content_extent = .{ .cols = cols, .rows = rows } }
         else if (std.mem.eql(u8, p.property, "scroll_mode"))
             .{ .scroll_mode = std.meta.stringToEnum(core.ScrollMode, p.mode orelse "") orelse
                 return DispatchError.InvalidScrollMode }
         else if (std.mem.eql(u8, p.property, "background"))
             .{ .background = try optColorFromJson(p.color) }
         else if (std.mem.eql(u8, p.property, "pty_mode"))
-            .{ .pty_mode = p.enabled }
+            .{ .pty_mode = enabled }
         else if (std.mem.eql(u8, p.property, "mouse_select"))
-            .{ .mouse_select = p.enabled }
+            .{ .mouse_select = enabled }
         else if (std.mem.eql(u8, p.property, "mouse_report"))
-            .{ .mouse_report = p.enabled }
+            .{ .mouse_report = enabled }
         else if (std.mem.eql(u8, p.property, "shadow"))
             .{ .shadow = if (p.shadow) |sh| try sh.toCore() else null }
         else if (std.mem.eql(u8, p.property, "selection_flow"))
@@ -2248,8 +1405,8 @@ pub const Dispatcher = struct {
             .{ .selection_flow = .{
                 .mode = std.meta.stringToEnum(core.SelectionFlow.Mode, p.mode orelse "horizontal") orelse
                     return DispatchError.InvalidSelectionFlow,
-                .column_cols = if (p.cols == 0) 2 else p.cols,
-                .origin_col = p.col,
+                .column_cols = if (cols == 0) 2 else cols,
+                .origin_col = col,
             } }
         else if (std.mem.eql(u8, p.property, "resize_edge"))
             .{ .resize_edge = std.meta.stringToEnum(core.ResizeEdge, p.edge orelse "none") orelse
@@ -2274,7 +1431,7 @@ pub const Dispatcher = struct {
         id: std.json.Value,
         params_value: codec.Params,
     ) ![]u8 {
-        const parsed = try codec.parseParams(PropertyParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.PropertyParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2305,13 +1462,13 @@ pub const Dispatcher = struct {
 
         if (std.mem.eql(u8, p.property, "cursor")) {
             const cursor = layer.getProperty(.cursor).cursor;
-            return try self.respond(alloc, id, CursorResult{ .row = cursor.row, .col = cursor.col });
+            return try self.respond(alloc, id, protocol.CursorResult{ .row = cursor.row, .col = cursor.col });
         } else if (std.mem.eql(u8, p.property, "revision")) {
             const revision = layer.getProperty(.revision).revision;
-            return try self.respond(alloc, id, RevisionResult{ .revision = revision });
+            return try self.respond(alloc, id, protocol.RevisionResult{ .revision = revision });
         } else if (std.mem.eql(u8, p.property, "position")) {
             const pos = layer.getProperty(.position).position;
-            return try self.respond(alloc, id, PositionResult{ .x = pos.x, .y = pos.y });
+            return try self.respond(alloc, id, protocol.PositionResult{ .x = pos.x, .y = pos.y });
         } else if (std.mem.eql(u8, p.property, "cell_position")) {
             // Needs the session's cell metrics, so it goes through the
             // context rather than the resolved layer -- see
@@ -2319,17 +1476,17 @@ pub const Dispatcher = struct {
             const value = self.ctx.getLayerProperty(self.surfaceOr(p.layer), .cell_position) catch
                 return DispatchError.UnknownLayer;
             const cell = value.cell_position;
-            return try self.respond(alloc, id, CellPositionResult{ .row = cell.row, .col = cell.col });
+            return try self.respond(alloc, id, protocol.CellPositionResult{ .row = cell.row, .col = cell.col });
         } else if (std.mem.eql(u8, p.property, "visibility")) {
             const visible = layer.getProperty(.visibility).visibility;
-            return try self.respond(alloc, id, VisibilityResult{ .visible = visible });
+            return try self.respond(alloc, id, protocol.VisibilityResult{ .visible = visible });
         } else if (std.mem.eql(u8, p.property, "viewport")) {
             const vp = layer.getProperty(.viewport).viewport;
-            return try self.respond(alloc, id, SizeResult{ .cols = vp.cols, .rows = vp.rows });
+            return try self.respond(alloc, id, protocol.SizeResult{ .cols = vp.cols, .rows = vp.rows });
         } else if (std.mem.eql(u8, p.property, "scroll_offset")) {
             const off = layer.getProperty(.scroll_offset).scroll_offset;
             const max = layer.maxScroll();
-            return try self.respond(alloc, id, ScrollOffsetResult{
+            return try self.respond(alloc, id, protocol.ScrollOffsetResult{
                 .row = off.row,
                 .col = off.col,
                 .max_row = max.row,
@@ -2337,7 +1494,7 @@ pub const Dispatcher = struct {
             });
         } else if (std.mem.eql(u8, p.property, "scrollbars")) {
             const sb = layer.getProperty(.scrollbars).scrollbars;
-            return try self.respond(alloc, id, ScrollbarsResult{
+            return try self.respond(alloc, id, protocol.ScrollbarsResult{
                 .vertical = sb.vertical,
                 .horizontal = sb.horizontal,
                 .row = sb.row,
@@ -2347,43 +1504,43 @@ pub const Dispatcher = struct {
             });
         } else if (std.mem.eql(u8, p.property, "size")) {
             const sz = layer.getProperty(.size).size;
-            return try self.respond(alloc, id, SizeResult{ .cols = sz.cols, .rows = sz.rows });
+            return try self.respond(alloc, id, protocol.SizeResult{ .cols = sz.cols, .rows = sz.rows });
         } else if (std.mem.eql(u8, p.property, "content_extent")) {
             const ce = layer.getProperty(.content_extent).content_extent;
-            return try self.respond(alloc, id, SizeResult{ .cols = ce.cols, .rows = ce.rows });
+            return try self.respond(alloc, id, protocol.SizeResult{ .cols = ce.cols, .rows = ce.rows });
         } else if (std.mem.eql(u8, p.property, "scroll")) {
             const sc = layer.getProperty(.scroll).scroll;
-            return try self.respond(alloc, id, ScrollResult{ .offset = sc.offset, .max = sc.max });
+            return try self.respond(alloc, id, protocol.ScrollResult{ .offset = sc.offset, .max = sc.max });
         } else if (std.mem.eql(u8, p.property, "scroll_mode")) {
             const mode = layer.getProperty(.scroll_mode).scroll_mode;
-            return try self.respond(alloc, id, ScrollModeResult{ .mode = @tagName(mode) });
+            return try self.respond(alloc, id, protocol.ScrollModeResult{ .mode = @tagName(mode) });
         } else if (std.mem.eql(u8, p.property, "background")) {
             const bg: ?protocol.Color = if (layer.getProperty(.background).background) |c|
                 colorToJson(c)
             else
                 null;
-            return try self.respond(alloc, id, BackgroundResult{ .color = bg });
+            return try self.respond(alloc, id, protocol.BackgroundResult{ .color = bg });
         } else if (std.mem.eql(u8, p.property, "pty_mode")) {
             const on = layer.getProperty(.pty_mode).pty_mode;
-            return try self.respond(alloc, id, PtyModeResult{ .enabled = on });
+            return try self.respond(alloc, id, protocol.PtyModeResult{ .enabled = on });
         } else if (std.mem.eql(u8, p.property, "mouse_select")) {
             const on = layer.getProperty(.mouse_select).mouse_select;
-            return try self.respond(alloc, id, PtyModeResult{ .enabled = on });
+            return try self.respond(alloc, id, protocol.PtyModeResult{ .enabled = on });
         } else if (std.mem.eql(u8, p.property, "mouse_report")) {
             const on = layer.getProperty(.mouse_report).mouse_report;
-            return try self.respond(alloc, id, PtyModeResult{ .enabled = on });
+            return try self.respond(alloc, id, protocol.PtyModeResult{ .enabled = on });
         } else if (std.mem.eql(u8, p.property, "opacity")) {
             const v = layer.getProperty(.opacity).opacity;
-            return try self.respond(alloc, id, OpacityResult{ .value = v });
+            return try self.respond(alloc, id, protocol.OpacityResult{ .value = v });
         } else if (std.mem.eql(u8, p.property, "shadow")) {
-            const sh: ?ShadowJson = if (layer.getProperty(.shadow).shadow) |v| ShadowJson.fromCore(v) else null;
-            return try self.respond(alloc, id, ShadowResult{ .shadow = sh });
+            const sh: ?protocol.ShadowWire = if (layer.getProperty(.shadow).shadow) |v| protocol.ShadowWire.fromCore(v) else null;
+            return try self.respond(alloc, id, protocol.ShadowResult{ .shadow = sh });
         } else if (std.mem.eql(u8, p.property, "selection_flow")) {
             const f = layer.getProperty(.selection_flow).selection_flow;
-            return try self.respond(alloc, id, SelectionFlowResult{ .mode = @tagName(f.mode), .cols = f.column_cols, .col = f.origin_col });
+            return try self.respond(alloc, id, protocol.SelectionFlowResult{ .mode = @tagName(f.mode), .cols = f.column_cols, .col = f.origin_col });
         } else if (std.mem.eql(u8, p.property, "resize_edge")) {
             const e = layer.getProperty(.resize_edge).resize_edge;
-            return try self.respond(alloc, id, ResizeEdgeResult{ .edge = @tagName(e) });
+            return try self.respond(alloc, id, protocol.ResizeEdgeResult{ .edge = @tagName(e) });
         }
         return DispatchError.UnknownProperty;
     }
@@ -2395,13 +1552,13 @@ pub const Dispatcher = struct {
     /// connection later closes without destroying it (see
     /// `Context.removeConnectionOwnership`).
     fn handleCreateLayer(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(CreateLayerParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CreateLayerParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
         const layer_handle = try self.ctx.createLayer(p.width, p.height, p.scrollback_rows);
         if (self.conn_id) |cid| self.ctx.addLayerOwner(layer_handle, cid) catch {};
-        return try self.respond(alloc, id, CreateLayerResult{ .handle = layer_handle });
+        return try self.respond(alloc, id, protocol.CreateLayerResult{ .handle = layer_handle });
     }
 
     /// `destroy_layer`: frees a layer and drops it from compositing (see
@@ -2413,7 +1570,7 @@ pub const Dispatcher = struct {
     /// logs and drops without touching the layer. An in-process caller
     /// (`conn_id` null) bypasses the check.
     fn handleDestroyLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(DestroyLayerParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.DestroyLayerParams, alloc, params_value);
         defer parsed.deinit();
         const layer_handle = parsed.value.layer;
         if (self.conn_id) |cid| {
@@ -2432,7 +1589,7 @@ pub const Dispatcher = struct {
     /// for an in-process caller (`conn_id` null) -- it owns nothing and
     /// needs no ownership to act.
     fn handleAdoptLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(AdoptLayerParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.AdoptLayerParams, alloc, params_value);
         defer parsed.deinit();
         if (self.conn_id) |cid| {
             self.ctx.addLayerOwner(parsed.value.layer, cid) catch return DispatchError.UnknownLayer;
@@ -2467,7 +1624,7 @@ pub const Dispatcher = struct {
     /// culled if the connection closes without `destroy_context`.
     fn handleCreateContext(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try codec.parseParams(CreateContextParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CreateContextParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2485,7 +1642,7 @@ pub const Dispatcher = struct {
         if (p.title) |t| try self.ctx.setTitle(t);
 
         var result = try self.contextBroadcast(alloc);
-        result.response = try self.respond(alloc, id, CreateContextResult{ .context = new_handle });
+        result.response = try self.respond(alloc, id, protocol.CreateContextResult{ .context = new_handle });
         return result;
     }
 
@@ -2499,7 +1656,7 @@ pub const Dispatcher = struct {
     /// check.
     fn handleDestroyContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try codec.parseParams(ContextHandleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ContextHandleParams, alloc, params_value);
         defer parsed.deinit();
         const target = parsed.value.context;
 
@@ -2529,7 +1686,7 @@ pub const Dispatcher = struct {
     /// if it's already visible.
     fn handleActivateContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try codec.parseParams(ContextHandleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ContextHandleParams, alloc, params_value);
         defer parsed.deinit();
         session.activateContext(parsed.value.context) catch return DispatchError.UnknownContext;
         return try self.contextBroadcast(alloc);
@@ -2547,7 +1704,7 @@ pub const Dispatcher = struct {
     /// caller other than the error.
     fn handleAttachContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try codec.parseParams(ContextHandleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ContextHandleParams, alloc, params_value);
         defer parsed.deinit();
         const target = parsed.value.context;
         self.ctx = session.contextPtr(target) orelse return DispatchError.UnknownContext;
@@ -2568,7 +1725,7 @@ pub const Dispatcher = struct {
     /// this context doesn't have, so a typo fails at the point of use
     /// rather than silently drawing somewhere else.
     fn handleAttachLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetCaretLayerParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetCaretLayerParams, alloc, params_value);
         defer parsed.deinit();
         const target = parsed.value.layer orelse {
             self.surface = null;
@@ -2587,7 +1744,7 @@ pub const Dispatcher = struct {
     /// context-level mirror of `adopt_layer`.
     fn handleAdoptContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try codec.parseParams(ContextHandleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ContextHandleParams, alloc, params_value);
         defer parsed.deinit();
         if (self.conn_id) |cid| {
             session.addContextOwner(parsed.value.context, cid) catch return DispatchError.UnknownContext;
@@ -2599,7 +1756,7 @@ pub const Dispatcher = struct {
     /// drawing on is not a privilege, and a shell names the root context
     /// it inherited this way.
     fn handleSetContextTitle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetContextTitleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetContextTitleParams, alloc, params_value);
         defer parsed.deinit();
         try self.ctx.setTitle(parsed.value.title);
     }
@@ -2609,7 +1766,7 @@ pub const Dispatcher = struct {
     /// puts it back on the window's. Needs no ownership, like a title: a
     /// program colours what it draws.
     fn handleSetTheme(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetThemeParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetThemeParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2700,16 +1857,16 @@ pub const Dispatcher = struct {
     /// there's already one, instead of dying on a wire error).
     fn handleRequestRole(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try codec.parseParams(RequestRoleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.RequestRoleParams, alloc, params_value);
         defer parsed.deinit();
         if (!std.mem.eql(u8, parsed.value.role, "window_manager")) return DispatchError.UnknownRole;
         // An in-process caller already has every privilege and needs no
         // registration; report success without taking the slot away from a
         // real client.
         const cid = self.conn_id orelse
-            return try self.respond(alloc, id, RequestRoleResult{ .granted = true });
+            return try self.respond(alloc, id, protocol.RequestRoleResult{ .granted = true });
         const token = session.claimManager(cid, parsed.value.token orelse 0);
-        return try self.respond(alloc, id, RequestRoleResult{
+        return try self.respond(alloc, id, protocol.RequestRoleResult{
             .granted = token != null,
             .token = token,
         });
@@ -2725,7 +1882,7 @@ pub const Dispatcher = struct {
     /// already has the token, and a bad one simply grants nothing.
     fn handleJoinRole(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try codec.parseParams(RequestRoleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.RequestRoleParams, alloc, params_value);
         defer parsed.deinit();
         if (!std.mem.eql(u8, parsed.value.role, "window_manager")) return DispatchError.UnknownRole;
         const cid = self.conn_id orelse return;
@@ -2742,7 +1899,7 @@ pub const Dispatcher = struct {
     /// that spawned it.
     fn handleAttachPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try codec.parseParams(AttachPaneParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.AttachPaneParams, alloc, params_value);
         defer parsed.deinit();
         const target = parsed.value.pane;
         const pane = session.panePtr(target) orelse return DispatchError.UnknownPane;
@@ -2757,12 +1914,12 @@ pub const Dispatcher = struct {
     /// placement separately undoable.
     fn handleCreatePane(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try codec.parseParams(CreatePaneParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CreatePaneParams, alloc, params_value);
         defer parsed.deinit();
 
         const made = try session.createPane(self.conn_id orelse 0, parsed.value.scrollback_rows);
         return .{
-            .response = try self.respond(alloc, id, CreatePaneResult{
+            .response = try self.respond(alloc, id, protocol.CreatePaneResult{
                 .pane = made.pane,
                 .context = made.context,
             }),
@@ -2776,7 +1933,7 @@ pub const Dispatcher = struct {
     /// freed underneath it.
     fn handleDestroyPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try codec.parseParams(PaneHandleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.PaneHandleParams, alloc, params_value);
         defer parsed.deinit();
         const target = parsed.value.pane;
 
@@ -2800,7 +1957,7 @@ pub const Dispatcher = struct {
     /// swallowing every subsequent keystroke into something invisible.
     fn handleFocusPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try codec.parseParams(PaneHandleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.PaneHandleParams, alloc, params_value);
         defer parsed.deinit();
         session.focusPane(parsed.value.pane) catch return DispatchError.UnknownPane;
         return try self.contextBroadcast(alloc);
@@ -2808,17 +1965,17 @@ pub const Dispatcher = struct {
 
     fn handleCreatePaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const session = try self.requireManager();
-        const parsed = try codec.parseParams(CreatePaneSplitParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CreatePaneSplitParams, alloc, params_value);
         defer parsed.deinit();
         const axis = std.meta.stringToEnum(core.SplitAxis, parsed.value.axis) orelse
             return DispatchError.InvalidSplitAxis;
         const split_handle = try session.createPaneSplit(axis, parsed.value.resizable);
-        return try self.respond(alloc, id, CreatePaneSplitResult{ .split = split_handle });
+        return try self.respond(alloc, id, protocol.CreatePaneSplitResult{ .split = split_handle });
     }
 
     fn handleDestroyPaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try codec.parseParams(PaneSplitHandleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.PaneSplitHandleParams, alloc, params_value);
         defer parsed.deinit();
         session.destroyPaneSplit(parsed.value.split) catch return DispatchError.UnknownPaneSplit;
         return .{ .panes_changed = true };
@@ -2826,7 +1983,7 @@ pub const Dispatcher = struct {
 
     fn handleSetPaneSplitChildren(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try codec.parseParams(SetPaneSplitChildrenParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetPaneSplitChildrenParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2861,7 +2018,7 @@ pub const Dispatcher = struct {
 
     fn handleSetRootPaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try codec.parseParams(SetRootPaneSplitParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetRootPaneSplitParams, alloc, params_value);
         defer parsed.deinit();
         session.setRootPaneSplit(parsed.value.split) catch return DispatchError.UnknownPaneSplit;
         return .{ .panes_changed = true };
@@ -2869,7 +2026,7 @@ pub const Dispatcher = struct {
 
     fn handleMovePaneDivider(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
-        const parsed = try codec.parseParams(MovePaneDividerParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.MovePaneDividerParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         session.movePaneDivider(p.split, p.index, p.delta) catch return DispatchError.UnknownPaneSplit;
@@ -2890,7 +2047,7 @@ pub const Dispatcher = struct {
     fn handleSpawnInPane(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const session = try self.requireManager();
         const spawner = self.spawner orelse return DispatchError.SpawnUnsupported;
-        const parsed = try codec.parseParams(SpawnInPaneParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SpawnInPaneParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         if (p.argv.len == 0) return DispatchError.SpawnFailed;
@@ -2902,7 +2059,7 @@ pub const Dispatcher = struct {
 
         const pid = spawner.spawn(p.pane, base, p.argv, cols, rows) catch
             return DispatchError.SpawnFailed;
-        return try self.respond(alloc, id, SpawnInPaneResult{ .pid = pid });
+        return try self.respond(alloc, id, protocol.SpawnInPaneResult{ .pid = pid });
     }
 
     /// `start_remote`: brings up an `ssh` trunk whose remote clients draw
@@ -2923,14 +2080,14 @@ pub const Dispatcher = struct {
     /// an ordinary terminal.
     fn handleStartRemote(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const starter = self.remote_starter orelse return DispatchError.RemoteUnsupported;
-        const parsed = try codec.parseParams(StartRemoteParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.StartRemoteParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         if (p.dest.len == 0) return DispatchError.RemoteStartFailed;
 
         const session = starter.start(p.dest, p.ssh_args, p.remote_command, self.active_pane, self.active_ctx) catch
             return DispatchError.RemoteStartFailed;
-        return try self.respond(alloc, id, StartRemoteResult{ .session = session });
+        return try self.respond(alloc, id, protocol.StartRemoteResult{ .session = session });
     }
 
     /// `stop_remote`: ends a session `start_remote` returned. Deliberately
@@ -2938,7 +2095,7 @@ pub const Dispatcher = struct {
     /// `remote_exit` notification every time it cancels one.
     fn handleStopRemote(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const starter = self.remote_starter orelse return DispatchError.RemoteUnsupported;
-        const parsed = try codec.parseParams(StopRemoteParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.StopRemoteParams, alloc, params_value);
         defer parsed.deinit();
         starter.stop(parsed.value.session);
     }
@@ -2952,7 +2109,7 @@ pub const Dispatcher = struct {
     /// never sees a program's keystrokes at all.
     fn handleSetWindowPrefix(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = try self.requireManager();
-        const parsed = try codec.parseParams(SetWindowPrefixParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetWindowPrefixParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -2975,7 +2132,7 @@ pub const Dispatcher = struct {
     /// (`host/redraw.zig` folds the flag into the change-detection
     /// fingerprint).
     fn handleSetWindowScrollbar(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetWindowScrollbarParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetWindowScrollbarParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.window_scrollbar = parsed.value.visible;
     }
@@ -2987,7 +2144,7 @@ pub const Dispatcher = struct {
     /// setting as it was. Changes nothing else; the host picks it up on
     /// its next repaint (`host/redraw.zig` folds it into the fingerprint).
     fn handleSetCaretLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetCaretLayerParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetCaretLayerParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.setCaretLayer(parsed.value.layer) catch |err| return switch (err) {
             error.UnknownLayer => DispatchError.UnknownLayer,
@@ -2999,7 +2156,7 @@ pub const Dispatcher = struct {
     /// whichever layer it tracks. The host picks it up on its next repaint
     /// (`host/redraw.zig` folds the flag into the fingerprint).
     fn handleSetCaretVisible(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetCaretVisibleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetCaretVisibleParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.caret_visible = parsed.value.visible;
     }
@@ -3009,7 +2166,7 @@ pub const Dispatcher = struct {
     /// to go back to the shape `host.conf.lua` configured. An unknown
     /// shape name fails to parse like any other bad param.
     fn handleSetCaretShape(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetCaretShapeParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetCaretShapeParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.caret_shape = parsed.value.shape;
     }
@@ -3026,7 +2183,7 @@ pub const Dispatcher = struct {
     /// there is none. Changes nothing else: the host reads the focused
     /// context's value on its next tick and hands it to the engine.
     fn handleSetKeyRepeat(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetKeyRepeatParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetKeyRepeatParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3066,7 +2223,7 @@ pub const Dispatcher = struct {
     }
 
     fn handleCreateSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(CreateSplitParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CreateSplitParams, alloc, params_value);
         defer parsed.deinit();
 
         const axis = std.meta.stringToEnum(core.SplitAxis, parsed.value.axis) orelse
@@ -3076,18 +2233,18 @@ pub const Dispatcher = struct {
         // and test call sites untouched) -- set it here, before the split
         // has children or a layout.
         if (self.ctx.splits.getPtr(split_handle)) |s| s.resizable = parsed.value.resizable;
-        return try self.respond(alloc, id, CreateSplitResult{ .handle = split_handle });
+        return try self.respond(alloc, id, protocol.CreateSplitResult{ .handle = split_handle });
     }
 
     fn handleDestroySplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(DestroySplitParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.DestroySplitParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.destroySplit(parsed.value.split) catch return DispatchError.UnknownSplit;
         return try self.relayout(alloc);
     }
 
     fn handleSetSplitChildren(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(SetSplitChildrenParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetSplitChildrenParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3122,14 +2279,14 @@ pub const Dispatcher = struct {
     }
 
     fn handleSetRootSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(SetRootSplitParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetRootSplitParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.setRootSplit(parsed.value.split) catch return DispatchError.UnknownSplit;
         return try self.relayout(alloc);
     }
 
     fn handleMoveDivider(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(MoveDividerParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.MoveDividerParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.moveDivider(p.split, p.index, p.delta) catch return DispatchError.UnknownSplit;
@@ -3141,7 +2298,7 @@ pub const Dispatcher = struct {
     /// bottom of the stack and isn't in the order at all, so naming it as
     /// `layer` or `above` reports `UnknownLayer`.
     fn handleRaiseLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(RaiseLayerParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.RaiseLayerParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.raiseLayer(parsed.value.layer, parsed.value.above) catch
             return DispatchError.UnknownLayer;
@@ -3150,7 +2307,7 @@ pub const Dispatcher = struct {
     /// `lower_layer`: the mirror of `raise_layer` (see
     /// `Context.lowerLayer`).
     fn handleLowerLayer(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(LowerLayerParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.LowerLayerParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.lowerLayer(parsed.value.layer, parsed.value.below) catch
             return DispatchError.UnknownLayer;
@@ -3161,11 +2318,11 @@ pub const Dispatcher = struct {
     /// fresh handle a later `write_text`/`draw_icon`/`destroy_metadata` can
     /// reference.
     fn handleCreateMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(CreateMetadataParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CreateMetadataParams, alloc, params_value);
         defer parsed.deinit();
 
         const metadata_handle = try self.ctx.createMetadata(parsed.value.json);
-        return try self.respond(alloc, id, CreateMetadataResult{ .handle = metadata_handle });
+        return try self.respond(alloc, id, protocol.CreateMetadataResult{ .handle = metadata_handle });
     }
 
     /// `destroy_metadata`: frees `id`'s stored JSON (see
@@ -3174,20 +2331,20 @@ pub const Dispatcher = struct {
     /// reference counting yet). Errors on an unknown id, same treatment
     /// `destroy_layer` gives an unknown layer handle.
     fn handleDestroyMetadata(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(DestroyMetadataParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.DestroyMetadataParams, alloc, params_value);
         defer parsed.deinit();
         self.ctx.destroyMetadata(parsed.value.id) catch return DispatchError.UnknownMetadata;
     }
 
     /// `get_metadata`: resolves `(row, col)` on `layer` (root when omitted)
     /// to a cell and reports its `metadata_id` plus that id's stored JSON
-    /// -- see `GetMetadataResult`'s doc comment for how those two can
+    /// -- see `protocol.GetMetadataResult`'s doc comment for how those two can
     /// diverge (a dangling id). Unlike `draw_icon`/`draw_image`, `row`/
     /// `col` are required rather than cursor-defaulted: this is a targeted
     /// lookup (e.g. resolving whatever cell a mouse click landed on), not
     /// a draw at "wherever the cursor currently is".
     fn handleGetMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(GetMetadataParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.GetMetadataParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3201,7 +2358,7 @@ pub const Dispatcher = struct {
             null;
         const json = if (metadata_id) |m| self.ctx.metadataJson(m) else null;
 
-        return try self.respond(alloc, id, GetMetadataResult{ .id = metadata_id, .json = json });
+        return try self.respond(alloc, id, protocol.GetMetadataResult{ .id = metadata_id, .json = json });
     }
 
     /// `find_metadata`: from the content cell `(above, col)`, reports the
@@ -3211,7 +2368,7 @@ pub const Dispatcher = struct {
     /// walk runs server-side so it never has to `get_cells` the grid to
     /// find spans itself (decisions.md, Metadata).
     fn handleFindMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(FindMetadataParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.FindMetadataParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3221,7 +2378,7 @@ pub const Dispatcher = struct {
         else
             .next;
 
-        const result: FindMetadataResult = if (layer.adjacentMetadataSpan(p.above, p.col, dir)) |hit|
+        const result: protocol.FindMetadataResult = if (layer.adjacentMetadataSpan(p.above, p.col, dir)) |hit|
             .{ .found = true, .above = hit.above, .col = hit.col, .id = hit.id }
         else
             .{ .found = false };
@@ -3233,7 +2390,7 @@ pub const Dispatcher = struct {
     /// read-back path decisions.md flagged as not yet exposed over the
     /// wire.
     fn handleGetCells(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(GetCellsParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.GetCellsParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
         const view_offset = parsed.value.view_offset;
@@ -3323,13 +2480,13 @@ pub const Dispatcher = struct {
     /// next frame. A request, unlike the host-internal `Server.reportScroll`
     /// path the mouse wheel/scrollbar use.
     fn handleScrollView(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(ScrollViewParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ScrollViewParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
         const new_offset = layer.scrollView(p.offset, p.delta);
 
-        const resp_body = try self.respond(alloc, id, ScrollResult{ .offset = new_offset, .max = layer.history_len });
+        const resp_body = try self.respond(alloc, id, protocol.ScrollResult{ .offset = new_offset, .max = layer.history_len });
         errdefer alloc.free(resp_body);
 
         // Null for the root layer's scrollback, a handle for a non-root
@@ -3365,7 +2522,7 @@ pub const Dispatcher = struct {
     /// changed, returns a `key_down`/`key_up` broadcast for other
     /// connections subscribed to `"key"`.
     fn handleReportKey(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(ReportKeyParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ReportKeyParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3402,7 +2559,7 @@ pub const Dispatcher = struct {
     /// `text` broadcast out to `"text"` subscribers. An empty string is
     /// dropped.
     fn handleReportText(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(ReportTextParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ReportTextParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3421,7 +2578,7 @@ pub const Dispatcher = struct {
     }
 
     fn handleReportMouseButton(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(ReportMouseButtonParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ReportMouseButtonParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3440,7 +2597,7 @@ pub const Dispatcher = struct {
     /// within one cell is dropped (the host already coalesces most of it,
     /// and an xterm mouse report is cell-granular anyway).
     fn handleReportMouseMove(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(ReportMouseMoveParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ReportMouseMoveParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3455,11 +2612,11 @@ pub const Dispatcher = struct {
     }
 
     fn handleSubscribe(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(SubscribeParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SubscribeParams, alloc, params_value);
         defer parsed.deinit();
         self.subscriptions = Subscriptions.setFromEvents(parsed.value.events);
 
-        // Atomically with arming the fan-out -- see `SubscribeParams.pane`.
+        // Atomically with arming the fan-out -- see `protocol.SubscribeParams.pane`.
         // An unknown pane is ignored rather than failing the subscribe: the
         // pane may have been destroyed between the spawn and the connect,
         // and leaving the connection in the focused pane is a better
@@ -3474,7 +2631,7 @@ pub const Dispatcher = struct {
             }
         }
 
-        return try self.respond(alloc, id, SubscribeResult{ .subscribed = parsed.value.events });
+        return try self.respond(alloc, id, protocol.SubscribeResult{ .subscribed = parsed.value.events });
     }
 
     fn handleGetInputState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
@@ -3498,11 +2655,11 @@ pub const Dispatcher = struct {
     }
 
     fn handleGetImageInfo(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(ImageInfoParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ImageInfoParams, alloc, params_value);
         defer parsed.deinit();
 
         const info = self.ctx.imageInfo(parsed.value.handle) orelse return DispatchError.UnknownImage;
-        return try self.respond(alloc, id, ImageInfoResult{ .width = info.width, .height = info.height });
+        return try self.respond(alloc, id, protocol.ImageInfoResult{ .width = info.width, .height = info.height });
     }
 
     /// Resolves an optional `row`/`col` pair against `layer`'s current
@@ -3517,7 +2674,7 @@ pub const Dispatcher = struct {
     }
 
     fn handleDrawImage(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(DrawImageParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.DrawImageParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3547,7 +2704,7 @@ pub const Dispatcher = struct {
     /// metrics to look up, unlike `handleDrawImage`, since an icon always
     /// scales the whole source image into the whole cell.
     fn handleDrawIcon(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(DrawIconParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.DrawIconParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3575,7 +2732,7 @@ pub const Dispatcher = struct {
     /// validated the same way `write_text`/`draw_icon`'s is
     /// (`resolveMetadata`), erroring `UnknownMetadata` on a bad handle.
     fn handleTagMetadata(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(TagMetadataParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.TagMetadataParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3588,7 +2745,7 @@ pub const Dispatcher = struct {
     /// from `row`/`col`" (clamped to 0 if `row`/`col` is already past the
     /// edge), so an all-defaulted `clear()` wipes everything.
     fn handleClear(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(ClearParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.ClearParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3603,7 +2760,7 @@ pub const Dispatcher = struct {
     /// moving a highlight costs a message instead of a row of text. Same
     /// region defaulting `handleClear` does.
     fn handleSetBg(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetBgParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetBgParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3615,7 +2772,7 @@ pub const Dispatcher = struct {
 
     /// `set_fg`: `set_bg` for the text colour -- see `core.Layer.fillFg`.
     fn handleSetFg(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetFgParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetFgParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3631,7 +2788,7 @@ pub const Dispatcher = struct {
     /// editor needs this rather than threading the underline through every
     /// write that touches the row.
     fn handleSetUnderline(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetUnderlineParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetUnderlineParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
 
@@ -3649,7 +2806,7 @@ pub const Dispatcher = struct {
     /// `Context.cell_px_w`/`cell_px_h` and glyphwire-host's matching
     /// constants.
     fn handleGetCellMetrics(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
-        return try self.respond(alloc, id, CellMetricsResult{
+        return try self.respond(alloc, id, protocol.CellMetricsResult{
             .cell_px_w = self.ctx.cell_px_w,
             .cell_px_h = self.ctx.cell_px_h,
         });
@@ -3679,7 +2836,7 @@ pub const Dispatcher = struct {
     /// `draw_icon` already uses). No rows yet -- nothing to
     /// paint until `table_set_rows`.
     fn handleCreateTable(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(CreateTableParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CreateTableParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3710,13 +2867,13 @@ pub const Dispatcher = struct {
         const style = try resolveTableStyle(talloc, p.style);
         const table_handle = try self.ctx.createTable(self.surfaceOr(p.layer), anchor.row, anchor.col, columns, style);
 
-        return try self.respond(alloc, id, CreateTableResult{ .handle = table_handle });
+        return try self.respond(alloc, id, protocol.CreateTableResult{ .handle = table_handle });
     }
 
     /// `destroy_table`: blanks the table's painted region and frees it
     /// (`Context.destroyTable`).
     fn handleDestroyTable(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(DestroyTableParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.DestroyTableParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.destroyTable(self.surfaceOr(p.layer), p.table) catch |err| switch (err) {
@@ -3743,7 +2900,7 @@ pub const Dispatcher = struct {
     }
 
     fn handleCreateOutline(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(CreateOutlineParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CreateOutlineParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3754,11 +2911,11 @@ pub const Dispatcher = struct {
         errdefer style.deinit(self.ctx.alloc);
         const outline_handle = try self.ctx.createOutline(self.surfaceOr(p.layer), anchor.row, anchor.col, width, style);
 
-        return try self.respond(alloc, id, CreateOutlineResult{ .handle = outline_handle });
+        return try self.respond(alloc, id, protocol.CreateOutlineResult{ .handle = outline_handle });
     }
 
     fn handleDestroyOutline(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(DestroyOutlineParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.DestroyOutlineParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.destroyOutline(self.surfaceOr(p.layer), p.outline) catch |err| switch (err) {
@@ -3810,7 +2967,7 @@ pub const Dispatcher = struct {
     /// fresh at the anchor, scrolling the layer terminal-style -- the
     /// `render` path, same as `table_set_rows`.
     fn handleOutlineSetNodes(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(OutlineSetNodesParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.OutlineSetNodesParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3826,7 +2983,7 @@ pub const Dispatcher = struct {
     /// see `core.Outline.setNodeCollapsed` for why this can't be the
     /// in-place repaint a table re-sort gets.
     fn handleOutlineSetCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(OutlineSetCollapsedParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.OutlineSetCollapsedParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3864,7 +3021,7 @@ pub const Dispatcher = struct {
     /// whole list, rather than the N a client would pay sending one
     /// `outline_set_collapsed` per node.
     fn handleOutlineSetAllCollapsed(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(OutlineSetAllCollapsedParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.OutlineSetAllCollapsedParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3875,7 +3032,7 @@ pub const Dispatcher = struct {
     }
 
     fn handleOutlineSetStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(OutlineSetStyleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.OutlineSetStyleParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3891,7 +3048,7 @@ pub const Dispatcher = struct {
     /// for a table. `visible` per node saves a client re-deriving the
     /// collapse walk to find out what is actually on screen.
     fn handleOutlineGetState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(OutlineGetStateParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.OutlineGetStateParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -3932,7 +3089,7 @@ pub const Dispatcher = struct {
     }
 
     fn handleCreateRect(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(CreateRectParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CreateRectParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const rect_handle = self.ctx.createRect(self.surfaceOr(p.layer), .{
@@ -3947,11 +3104,11 @@ pub const Dispatcher = struct {
             error.UnknownLayer => return DispatchError.UnknownLayer,
             else => |e| return e,
         };
-        return .{ .response = try self.respond(alloc, id, CreateRectResult{ .handle = rect_handle }) };
+        return .{ .response = try self.respond(alloc, id, protocol.CreateRectResult{ .handle = rect_handle }) };
     }
 
     fn handleUpdateRect(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(UpdateRectParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.UpdateRectParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.updateRect(self.surfaceOr(p.layer), p.rect, .{
@@ -3969,7 +3126,7 @@ pub const Dispatcher = struct {
     }
 
     fn handleDestroyRect(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(DestroyRectParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.DestroyRectParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.destroyRect(self.surfaceOr(p.layer), p.rect) catch |err| switch (err) {
@@ -3981,7 +3138,7 @@ pub const Dispatcher = struct {
     /// `set_drop_target`: shows, moves or (`mode: "none"`) clears the
     /// layer's drop-target highlight. See `core.DropTarget`.
     fn handleSetDropTarget(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(SetDropTargetParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.SetDropTargetParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const Mode = enum { none, layer, cells, insert };
@@ -4007,7 +3164,7 @@ pub const Dispatcher = struct {
     }
 
     fn handleCreateNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) !HandleResult {
-        const parsed = try codec.parseParams(CreateNinePatchParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.CreateNinePatchParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const style = self.ctx.ninePatchStyle(p.style) orelse return DispatchError.UnknownNinePatchStyle;
@@ -4021,11 +3178,11 @@ pub const Dispatcher = struct {
             error.UnknownLayer => return DispatchError.UnknownLayer,
             else => |e| return e,
         };
-        return .{ .response = try self.respond(alloc, id, CreateNinePatchResult{ .handle = np_handle }) };
+        return .{ .response = try self.respond(alloc, id, protocol.CreateNinePatchResult{ .handle = np_handle }) };
     }
 
     fn handleUpdateNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(UpdateNinePatchParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.UpdateNinePatchParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const style: ?core.NinePatchStyle = if (p.style) |name|
@@ -4045,7 +3202,7 @@ pub const Dispatcher = struct {
     }
 
     fn handleDestroyNinePatch(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(DestroyNinePatchParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.DestroyNinePatchParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         self.ctx.destroyNinePatch(self.surfaceOr(p.layer), p.nine_patch) catch |err| switch (err) {
@@ -4129,7 +3286,7 @@ pub const Dispatcher = struct {
     /// core.zig's Table section on why this needs no host/main.zig
     /// changes to actually show up.
     fn handleTableSetRows(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(TableSetRowsParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.TableSetRowsParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -4148,7 +3305,7 @@ pub const Dispatcher = struct {
     /// `table_set_rows` -- this is the message a future sort-aware
     /// `glyphwire-shell` click handler would call.
     fn handleTableSetSort(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(TableSetSortParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.TableSetSortParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -4168,7 +3325,7 @@ pub const Dispatcher = struct {
     /// `table_set_style`: replaces the table's whole style (e.g. toggling
     /// `alt_row_bg` on/off) and repaints.
     fn handleTableSetStyle(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const parsed = try codec.parseParams(TableSetStyleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.TableSetStyleParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);
@@ -4187,7 +3344,7 @@ pub const Dispatcher = struct {
     /// For a future client that needs to know e.g. which columns are
     /// sortable before deciding what a header click should do.
     fn handleTableGetState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
-        const parsed = try codec.parseParams(TableGetStateParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.TableGetStateParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
         const layer = try self.resolveLayer(p.layer);

@@ -107,7 +107,7 @@ fn run(init: std.process.Init) !void {
 
     for (runs) |r| {
         try client.setCursor(r.row, r.col);
-        try client.writeText(r.text, r.fg, r.bg);
+        try client.writeText(r.text, .{ .fg = r.fg, .bg = r.bg });
     }
 
     // Images/icons/box-drawing showcase (Phase 3/3.5/3.6) -- a panel framed
@@ -120,13 +120,13 @@ fn run(init: std.process.Init) !void {
     // plain one-cell `.fit` `draw_icon`.
     try drawTileFrame(&client, panel_row, panel_col, panel_rows, panel_cols);
     try client.setCursor(panel_row + 1, panel_col + 2);
-    try client.writeText("icons + box tiles", rgb(255, 255, 255), null);
+    try client.writeText("icons + box tiles", .{ .fg = rgb(255, 255, 255) });
 
     const icon_names = [_][]const u8{ "file/folder", "file/file", "file/audio", "file/image", "file/video", "file/archive", "file/executable", "file/drive" };
     const metrics = client.getCellMetrics() catch null;
 
     try client.setCursor(panel_row + 3, panel_col + 2);
-    try client.writeText("fill (1 line tall):", rgb(180, 180, 180), null);
+    try client.writeText("fill (1 line tall):", .{ .fg = rgb(180, 180, 180) });
     for (icon_names, 0..) |name, i| {
         const col = icon_col0 + i * 3;
         if (metrics) |m| {
@@ -142,7 +142,7 @@ fn run(init: std.process.Init) !void {
     }
 
     try client.setCursor(panel_row + 6, panel_col + 2);
-    try client.writeText("large (3 lines tall):", rgb(180, 180, 180), null);
+    try client.writeText("large (3 lines tall):", .{ .fg = rgb(180, 180, 180) });
     for (icon_names, 0..) |name, i| {
         const col = icon_col0 + i * 5;
         if (metrics) |m| {
@@ -163,13 +163,13 @@ fn run(init: std.process.Init) !void {
     // codepoint no face provides would show as a tofu box.
     const intl_row = panel_row + panel_rows + 1;
     try client.setCursor(intl_row, 0);
-    try client.writeText("hello world, in more scripts:", rgb(200, 200, 200), null);
+    try client.writeText("hello world, in more scripts:", .{ .fg = rgb(200, 200, 200) });
     try client.setCursor(intl_row + 1, 2);
-    try client.writeText("Greek:   \u{0393}\u{03B5}\u{03B9}\u{03B1} \u{03C3}\u{03BF}\u{03C5} \u{039A}\u{03CC}\u{03C3}\u{03BC}\u{03B5}", rgb(126, 200, 255), null);
+    try client.writeText("Greek:   \u{0393}\u{03B5}\u{03B9}\u{03B1} \u{03C3}\u{03BF}\u{03C5} \u{039A}\u{03CC}\u{03C3}\u{03BC}\u{03B5}", .{ .fg = rgb(126, 200, 255) });
     try client.setCursor(intl_row + 2, 2);
-    try client.writeText("Russian: \u{041F}\u{0440}\u{0438}\u{0432}\u{0435}\u{0442}, \u{043C}\u{0438}\u{0440}", rgb(255, 184, 108), null);
+    try client.writeText("Russian: \u{041F}\u{0440}\u{0438}\u{0432}\u{0435}\u{0442}, \u{043C}\u{0438}\u{0440}", .{ .fg = rgb(255, 184, 108) });
     try client.setCursor(intl_row + 3, 2);
-    try client.writeText("Japanese: \u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\u{4E16}\u{754C}", rgb(80, 250, 123), null);
+    try client.writeText("Japanese: \u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\u{4E16}\u{754C}", .{ .fg = rgb(80, 250, 123) });
 
     // Underline styles: the five `write_text` takes, then the two cases that
     // are the reason the attribute exists at all -- a coloured underline
@@ -178,10 +178,10 @@ fn run(init: std.process.Init) !void {
     // mirrored program's output.
     const ul_row = intl_row + 5;
     try client.setCursor(ul_row, 0);
-    try client.writeText("underline styles:", rgb(200, 200, 200), null);
+    try client.writeText("underline styles:", .{ .fg = rgb(200, 200, 200) });
     const styles = [_]glyphwire.Underline{ .single, .double, .curly, .dotted, .dashed };
     for (styles, 0..) |style, i| {
-        try client.writeTextOpts(@tagName(style), .{
+        try client.writeText(@tagName(style), .{
             .row = ul_row + 1 + i,
             .col = 2,
             .fg = rgb(220, 220, 228),
@@ -213,7 +213,7 @@ fn run(init: std.process.Init) !void {
     // And through SGR, the way a compiler's own output would carry it:
     // `4:3` is curly, `58;2;r;g;b` its colour. Note `4:3` and not `4;3` --
     // the latter is an underline followed by an italic.
-    try client.writeTextOpts(
+    try client.writeText(
         "\x1b[4:3;58;2;232;92;92mvia SGR escape\x1b[0m",
         .{ .row = ul_row + 2 + styles.len, .col = 2, .fg = rgb(220, 220, 228) },
     );

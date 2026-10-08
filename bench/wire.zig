@@ -80,17 +80,9 @@ fn row(out: *std.Io.Writer, label: []const u8, sizes: [2]usize, ns: [2]u64) !voi
 // ─── Fixtures ────────────────────────────────────────────────────────────
 
 /// One syntax-coloured line as a client sends it: `write_text` with
-/// per-token spans, nulls left out (`notifyCompact`).
-const SpanOut = struct {
-    text: []const u8,
-    fg: ?protocol.Color = null,
-};
-const RowOut = struct {
-    row: usize,
-    col: usize = 0,
-    spans: []const SpanOut,
-    pad: bool = true,
-};
+/// per-token spans, nulls left out (`Client.notify`).
+const SpanOut = protocol.SpanParams;
+const RowOut = protocol.WriteTextParams;
 
 const tokens = [_][]const u8{ "    ", "const", " ", "parsed", " = ", "try", " ", "codec", ".", "parseEnvelope", "(", "format", ", ", "alloc", ", ", "body", ");", "  // decoded once" };
 
@@ -99,33 +91,13 @@ fn spanRow(spans: *[tokens.len]SpanOut, r: usize) RowOut {
         .text = t,
         .fg = if (i % 3 == 0) null else .{ .r = @intCast(i * 13), .g = 180, .b = @intCast(255 - i * 7) },
     };
-    return .{ .row = r, .spans = spans };
+    return .{ .row = r, .col = 0, .spans = spans, .pad = true };
 }
-
-/// The `write_text` params a server reads that row back into -- the
-/// fields of `dispatch.zig`'s own `WriteTextParams` that the row uses.
-const SpanIn = struct {
-    text: []const u8,
-    fg: ?protocol.Color = null,
-    bg: ?protocol.Color = null,
-    metadata_id: ?u32 = null,
-    scale: ?[]const u8 = null,
-};
-const RowIn = struct {
-    layer: ?u32 = null,
-    row: ?usize = null,
-    col: ?usize = null,
-    text: ?[]const u8 = null,
-    spans: ?[]const SpanIn = null,
-    pad: bool = false,
-    fg: ?protocol.Color = null,
-    bg: ?protocol.Color = null,
-};
 
 fn decodeRow(alloc: std.mem.Allocator, format: Format, body: []const u8) !void {
     const env = try codec.parseEnvelope(format, alloc, body);
     defer env.deinit();
-    const p = try codec.parseParams(RowIn, alloc, env.value.params);
+    const p = try codec.parseParams(protocol.WriteTextParams, alloc, env.value.params);
     defer p.deinit();
     std.mem.doNotOptimizeAway(p.value.spans.?.len);
 }

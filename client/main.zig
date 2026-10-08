@@ -27,5 +27,5 @@ fn sendHello(init: std.process.Init) !void {
     var client = try glyphwire.Client.connectFromEnv(init.io, init.gpa, init.environ_map);
     defer client.deinit();
 
-    try client.writeText("hello", null, null);
+    try client.writeText("hello", .{});
 }

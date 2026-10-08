@@ -447,20 +447,20 @@ pub const Popup = struct {
                 .{ .text = self.title },
             }, .{ .layer = self.header_layer, .row = 0, .col = 0, .fg = s.header_fg, .bg = s.header_bg, .max_cols = cols - tail_w, .pad = true });
         }
-        try b.writeTextOpts(tail, .{ .layer = self.header_layer, .row = 0, .col = cols - tail_w, .fg = s.header_fg, .bg = s.header_bg, .max_cols = tail_w });
+        try b.writeText(tail, .{ .layer = self.header_layer, .row = 0, .col = cols - tail_w, .fg = s.header_fg, .bg = s.header_bg, .max_cols = tail_w });
 
         // The query behind a `> ` prompt, with a drawn caret: a layer's
         // cursor property is its next write position, not a visual one.
         // No `bg` from here on: the panel behind the popup is its
         // background (or the layer's own, in the flat fallback).
         const prompt = "> ";
-        try b.writeTextOpts(prompt, .{ .layer = self.header_layer, .row = 1, .col = 0, .fg = s.dim_fg });
-        try b.writeTextOpts(f.query.text(), .{ .layer = self.header_layer, .row = 1, .col = prompt.len, .fg = s.text_fg, .max_cols = cols -| prompt.len, .pad = true });
+        try b.writeText(prompt, .{ .layer = self.header_layer, .row = 1, .col = 0, .fg = s.dim_fg });
+        try b.writeText(f.query.text(), .{ .layer = self.header_layer, .row = 1, .col = prompt.len, .fg = s.text_fg, .max_cols = cols -| prompt.len, .pad = true });
         const caret_col = prompt.len + f.query.caretCol();
         if (caret_col < cols) {
             const q = f.query.text();
             const under = if (f.query.caret < q.len) q[f.query.caret..lineedit.nextBoundary(q, f.query.caret)] else " ";
-            try b.writeTextOpts(under, .{ .layer = self.header_layer, .row = 1, .col = caret_col, .fg = s.bg, .bg = s.text_fg });
+            try b.writeText(under, .{ .layer = self.header_layer, .row = 1, .col = caret_col, .fg = s.bg, .bg = s.text_fg });
         }
     }
 
@@ -473,7 +473,7 @@ pub const Popup = struct {
         if (f.matchCount() == 0) {
             var buf: [96]u8 = undefined;
             const note = std.fmt.bufPrint(&buf, "  {s}", .{s.empty_text}) catch s.empty_text;
-            try b.writeTextOpts(note, .{ .layer = self.list_layer, .row = 0, .col = 0, .fg = s.dim_fg, .max_cols = cols });
+            try b.writeText(note, .{ .layer = self.list_layer, .row = 0, .col = 0, .fg = s.dim_fg, .max_cols = cols });
             return;
         }
         for (0..rows) |i| {

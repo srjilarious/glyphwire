@@ -301,68 +301,11 @@ pub const Client = struct {
         self.stream.close(self.io);
     }
 
-    /// `write_text(text, fg?, bg?)` -- a notification, no response. `fg`/
-    /// `bg` null means "use the server's default style" (see
-    /// `core.default_style`), matching the wire params' optionality.
-    pub fn writeText(self: *Client, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
-        try self.notify("write_text", .{
-            .text = text,
-            .fg = colorToJson(fg),
-            .bg = colorToJson(bg),
-        });
-    }
-
-    /// Same as `writeText`, but every cell the text touches is also
-    /// tagged with `metadata_id` (`create_metadata`'s return value) -- see
-    /// `core.Cell.metadata_id`'s doc comment. A separate method rather
-    /// than a new required param on `writeText` since Zig has no default
-    /// parameter values.
-    pub fn writeTextTagged(self: *Client, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: core.MetadataHandle) !void {
-        try self.notify("write_text", .{
-            .text = text,
-            .fg = colorToJson(fg),
-            .bg = colorToJson(bg),
-            .metadata_id = metadata_id,
-        });
-    }
-
-    /// Same as `writeTextTagged`, but every cell the text touches also
-    /// carries `scale` (`core.Cell.text_scale`) for larger titles/headings
-    /// -- see `core.TextScale`'s doc comment for what that does and
-    /// doesn't reserve. A separate method rather than a new required param
-    /// on `writeText`/`writeTextTagged` since Zig has no default parameter
-    /// values.
-    pub fn writeTextScaled(self: *Client, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: ?core.MetadataHandle, scale: core.TextScale) !void {
-        try self.notify("write_text", .{
-            .text = text,
-            .fg = colorToJson(fg),
-            .bg = colorToJson(bg),
-            .metadata_id = metadata_id,
-            .scale = @tagName(scale),
-        });
-    }
-
-    /// `write_text(text, fg?, transparent_bg: true)` -- like `writeText`,
-    /// but leaves whatever background is already on each cell touched
-    /// untouched instead of resetting it to `core.default_style.bg` -- for
-    /// writing text over a background drawn some other way (e.g.
-    /// a nine-patch's fill) that needs to stay visible through it,
-    /// rather than approximating it with a matching flat color. A separate
-    /// method rather than a third `?bool` param on `writeText` since Zig
-    /// has no default parameter values.
-    pub fn writeTextTransparent(self: *Client, text: []const u8, fg: ?core.Color) !void {
-        try self.notify("write_text", .{
-            .text = text,
-            .fg = colorToJson(fg),
-            .transparent_bg = true,
-        });
-    }
-
     /// Everything `write_text` can take besides the text, as one options
-    /// struct -- the one write call a program needs instead of choosing
-    /// between `writeText`/`writeTextOn`/`writeTextTagged`/... and pairing
-    /// it with a cursor move. Shared by `Client.writeTextOpts` and
-    /// `Batch.writeTextOpts`.
+    /// struct, so one write call covers placement, colours, metadata and
+    /// scale without a separate cursor move. `.{}` writes at the root
+    /// layer's cursor in the default style. Shared by `Client.writeText`
+    /// and `Batch.writeText`.
     pub const TextOpts = struct {
         /// null = the root layer.
         layer: ?core.LayerHandle = null,
@@ -400,9 +343,11 @@ pub const Client = struct {
         underline_color: ?core.Color = null,
     };
 
-    /// `write_text` with every option (see `TextOpts`) -- a notification.
-    pub fn writeTextOpts(self: *Client, text: []const u8, opts: TextOpts) !void {
-        try self.notifyCompact("write_text", textParams(text, null, opts));
+    /// `write_text` -- a notification, no response. Every option is in
+    /// `TextOpts`; a null `fg`/`bg` means the server's default style (see
+    /// `core.default_style`).
+    pub fn writeText(self: *Client, text: []const u8, opts: TextOpts) !void {
+        try self.notify("write_text", textParams(text, null, opts));
     }
 
     /// One styled piece of a `writeSpans` write. Every null field inherits
@@ -428,11 +373,11 @@ pub const Client = struct {
     pub fn writeSpans(self: *Client, spans: []const Span, opts: TextOpts) !void {
         const wire_spans = try spansToWire(self.alloc, spans);
         defer self.alloc.free(wire_spans);
-        try self.notifyCompact("write_text", textParams(null, wire_spans, opts));
+        try self.notify("write_text", textParams(null, wire_spans, opts));
     }
 
-    fn spansToWire(alloc: std.mem.Allocator, spans: []const Span) ![]SpanWire {
-        const out = try alloc.alloc(SpanWire, spans.len);
+    fn spansToWire(alloc: std.mem.Allocator, spans: []const Span) ![]protocol.SpanParams {
+        const out = try alloc.alloc(protocol.SpanParams, spans.len);
         for (spans, out) |s, *w| w.* = .{
             .text = s.text,
             .fg = colorToJson(s.fg),
@@ -446,24 +391,13 @@ pub const Client = struct {
         return out;
     }
 
-    const SpanWire = struct {
-        text: []const u8,
-        fg: ?protocol.Color,
-        bg: ?protocol.Color,
-        metadata_id: ?core.MetadataHandle,
-        transparent_bg: ?bool,
-        scale: ?[]const u8,
-        underline: ?[]const u8,
-        underline_color: ?protocol.Color,
-    };
-
     /// The wire params for a `TextOpts` write: either `text` or `spans`.
-    /// Shared with `Batch`. Sent with `notifyCompact`, so every field left
-    /// null here is absent on the wire -- which is why the server-side
-    /// defaults (`pad` false, `selectable` true, `transparent_bg` false,
-    /// `scale` x1) are written as null rather than spelled out: a syntax-
-    /// coloured row is mostly spans, and every byte per span counts.
-    fn textParams(text: ?[]const u8, spans: ?[]const SpanWire, opts: TextOpts) WriteTextWire {
+    /// Shared with `Batch`. Every field left null here is absent on the
+    /// wire (see `notify`) -- which is why the server-side defaults (`pad`
+    /// false, `selectable` true, `transparent_bg` false, `scale` x1) are
+    /// written as null rather than spelled out: a syntax-coloured row is
+    /// mostly spans, and every byte per span counts.
+    fn textParams(text: ?[]const u8, spans: ?[]const protocol.SpanParams, opts: TextOpts) protocol.WriteTextParams {
         return .{
             .layer = opts.layer,
             .row = opts.row,
@@ -487,25 +421,6 @@ pub const Client = struct {
         };
     }
 
-    const WriteTextWire = struct {
-        layer: ?core.LayerHandle,
-        row: ?usize,
-        col: ?usize,
-        text: ?[]const u8,
-        spans: ?[]const SpanWire,
-        fg: ?protocol.Color,
-        bg: ?protocol.Color,
-        transparent_bg: ?bool,
-        metadata_id: ?core.MetadataHandle,
-        scale: ?[]const u8,
-        max_cols: ?usize,
-        pad: ?bool,
-        selectable: ?bool,
-        copy_text: ?[]const u8,
-        underline: ?[]const u8,
-        underline_color: ?protocol.Color,
-    };
-
     /// `clear`'s options: the region (defaulting to the whole layer) and
     /// an optional fill colour. Shared by `Client.clearArea` and
     /// `Batch.clearArea`.
@@ -527,7 +442,7 @@ pub const Client = struct {
         try self.notify("clear", clearParams(opts));
     }
 
-    fn clearParams(opts: ClearOpts) ClearWire {
+    fn clearParams(opts: ClearOpts) protocol.ClearParams {
         return .{
             .layer = opts.layer,
             .row = opts.row,
@@ -537,15 +452,6 @@ pub const Client = struct {
             .bg = colorToJson(opts.bg),
         };
     }
-
-    const ClearWire = struct {
-        layer: ?core.LayerHandle,
-        row: usize,
-        col: usize,
-        rows: ?usize,
-        cols: ?usize,
-        bg: ?protocol.Color,
-    };
 
     /// `set_bg`'s options: `ClearOpts`' region, with `bg` required --
     /// the call is "paint this background". Shared by `Client.setBg` and
@@ -568,7 +474,7 @@ pub const Client = struct {
         try self.notify("set_bg", setBgParams(opts));
     }
 
-    fn setBgParams(opts: SetBgOpts) SetBgWire {
+    fn setBgParams(opts: SetBgOpts) protocol.SetBgParams {
         return .{
             .layer = opts.layer,
             .row = opts.row,
@@ -578,15 +484,6 @@ pub const Client = struct {
             .bg = colorToJson(opts.bg).?,
         };
     }
-
-    const SetBgWire = struct {
-        layer: ?core.LayerHandle,
-        row: usize,
-        col: usize,
-        rows: ?usize,
-        cols: ?usize,
-        bg: protocol.Color,
-    };
 
     /// `set_fg`'s options: `SetBgOpts`' region, with `fg` required.
     /// Shared by `Client.setFg` and `Batch.setFg`.
@@ -608,7 +505,7 @@ pub const Client = struct {
         try self.notify("set_fg", setFgParams(opts));
     }
 
-    fn setFgParams(opts: SetFgOpts) SetFgWire {
+    fn setFgParams(opts: SetFgOpts) protocol.SetFgParams {
         return .{
             .layer = opts.layer,
             .row = opts.row,
@@ -618,15 +515,6 @@ pub const Client = struct {
             .fg = colorToJson(opts.fg).?,
         };
     }
-
-    const SetFgWire = struct {
-        layer: ?core.LayerHandle,
-        row: usize,
-        col: usize,
-        rows: ?usize,
-        cols: ?usize,
-        fg: protocol.Color,
-    };
 
     /// `set_underline`'s options: `SetBgOpts`' region for the underline
     /// channel. Shared by `Client.setUnderline` and `Batch.setUnderline`.
@@ -651,7 +539,7 @@ pub const Client = struct {
         try self.notify("set_underline", setUnderlineParams(opts));
     }
 
-    fn setUnderlineParams(opts: SetUnderlineOpts) SetUnderlineWire {
+    fn setUnderlineParams(opts: SetUnderlineOpts) protocol.SetUnderlineParams {
         return .{
             .layer = opts.layer,
             .row = opts.row,
@@ -662,16 +550,6 @@ pub const Client = struct {
             .underline_color = colorToJson(opts.underline_color),
         };
     }
-
-    const SetUnderlineWire = struct {
-        layer: ?core.LayerHandle,
-        row: usize,
-        col: usize,
-        rows: ?usize,
-        cols: ?usize,
-        underline: []const u8,
-        underline_color: ?protocol.Color,
-    };
 
     /// `set_property(layer, "cursor", {row, col})` -- a notification.
     pub fn setCursor(self: *Client, row: usize, col: usize) !void {
@@ -727,7 +605,7 @@ pub const Client = struct {
     /// of `setCursorOn`, for a client drawing terminal-style output onto
     /// a layer that isn't its root (`gw-shell --embed`).
     pub fn getCursorOn(self: *Client, layer: ?core.LayerHandle) !core.Cursor {
-        var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .layer = layer, .property = "cursor" });
+        var parsed = try self.request(protocol.CursorResult, "get_property", .{ .layer = layer, .property = "cursor" });
         defer parsed.deinit();
         return .{ .row = parsed.value.result.row, .col = parsed.value.result.col };
     }
@@ -736,7 +614,7 @@ pub const Client = struct {
     /// decide whether `getCells` is worth calling again, rather than
     /// fetching the full grid every frame regardless of whether it changed.
     pub fn getRevision(self: *Client) !u64 {
-        var parsed = try self.request(struct { revision: u64 }, "get_property", .{ .property = "revision" });
+        var parsed = try self.request(protocol.RevisionResult, "get_property", .{ .property = "revision" });
         defer parsed.deinit();
         return parsed.value.result.revision;
     }
@@ -747,7 +625,7 @@ pub const Client = struct {
     /// counterpart for a client that wants to react to window resizes
     /// rather than poll; `getLayerSize` is the form for any other layer.
     pub fn getSize(self: *Client) !core.LayerSize {
-        var parsed = try self.request(struct { cols: usize, rows: usize }, "get_property", .{ .property = "size" });
+        var parsed = try self.request(protocol.SizeResult, "get_property", .{ .property = "size" });
         defer parsed.deinit();
         return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
     }
@@ -799,7 +677,7 @@ pub const Client = struct {
     /// `get_property(layer, "scroll")` for a named layer -- the
     /// scrollback view of a layer created with `scrollback_rows`.
     pub fn getScrollOn(self: *Client, layer: ?core.LayerHandle) !core.LayerScroll {
-        var parsed = try self.request(struct { offset: usize, max: usize }, "get_property", .{ .layer = layer, .property = "scroll" });
+        var parsed = try self.request(protocol.ScrollResult, "get_property", .{ .layer = layer, .property = "scroll" });
         defer parsed.deinit();
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }
@@ -818,7 +696,7 @@ pub const Client = struct {
     /// `scroll_view(layer, offset?, delta?)` -- `scrollView` aimed at a
     /// named layer.
     pub fn scrollViewOn(self: *Client, layer: ?core.LayerHandle, offset: ?usize, delta: ?i64) !core.LayerScroll {
-        var parsed = try self.request(struct { offset: usize, max: usize }, "scroll_view", .{ .layer = layer, .offset = offset, .delta = delta });
+        var parsed = try self.request(protocol.ScrollResult, "scroll_view", .{ .layer = layer, .offset = offset, .delta = delta });
         defer parsed.deinit();
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }
@@ -869,7 +747,7 @@ pub const Client = struct {
     /// `"key"`, `"mouse_button"`) on this connection. See `InputListener`
     /// for a ready-made subscribed connection with a background reader.
     pub fn subscribe(self: *Client, events: []const []const u8) !void {
-        var parsed = try self.request(struct { subscribed: [][]const u8 }, "subscribe", .{ .events = events });
+        var parsed = try self.request(protocol.SubscribeResult, "subscribe", .{ .events = events });
         defer parsed.deinit();
     }
 
@@ -994,7 +872,7 @@ pub const Client = struct {
     /// `get_image_info(handle)` -- a request returning the image's natural
     /// pixel dimensions.
     pub fn getImageInfo(self: *Client, handle: core.ImageHandle) !core.ImageInfo {
-        var parsed = try self.request(struct { width: u32, height: u32 }, "get_image_info", .{ .handle = handle });
+        var parsed = try self.request(protocol.ImageInfoResult, "get_image_info", .{ .handle = handle });
         defer parsed.deinit();
         return .{ .width = parsed.value.result.width, .height = parsed.value.result.height };
     }
@@ -1019,7 +897,7 @@ pub const Client = struct {
     }
 
     /// `draw_image(layer, ...)` -- the explicitly-targeted form of
-    /// `drawImage`, matching `writeTextOn` / `drawIconOn`.
+    /// `drawImage`, matching `drawIconOn`.
     /// The wire message has always carried `layer?`; only the Zig helper
     /// was missing it, so a TUI drawing a picture into one of its own
     /// layers (gw-read's page layer) had no way to say which.
@@ -1097,7 +975,7 @@ pub const Client = struct {
     /// The wire params for a styled `draw_icon`. `layer` is passed
     /// separately so the `*On*` forms can override `opts.layer`. Shared
     /// with `Batch`.
-    fn iconParams(layer: ?core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) DrawIconWire {
+    fn iconParams(layer: ?core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) protocol.DrawIconParams {
         return .{
             .layer = layer,
             .row = row,
@@ -1112,20 +990,6 @@ pub const Client = struct {
             .foreground = opts.foreground,
         };
     }
-
-    const DrawIconWire = struct {
-        layer: ?core.LayerHandle,
-        row: ?usize,
-        col: ?usize,
-        name: []const u8,
-        scale: []const u8,
-        h_align: []const u8,
-        v_align: []const u8,
-        max_w: ?u32,
-        max_h: ?u32,
-        metadata_id: ?core.MetadataHandle,
-        foreground: bool,
-    };
 
     /// `draw_icon(layer, row?, col?, name)` on a non-root layer -- see
     /// `drawIcon` for the root-layer version.
@@ -1142,7 +1006,7 @@ pub const Client = struct {
 
     /// `tag_metadata(layer?, row, col, metadata_id)` -- a notification.
     /// Sets exactly one cell's metadata tag without touching its
-    /// background/text -- unlike `writeTextTagged`/`drawIconStyled`,
+    /// background/text -- unlike `writeText`/`drawIconStyled`,
     /// which tag as a side effect of drawing something. For a client that
     /// needs a cell tagged without changing what's drawn there, e.g.
     /// tagging the extra cells a `.natural`-scaled icon visually
@@ -1168,7 +1032,7 @@ pub const Client = struct {
     }
 
     /// `clear(layer, ...)` -- the explicitly-targeted form of `clear`,
-    /// matching `writeTextOn` / `drawImageOn`, for a TUI wiping one of its
+    /// matching `drawImageOn`, for a TUI wiping one of its
     /// own layers.
     pub fn clearOn(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
         try self.notify("clear", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols });
@@ -1180,7 +1044,7 @@ pub const Client = struct {
     /// decisions.md's Layer section. Returns its handle, for the
     /// `*On`/`*Layer` methods below.
     pub fn createLayer(self: *Client, width: ?usize, height: ?usize, scrollback_rows: usize) !core.LayerHandle {
-        var parsed = try self.request(struct { handle: core.LayerHandle }, "create_layer", .{
+        var parsed = try self.request(protocol.CreateLayerResult, "create_layer", .{
             .width = width,
             .height = height,
             .scrollback_rows = scrollback_rows,
@@ -1232,7 +1096,7 @@ pub const Client = struct {
         scrollback_rows: usize,
         window_scrollbar: bool,
     ) !core.ContextHandle {
-        var parsed = try self.request(struct { context: core.ContextHandle }, "create_context", .{
+        var parsed = try self.request(protocol.CreateContextResult, "create_context", .{
             .width = width,
             .height = height,
             .scrollback_rows = scrollback_rows,
@@ -1425,7 +1289,7 @@ pub const Client = struct {
     /// role for different halves of it (see `core.Session.managers`).
     pub fn requestWindowManager(self: *Client) !?u64 {
         var parsed = try self.request(
-            struct { granted: bool, token: ?u64 = null },
+            protocol.RequestRoleResult,
             "request_role",
             .{ .role = "window_manager" },
         );
@@ -1439,7 +1303,7 @@ pub const Client = struct {
     /// (`setPaneSplitChildren` / `setRootPaneSplit`).
     pub fn createPane(self: *Client, scrollback_rows: usize) !PaneCreated {
         var parsed = try self.request(
-            struct { pane: core.PaneHandle, context: core.ContextHandle },
+            protocol.CreatePaneResult,
             "create_pane",
             .{ .scrollback_rows = scrollback_rows },
         );
@@ -1460,7 +1324,7 @@ pub const Client = struct {
 
     pub fn createPaneSplit(self: *Client, axis: core.SplitAxis, resizable: bool) !core.PaneSplitHandle {
         var parsed = try self.request(
-            struct { split: core.PaneSplitHandle },
+            protocol.CreatePaneSplitResult,
             "create_pane_split",
             .{ .axis = @tagName(axis), .resizable = resizable },
         );
@@ -1506,7 +1370,7 @@ pub const Client = struct {
         rows: ?usize,
     ) !i64 {
         var parsed = try self.request(
-            struct { pid: i64 },
+            protocol.SpawnInPaneResult,
             "spawn_in_pane",
             .{ .pane = pane, .argv = argv, .cols = cols, .rows = rows },
         );
@@ -1533,7 +1397,7 @@ pub const Client = struct {
         remote_command: ?[]const u8,
     ) !u64 {
         var parsed = try self.request(
-            struct { session: u64 },
+            protocol.StartRemoteResult,
             "start_remote",
             .{ .dest = dest, .ssh_args = ssh_args, .remote_command = remote_command },
         );
@@ -1577,7 +1441,7 @@ pub const Client = struct {
     /// `get_property(layer?, "cell_position")` -- the cell a layer's
     /// top-left corner sits on.
     pub fn getLayerCellPosition(self: *Client, layer: ?core.LayerHandle) !CellPos {
-        var parsed = try self.request(struct { row: usize, col: usize }, "get_property", .{ .layer = layer, .property = "cell_position" });
+        var parsed = try self.request(protocol.CellPositionResult, "get_property", .{ .layer = layer, .property = "cell_position" });
         defer parsed.deinit();
         return .{ .row = parsed.value.result.row, .col = parsed.value.result.col };
     }
@@ -1595,7 +1459,7 @@ pub const Client = struct {
     /// `get_property(layer, "size")` on a non-root layer -- see `getSize`
     /// for the root-layer (i.e. window-size) version.
     pub fn getLayerSize(self: *Client, layer: core.LayerHandle) !core.LayerSize {
-        var parsed = try self.request(struct { cols: usize, rows: usize }, "get_property", .{ .layer = layer, .property = "size" });
+        var parsed = try self.request(protocol.SizeResult, "get_property", .{ .layer = layer, .property = "size" });
         defer parsed.deinit();
         return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
     }
@@ -1610,7 +1474,7 @@ pub const Client = struct {
 
     /// `get_property(layer?, "visibility")`.
     pub fn getLayerVisible(self: *Client, layer: ?core.LayerHandle) !bool {
-        var parsed = try self.request(struct { visible: bool }, "get_property", .{ .layer = layer, .property = "visibility" });
+        var parsed = try self.request(protocol.VisibilityResult, "get_property", .{ .layer = layer, .property = "visibility" });
         defer parsed.deinit();
         return parsed.value.result.visible;
     }
@@ -1627,7 +1491,7 @@ pub const Client = struct {
 
     /// `get_property(layer?, "opacity")`.
     pub fn getLayerOpacity(self: *Client, layer: ?core.LayerHandle) !f32 {
-        var parsed = try self.request(struct { value: f32 }, "get_property", .{ .layer = layer, .property = "opacity" });
+        var parsed = try self.request(protocol.OpacityResult, "get_property", .{ .layer = layer, .property = "opacity" });
         defer parsed.deinit();
         return parsed.value.result.value;
     }
@@ -1644,7 +1508,7 @@ pub const Client = struct {
 
     /// `get_property(layer?, "viewport")`.
     pub fn getLayerViewport(self: *Client, layer: ?core.LayerHandle) !core.Viewport {
-        var parsed = try self.request(struct { cols: usize, rows: usize }, "get_property", .{ .layer = layer, .property = "viewport" });
+        var parsed = try self.request(protocol.SizeResult, "get_property", .{ .layer = layer, .property = "viewport" });
         defer parsed.deinit();
         return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
     }
@@ -1690,7 +1554,7 @@ pub const Client = struct {
 
     /// `get_property(layer?, "scroll_mode")`.
     pub fn getLayerScrollMode(self: *Client, layer: ?core.LayerHandle) !core.ScrollMode {
-        var parsed = try self.request(struct { mode: []const u8 }, "get_property", .{ .layer = layer, .property = "scroll_mode" });
+        var parsed = try self.request(protocol.ScrollModeResult, "get_property", .{ .layer = layer, .property = "scroll_mode" });
         defer parsed.deinit();
         return std.meta.stringToEnum(core.ScrollMode, parsed.value.result.mode) orelse error.InvalidScrollMode;
     }
@@ -1719,26 +1583,10 @@ pub const Client = struct {
     }
 
     /// `core.Shadow` in its wire shape. Shared with `Batch.setLayerShadow`.
-    fn shadowToJson(shadow: ?core.Shadow) ?ShadowWire {
+    fn shadowToJson(shadow: ?core.Shadow) ?protocol.ShadowWire {
         const sh = shadow orelse return null;
-        return .{
-            .x = sh.x,
-            .y = sh.y,
-            .blur = sh.blur,
-            .radius = sh.radius,
-            .spread = sh.spread,
-            .color = colorToWire(sh.color),
-        };
+        return protocol.ShadowWire.fromCore(sh);
     }
-
-    const ShadowWire = struct {
-        x: i32,
-        y: i32,
-        blur: u32,
-        radius: u32,
-        spread: i32,
-        color: protocol.Color,
-    };
 
     /// `set_property(layer, "pty_mode", {enabled})` -- a notification.
     /// Turns on cross-`write_text`-call persistence of the layer's
@@ -1754,7 +1602,7 @@ pub const Client = struct {
 
     /// `get_property(layer?, "pty_mode")`.
     pub fn getLayerPtyMode(self: *Client, layer: ?core.LayerHandle) !bool {
-        var parsed = try self.request(struct { enabled: bool }, "get_property", .{ .layer = layer, .property = "pty_mode" });
+        var parsed = try self.request(protocol.PtyModeResult, "get_property", .{ .layer = layer, .property = "pty_mode" });
         defer parsed.deinit();
         return parsed.value.result.enabled;
     }
@@ -1779,21 +1627,19 @@ pub const Client = struct {
         try self.notify("set_property", selectionFlowParams(layer, flow));
     }
 
-    fn selectionFlowParams(layer: core.LayerHandle, flow: core.SelectionFlow) SelectionFlowWire {
-        return .{ .layer = layer, .mode = @tagName(flow.mode), .cols = flow.column_cols, .col = flow.origin_col };
+    fn selectionFlowParams(layer: core.LayerHandle, flow: core.SelectionFlow) protocol.PropertyParams {
+        return .{
+            .layer = layer,
+            .property = "selection_flow",
+            .mode = @tagName(flow.mode),
+            .cols = flow.column_cols,
+            .col = flow.origin_col,
+        };
     }
-
-    const SelectionFlowWire = struct {
-        layer: core.LayerHandle,
-        property: []const u8 = "selection_flow",
-        mode: []const u8,
-        cols: usize,
-        col: usize,
-    };
 
     /// `get_property(layer?, "selection_flow")`.
     pub fn getLayerSelectionFlow(self: *Client, layer: ?core.LayerHandle) !core.SelectionFlow {
-        var parsed = try self.request(struct { mode: []const u8, cols: usize, col: usize }, "get_property", .{ .layer = layer, .property = "selection_flow" });
+        var parsed = try self.request(protocol.SelectionFlowResult, "get_property", .{ .layer = layer, .property = "selection_flow" });
         defer parsed.deinit();
         const r = parsed.value.result;
         return .{
@@ -1815,14 +1661,14 @@ pub const Client = struct {
 
     /// `get_property(layer?, "mouse_report")`.
     pub fn getLayerMouseReport(self: *Client, layer: ?core.LayerHandle) !bool {
-        var parsed = try self.request(struct { enabled: bool }, "get_property", .{ .layer = layer, .property = "mouse_report" });
+        var parsed = try self.request(protocol.PtyModeResult, "get_property", .{ .layer = layer, .property = "mouse_report" });
         defer parsed.deinit();
         return parsed.value.result.enabled;
     }
 
     /// `get_property(layer?, "mouse_select")`.
     pub fn getLayerMouseSelect(self: *Client, layer: ?core.LayerHandle) !bool {
-        var parsed = try self.request(struct { enabled: bool }, "get_property", .{ .layer = layer, .property = "mouse_select" });
+        var parsed = try self.request(protocol.PtyModeResult, "get_property", .{ .layer = layer, .property = "mouse_select" });
         defer parsed.deinit();
         return parsed.value.result.enabled;
     }
@@ -1854,7 +1700,7 @@ pub const Client = struct {
     /// no grab band, and ignores `moveDivider` -- for a structural split
     /// like buffer-area-over-command-line.
     pub fn createSplit(self: *Client, axis: core.SplitAxis, resizable: bool) !core.SplitHandle {
-        var parsed = try self.request(struct { handle: core.SplitHandle }, "create_split", .{
+        var parsed = try self.request(protocol.CreateSplitResult, "create_split", .{
             .axis = @tagName(axis),
             .resizable = resizable,
         });
@@ -1904,33 +1750,11 @@ pub const Client = struct {
         try self.notify("lower_layer", .{ .layer = layer, .below = below });
     }
 
-    /// `write_text(layer, text, fg?, bg?)` on a non-root layer -- see
-    /// `writeText` for the root-layer version.
-    pub fn writeTextOn(self: *Client, layer: core.LayerHandle, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
-        try self.notify("write_text", .{
-            .layer = layer,
-            .text = text,
-            .fg = colorToJson(fg),
-            .bg = colorToJson(bg),
-        });
-    }
-
-    /// `write_text(layer, text, fg?, transparent_bg: true)` on a non-root
-    /// layer -- see `writeTextTransparent` for the root-layer version.
-    pub fn writeTextOnTransparent(self: *Client, layer: core.LayerHandle, text: []const u8, fg: ?core.Color) !void {
-        try self.notify("write_text", .{
-            .layer = layer,
-            .text = text,
-            .fg = colorToJson(fg),
-            .transparent_bg = true,
-        });
-    }
-
     /// `get_cell_metrics` -- a request returning the session's fixed cell
     /// pixel size, for a client computing `draw_image`'s span from an
     /// image's natural pixel dimensions.
     pub fn getCellMetrics(self: *Client) !struct { w: u32, h: u32 } {
-        var parsed = try self.request(struct { cell_px_w: u32, cell_px_h: u32 }, "get_cell_metrics", .{});
+        var parsed = try self.request(protocol.CellMetricsResult, "get_cell_metrics", .{});
         defer parsed.deinit();
         return .{ .w = parsed.value.result.cell_px_w, .h = parsed.value.result.cell_px_h };
     }
@@ -2036,7 +1860,7 @@ pub const Client = struct {
             };
         }
 
-        var parsed = try self.request(struct { handle: core.TableHandle }, "create_table", .{
+        var parsed = try self.request(protocol.CreateTableResult, "create_table", .{
             .layer = layer,
             .row = row,
             .col = col,
@@ -2103,7 +1927,7 @@ pub const Client = struct {
         width: ?usize,
         style: OutlineStyleInput,
     ) !core.OutlineHandle {
-        var parsed = try self.request(struct { handle: core.OutlineHandle }, "create_outline", .{
+        var parsed = try self.request(protocol.CreateOutlineResult, "create_outline", .{
             .layer = layer,
             .row = row,
             .col = col,
@@ -2373,13 +2197,13 @@ pub const Client = struct {
     /// handle for `updateRect`/`destroyRect`. Position/size are in the
     /// layer's own content pixel space -- see `core.Rect`'s doc comment.
     pub fn createRect(self: *Client, layer: ?core.LayerHandle, rect: core.Rect) !core.RectHandle {
-        var parsed = try self.request(struct { handle: core.RectHandle }, "create_rect", rectParams(layer, rect));
+        var parsed = try self.request(protocol.CreateRectResult, "create_rect", rectParams(layer, rect));
         defer parsed.deinit();
         return parsed.value.result.handle;
     }
 
     /// `create_rect`'s wire params. Shared with `Batch.createRect`.
-    fn rectParams(layer: ?core.LayerHandle, rect: core.Rect) RectWire {
+    fn rectParams(layer: ?core.LayerHandle, rect: core.Rect) protocol.CreateRectParams {
         return .{
             .layer = layer,
             .x = rect.x,
@@ -2392,17 +2216,6 @@ pub const Client = struct {
         };
     }
 
-    const RectWire = struct {
-        layer: ?core.LayerHandle,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-        color: protocol.Color,
-        line_width: u32,
-        filled: bool,
-    };
-
     /// `update_rect(layer?, rect, ...)` -- a notification. Merges `patch`'s
     /// non-null fields into the existing rect; a field left `null` keeps
     /// its current value -- see `core.RectUpdate`'s doc comment.
@@ -2411,7 +2224,7 @@ pub const Client = struct {
     }
 
     /// `update_rect`'s wire params. Shared with `Batch.updateRect`.
-    fn rectUpdateParams(layer: ?core.LayerHandle, handle: core.RectHandle, patch: core.RectUpdate) RectUpdateWire {
+    fn rectUpdateParams(layer: ?core.LayerHandle, handle: core.RectHandle, patch: core.RectUpdate) protocol.UpdateRectParams {
         return .{
             .layer = layer,
             .rect = handle,
@@ -2424,18 +2237,6 @@ pub const Client = struct {
             .filled = patch.filled,
         };
     }
-
-    const RectUpdateWire = struct {
-        layer: ?core.LayerHandle,
-        rect: core.RectHandle,
-        x: ?u32,
-        y: ?u32,
-        w: ?u32,
-        h: ?u32,
-        color: ?protocol.Color,
-        line_width: ?u32,
-        filled: ?bool,
-    };
 
     /// `destroy_rect(layer?, rect)` -- a notification. Removes the rect;
     /// it stops painting immediately.
@@ -2451,17 +2252,8 @@ pub const Client = struct {
         try self.notify("set_drop_target", dropTargetParams(layer, target));
     }
 
-    const DropTargetWire = struct {
-        layer: ?core.LayerHandle,
-        mode: []const u8,
-        row: ?usize = null,
-        col: ?usize = null,
-        rows: ?usize = null,
-        cols: ?usize = null,
-    };
-
     /// `set_drop_target`'s wire params. Shared with `Batch.setDropTarget`.
-    fn dropTargetParams(layer: ?core.LayerHandle, target: ?core.DropTarget) DropTargetWire {
+    fn dropTargetParams(layer: ?core.LayerHandle, target: ?core.DropTarget) protocol.SetDropTargetParams {
         const t = target orelse return .{ .layer = layer, .mode = "none" };
         return switch (t) {
             .layer => .{ .layer = layer, .mode = "layer" },
@@ -2477,25 +2269,16 @@ pub const Client = struct {
     /// `updateNinePatch`/`destroyNinePatch`. Drawn under every cell
     /// background on the layer -- see `core.NinePatch`.
     pub fn createNinePatch(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, rows: usize, cols: usize, style: []const u8) !core.NinePatchHandle {
-        var parsed = try self.request(struct { handle: core.NinePatchHandle }, "create_nine_patch", ninePatchParams(layer, row, col, rows, cols, style));
+        var parsed = try self.request(protocol.CreateNinePatchResult, "create_nine_patch", ninePatchParams(layer, row, col, rows, cols, style));
         defer parsed.deinit();
         return parsed.value.result.handle;
     }
 
     /// `create_nine_patch`'s wire params. Shared with
     /// `Batch.createNinePatch`.
-    fn ninePatchParams(layer: ?core.LayerHandle, row: usize, col: usize, rows: usize, cols: usize, style: []const u8) NinePatchWire {
+    fn ninePatchParams(layer: ?core.LayerHandle, row: usize, col: usize, rows: usize, cols: usize, style: []const u8) protocol.CreateNinePatchParams {
         return .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols, .style = style };
     }
-
-    const NinePatchWire = struct {
-        layer: ?core.LayerHandle,
-        row: usize,
-        col: usize,
-        rows: usize,
-        cols: usize,
-        style: []const u8,
-    };
 
     /// `update_nine_patch`'s patch: a `null` field is left unchanged. The
     /// client-side twin of `core.NinePatchUpdate`, carrying the style's
@@ -2516,7 +2299,7 @@ pub const Client = struct {
 
     /// `update_nine_patch`'s wire params. Shared with
     /// `Batch.updateNinePatch`.
-    fn ninePatchUpdateParams(layer: ?core.LayerHandle, handle: core.NinePatchHandle, patch: NinePatchUpdate) NinePatchUpdateWire {
+    fn ninePatchUpdateParams(layer: ?core.LayerHandle, handle: core.NinePatchHandle, patch: NinePatchUpdate) protocol.UpdateNinePatchParams {
         return .{
             .layer = layer,
             .nine_patch = handle,
@@ -2528,16 +2311,6 @@ pub const Client = struct {
         };
     }
 
-    const NinePatchUpdateWire = struct {
-        layer: ?core.LayerHandle,
-        nine_patch: core.NinePatchHandle,
-        row: ?usize,
-        col: ?usize,
-        rows: ?usize,
-        cols: ?usize,
-        style: ?[]const u8,
-    };
-
     /// `destroy_nine_patch(layer?, nine_patch)` -- a notification. Removes
     /// the nine-patch; it stops painting immediately.
     pub fn destroyNinePatch(self: *Client, layer: ?core.LayerHandle, handle: core.NinePatchHandle) !void {
@@ -2547,10 +2320,10 @@ pub const Client = struct {
     /// `create_metadata(json)` -- a request. Stores `json` verbatim (the
     /// server never parses it, only stores/returns it -- see decisions.md's
     /// Metadata section) and returns a fresh handle that
-    /// `writeTextTagged`/`drawIconStyled`'s `metadata_id`, `getMetadata`,
+    /// `writeText`/`drawIconStyled`'s `metadata_id`, `getMetadata`,
     /// or `destroyMetadata` can reference.
     pub fn createMetadata(self: *Client, json: []const u8) !core.MetadataHandle {
-        var parsed = try self.request(struct { handle: core.MetadataHandle }, "create_metadata", .{ .json = json });
+        var parsed = try self.request(protocol.CreateMetadataResult, "create_metadata", .{ .json = json });
         defer parsed.deinit();
         return parsed.value.result.handle;
     }
@@ -2580,7 +2353,7 @@ pub const Client = struct {
     /// `layer` null means the root layer -- same rule every
     /// layer-optional method on this type follows.
     pub fn getMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, view_offset: usize) !struct { id: ?core.MetadataHandle, json: ?[]u8 } {
-        var parsed = try self.request(struct { id: ?core.MetadataHandle, json: ?[]const u8 }, "get_metadata", .{ .layer = layer, .row = row, .col = col, .view_offset = view_offset });
+        var parsed = try self.request(protocol.GetMetadataResult, "get_metadata", .{ .layer = layer, .row = row, .col = col, .view_offset = view_offset });
         defer parsed.deinit();
         const json = if (parsed.value.result.json) |j| try self.alloc.dupe(u8, j) else null;
         return .{ .id = parsed.value.result.id, .json = json };
@@ -2600,7 +2373,7 @@ pub const Client = struct {
         dir: core.MetadataSpanDir,
     ) !?core.MetadataSpanHit {
         var parsed = try self.request(
-            struct { found: bool, above: i64 = 0, col: usize = 0, id: ?core.MetadataHandle = null },
+            protocol.FindMetadataResult,
             "find_metadata",
             .{ .layer = layer, .above = above, .col = col, .direction = @tagName(dir) },
         );
@@ -2664,7 +2437,7 @@ pub const Client = struct {
     /// text (empty string when nothing is selected); caller owns it, free
     /// with this Client's allocator.
     pub fn getSelectionText(self: *Client, layer: ?core.LayerHandle) ![]u8 {
-        var parsed = try self.request(struct { text: []const u8 }, "get_selection_text", .{ .layer = layer });
+        var parsed = try self.request(protocol.SelectionTextResult, "get_selection_text", .{ .layer = layer });
         defer parsed.deinit();
         return try self.alloc.dupe(u8, parsed.value.result.text);
     }
@@ -2746,7 +2519,7 @@ pub const Client = struct {
     /// buffer (see `core.Context.clipboard` for its freshness caveat on
     /// glyphwire-host); caller owns the result.
     pub fn getClipboard(self: *Client) ![]u8 {
-        var parsed = try self.request(struct { text: []const u8 }, "get_clipboard", .{});
+        var parsed = try self.request(protocol.ClipboardResult, "get_clipboard", .{});
         defer parsed.deinit();
         return try self.alloc.dupe(u8, parsed.value.result.text);
     }
@@ -2775,28 +2548,32 @@ pub const Client = struct {
     /// or theme role goes out as the reference, for the host to resolve.
     pub const colorToWire = protocol.colorToWire;
 
-    fn notify(self: *Client, method: []const u8, params: anytype) !void {
-        const body = try codec.notification(self.format, self.alloc, method, params, .{});
-        defer self.alloc.free(body);
-        try self.frameAndFlush(body);
-    }
-
-    /// `notify` with every null field left out of the JSON rather than
-    /// sent as `null`. Only for methods whose server-side params give each
-    /// optional field a null default, so absent and null mean the same
-    /// thing -- today `write_text`, the hot path, where the nulls were over
-    /// half the bytes of a syntax-coloured frame.
-    fn notifyCompact(self: *Client, method: []const u8, params: anytype) !void {
+    /// Sends `method` as a notification. `params` is the struct the
+    /// server's handler parses (`protocol.ParamsOf`), so an anonymous
+    /// literal here is checked field by field against it.
+    ///
+    /// Null fields are left out rather than sent as `null`: every optional
+    /// in `protocol`'s params defaults to null, so absent and null mean the
+    /// same thing to the server, and on a syntax-coloured `write_text`
+    /// frame the nulls were over half the bytes.
+    fn notify(self: *Client, comptime method: []const u8, params: protocol.ParamsOf(method)) !void {
         const body = try codec.notification(self.format, self.alloc, method, params, .{ .omit_nulls = true });
         defer self.alloc.free(body);
         try self.frameAndFlush(body);
     }
 
-    fn request(self: *Client, comptime ResultT: type, method: []const u8, params: anytype) !std.json.Parsed(codec.Result(ResultT)) {
+    /// Sends `method` as a request and reads its response as `ResultT`.
+    /// `params` as for `notify`.
+    fn request(
+        self: *Client,
+        comptime ResultT: type,
+        comptime method: []const u8,
+        params: protocol.ParamsOf(method),
+    ) !std.json.Parsed(codec.Result(ResultT)) {
         const id = self.next_id;
         self.next_id += 1;
 
-        const body = try codec.request(self.format, self.alloc, id, method, params, .{});
+        const body = try codec.request(self.format, self.alloc, id, method, params, .{ .omit_nulls = true });
         defer self.alloc.free(body);
         try self.frameAndFlush(body);
 
@@ -2874,36 +2651,31 @@ pub const Client = struct {
             self.arena.deinit();
         }
 
+        /// Encodes one sub-message, null fields left out as in
+        /// `Client.notify`.
         fn append(self: *Batch, sub_id: ?u32, method: []const u8, params: anytype) !void {
             const a = self.arena.allocator();
             const format = self.client.format;
             const s = if (sub_id) |sid|
-                try codec.encodeAlloc(format, a, .{ .method = method, .params = params, .id = sid }, .{})
+                try codec.encodeAlloc(format, a, .{ .method = method, .params = params, .id = sid }, .{ .omit_nulls = true })
             else
-                try codec.encodeAlloc(format, a, .{ .method = method, .params = params }, .{});
-            try self.msgs.append(a, s);
-        }
-
-        /// A notification sub-message with null fields left out -- see
-        /// `Client.notifyCompact` for which methods may use it.
-        fn notifyCompact(self: *Batch, method: []const u8, params: anytype) !void {
-            const a = self.arena.allocator();
-            const s = try codec.encodeAlloc(self.client.format, a, .{ .method = method, .params = params }, .{ .omit_nulls = true });
+                try codec.encodeAlloc(format, a, .{ .method = method, .params = params }, .{ .omit_nulls = true });
             try self.msgs.append(a, s);
         }
 
         /// Appends a notification sub-message (no result). `method`/
         /// `params` are the same pair `Client`'s own notification methods
-        /// build -- this is the generic escape hatch for anything without
-        /// a typed convenience below.
-        pub fn notify(self: *Batch, method: []const u8, params: anytype) !void {
+        /// build, typed the same way (`protocol.ParamsOf`) -- this is the
+        /// generic escape hatch for anything without a typed convenience
+        /// below.
+        pub fn notify(self: *Batch, comptime method: []const u8, params: protocol.ParamsOf(method)) !void {
             try self.append(null, method, params);
         }
 
         /// Appends a request sub-message and returns its `Slot`. `method`/
         /// `params` mirror `Client.request`'s. The result comes back in
         /// `send`'s `BatchResults`, keyed by the returned slot.
-        pub fn request(self: *Batch, method: []const u8, params: anytype) !Slot {
+        pub fn request(self: *Batch, comptime method: []const u8, params: protocol.ParamsOf(method)) !Slot {
             self.n_requests += 1;
             const sub_id = self.n_requests;
             try self.append(sub_id, method, params);
@@ -2918,48 +2690,15 @@ pub const Client = struct {
 
         // -- Text, clearing and the cursor --
 
-        /// Batched `write_text` with every option -- see `Client.TextOpts`.
-        pub fn writeTextOpts(self: *Batch, text: []const u8, opts: TextOpts) !void {
-            try self.notifyCompact("write_text", textParams(text, null, opts));
+        /// Batched `write_text` -- see `Client.writeText`.
+        pub fn writeText(self: *Batch, text: []const u8, opts: TextOpts) !void {
+            try self.notify("write_text", textParams(text, null, opts));
         }
 
         /// Batched `write_text` with `spans` -- see `Client.writeSpans`.
         pub fn writeSpans(self: *Batch, spans: []const Span, opts: TextOpts) !void {
             const wire_spans = try spansToWire(self.arena.allocator(), spans);
-            try self.notifyCompact("write_text", textParams(null, wire_spans, opts));
-        }
-
-        /// Batched `write_text` -- see `Client.writeText`.
-        pub fn writeText(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
-            try self.notify("write_text", .{ .text = text, .fg = colorToJson(fg), .bg = colorToJson(bg) });
-        }
-
-        /// Batched `write_text` with a metadata tag -- see
-        /// `Client.writeTextTagged`.
-        pub fn writeTextTagged(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: core.MetadataHandle) !void {
-            try self.notify("write_text", .{ .text = text, .fg = colorToJson(fg), .bg = colorToJson(bg), .metadata_id = metadata_id });
-        }
-
-        /// Batched `write_text` with a metadata tag and a `scale` -- see
-        /// `Client.writeTextScaled`.
-        pub fn writeTextScaled(self: *Batch, text: []const u8, fg: ?core.Color, bg: ?core.Color, metadata_id: ?core.MetadataHandle, scale: core.TextScale) !void {
-            try self.notify("write_text", .{ .text = text, .fg = colorToJson(fg), .bg = colorToJson(bg), .metadata_id = metadata_id, .scale = @tagName(scale) });
-        }
-
-        /// Batched `write_text(text, fg?, transparent_bg: true)` -- see
-        /// `Client.writeTextTransparent`.
-        pub fn writeTextTransparent(self: *Batch, text: []const u8, fg: ?core.Color) !void {
-            try self.notify("write_text", .{ .text = text, .fg = colorToJson(fg), .transparent_bg = true });
-        }
-
-        /// Batched `Client.writeTextOn`.
-        pub fn writeTextOn(self: *Batch, layer: core.LayerHandle, text: []const u8, fg: ?core.Color, bg: ?core.Color) !void {
-            try self.notify("write_text", .{ .layer = layer, .text = text, .fg = colorToJson(fg), .bg = colorToJson(bg) });
-        }
-
-        /// Batched `Client.writeTextOnTransparent`.
-        pub fn writeTextOnTransparent(self: *Batch, layer: core.LayerHandle, text: []const u8, fg: ?core.Color) !void {
-            try self.notify("write_text", .{ .layer = layer, .text = text, .fg = colorToJson(fg), .transparent_bg = true });
+            try self.notify("write_text", textParams(null, wire_spans, opts));
         }
 
         /// Batched `clear` with every option -- see `Client.ClearOpts`.
@@ -3883,78 +3622,21 @@ pub const FocusEvent = struct { focused: bool };
 
 /// `get_property(layer, "scroll_offset")`'s result -- where the viewport
 /// sits and how far it can go on each axis.
-pub const ScrollOffsetState = struct {
-    row: usize,
-    col: usize,
-    max_row: usize,
-    max_col: usize,
-};
+pub const ScrollOffsetState = protocol.ScrollOffsetResult;
 
-/// One `set_split_children` entry, in the shape the wire wants: exactly
-/// one of `layer`/`split`, and at most one of `weight`/`fixed`. The
-/// constructors below are the ergonomic way to build them.
-/// One `set_pane_split_children` entry. The window-level mirror of
-/// `SplitChildInput`: same sizing vocabulary, different child kind.
-pub const PaneSplitChildInput = struct {
-    pane: ?core.PaneHandle = null,
-    split: ?core.PaneSplitHandle = null,
-    weight: ?f32 = null,
-    fixed: ?usize = null,
+/// One `set_split_children` entry -- see `protocol.SplitChildParams` and
+/// its constructors.
+pub const SplitChildInput = protocol.SplitChildParams;
 
-    /// A pane taking a share of whatever the fixed siblings leave.
-    pub fn paneWeighted(handle: core.PaneHandle, weight: f32) PaneSplitChildInput {
-        return .{ .pane = handle, .weight = weight };
-    }
-
-    /// A pane with an exact extent along the split's axis -- a fixed-width
-    /// sidebar pane, a one-row status pane.
-    pub fn paneFixed(handle: core.PaneHandle, cells: usize) PaneSplitChildInput {
-        return .{ .pane = handle, .fixed = cells };
-    }
-
-    pub fn splitWeighted(handle: core.PaneSplitHandle, weight: f32) PaneSplitChildInput {
-        return .{ .split = handle, .weight = weight };
-    }
-
-    pub fn splitFixed(handle: core.PaneSplitHandle, cells: usize) PaneSplitChildInput {
-        return .{ .split = handle, .fixed = cells };
-    }
-};
+/// One `set_pane_split_children` entry -- see
+/// `protocol.PaneSplitChildParams` and its constructors.
+pub const PaneSplitChildInput = protocol.PaneSplitChildParams;
 
 /// What `create_pane` answers with: the pane, and the context it shows.
 pub const PaneCreated = struct {
     pane: core.PaneHandle,
     context: core.ContextHandle,
 };
-
-pub const SplitChildInput = struct {
-    layer: ?core.LayerHandle = null,
-    split: ?core.SplitHandle = null,
-    weight: ?f32 = null,
-    fixed: ?usize = null,
-
-    /// A layer taking a share of whatever the fixed siblings leave.
-    pub fn layerWeighted(handle: core.LayerHandle, weight: f32) SplitChildInput {
-        return .{ .layer = handle, .weight = weight };
-    }
-
-    /// A layer with an exact extent along the split's axis -- a one-row
-    /// statusline, a fixed-width gutter.
-    pub fn layerFixed(handle: core.LayerHandle, cells: usize) SplitChildInput {
-        return .{ .layer = handle, .fixed = cells };
-    }
-
-    /// A nested split taking a share.
-    pub fn splitWeighted(handle: core.SplitHandle, weight: f32) SplitChildInput {
-        return .{ .split = handle, .weight = weight };
-    }
-
-    /// A nested split with an exact extent.
-    pub fn splitFixed(handle: core.SplitHandle, cells: usize) SplitChildInput {
-        return .{ .split = handle, .fixed = cells };
-    }
-};
-
 /// A `scroll_offset` notification: a layer's viewport moved over its
 /// content grid (the host's wheel or scrollbar, or another client's
 /// `set_property`). Carries the handle, unlike `ScrollEvent`, which is
@@ -4596,7 +4278,7 @@ pub const InputListener = struct {
     /// Fire-and-forget (a notification, no ack); safe to call while the
     /// reader thread is running (nothing else writes this connection).
     pub fn attachContext(self: *InputListener, context: core.ContextHandle) !void {
-        const body = try codec.notification(self.format, self.alloc, "attach_context", .{ .context = context }, .{});
+        const body = try codec.notification(self.format, self.alloc, "attach_context", protocol.ContextHandleParams{ .context = context }, .{});
         defer self.alloc.free(body);
         try self.writeBody(body);
     }
@@ -4620,8 +4302,7 @@ pub const InputListener = struct {
     /// Ordering makes it safe anyway -- everything this connection receives
     /// afterwards is decided on the server, after this has been processed.
     pub fn joinWindowManager(self: *InputListener, token: u64) !void {
-        const Params = struct { role: []const u8 = "window_manager", token: u64 };
-        const body = try codec.notification(self.format, self.alloc, "join_role", Params{ .token = token }, .{});
+        const body = try codec.notification(self.format, self.alloc, "join_role", protocol.RequestRoleParams{ .role = "window_manager", .token = token }, .{});
         defer self.alloc.free(body);
         try self.writeBody(body);
     }
@@ -4637,11 +4318,7 @@ pub const InputListener = struct {
     /// into one message makes that window impossible rather than merely
     /// small.
     fn sendSubscribeAndWaitForAck(self: *InputListener, events: []const []const u8, pane: ?core.PaneHandle) !void {
-        const Params = struct {
-            events: []const []const u8,
-            pane: ?core.PaneHandle = null,
-        };
-        const body = try codec.request(self.format, self.alloc, 1, "subscribe", Params{ .events = events, .pane = pane }, .{});
+        const body = try codec.request(self.format, self.alloc, 1, "subscribe", protocol.SubscribeParams{ .events = events, .pane = pane }, .{});
         defer self.alloc.free(body);
 
         // The connection's first bytes: the preamble rides in front of

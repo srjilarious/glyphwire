@@ -61,7 +61,7 @@ fn run(init: std.process.Init) !void {
     try client.clear(0, 0, null, null);
 
     try client.setCursor(0, 0);
-    try client.writeText("glyphwire table demo", rgb(0, 255, 255), null);
+    try client.writeText("glyphwire table demo", .{ .fg = rgb(0, 255, 255) });
 
     const bordered_rows = try buildRows(alloc, 3);
     const bordered = try client.createTable(null, 2, 0, &.{
@@ -76,7 +76,7 @@ fn run(init: std.process.Init) !void {
     const ruled_col = 40 + 4;
 
     try client.setCursor(2, ruled_col);
-    try client.writeText("ruled, no border:", rgb(255, 255, 255), null);
+    try client.writeText("ruled, no border:", .{ .fg = rgb(255, 255, 255) });
 
     const ruled_rows = try buildRows(alloc, 2);
     const ruled = try client.createTable(null, 3, ruled_col, &.{
@@ -87,7 +87,7 @@ fn run(init: std.process.Init) !void {
     const bare_col = ruled_col + 31 + 4;
 
     try client.setCursor(2, bare_col);
-    try client.writeText("bare:", rgb(255, 255, 255), null);
+    try client.writeText("bare:", .{ .fg = rgb(255, 255, 255) });
 
     const bare_rows = try buildRows(alloc, 2);
     const bare = try client.createTable(null, 3, bare_col, &.{

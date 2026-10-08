@@ -515,7 +515,7 @@ pub const Ui = struct {
                     defer self.alloc.free(blank);
                     @memset(blank, ' ');
                     for (0..im.rows) |r| {
-                        try b.writeTextOpts(blank, .{
+                        try b.writeText(blank, .{
                             .layer = self.page_layer,
                             .row = im.row + r,
                             .col = im.col,
@@ -595,7 +595,7 @@ pub const Ui = struct {
         const left_max = cols -| right_w;
         var b = self.client.batch();
         defer b.deinit();
-        try b.writeTextOpts(left, .{
+        try b.writeText(left, .{
             .layer = self.status_layer,
             .row = 0,
             .col = 0,
@@ -604,7 +604,7 @@ pub const Ui = struct {
             .max_cols = left_max,
             .pad = true,
         });
-        try b.writeTextOpts(right, .{ .layer = self.status_layer, .row = 0, .col = left_max, .fg = fg_muted, .bg = bg_status });
+        try b.writeText(right, .{ .layer = self.status_layer, .row = 0, .col = left_max, .fg = fg_muted, .bg = bg_status });
         var sent = try b.send();
         sent.deinit();
     }

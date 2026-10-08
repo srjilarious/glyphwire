@@ -594,7 +594,7 @@ const Ui = struct {
         // cursor property is the *next write* position, not a visual
         // marker.
         try b.clearArea(.{ .layer = self.header_layer, .row = 1, .rows = 1 });
-        try b.writeTextOpts(self.scratch.items, .{
+        try b.writeText(self.scratch.items, .{
             .layer = self.header_layer,
             .row = 1,
             .col = 0,
@@ -602,7 +602,7 @@ const Ui = struct {
             .bg = bg_header,
             .max_cols = self.cols,
         });
-        try b.writeTextOpts(" ", .{ .layer = self.header_layer, .fg = bg_header, .bg = fg_header, .max_cols = 1 });
+        try b.writeText(" ", .{ .layer = self.header_layer, .fg = bg_header, .bg = fg_header, .max_cols = 1 });
 
         self.scratch.clearRetainingCapacity();
         const pick = switch (self.mode) {
@@ -637,7 +637,7 @@ const Ui = struct {
     /// and pads the rest of the row in `bg`, so stale content from a
     /// longer previous line never survives.
     fn writeLine(self: *Ui, b: *glyphwire.Client.Batch, layer: glyphwire.LayerHandle, row: usize, text: []const u8, fg: glyphwire.Color, bg: glyphwire.Color) !void {
-        try b.writeTextOpts(text, .{
+        try b.writeText(text, .{
             .layer = layer,
             .row = row,
             .col = 0,

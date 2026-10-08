@@ -123,7 +123,7 @@ pub fn parseBatchMessages(alloc: std.mem.Allocator, params: Params) !std.json.Pa
 pub const EncodeOptions = struct {
     /// Leave null optional fields out rather than writing them as null.
     /// Only for params whose receiving struct defaults every optional to
-    /// null -- see `Client.notifyCompact`.
+    /// null, as `protocol`'s request params all do -- see `Client.notify`.
     omit_nulls: bool = false,
 };
 

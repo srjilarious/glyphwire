@@ -342,12 +342,12 @@ fn draw(
         // last row and emit a newline to scroll one blank in, the same
         // gap `gw-ls -l` leaves in that case.
         try client.setCursor(bottom, 0);
-        try client.writeText("\n", null, null);
+        try client.writeText("\n", .{});
     }
 
     if (cap) |max| {
         var buf: [128]u8 = undefined;
-        try client.writeText(capNote(&buf, max), glyphwire.Color.role(.message), null);
+        try client.writeText(capNote(&buf, max), .{ .fg = glyphwire.Color.role(.message) });
     }
 }
 

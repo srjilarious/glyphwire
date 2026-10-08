@@ -1478,24 +1478,24 @@ pub const Ui = struct {
         const title = std.fmt.bufPrint(&title_buf, " {s} ", .{d.title}) catch d.title;
         const title_col = (w -| glyphwire.stringWidth(title)) / 2;
         try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = title_bg });
-        try b.writeTextOpts(title, .{ .layer = layer, .row = 0, .col = title_col, .fg = fg_title_active, .bg = title_bg, .max_cols = w });
+        try b.writeText(title, .{ .layer = layer, .row = 0, .col = title_col, .fg = fg_title_active, .bg = title_bg, .max_cols = w });
 
         var row: usize = 2;
         it = std.mem.splitScalar(u8, d.message, '\n');
         while (it.next()) |line| : (row += 1) {
             if (row >= h -| 2) break;
-            try b.writeTextOpts(line, .{ .layer = layer, .row = row, .col = 2, .fg = fg_dialog, .bg = bg_dialog, .max_cols = w -| 4 });
+            try b.writeText(line, .{ .layer = layer, .row = row, .col = 2, .fg = fg_dialog, .bg = bg_dialog, .max_cols = w -| 4 });
         }
         row += 1;
 
         if (d.input) |*in| {
             const field_w = w -| 4;
             const view = fieldView(in.text(), in.caret, field_w);
-            try b.writeTextOpts(in.text()[view.start..], .{ .layer = layer, .row = row, .col = 2, .fg = fg_dialog, .bg = bg_input, .max_cols = field_w, .pad = true });
+            try b.writeText(in.text()[view.start..], .{ .layer = layer, .row = row, .col = 2, .fg = fg_dialog, .bg = bg_input, .max_cols = field_w, .pad = true });
             // The caret: the character under it (or a blank past the end)
             // drawn in reverse.
             const under = if (in.caret < in.text().len) in.text()[in.caret..nextCodepoint(in.text(), in.caret)] else " ";
-            try b.writeTextOpts(under, .{ .layer = layer, .row = row, .col = 2 + view.caret_col, .fg = bg_input, .bg = fg_dialog });
+            try b.writeText(under, .{ .layer = layer, .row = row, .col = 2 + view.caret_col, .fg = bg_input, .bg = fg_dialog });
             row += 2;
         }
 
@@ -1509,9 +1509,9 @@ pub const Ui = struct {
             const bg = if (focused) bg_button_focus else bg_button;
             var lbuf: [32]u8 = undefined;
             const text = std.fmt.bufPrint(&lbuf, "[ {s} ]", .{label}) catch label;
-            try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = col, .fg = fg_dialog, .bg = bg });
+            try b.writeText(text, .{ .layer = layer, .row = row, .col = col, .fg = fg_dialog, .bg = bg });
             if (d.input == null) {
-                try b.writeTextOpts(label[0..1], .{ .layer = layer, .row = row, .col = col + 2, .fg = fg_marked, .bg = bg });
+                try b.writeText(label[0..1], .{ .layer = layer, .row = row, .col = col + 2, .fg = fg_marked, .bg = bg });
             }
             if (i < self.button_spans.len) self.button_spans[i] = .{ .row = row, .col = col, .w = bw };
             col += bw + 1;
@@ -1797,7 +1797,7 @@ pub const Ui = struct {
             } else {
                 var pbuf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
                 const shown = self.displayPath(&pbuf, p.path, w -| 2);
-                try b.writeTextOpts(shown, .{ .layer = layer, .row = 0, .col = 1, .fg = fg, .bg = bg, .max_cols = w -| 2 });
+                try b.writeText(shown, .{ .layer = layer, .row = 0, .col = 1, .fg = fg, .bg = bg, .max_cols = w -| 2 });
             }
         }
 
@@ -1806,13 +1806,13 @@ pub const Ui = struct {
         // under it are, so the arrow sits against the numbers.
         var head_buf: [32]u8 = undefined;
         try b.clearArea(.{ .layer = layer, .row = header_row, .rows = 1, .bg = bg_header });
-        try b.writeTextOpts(headerLabel(&head_buf, "Name", p.sort, .name), .{ .layer = layer, .row = header_row, .col = cols.name_col, .fg = fg_header, .bg = bg_header });
+        try b.writeText(headerLabel(&head_buf, "Name", p.sort, .name), .{ .layer = layer, .row = header_row, .col = cols.name_col, .fg = fg_header, .bg = bg_header });
         if (cols.size_col) |c| {
             const label = headerLabel(&head_buf, "Size", p.sort, .size);
             const pad = size_w -| gridlayout.displayWidth(label);
-            try b.writeTextOpts(label, .{ .layer = layer, .row = header_row, .col = c + pad, .fg = fg_header, .bg = bg_header });
+            try b.writeText(label, .{ .layer = layer, .row = header_row, .col = c + pad, .fg = fg_header, .bg = bg_header });
         }
-        if (cols.date_col) |c| try b.writeTextOpts(headerLabel(&head_buf, "Modified", p.sort, .time), .{ .layer = layer, .row = header_row, .col = c, .fg = fg_header, .bg = bg_header });
+        if (cols.date_col) |c| try b.writeText(headerLabel(&head_buf, "Modified", p.sort, .time), .{ .layer = layer, .row = header_row, .col = c, .fg = fg_header, .bg = bg_header });
 
         // Rows: text first, icons last -- a text write clears a cell's
         // foreground icon, and a tall icon spills into the row below.
@@ -1937,11 +1937,11 @@ pub const Ui = struct {
         const fg = colors.name;
         const detail_fg = colors.detail;
 
-        if (marked) try b.writeTextOpts("*", .{ .layer = layer, .row = y, .col = 0, .fg = detail_fg, .bg = bg });
+        if (marked) try b.writeText("*", .{ .layer = layer, .row = y, .col = 0, .fg = detail_fg, .bg = bg });
 
         var nbuf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
         const name_text = gridlayout.truncateToCols(&nbuf, name, cols.name_w);
-        try b.writeTextOpts(name_text, .{ .layer = layer, .row = y, .col = cols.name_col, .fg = fg, .bg = bg });
+        try b.writeText(name_text, .{ .layer = layer, .row = y, .col = cols.name_col, .fg = fg, .bg = bg });
 
         if (cols.size_col) |c| {
             var sbuf: [24]u8 = undefined;
@@ -1949,12 +1949,12 @@ pub const Ui = struct {
                 if ((e.link_target_kind orelse e.kind) == .directory) break :blk "   <DIR>";
                 break :blk lsfmt.formatSize(&sbuf, e.size, false);
             } else "    <UP>";
-            try b.writeTextOpts(size_text, .{ .layer = layer, .row = y, .col = c, .fg = detail_fg, .bg = bg });
+            try b.writeText(size_text, .{ .layer = layer, .row = y, .col = c, .fg = detail_fg, .bg = bg });
         }
         if (cols.date_col) |c| {
             if (entry) |e| {
                 var tbuf: [20]u8 = undefined;
-                try b.writeTextOpts(lsfmt.formatTimestamp(&tbuf, e.mtime_sec), .{ .layer = layer, .row = y, .col = c, .fg = detail_fg, .bg = bg });
+                try b.writeText(lsfmt.formatTimestamp(&tbuf, e.mtime_sec), .{ .layer = layer, .row = y, .col = c, .fg = detail_fg, .bg = bg });
             }
         }
 
@@ -1968,7 +1968,7 @@ pub const Ui = struct {
                     lsfmt.formatPermBits(&perm_buf, e.mode),
                     lsentries.ownerGroupText(&owner_buf, e.uid, e.gid),
                 }) catch "";
-                try b.writeTextOpts(line, .{ .layer = layer, .row = y + 1, .col = cols.name_col, .fg = detail_fg, .bg = bg, .max_cols = w -| (cols.name_col + 1) });
+                try b.writeText(line, .{ .layer = layer, .row = y + 1, .col = cols.name_col, .fg = detail_fg, .bg = bg, .max_cols = w -| (cols.name_col + 1) });
             }
         }
     }
@@ -2000,11 +2000,11 @@ pub const Ui = struct {
         // with a gap, and is cut to it rather than running underneath.
         var left_max = w -| 2;
         if (total_w > 0 and w >= total_w + 3) {
-            try b.writeTextOpts(total, .{ .layer = layer, .row = row, .col = w - 1 - total_w, .fg = fg_detail, .bg = bg_footer });
+            try b.writeText(total, .{ .layer = layer, .row = row, .col = w - 1 - total_w, .fg = fg_detail, .bg = bg_footer });
             left_max = w -| (total_w + 3);
         }
         if (text.len > 0 and left_max > 0) {
-            try b.writeTextOpts(text, .{ .layer = layer, .row = row, .col = 1, .fg = if (marked > 0) fg_marked else fg_footer, .bg = bg_footer, .max_cols = left_max });
+            try b.writeText(text, .{ .layer = layer, .row = row, .col = 1, .fg = if (marked > 0) fg_marked else fg_footer, .bg = bg_footer, .max_cols = left_max });
         }
     }
 
@@ -2019,7 +2019,7 @@ pub const Ui = struct {
         try b.clearArea(.{ .layer = layer, .bg = bg_bar });
 
         if (self.message) |m| {
-            try b.writeTextOpts(m, .{ .layer = layer, .row = 0, .col = 1, .fg = fg_message, .bg = bg_bar, .max_cols = self.win.cols -| 2 });
+            try b.writeText(m, .{ .layer = layer, .row = 0, .col = 1, .fg = fg_message, .bg = bg_bar, .max_cols = self.win.cols -| 2 });
         } else {
             var col: usize = 0;
             for (actions.bar_actions) |a| {
@@ -2029,11 +2029,11 @@ pub const Ui = struct {
                 const label = actions.barLabel(a);
                 const need = key.len + label.len + 2;
                 if (col + need > self.win.cols) break;
-                try b.writeTextOpts(key, .{ .layer = layer, .row = 0, .col = col, .fg = fg_bar_key, .bg = bg_bar });
+                try b.writeText(key, .{ .layer = layer, .row = 0, .col = col, .fg = fg_bar_key, .bg = bg_bar });
                 col += key.len;
                 var lbuf: [32]u8 = undefined;
                 const padded = std.fmt.bufPrint(&lbuf, "{s} ", .{label}) catch label;
-                try b.writeTextOpts(padded, .{ .layer = layer, .row = 0, .col = col, .fg = fg_bar_label, .bg = bg_bar_label });
+                try b.writeText(padded, .{ .layer = layer, .row = 0, .col = col, .fg = fg_bar_label, .bg = bg_bar_label });
                 col += padded.len + 1;
             }
         }
@@ -2167,9 +2167,9 @@ pub const offsetAtCol = lineedit.offsetAtCol;
 /// drawn from, which a click in the field needs to find its offset.
 fn writeField(b: *Batch, layer: glyphwire.LayerHandle, in: *const LineEdit, row: usize, col: usize, width: usize) !usize {
     const view = fieldView(in.text(), in.caret, width);
-    try b.writeTextOpts(in.text()[view.start..], .{ .layer = layer, .row = row, .col = col, .fg = fg_dialog, .bg = bg_input, .max_cols = width, .pad = true });
+    try b.writeText(in.text()[view.start..], .{ .layer = layer, .row = row, .col = col, .fg = fg_dialog, .bg = bg_input, .max_cols = width, .pad = true });
     const under = if (in.caret < in.text().len) in.text()[in.caret..nextCodepoint(in.text(), in.caret)] else " ";
-    try b.writeTextOpts(under, .{ .layer = layer, .row = row, .col = col + view.caret_col, .fg = bg_input, .bg = fg_dialog });
+    try b.writeText(under, .{ .layer = layer, .row = row, .col = col + view.caret_col, .fg = bg_input, .bg = fg_dialog });
     return view.start;
 }
 
