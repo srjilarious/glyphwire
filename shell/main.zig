@@ -28,25 +28,30 @@ const promptrow = @import("shell_support").promptrow;
 const openaction = @import("shell_support").openaction;
 const logicalpath = @import("shell_support").logicalpath;
 const remotecmd = @import("shell_support").remotecmd;
-const Pty = glyphwire.Pty;
-const ModeTracker = glyphwire.ModeTracker;
+const builtins = @import("builtins.zig");
+const completion = @import("completion.zig");
+const jobs = @import("jobs.zig");
+const persist = @import("persist.zig");
+const render = @import("render.zig");
+pub const Pty = glyphwire.Pty;
+pub const ModeTracker = glyphwire.ModeTracker;
 
 /// The left prompt template used when `shell.conf.lua` configured a prompt
 /// (`prompt.right` and/or the sub-templates) but not `prompt.left`. Byte
 /// for byte the same as the unconfigured default `writeDefaultPrefix`
 /// produces -- an absolute cwd, then `" > "`.
-const default_prompt_left = "{cwd_full} > ";
+pub const default_prompt_left = "{cwd_full} > ";
 
 /// The colour glyphwire-shell uses for every error line it prints onto
 /// the grid itself (a bad `cd`, a spawn failure, a pipeline syntax
 /// error). A theme role, like every colour the shell draws, so the host
 /// resolves it against the window's theme.
-const err_color = glyphwire.Color.role(.message_error);
+pub const err_color = glyphwire.Color.role(.message_error);
 /// `[1] zoe main.zig  (background)` and the other job notices.
-const job_color = glyphwire.Color.role(.accent);
+pub const job_color = glyphwire.Color.role(.accent);
 /// How long `hangUpJobs` waits after SIGHUP before SIGKILL, when the shell
 /// exits with jobs still in the background.
-const job_hangup_grace_ms = 500;
+pub const job_hangup_grace_ms = 500;
 
 /// Rows of context kept between the browse cursor and the top/bottom of
 /// the window while walking scrollback with the arrow keys, when
@@ -69,7 +74,7 @@ const default_completion_max_items: usize = 5;
 /// runs synchronously while the prompt is being drawn, so a hung `git`
 /// in a huge repo must not stall the prompt for long -- it's killed and
 /// `{name}` renders empty. See `Prompt.runCmdVar`.
-const default_cmd_var_timeout_ms: u64 = 400;
+pub const default_cmd_var_timeout_ms: u64 = 400;
 
 /// Resize debounce (see the resize handling in `runPrompt`). A resize
 /// drag emits an event per frame; redrawing the prompt on each one looks
@@ -85,8 +90,8 @@ const prompt_idle_ms: i64 = 500;
 
 /// Fish-style inline completion hint delay. The prompt loop already uses
 /// a 500ms idle heartbeat, so this stays aligned with that cadence.
-const autocomplete_idle_ms: i64 = 500;
-const autocomplete_hint_color = glyphwire.Color.role(.suggestion);
+pub const autocomplete_idle_ms: i64 = 500;
+pub const autocomplete_hint_color = glyphwire.Color.role(.suggestion);
 
 /// Env var naming the write end of the "result pipe" `runCommand` opens
 /// before spawning every foreground command (see `Prompt.spawnResultPipe`):
@@ -97,7 +102,7 @@ const autocomplete_hint_color = glyphwire.Color.role(.suggestion);
 /// (`Prompt.readResultPipe`). Not documented to the user as a public API
 /// yet, just a convention between the shell and its own bundled tools
 /// (`gw-hist` is the first); see docs/decisions.md "Shell result pipe".
-const result_fd_env = "GLYPHWIRE_RESULT_FD";
+pub const result_fd_env = "GLYPHWIRE_RESULT_FD";
 
 comptime {
     // The captured-child marker detector keeps its own copy of the
@@ -107,22 +112,22 @@ comptime {
         @compileError("shell_support.handshake.marker is out of sync with glyphwire.handshake_marker");
 }
 
-const c = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-    extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+pub const c = struct {
+    pub extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    pub extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    pub extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
     /// Resolves `path` against the filesystem into `resolved` (must be at
     /// least `PATH_MAX`); returns `resolved` on success, null otherwise.
-    extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]u8;
-    extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
-    extern "c" fn close(fd: c_int) c_int;
-    extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
-    extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
+    pub extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]u8;
+    pub extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
+    pub extern "c" fn close(fd: c_int) c_int;
+    pub extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
+    pub extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
     /// No `O_CLOEXEC`, matching `pipeexec.zig`'s pipes: `runCommand` wants
     /// both ends to survive `fork`+`exec` into the spawned child with no
     /// extra plumbing (see `Prompt.spawnResultPipe`), and it closes its
     /// own copies explicitly rather than relying on close-on-exec.
-    extern "c" fn pipe2(fds: *[2]c_int, flags: c_int) c_int;
+    pub extern "c" fn pipe2(fds: *[2]c_int, flags: c_int) c_int;
 };
 
 /// `signal(2)` just for the one-shot SIGPIPE ignore in `main`. Linux
@@ -136,8 +141,8 @@ const csig = struct {
 /// libc time formatting for the prompt's `{time}` token -- this reduced
 /// std has no `strftime`/`localtime`. `Tm` is glibc's `struct tm` (the
 /// nine `int` fields, then `tm_gmtoff` / `tm_zone`).
-const timelib = struct {
-    const Tm = extern struct {
+pub const timelib = struct {
+    pub const Tm = extern struct {
         sec: c_int,
         min: c_int,
         hour: c_int,
@@ -150,22 +155,12 @@ const timelib = struct {
         gmtoff: c_long,
         zone: ?[*:0]const u8,
     };
-    extern "c" fn time(t: ?*c_long) c_long;
-    extern "c" fn localtime_r(timep: *const c_long, result: *Tm) ?*Tm;
-    extern "c" fn strftime(s: [*]u8, max: usize, format: [*:0]const u8, tm: *const Tm) usize;
+    pub extern "c" fn time(t: ?*c_long) c_long;
+    pub extern "c" fn localtime_r(timep: *const c_long, result: *Tm) ?*Tm;
+    pub extern "c" fn strftime(s: [*]u8, max: usize, format: [*:0]const u8, tm: *const Tm) usize;
 };
 
-/// A powerline segment's colour: a palette slot (`"bright_blue"`), a
-/// theme role (`"status_bg"`) -- both follow the window's theme -- or a
-/// fixed `#rgb` / `#rrggbb` (the `#` optional). `null` for an unset field
-/// or a malformed value.
-fn plColor(s: ?[]const u8) ?glyphwire.Color {
-    const spec = s orelse return null;
-    if (glyphwire.theme.slotByName(spec)) |sl| return glyphwire.Color.slot(sl);
-    if (glyphwire.theme.roleByName(spec)) |r| return glyphwire.Color.role(r);
-    const p = prompt_template.parseColor(spec) orelse return null;
-    return .{ .r = p.r, .g = p.g, .b = p.b };
-}
+pub const plColor = render.plColor;
 
 /// gw-shell: sets up discovery, then either execs into a given
 /// command (`gw-shell <command> [args...]`, unchanged from
@@ -371,7 +366,7 @@ const configDirPath = glyphwire.configDirPath;
 /// `Prompt.noteResize`) and then applies it if the size has settled
 /// (`applyPendingResize`). The prompt is *not* redrawn while a resize is
 /// still in flight.
-fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
+pub fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
     var last: ?glyphwire.ResizeEvent = null;
     while (listener.pollResizeEvent()) |rev| last = rev;
     if (last) |rev| prompt.noteResize(rev.cols, rev.rows);
@@ -383,7 +378,7 @@ fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
 /// host when it generated the event: sampling the live down-set instead
 /// lets a shell that fell behind send a TUI the wrong escape sequence
 /// (Ctrl released before its keystroke was encoded).
-fn ptyMods(mods: glyphwire.Mods) keyencode.Mods {
+pub fn ptyMods(mods: glyphwire.Mods) keyencode.Mods {
     return .{ .ctrl = mods.ctrl, .shift = mods.shift, .alt = mods.alt };
 }
 
@@ -404,7 +399,7 @@ fn heldMouseButton(listener: *glyphwire.InputListener) ?keyencode.MouseButton {
 /// what the reported cell has to be measured from: the child's screen is
 /// the shell's surface, and embedded that is a panel partway down the
 /// host's window rather than the window itself.
-fn ptyMouseButton(pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseButtonEvent, origin: glyphwire.CellPos) void {
+pub fn ptyMouseButton(pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseButtonEvent, origin: glyphwire.CellPos) void {
     if (!modes.mouseReporting()) return;
     const enc: keyencode.MouseEncoding = if (modes.sgrMouse()) .sgr else .legacy;
     const btn = keyencode.mouseButtonFromName(mev.button) orelse return;
@@ -418,7 +413,7 @@ fn ptyMouseButton(pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseButtonEven
 }
 
 /// `ptyMouseButton` for pointer motion.
-fn ptyMouseMove(listener: *glyphwire.InputListener, pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseMoveEvent, origin: glyphwire.CellPos) void {
+pub fn ptyMouseMove(listener: *glyphwire.InputListener, pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseMoveEvent, origin: glyphwire.CellPos) void {
     if (!modes.mouseReporting() or !modes.wantsMotion()) return;
     const enc: keyencode.MouseEncoding = if (modes.sgrMouse()) .sgr else .legacy;
     // `?1002` reports motion only while a button is held; `?1003`
@@ -501,6 +496,11 @@ fn promptClick(prompt: *Prompt, mev: glyphwire.MouseButtonEvent) !void {
 /// insert/delete) and command dispatch. Runs forever (killed along with
 /// the rest of the process tree, same as any other long-lived child in
 /// this codebase).
+///
+/// The connections, the embed control pipe and the `Prompt` itself live in
+/// this frame (their `defer`s are here); the phases below do the rest:
+/// `seedPromptEnv`, `preparePrompt`, `runStartupScript`, then
+/// `promptEventLoop` until the shell exits.
 fn runPrompt(
     io: std.Io,
     alloc: std.mem.Allocator,
@@ -537,38 +537,58 @@ fn runPrompt(
     var prompt: Prompt = .{ .client = &client, .environ_map = environ_map, .listener = listener };
     prompt.profiler = shellProfilerFromEnv(io, environ_map);
 
-    // `--embed`: join the host's context and draw on the layer it made
-    // for us instead of on a context of our own. Both connections attach
-    // -- the drawing one so `layer?`-scoped messages resolve there, the
-    // listener so its input follows that context's visibility.
     var control: ?embed.Control = null;
     defer if (control) |*ctl| ctl.deinit();
     if (embed_opts) |eo| {
-        client.attachContext(eo.context) catch |err| {
-            std.log.err("prompt: --embed: can't attach to context {d}: {t}", .{ eo.context, err });
-            return;
-        };
-        listener.attachContext(eo.context) catch |err| {
-            std.log.err("prompt: --embed: listener can't attach to context {d}: {t}", .{ eo.context, err });
-            return;
-        };
-        prompt.layer = eo.layer;
-        // The panel starts out of focus: the host opens it, then says so.
-        prompt.focused = false;
-        if (eo.control_fd) |fd| control = embed.Control.init(alloc, fd);
-        prompt.control = if (control) |*ctl| ctl else null;
+        if (!attachEmbedded(&prompt, listener, alloc, eo, &control)) return;
     }
-    // The live environment `sh.setenv` mutates (alongside libc, for
-    // children). Seeded from the *live* libc environ, not the
-    // `std.process.Init` snapshot in `environ_map`: `main` prepends
-    // `<cwd>/zig-out/bin` to PATH and sets the GLYPHWIRE_* discovery vars
-    // with libc `setenv` *after* that snapshot is taken (see
-    // `prependZigOutBinToPath`), so seeding from the snapshot would give a
-    // stale PATH -- and then a script that rewrites PATH (venv_activate
-    // prepending its bin/) would write the stale value back through
-    // `c.setenv` and drop `zig-out/bin`, so `ls` would stop resolving to
-    // the bundled `glyphwire-ls`. Seeded before `defer prompt.deinit()`
-    // so the deinit is always safe.
+
+    try seedPromptEnv(&prompt, io, alloc);
+    // Unreachable before `exit` gave this loop a clean return path --
+    // every previous exit was a hard kill, so this never ran and the leak
+    // never surfaced.
+    defer prompt.deinit();
+
+    try preparePrompt(&prompt, io, alloc, environ_map);
+    if (runStartupScript(&prompt, io, alloc, environ_map)) return;
+    try promptEventLoop(&prompt, io, alloc, listener);
+}
+
+/// `--embed`: join the host's context and draw on the layer it made for
+/// us instead of on a context of our own. Both connections attach -- the
+/// drawing one so `layer?`-scoped messages resolve there, the listener so
+/// its input follows that context's visibility. `control` is the caller's,
+/// so it outlives this call. False (already logged) when either attach
+/// failed and the shell should give up.
+fn attachEmbedded(prompt: *Prompt, listener: *glyphwire.InputListener, alloc: std.mem.Allocator, eo: embed.Options, control: *?embed.Control) bool {
+    prompt.client.attachContext(eo.context) catch |err| {
+        std.log.err("prompt: --embed: can't attach to context {d}: {t}", .{ eo.context, err });
+        return false;
+    };
+    listener.attachContext(eo.context) catch |err| {
+        std.log.err("prompt: --embed: listener can't attach to context {d}: {t}", .{ eo.context, err });
+        return false;
+    };
+    prompt.layer = eo.layer;
+    // The panel starts out of focus: the host opens it, then says so.
+    prompt.focused = false;
+    if (eo.control_fd) |fd| control.* = embed.Control.init(alloc, fd);
+    prompt.control = if (control.*) |*ctl| ctl else null;
+    return true;
+}
+
+/// The live environment `sh.setenv` mutates (alongside libc, for
+/// children). Seeded from the *live* libc environ, not the
+/// `std.process.Init` snapshot in `environ_map`: `main` prepends
+/// `<cwd>/zig-out/bin` to PATH and sets the GLYPHWIRE_* discovery vars
+/// with libc `setenv` *after* that snapshot is taken (see
+/// `prependZigOutBinToPath`), so seeding from the snapshot would give a
+/// stale PATH -- and then a script that rewrites PATH (venv_activate
+/// prepending its bin/) would write the stale value back through
+/// `c.setenv` and drop `zig-out/bin`, so `ls` would stop resolving to
+/// the bundled `glyphwire-ls`. Called before `runPrompt`'s
+/// `defer prompt.deinit()` so the deinit is always safe.
+fn seedPromptEnv(prompt: *Prompt, io: std.Io, alloc: std.mem.Allocator) !void {
     prompt.env = std.process.Environ.Map.init(alloc);
     {
         const live: std.process.Environ.PosixBlock.View = .{ .slice = @ptrCast(std.mem.span(std.c.environ)) };
@@ -577,16 +597,15 @@ fn runPrompt(
     // `$PWD` is set from the real cwd here rather than trusted from
     // whatever launched this process -- see `Prompt.chdir` for why the
     // shell maintains it itself from this point on.
-    {
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = std.process.currentPath(io, &cwd_buf) catch 0;
-        if (n > 0) prompt.setEnvVar("PWD", cwd_buf[0..n]);
-    }
-    // Unreachable before `exit` gave this loop a clean return path --
-    // every previous exit was a hard kill, so this never ran and the leak
-    // never surfaced.
-    defer prompt.deinit();
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.process.currentPath(io, &cwd_buf) catch 0;
+    if (n > 0) prompt.setEnvVar("PWD", cwd_buf[0..n]);
+}
 
+/// Everything between connecting and the first keystroke: the surface's
+/// size, the `{host}` name and icon metrics, `shell.conf.lua`, history and
+/// the zjump database, then the first prompt.
+fn preparePrompt(prompt: *Prompt, io: std.Io, alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) !void {
     {
         // Embedded, the surface is the host's panel layer, not the
         // context's root grid -- `drawGetCells` follows `prompt.layer`.
@@ -624,23 +643,30 @@ fn runPrompt(
     prompt.persist_gate.reset(std.Io.Timestamp.now(io, .awake).toMilliseconds());
 
     try prompt.showPrompt();
+}
 
-    // Scripted input for automated screenshots / smoke runs: if
-    // GLYPHWIRE_SHELL_SCRIPT names a readable file, each non-blank,
-    // non-`#`-comment line is played through the prompt exactly as if it
-    // had been typed and submitted, before the interactive key loop
-    // starts. The prompt then carries on normally (the window stays up so
-    // a screenshot tool -- see the host's `--screenshot` -- can capture
-    // the result), unless one of the scripted lines was `exit`.
-    if (environ_map.get("GLYPHWIRE_SHELL_SCRIPT")) |script_path| {
-        if (script_path.len > 0) {
-            runScriptFile(io, alloc, &prompt, script_path) catch |err| {
-                std.log.err("prompt: couldn't run GLYPHWIRE_SHELL_SCRIPT '{s}': {t}", .{ script_path, err });
-            };
-            if (prompt.should_exit) return;
-        }
-    }
+/// Scripted input for automated screenshots / smoke runs: if
+/// GLYPHWIRE_SHELL_SCRIPT names a readable file, each non-blank,
+/// non-`#`-comment line is played through the prompt exactly as if it
+/// had been typed and submitted, before the interactive key loop
+/// starts. The prompt then carries on normally (the window stays up so
+/// a screenshot tool -- see the host's `--screenshot` -- can capture
+/// the result), unless one of the scripted lines was `exit`, which is
+/// when this returns true.
+fn runStartupScript(prompt: *Prompt, io: std.Io, alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) bool {
+    const script_path = environ_map.get("GLYPHWIRE_SHELL_SCRIPT") orelse return false;
+    if (script_path.len == 0) return false;
+    runScriptFile(io, alloc, prompt, script_path) catch |err| {
+        std.log.err("prompt: couldn't run GLYPHWIRE_SHELL_SCRIPT '{s}': {t}", .{ script_path, err });
+    };
+    return prompt.should_exit;
+}
 
+/// The interactive loop: waits for the next event (or the idle tick),
+/// hands session events to `handleSessionEvent`, and turns input into a
+/// key press for `handlePromptKey` via `takeKeyEvent`. Returns once the
+/// shell should exit.
+fn promptEventLoop(prompt: *Prompt, io: std.Io, alloc: std.mem.Allocator, listener: *glyphwire.InputListener) !void {
     var last_idle = std.Io.Clock.Timestamp.now(io, .awake);
     while (true) {
         // One profiler "tick" per loop iteration (per event or idle
@@ -664,42 +690,17 @@ fn runPrompt(
         const wait_ms: i64 = if (prompt.pending_resize != null) resize_settle_ms else prompt_idle_ms;
         const any_ev = (try listener.next(.{ .duration = .{ .raw = .fromMilliseconds(wait_ms), .clock = .awake } })) orelse {
             last_idle = std.Io.Clock.Timestamp.now(io, .awake);
-            if (promptIdleTick(&prompt)) continue;
+            _ = promptIdleTick(prompt);
             continue;
         };
         const input_ev = any_ev.asInput() orelse {
             defer any_ev.deinit(alloc);
-            // Out of focus, the pointer and the scrollback are the host's
-            // too -- only the resize still concerns us, since the panel's
-            // layer moves with the window whether or not we're typing.
-            if (!prompt.focused) {
-                switch (any_ev) {
-                    .resize => |rev| prompt.noteResize(rev.cols, rev.rows),
-                    else => {},
-                }
-                continue;
-            }
-            switch (any_ev) {
-                .mouse_button => |mev| try promptClick(&prompt, mev),
-                // Keep `prompt.view_scroll` current with any host-driven
-                // scroll (mouse wheel, scrollbar) so browse-down and the
-                // type-to-snap-back in `setCursorAt` know the real offset.
-                // Only for the surface this prompt draws on: embedded,
-                // the context has other layers with rings of their own.
-                .scroll => |sev| if (sev.layer == prompt.layer) {
-                    prompt.view_scroll = sev.offset;
-                },
-                // A window resize rebuilt the grid (bottom-anchored) and
-                // changed its dimensions. The re-layout is debounced
-                // (`Prompt.noteResize` / `applyPendingResize`).
-                .resize => |rev| prompt.noteResize(rev.cols, rev.rows),
-                else => {},
-            }
+            try handleSessionEvent(prompt, any_ev);
             // A steady stream of pointer events must not starve the idle
             // work a timeout would otherwise have run.
             if (last_idle.untilNow(io).raw.toMilliseconds() >= prompt_idle_ms) {
                 last_idle = std.Io.Clock.Timestamp.now(io, .awake);
-                _ = promptIdleTick(&prompt);
+                _ = promptIdleTick(prompt);
             }
             continue;
         };
@@ -717,301 +718,346 @@ fn runPrompt(
         // layout.
         prompt.applyPendingResize(true) catch {};
 
-        // Committed text input -- the characters the user typed, already
-        // resolved through their OS keyboard layout / dead keys / IME.
-        // Taken from the same queue as key events so "type then Enter"
-        // can't reorder. Text only edits the live line, so it's held back
-        // while browsing scrollback, matching how the printable-key path
-        // used to gate on `browse_pos`. The physical key event that
-        // accompanies each keystroke in real host use is a separate
-        // `.key` event and just falls through the handling below doing
-        // nothing.
-        const ev: glyphwire.KeyEvent = switch (input_ev) {
-            .text => |tev| {
-                defer alloc.free(tev.text);
-                // Off the browse path this just edits the live line. While
-                // browsing scrollback, `scrollback_type_exits` (default
-                // true) decides whether a keystroke snaps back to the
-                // prompt and inserts (`insertText` funnels through
-                // `setCursorAt`, which clears `browse_pos` and the scroll
-                // view) or is ignored until Escape. A lone space is the
-                // exception: while browsing it toggles the mark under the
-                // cursor (handled by the `.key` "space" arm below), so it
-                // must not be consumed as type-to-exit here.
-                const browse_space = prompt.browse_pos != null and std.mem.eql(u8, tev.text, " ");
-                if (!browse_space and (prompt.browse_pos == null or prompt.scrollbackTypeExits())) {
-                    try prompt.insertText(tev.text);
-                }
-                continue;
-            },
-            .paste => |tev| {
-                defer alloc.free(tev.text);
-                // Ctrl+Shift+V: insert the clipboard text into the live
-                // line without submitting (the user presses Enter). The
-                // editor is single-line, so the field's
-                // `.flatten_newlines` policy turns newline runs into
-                // single spaces on the way in -- a pasted file list then
-                // reads as space-separated arguments instead of one
-                // unusable blob. A paste while browsing follows the same
-                // `scrollback_type_exits` rule as typed text.
-                if (prompt.browse_pos == null or prompt.scrollbackTypeExits()) {
-                    try prompt.insertText(tev.text);
-                }
-                continue;
-            },
-            .copy_request => {
-                // Ctrl+Shift+C was pressed with nothing selected in the
-                // host. With entries marked, answer with their paths as
-                // one space-separated line (each quoted only if it needs
-                // it); otherwise with the current line. Either way it
-                // lands on the OS clipboard.
-                if (prompt.marks.items.len > 0) {
-                    if (prompt.markedPathsText(alloc)) |text| {
-                        defer alloc.free(text);
-                        client.setClipboard(text) catch |err| {
-                            std.log.err("prompt: set_clipboard (copy_request) failed: {t}", .{err});
-                        };
-                    } else |err| {
-                        std.log.err("prompt: could not build marked-paths clipboard text: {t}", .{err});
-                    }
-                } else {
-                    client.setClipboard(prompt.line.text()) catch |err| {
-                        std.log.err("prompt: set_clipboard (copy_request) failed: {t}", .{err});
-                    };
-                }
-                continue;
-            },
-            .shutdown => {
-                // The host window is closing. Flush persistent state and
-                // end the loop the same way a typed `exit` does --
-                // `defer prompt.deinit()` (which also flushes) then runs.
-                prompt.flushPersistentState(.force);
-                prompt.should_exit = true;
-                return;
-            },
-            // A window manager's own commands (see `InputEvent.window_key`).
-            // Never delivered here: this program is not one.
-            .window_key => |kev| {
-                alloc.free(kev.key);
-                continue;
-            },
-            .window_text => |tev| {
-                alloc.free(tev.text);
-                continue;
-            },
-            .key => |kev| kev,
+        const ev = (try takeKeyEvent(prompt, alloc, input_ev)) orelse {
+            if (prompt.should_exit) return;
+            continue;
         };
         defer alloc.free(ev.key);
         if (!ev.pressed) continue; // only key-down drives the prompt
+        try handlePromptKey(prompt, ev);
+        if (prompt.should_exit) return; // "exit" was typed -- see submitLine
+    }
+}
 
-        // `ctrl` gates most of the chords below (the ctrl+letter / ctrl+
-        // arrow editing ones); `alt` gates exactly one, alt+d. `super`
-        // has no cases and needs no checking: plain characters come from
-        // the `text` stream, and the host doesn't emit `text` for a
-        // genuine modifier chord, so an unhandled alt/super combo simply
-        // does nothing here. Read off the event, as it was pressed.
-        const ctrl = ev.ctrl();
-        const alt = ev.alt();
-
-        if (std.mem.eql(u8, ev.key, "enter")) {
-            // The completion picker takes priority over both browsing and
-            // submitting -- accepting the highlighted candidate completes
-            // the word, it doesn't run the line.
-            if (prompt.completion_picker != null) {
-                try prompt.acceptCompletionPicker();
-            } else if (prompt.browse_pos != null) {
-                try prompt.browseEnter();
-            } else {
-                try prompt.submitLine();
-                if (prompt.should_exit) return; // "exit" was typed -- see submitLine
-            }
-        } else if (std.mem.eql(u8, ev.key, "escape")) {
-            // The explicit "never mind" key. The picker, if open, is
-            // dismissed first (leaving whatever's already typed); then, if
-            // entries are marked, the first Escape just clears the marks
-            // (and their highlight), leaving you where you were; otherwise
-            // it snaps browsing back to the prompt. Everything else that
-            // ends browsing (below) does so as a side effect of also doing
-            // something.
-            if (prompt.completion_picker != null) {
-                try prompt.closeCompletionPicker();
-            } else if (prompt.marks.items.len > 0) {
-                try prompt.resetMarks();
-            } else {
-                try prompt.setCursorAt(prompt.line.caret);
-            }
-        } else if (std.mem.eql(u8, ev.key, "space")) {
-            // Space while browsing a listing toggles the entry under the
-            // cursor in the multi-select mark set (Ctrl+click does the
-            // same with the mouse). Ignored off the browse path -- a
-            // literal space on the live line comes from the `.text` stream.
-            if (prompt.browse_pos) |bp| try prompt.toggleHighlightAt(bp.row, bp.col, prompt.view_scroll);
-        } else if (std.mem.eql(u8, ev.key, "tab")) {
-            // Tab cycles the picker's selection forward when it's open
-            // (zsh menu-select style, alongside Down); otherwise it's
-            // filename completion on the live line, which does nothing
-            // while browsing scrollback.
-            if (prompt.completion_picker != null) {
-                try prompt.moveCompletionPicker(1);
-            } else if (prompt.browse_pos == null) {
-                try prompt.doComplete();
-            }
-        } else if (ctrl and std.mem.eql(u8, ev.key, "backspace")) {
-            // Bash's Ctrl+Backspace/Ctrl+Delete (unix-word-rubout /
-            // kill-word), stopping at the same class boundaries as
-            // Ctrl+Left/Right below rather than bash's whitespace-only
-            // rule -- see `deleteWordBackward`'s doc comment.
-            try prompt.deleteWordBackward();
-        } else if (ctrl and std.mem.eql(u8, ev.key, "delete")) {
-            try prompt.deleteWordForward();
-        } else if (std.mem.eql(u8, ev.key, "backspace")) {
-            try prompt.deleteBackward();
-        } else if (std.mem.eql(u8, ev.key, "delete")) {
-            try prompt.deleteForward();
-        } else if (std.mem.eql(u8, ev.key, "home") and prompt.browse_pos != null) {
-            // Home/End while browsing act on the scrollback row the browse
-            // cursor is on (column 0 / just past its last non-blank cell),
-            // staying in browse mode -- unlike ctrl+a / ctrl+e, which
-            // still snap back to the live prompt in every state.
-            try prompt.browseHome();
-        } else if (std.mem.eql(u8, ev.key, "end") and prompt.browse_pos != null) {
-            try prompt.browseEnd();
-        } else if ((ctrl and std.mem.eql(u8, ev.key, "a")) or std.mem.eql(u8, ev.key, "home")) {
-            // On the live line Home mirrors ctrl+a (go to column 0); via
-            // `moveCursorTo` -> `setCursorAt` it also ends any browse and
-            // snaps the view back to the live tail.
-            try prompt.moveCursorTo(0);
-        } else if ((ctrl and std.mem.eql(u8, ev.key, "e")) or std.mem.eql(u8, ev.key, "end")) {
-            // End mirrors ctrl+e on the live line; the browse-mode form is
-            // handled above.
-            try prompt.moveCursorTo(prompt.line.text().len);
-        } else if (ctrl and std.mem.eql(u8, ev.key, "u")) {
-            try prompt.killToStart();
-        } else if (ctrl and std.mem.eql(u8, ev.key, "k")) {
-            // readline's kill-line, the mirror of ctrl+u -- the shared
-            // field has it, so the prompt may as well bind it.
-            try prompt.killToEnd();
-        } else if (ctrl and std.mem.eql(u8, ev.key, "l")) {
-            try prompt.clearScreen();
-        } else if (ctrl and std.mem.eql(u8, ev.key, "r")) {
-            try prompt.historySearch();
-        } else if (alt and std.mem.eql(u8, ev.key, "d")) {
-            // Drops `cd <cwd>` onto the line to be edited into the
-            // directory you actually want -- see `cdCwdLine`.
-            try prompt.cdCwdLine();
-        } else if (alt and std.mem.eql(u8, ev.key, "c")) {
-            // fzf's chord for "cd into a directory I pick" -- see
-            // `dirSearch`.
-            try prompt.dirSearch();
-        } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
-            // While browsing, ctrl+left/right is a bigger horizontal step
-            // (`scrollback_jump` columns), mirroring ctrl+up/down's row
-            // jump -- it does not snap back to the prompt. On the live
-            // line it's the word jump, which (via moveCursorTo ->
-            // setCursorAt) ends any browse.
-            if (prompt.browse_pos != null) {
-                try prompt.browseLeft(prompt.scrollbackJumpRows());
-            } else {
-                try prompt.moveCursorTo(prompt.wordLeft());
-            }
-        } else if (ctrl and std.mem.eql(u8, ev.key, "right")) {
-            if (prompt.browse_pos != null) {
-                try prompt.browseRight(prompt.scrollbackJumpRows());
-            } else {
-                try prompt.moveCursorTo(prompt.wordRight());
-            }
-        } else if (ctrl and std.mem.eql(u8, ev.key, "up")) {
-            // The picker (if open) takes priority over browse mode too --
-            // Ctrl+Up/Down move the selection exactly like plain Up/Down
-            // do below rather than jumping by `scrollback_jump`, since the
-            // picker's own list is short. Otherwise, Ctrl+Up breaks into
-            // scrollback browse mode from the live prompt (a one-row step
-            // off the input line); once browsing it's a bigger jump
-            // (`scrollback_jump` rows, default 5) for scanning a long
-            // listing faster.
-            if (prompt.completion_picker != null) {
-                try prompt.moveCompletionPicker(-1);
-            } else if (prompt.browse_pos != null) {
-                try prompt.browseUp(prompt.scrollbackJumpRows());
-            } else {
-                try prompt.browseUp(1);
-            }
-        } else if (ctrl and std.mem.eql(u8, ev.key, "down")) {
-            // The mirror jump while browsing. At the live prompt there's
-            // nothing below the input line, so Ctrl+Down does nothing.
-            if (prompt.completion_picker != null) {
-                try prompt.moveCompletionPicker(1);
-            } else if (prompt.browse_pos != null) {
-                try prompt.browseDown(prompt.scrollbackJumpRows());
-            }
-        } else if (ctrl and std.mem.eql(u8, ev.key, "page_up")) {
-            // Ctrl+PgUp jumps the cursor to the previous metadata-id
-            // span's landing cell (a gw-ls entry, say) -- the span's
-            // focus cell if it named one, which is how a `gw-ls -l` row
-            // lands on the filename rather than the permissions column,
-            // else its first visible character. Enters scrollback browse
-            // mode from the live prompt if needed.
-            try prompt.metadataJump(.prev);
-        } else if (ctrl and std.mem.eql(u8, ev.key, "page_down")) {
-            // The mirror toward the live tail. A no-op at the live prompt
-            // (nothing tagged below the input line).
-            try prompt.metadataJump(.next);
-        } else if (std.mem.eql(u8, ev.key, "up")) {
-            // Moves the picker's selection when it's open. Otherwise plain
-            // Up is readline-style history recall at the prompt, a
-            // one-row browse step while already in scrollback mode.
-            if (prompt.completion_picker != null) {
-                try prompt.moveCompletionPicker(-1);
-            } else if (prompt.browse_pos != null) {
-                try prompt.browseUp(1);
-            } else {
-                try prompt.historyUp();
-            }
-        } else if (std.mem.eql(u8, ev.key, "down")) {
-            if (prompt.completion_picker != null) {
-                try prompt.moveCompletionPicker(1);
-            } else if (prompt.browse_pos != null) {
-                try prompt.browseDown(1);
-            } else {
-                try prompt.historyDown();
-            }
-        } else if (std.mem.eql(u8, ev.key, "left")) {
-            // Not explicitly asked for, but needed alongside ctrl+left/
-            // right: without plain single-character movement too, the
-            // caret (drawn by glyphwire-host wherever the raw grid cursor
-            // sits) could wander away from `prompt.line.caret` -- the offset
-            // typing/backspace actually act on -- which would look
-            // confusing (caret in one place, edits landing in another).
-            // While browsing (`browse_pos != null`), Left instead moves
-            // within whatever row is currently being browsed -- see
-            // `browseLeft`.
-            if (prompt.browse_pos != null) {
-                try prompt.browseLeft(1);
-            } else {
-                // Step a whole codepoint, not one byte: a CJK character is
-                // three bytes but one cursor stop (see `lineedit`).
-                try prompt.moveCursorTo(prompt.line.prevOffset());
-            }
-        } else if (std.mem.eql(u8, ev.key, "right")) {
-            if (prompt.browse_pos != null) {
-                try prompt.browseRight(1);
-            } else if (prompt.completion_picker == null and prompt.line.caret == prompt.line.text().len) {
-                try prompt.acceptCompletionHintOrComplete();
-            } else {
-                // While the picker is open this just moves the cursor --
-                // `moveCursorTo` closes it, same as every other explicit
-                // reposition.
-                try prompt.moveCursorTo(prompt.line.nextOffset());
-            }
+/// A non-input notification at the prompt: a click, a scroll or a resize.
+/// Out of focus, the pointer and the scrollback are the host's too -- only
+/// the resize still concerns us, since the panel's layer moves with the
+/// window whether or not we're typing.
+fn handleSessionEvent(prompt: *Prompt, any_ev: glyphwire.Event) !void {
+    if (!prompt.focused) {
+        switch (any_ev) {
+            .resize => |rev| prompt.noteResize(rev.cols, rev.rows),
+            else => {},
         }
-        // Plain character insertion is not handled here: it comes from the
-        // `.text` branch of the switch above, which is the only correct
-        // source for a non-US layout, an AltGr combo or CJK IME. An
-        // unhandled key event (a bare letter, or a ctrl/alt chord with no
-        // explicit case above like ctrl+c / alt+f) just falls through and
-        // does nothing -- a real terminal swallows those too, and the host
-        // suppresses `text` for genuine modifier chords, so
-        // nothing types.
+        return;
+    }
+    switch (any_ev) {
+        .mouse_button => |mev| try promptClick(prompt, mev),
+        // Keep `prompt.view_scroll` current with any host-driven
+        // scroll (mouse wheel, scrollbar) so browse-down and the
+        // type-to-snap-back in `setCursorAt` know the real offset.
+        // Only for the surface this prompt draws on: embedded,
+        // the context has other layers with rings of their own.
+        .scroll => |sev| if (sev.layer == prompt.layer) {
+            prompt.view_scroll = sev.offset;
+        },
+        // A window resize rebuilt the grid (bottom-anchored) and
+        // changed its dimensions. The re-layout is debounced
+        // (`Prompt.noteResize` / `applyPendingResize`).
+        .resize => |rev| prompt.noteResize(rev.cols, rev.rows),
+        else => {},
+    }
+}
+
+/// Handles every input event that isn't a key press -- text, a paste, a
+/// copy request, the window closing -- and hands a key event back for
+/// `handlePromptKey`. Null when the event was consumed here; the caller
+/// owns the returned event's `key`.
+///
+/// Committed text input -- the characters the user typed, already
+/// resolved through their OS keyboard layout / dead keys / IME -- is taken
+/// from the same queue as key events so "type then Enter" can't reorder.
+/// Text only edits the live line, so it's held back while browsing
+/// scrollback, matching how the printable-key path used to gate on
+/// `browse_pos`. The physical key event that accompanies each keystroke in
+/// real host use is a separate `.key` event and just falls through
+/// `handlePromptKey` doing nothing.
+fn takeKeyEvent(prompt: *Prompt, alloc: std.mem.Allocator, input_ev: glyphwire.InputEvent) !?glyphwire.KeyEvent {
+    switch (input_ev) {
+        .text => |tev| {
+            defer alloc.free(tev.text);
+            // Off the browse path this just edits the live line. While
+            // browsing scrollback, `scrollback_type_exits` (default
+            // true) decides whether a keystroke snaps back to the
+            // prompt and inserts (`insertText` funnels through
+            // `setCursorAt`, which clears `browse_pos` and the scroll
+            // view) or is ignored until Escape. A lone space is the
+            // exception: while browsing it toggles the mark under the
+            // cursor (handled by `handlePromptKey`'s "space" arm), so it
+            // must not be consumed as type-to-exit here.
+            const browse_space = prompt.browse_pos != null and std.mem.eql(u8, tev.text, " ");
+            if (!browse_space and (prompt.browse_pos == null or prompt.scrollbackTypeExits())) {
+                try prompt.insertText(tev.text);
+            }
+            return null;
+        },
+        .paste => |tev| {
+            defer alloc.free(tev.text);
+            // Ctrl+Shift+V: insert the clipboard text into the live
+            // line without submitting (the user presses Enter). The
+            // editor is single-line, so the field's
+            // `.flatten_newlines` policy turns newline runs into
+            // single spaces on the way in -- a pasted file list then
+            // reads as space-separated arguments instead of one
+            // unusable blob. A paste while browsing follows the same
+            // `scrollback_type_exits` rule as typed text.
+            if (prompt.browse_pos == null or prompt.scrollbackTypeExits()) {
+                try prompt.insertText(tev.text);
+            }
+            return null;
+        },
+        .copy_request => {
+            // Ctrl+Shift+C was pressed with nothing selected in the
+            // host. With entries marked, answer with their paths as
+            // one space-separated line (each quoted only if it needs
+            // it); otherwise with the current line. Either way it
+            // lands on the OS clipboard.
+            if (prompt.marks.items.len > 0) {
+                if (prompt.markedPathsText(alloc)) |text| {
+                    defer alloc.free(text);
+                    prompt.client.setClipboard(text) catch |err| {
+                        std.log.err("prompt: set_clipboard (copy_request) failed: {t}", .{err});
+                    };
+                } else |err| {
+                    std.log.err("prompt: could not build marked-paths clipboard text: {t}", .{err});
+                }
+            } else {
+                prompt.client.setClipboard(prompt.line.text()) catch |err| {
+                    std.log.err("prompt: set_clipboard (copy_request) failed: {t}", .{err});
+                };
+            }
+            return null;
+        },
+        .shutdown => {
+            // The host window is closing. Flush persistent state and
+            // end the loop the same way a typed `exit` does --
+            // `defer prompt.deinit()` (which also flushes) then runs.
+            prompt.flushPersistentState(.force);
+            prompt.should_exit = true;
+            return null;
+        },
+        // A window manager's own commands (see `InputEvent.window_key`).
+        // Never delivered here: this program is not one.
+        .window_key => |kev| {
+            alloc.free(kev.key);
+            return null;
+        },
+        .window_text => |tev| {
+            alloc.free(tev.text);
+            return null;
+        },
+        .key => |kev| return kev,
+    }
+}
+
+/// One key press at the prompt: the editing, browsing, completion and
+/// history chords.
+///
+/// Plain character insertion is not handled here: it comes from
+/// `takeKeyEvent`'s `.text` arm, which is the only correct source for a
+/// non-US layout, an AltGr combo or CJK IME. An unhandled key event (a
+/// bare letter, or a ctrl/alt chord with no explicit case below like
+/// ctrl+c / alt+f) just falls through and does nothing -- a real terminal
+/// swallows those too, and the host suppresses `text` for genuine
+/// modifier chords, so nothing types.
+fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
+    // `ctrl` gates most of the chords below (the ctrl+letter / ctrl+
+    // arrow editing ones); `alt` gates exactly one, alt+d. `super`
+    // has no cases and needs no checking: plain characters come from
+    // the `text` stream, and the host doesn't emit `text` for a
+    // genuine modifier chord, so an unhandled alt/super combo simply
+    // does nothing here. Read off the event, as it was pressed.
+    const ctrl = ev.ctrl();
+    const alt = ev.alt();
+    if (std.mem.eql(u8, ev.key, "enter")) {
+        // The completion picker takes priority over both browsing and
+        // submitting -- accepting the highlighted candidate completes
+        // the word, it doesn't run the line.
+        if (prompt.completion_picker != null) {
+            try prompt.acceptCompletionPicker();
+        } else if (prompt.browse_pos != null) {
+            try prompt.browseEnter();
+        } else {
+            try prompt.submitLine();
+        }
+    } else if (std.mem.eql(u8, ev.key, "escape")) {
+        // The explicit "never mind" key. The picker, if open, is
+        // dismissed first (leaving whatever's already typed); then, if
+        // entries are marked, the first Escape just clears the marks
+        // (and their highlight), leaving you where you were; otherwise
+        // it snaps browsing back to the prompt. Everything else that
+        // ends browsing (below) does so as a side effect of also doing
+        // something.
+        if (prompt.completion_picker != null) {
+            try prompt.closeCompletionPicker();
+        } else if (prompt.marks.items.len > 0) {
+            try prompt.resetMarks();
+        } else {
+            try prompt.setCursorAt(prompt.line.caret);
+        }
+    } else if (std.mem.eql(u8, ev.key, "space")) {
+        // Space while browsing a listing toggles the entry under the
+        // cursor in the multi-select mark set (Ctrl+click does the
+        // same with the mouse). Ignored off the browse path -- a
+        // literal space on the live line comes from the `.text` stream.
+        if (prompt.browse_pos) |bp| try prompt.toggleHighlightAt(bp.row, bp.col, prompt.view_scroll);
+    } else if (std.mem.eql(u8, ev.key, "tab")) {
+        // Tab cycles the picker's selection forward when it's open
+        // (zsh menu-select style, alongside Down); otherwise it's
+        // filename completion on the live line, which does nothing
+        // while browsing scrollback.
+        if (prompt.completion_picker != null) {
+            try prompt.moveCompletionPicker(1);
+        } else if (prompt.browse_pos == null) {
+            try prompt.doComplete();
+        }
+    } else if (ctrl and std.mem.eql(u8, ev.key, "backspace")) {
+        // Bash's Ctrl+Backspace/Ctrl+Delete (unix-word-rubout /
+        // kill-word), stopping at the same class boundaries as
+        // Ctrl+Left/Right below rather than bash's whitespace-only
+        // rule -- see `deleteWordBackward`'s doc comment.
+        try prompt.deleteWordBackward();
+    } else if (ctrl and std.mem.eql(u8, ev.key, "delete")) {
+        try prompt.deleteWordForward();
+    } else if (std.mem.eql(u8, ev.key, "backspace")) {
+        try prompt.deleteBackward();
+    } else if (std.mem.eql(u8, ev.key, "delete")) {
+        try prompt.deleteForward();
+    } else if (std.mem.eql(u8, ev.key, "home") and prompt.browse_pos != null) {
+        // Home/End while browsing act on the scrollback row the browse
+        // cursor is on (column 0 / just past its last non-blank cell),
+        // staying in browse mode -- unlike ctrl+a / ctrl+e, which
+        // still snap back to the live prompt in every state.
+        try prompt.browseHome();
+    } else if (std.mem.eql(u8, ev.key, "end") and prompt.browse_pos != null) {
+        try prompt.browseEnd();
+    } else if ((ctrl and std.mem.eql(u8, ev.key, "a")) or std.mem.eql(u8, ev.key, "home")) {
+        // On the live line Home mirrors ctrl+a (go to column 0); via
+        // `moveCursorTo` -> `setCursorAt` it also ends any browse and
+        // snaps the view back to the live tail.
+        try prompt.moveCursorTo(0);
+    } else if ((ctrl and std.mem.eql(u8, ev.key, "e")) or std.mem.eql(u8, ev.key, "end")) {
+        // End mirrors ctrl+e on the live line; the browse-mode form is
+        // handled above.
+        try prompt.moveCursorTo(prompt.line.text().len);
+    } else if (ctrl and std.mem.eql(u8, ev.key, "u")) {
+        try prompt.killToStart();
+    } else if (ctrl and std.mem.eql(u8, ev.key, "k")) {
+        // readline's kill-line, the mirror of ctrl+u -- the shared
+        // field has it, so the prompt may as well bind it.
+        try prompt.killToEnd();
+    } else if (ctrl and std.mem.eql(u8, ev.key, "l")) {
+        try prompt.clearScreen();
+    } else if (ctrl and std.mem.eql(u8, ev.key, "r")) {
+        try prompt.historySearch();
+    } else if (alt and std.mem.eql(u8, ev.key, "d")) {
+        // Drops `cd <cwd>` onto the line to be edited into the
+        // directory you actually want -- see `cdCwdLine`.
+        try prompt.cdCwdLine();
+    } else if (alt and std.mem.eql(u8, ev.key, "c")) {
+        // fzf's chord for "cd into a directory I pick" -- see
+        // `dirSearch`.
+        try prompt.dirSearch();
+    } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
+        // While browsing, ctrl+left/right is a bigger horizontal step
+        // (`scrollback_jump` columns), mirroring ctrl+up/down's row
+        // jump -- it does not snap back to the prompt. On the live
+        // line it's the word jump, which (via moveCursorTo ->
+        // setCursorAt) ends any browse.
+        if (prompt.browse_pos != null) {
+            try prompt.browseLeft(prompt.scrollbackJumpRows());
+        } else {
+            try prompt.moveCursorTo(prompt.wordLeft());
+        }
+    } else if (ctrl and std.mem.eql(u8, ev.key, "right")) {
+        if (prompt.browse_pos != null) {
+            try prompt.browseRight(prompt.scrollbackJumpRows());
+        } else {
+            try prompt.moveCursorTo(prompt.wordRight());
+        }
+    } else if (ctrl and std.mem.eql(u8, ev.key, "up")) {
+        // The picker (if open) takes priority over browse mode too --
+        // Ctrl+Up/Down move the selection exactly like plain Up/Down
+        // do below rather than jumping by `scrollback_jump`, since the
+        // picker's own list is short. Otherwise, Ctrl+Up breaks into
+        // scrollback browse mode from the live prompt (a one-row step
+        // off the input line); once browsing it's a bigger jump
+        // (`scrollback_jump` rows, default 5) for scanning a long
+        // listing faster.
+        if (prompt.completion_picker != null) {
+            try prompt.moveCompletionPicker(-1);
+        } else if (prompt.browse_pos != null) {
+            try prompt.browseUp(prompt.scrollbackJumpRows());
+        } else {
+            try prompt.browseUp(1);
+        }
+    } else if (ctrl and std.mem.eql(u8, ev.key, "down")) {
+        // The mirror jump while browsing. At the live prompt there's
+        // nothing below the input line, so Ctrl+Down does nothing.
+        if (prompt.completion_picker != null) {
+            try prompt.moveCompletionPicker(1);
+        } else if (prompt.browse_pos != null) {
+            try prompt.browseDown(prompt.scrollbackJumpRows());
+        }
+    } else if (ctrl and std.mem.eql(u8, ev.key, "page_up")) {
+        // Ctrl+PgUp jumps the cursor to the previous metadata-id
+        // span's landing cell (a gw-ls entry, say) -- the span's
+        // focus cell if it named one, which is how a `gw-ls -l` row
+        // lands on the filename rather than the permissions column,
+        // else its first visible character. Enters scrollback browse
+        // mode from the live prompt if needed.
+        try prompt.metadataJump(.prev);
+    } else if (ctrl and std.mem.eql(u8, ev.key, "page_down")) {
+        // The mirror toward the live tail. A no-op at the live prompt
+        // (nothing tagged below the input line).
+        try prompt.metadataJump(.next);
+    } else if (std.mem.eql(u8, ev.key, "up")) {
+        // Moves the picker's selection when it's open. Otherwise plain
+        // Up is readline-style history recall at the prompt, a
+        // one-row browse step while already in scrollback mode.
+        if (prompt.completion_picker != null) {
+            try prompt.moveCompletionPicker(-1);
+        } else if (prompt.browse_pos != null) {
+            try prompt.browseUp(1);
+        } else {
+            try prompt.historyUp();
+        }
+    } else if (std.mem.eql(u8, ev.key, "down")) {
+        if (prompt.completion_picker != null) {
+            try prompt.moveCompletionPicker(1);
+        } else if (prompt.browse_pos != null) {
+            try prompt.browseDown(1);
+        } else {
+            try prompt.historyDown();
+        }
+    } else if (std.mem.eql(u8, ev.key, "left")) {
+        // Not explicitly asked for, but needed alongside ctrl+left/
+        // right: without plain single-character movement too, the
+        // caret (drawn by glyphwire-host wherever the raw grid cursor
+        // sits) could wander away from `prompt.line.caret` -- the offset
+        // typing/backspace actually act on -- which would look
+        // confusing (caret in one place, edits landing in another).
+        // While browsing (`browse_pos != null`), Left instead moves
+        // within whatever row is currently being browsed -- see
+        // `browseLeft`.
+        if (prompt.browse_pos != null) {
+            try prompt.browseLeft(1);
+        } else {
+            // Step a whole codepoint, not one byte: a CJK character is
+            // three bytes but one cursor stop (see `lineedit`).
+            try prompt.moveCursorTo(prompt.line.prevOffset());
+        }
+    } else if (std.mem.eql(u8, ev.key, "right")) {
+        if (prompt.browse_pos != null) {
+            try prompt.browseRight(1);
+        } else if (prompt.completion_picker == null and prompt.line.caret == prompt.line.text().len) {
+            try prompt.acceptCompletionHintOrComplete();
+        } else {
+            // While the picker is open this just moves the cursor --
+            // `moveCursorTo` closes it, same as every other explicit
+            // reposition.
+            try prompt.moveCursorTo(prompt.line.nextOffset());
+        }
     }
 }
 
@@ -1020,7 +1066,7 @@ fn runPrompt(
 /// line takes, so a scripted `ls` blocks on its child and draws to the
 /// grid identically. Lines are trimmed; blank lines and `#` comments are
 /// skipped. Stops early if a line was `exit` (sets `prompt.should_exit`).
-/// See `runPrompt`'s GLYPHWIRE_SHELL_SCRIPT block for why this exists.
+/// See `runStartupScript` for why this exists.
 fn runScriptFile(io: std.Io, alloc: std.mem.Allocator, prompt: *Prompt, path: []const u8) !void {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(64 * 1024));
     defer alloc.free(bytes);
@@ -1035,46 +1081,16 @@ fn runScriptFile(io: std.Io, alloc: std.mem.Allocator, prompt: *Prompt, path: []
     }
 }
 
-/// Where a completion candidate came from -- drives both the `/` vs ` `
-/// terminator (only `.dir` gets `/`) and the dimmed `[tag]` the
-/// interactive picker shows next to each row (`completionSourceTag`), a
-/// hook for a later completion source (git branches, flags, ...) to
-/// identify itself the same way.
-const CompletionSource = enum { file, dir, alias, builtin, script };
-
-fn completionSourceTag(source: CompletionSource) []const u8 {
-    return switch (source) {
-        .file => "file",
-        .dir => "dir",
-        .alias => "alias",
-        .builtin => "builtin",
-        .script => "script",
-    };
-}
-
-/// One filename offered by Tab completion -- `name` is the raw directory
-/// entry (no trailing slash); `source` drives the `/` vs ` ` suffix on a
-/// unique match and the picker's metadata tag.
-const CompletionCandidate = struct { name: []const u8, source: CompletionSource };
-
-/// Live state for the interactive Tab-completion dropdown (see
-/// `Prompt.recomputeAndDrawPicker`). The candidate list itself is never
-/// cached here -- every redraw rescans via `collectCompletionCandidates`
-/// from the current buffer/cursor, so typing narrows the list for free
-/// and there's no stale-cache case to handle. `list` indexes into that
-/// freshly-scanned list; `drawn_rows` is how many rows are currently
-/// painted below the input line, so a redraw knows how much to clear
-/// first and whether the screen still needs scrolling to make room.
-const CompletionPickerState = struct {
-    list: ListCursor = .{},
-    drawn_rows: usize = 0,
-};
+pub const CompletionSource = completion.CompletionSource;
+pub const completionSourceTag = completion.completionSourceTag;
+pub const CompletionCandidate = completion.CompletionCandidate;
+pub const CompletionPickerState = completion.CompletionPickerState;
 
 /// The core builtins `dispatchLine` recognises by name (see the
 /// precedence comment there). Offered by Tab completion in command
 /// position alongside aliases and script builtins. `alias` is handled a
 /// step earlier than the rest but is still a name worth completing.
-const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "fg", "gwssh", "jobs", "reload", "unalias", "unset", "zj" };
+pub const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "fg", "gwssh", "jobs", "reload", "unalias", "unset", "zj" };
 
 /// Where `assets/scripts/provision_remote.lua` puts the remote-side
 /// binaries. Deliberately *not* on the remote `PATH` -- the minimal one a
@@ -1085,56 +1101,9 @@ const core_builtin_names = [_][]const u8{ "alias", "cd", "exit", "export", "fg",
 /// Passed through to the remote shell unexpanded: nothing in the builtin
 /// dispatch path expands `~`, so the far side resolves it against the
 /// remote home, which is the one that matters.
-const provisioned_agent_path = "~/.local/share/glyphwire/bin/gw-agent";
+pub const provisioned_agent_path = "~/.local/share/glyphwire/bin/gw-agent";
 
-/// Alias store backing the prompt's `alias`/`unalias` builtins. Seeded at
-/// startup from `~/.config/glyphwire/shell.conf.lua`'s `alias(name, value)`
-/// calls (see `Prompt.loadStartupConfig`), then mutated for the rest of
-/// the session by the builtins; nothing here is written back to disk, so
-/// a session-only `alias` doesn't survive `exit`. Keys and values are
-/// owned dups; `Prompt.deinit` frees the whole table.
-const AliasTable = struct {
-    map: std.StringHashMapUnmanaged([]const u8) = .empty,
-
-    fn deinit(self: *AliasTable, alloc: std.mem.Allocator) void {
-        var it = self.map.iterator();
-        while (it.next()) |e| {
-            alloc.free(e.key_ptr.*);
-            alloc.free(e.value_ptr.*);
-        }
-        self.map.deinit(alloc);
-    }
-
-    /// Binds `name` to `value`, replacing (and freeing) any prior binding
-    /// for `name`.
-    fn set(self: *AliasTable, alloc: std.mem.Allocator, name: []const u8, value: []const u8) !void {
-        const key = try alloc.dupe(u8, name);
-        errdefer alloc.free(key);
-        const val = try alloc.dupe(u8, value);
-        errdefer alloc.free(val);
-
-        const gop = try self.map.getOrPut(alloc, key);
-        if (gop.found_existing) {
-            alloc.free(key);
-            alloc.free(gop.value_ptr.*);
-        }
-        gop.value_ptr.* = val;
-    }
-
-    /// Removes `name`'s binding; returns whether there was one to remove.
-    fn remove(self: *AliasTable, alloc: std.mem.Allocator, name: []const u8) bool {
-        if (self.map.fetchRemove(name)) |kv| {
-            alloc.free(kv.key);
-            alloc.free(kv.value);
-            return true;
-        }
-        return false;
-    }
-
-    fn get(self: *const AliasTable, name: []const u8) ?[]const u8 {
-        return self.map.get(name);
-    }
-};
+pub const AliasTable = builtins.AliasTable;
 
 /// One marked `ls` entry -- the `kind` / `path` / `mimetype` fields
 /// parsed out of a `HighlightState` entry's metadata blob (owned,
@@ -1185,7 +1154,7 @@ fn shellProfilerFromEnv(io: std.Io, environ_map: *const std.process.Environ.Map)
     return ShellProfiler.init(io, true, ms, ms);
 }
 
-const Prompt = struct {
+pub const Prompt = struct {
     client: *glyphwire.Client,
     /// The environment as it was at startup -- a read-only snapshot from
     /// `std.process.Init`. Everything that doesn't change over a session
@@ -1479,7 +1448,7 @@ const Prompt = struct {
     icon_cols: usize = 1,
     icon_max_h: u32 = 0,
 
-    fn deinit(self: *Prompt) void {
+    pub fn deinit(self: *Prompt) void {
         const alloc = self.client.alloc;
         // Last chance to persist -- covers the `exit` builtin and the
         // socket-close (host gone) paths, which reach here without going
@@ -1516,7 +1485,7 @@ const Prompt = struct {
     /// Drops every memoised command-var value. Called at the top of
     /// `writePromptPrefix` (so a new prompt re-runs the commands) and
     /// from `deinit`.
-    fn resetCmdVars(self: *Prompt) void {
+    pub fn resetCmdVars(self: *Prompt) void {
         const alloc = self.client.alloc;
         var it = self.cmd_var_cache.valueIterator();
         while (it.next()) |v| alloc.free(v.*);
@@ -1525,13 +1494,13 @@ const Prompt = struct {
     }
 
     /// The parsed prompt config, or `null` when there's no `shell.conf.lua`.
-    fn promptCfg(self: *Prompt) ?*const config.PromptConfig {
+    pub fn promptCfg(self: *Prompt) ?*const config.PromptConfig {
         if (self.prompt_config) |pcfg| return &pcfg.prompt;
         return null;
     }
 
     /// `prompt.dur_min_ms` if set, else the built-in default.
-    fn durMinMs(self: *Prompt) u64 {
+    pub fn durMinMs(self: *Prompt) u64 {
         if (self.promptCfg()) |p| if (p.dur_min_ms) |m| return m;
         return 2000;
     }
@@ -1540,7 +1509,7 @@ const Prompt = struct {
     /// `prompt.scrolloff` if set, else the default, clamped by
     /// `browsescroll.clampScrolloff` so the cursor still has room to move
     /// between the prompt row and the top margin.
-    fn scrolloffRows(self: *Prompt) usize {
+    pub fn scrolloffRows(self: *Prompt) usize {
         const want: usize = if (self.promptCfg()) |p|
             (if (p.scrolloff) |s| @as(usize, s) else default_scrolloff)
         else
@@ -1551,7 +1520,7 @@ const Prompt = struct {
     /// Rows a Ctrl+Up / Ctrl+Down jump covers while browsing scrollback
     /// (see `default_scrollback_jump`): `prompt.scrollback_jump` if set,
     /// else the default. Floored at 1 so a jump always moves.
-    fn scrollbackJumpRows(self: *Prompt) usize {
+    pub fn scrollbackJumpRows(self: *Prompt) usize {
         if (self.promptCfg()) |p| if (p.scrollback_jump) |n| return @max(@as(usize, n), 1);
         return default_scrollback_jump;
     }
@@ -1559,7 +1528,7 @@ const Prompt = struct {
     /// Max rows the interactive Tab-completion picker shows at once
     /// (see `default_completion_max_items`): `prompt.completion_max_items`
     /// if set, else the default. Floored at 1.
-    fn completionMaxItems(self: *Prompt) usize {
+    pub fn completionMaxItems(self: *Prompt) usize {
         if (self.promptCfg()) |p| if (p.completion_max_items) |n| return @max(@as(usize, n), 1);
         return default_completion_max_items;
     }
@@ -1568,30 +1537,32 @@ const Prompt = struct {
     /// ends browse mode and inserts it on the live line (the default),
     /// vs. being ignored until Escape. Config:
     /// `prompt{ scrollback_type_exits = false }`.
-    fn scrollbackTypeExits(self: *Prompt) bool {
+    pub fn scrollbackTypeExits(self: *Prompt) bool {
         if (self.promptCfg()) |p| if (p.scrollback_type_exits) |b| return b;
         return true;
     }
 
-    /// Any real prompt edit or cursor move invalidates the displayed
-    /// inline completion. The next idle tick recomputes it from the new
-    /// buffer/cursor state.
-    fn armCompletionHint(self: *Prompt) void {
-        self.completion_hint_visible = false;
-        self.completion_hint_dirty = true;
-        self.completion_hint_activity_at = std.Io.Clock.Timestamp.now(self.client.io, .awake);
-    }
-
-    fn hideCompletionHint(self: *Prompt) void {
-        self.completion_hint_visible = false;
-        self.completion_hint_dirty = false;
-        self.completion_hint.clearRetainingCapacity();
-    }
+    // ── Completion (completion.zig) ──────────────────────────────────────
+    pub const armCompletionHint = completion.armCompletionHint;
+    pub const hideCompletionHint = completion.hideCompletionHint;
+    pub const doComplete = completion.doComplete;
+    pub const appendCommandNameCandidates = completion.appendCommandNameCandidates;
+    pub const collectCompletionCandidates = completion.collectCompletionCandidates;
+    pub const sortCompletionCandidates = completion.sortCompletionCandidates;
+    pub const maybeShowCompletionHint = completion.maybeShowCompletionHint;
+    pub const acceptCompletionHintOrComplete = completion.acceptCompletionHintOrComplete;
+    pub const completionDir = completion.completionDir;
+    pub const recomputeAndDrawPicker = completion.recomputeAndDrawPicker;
+    pub const reservePickerRows = completion.reservePickerRows;
+    pub const moveCompletionPicker = completion.moveCompletionPicker;
+    pub const refreshCompletionPickerIfOpen = completion.refreshCompletionPickerIfOpen;
+    pub const acceptCompletionPicker = completion.acceptCompletionPicker;
+    pub const closeCompletionPicker = completion.closeCompletionPicker;
 
     /// Fills `host`/`host_buf` from `$HOSTNAME` or `/etc/hostname`. Best
     /// effort: leaves `host` empty (so `{host}` renders nothing) on any
     /// failure. Called once at startup.
-    fn resolveHostname(self: *Prompt) void {
+    pub fn resolveHostname(self: *Prompt) void {
         if (self.environ_map.get("HOSTNAME")) |h| {
             if (h.len > 0 and h.len <= self.host_buf.len) {
                 @memcpy(self.host_buf[0..h.len], h);
@@ -1611,73 +1582,47 @@ const Prompt = struct {
     /// it is local. Set by `gw-agent` when it spawns the remote shell, so
     /// it is inherited by everything the shell launches too -- a remote
     /// `zoe` can tell where it is by the same variable.
-    fn remoteDest(self: *Prompt) []const u8 {
+    pub fn remoteDest(self: *Prompt) []const u8 {
         return self.env.get("GLYPHWIRE_REMOTE") orelse "";
     }
 
     /// The bundled prompt icons (`assets/icons/...`) are 32x32.
-    const icon_native_px: u32 = 32;
+    pub const icon_native_px: u32 = 32;
 
-    /// Works out how a `{icon:...}` should be drawn from the session's cell
-    /// pixel size (`get_cell_metrics`): natural-scaled, capped to one
-    /// cell-height so it fills the row without spilling onto the row above
-    /// or below, and how many columns that makes it (`ceil(h / w)`, ~2 for
-    /// a square icon in a roughly 1:2 cell). Leaves the fit-in-one-cell
-    /// default if the metrics request fails.
-    fn resolveIconMetrics(self: *Prompt) void {
-        const m = self.client.getCellMetrics() catch return;
-        if (m.w == 0 or m.h == 0) return;
-        self.icon_max_h = m.h;
-        const render_px = @min(icon_native_px, m.h);
-        self.icon_cols = @max(1, (render_px + m.w - 1) / m.w);
-    }
-
-    /// Writes the prompt prefix at the cursor's current position and
-    /// returns where the input line begins, for the caller to record as
-    /// `line_start_row`/`_col`. Everything is read fresh each time (cwd,
-    /// exit status, time, ...) so a `cd` or a failed command shows on the
-    /// very next prompt.
-    ///
-    /// Three shapes, by `shell.conf.lua`:
-    ///   - nothing configured -> `writeDefaultPrefix` (`<cwd> > `)
-    ///   - `prompt.left` / `prompt.right` strings -> `writeTemplatedPrefix`
-    ///   - `prompt.left_segments` / `right_segments` -> `writePowerlinePrefix`
-    ///
-    /// Also (re)sets the input-box bounds: `input_max_col` (right edge the
-    /// typed text may not cross), `input_scroll`, `right_dynamic`,
-    /// `prompt_lines`.
-    /// Draws the prompt prefix as a single host frame. With `sink` null
-    /// each prefix writer opens its own `batch`, appends every draw, and
-    /// sends it once -- so the prompt appears all at once, not segment by
-    /// segment. With `sink` non-null the draws are appended to the
-    /// caller's batch instead (it does the send), letting `handleResize`
-    /// fold the prefix redraw into the same frame as its clear.
-    fn writePromptPrefix(self: *Prompt, sink: ChainSink) !glyphwire.Cursor {
-        self.input_max_col = self.grid_cols;
-        self.input_scroll = 0;
-        self.right_dynamic = false;
-        self.prompt_lines = 1;
-
-        // A brand-new prompt: re-run the `commands` vars. Everything drawn
-        // for *this* prompt after here (the idle right-chain refresh, a
-        // multi-line redraw) reuses whatever they resolve to now.
-        self.resetCmdVars();
-
-        const p = self.promptCfg() orelse return self.writeDefaultPrefix(sink);
-        if (p.left_segments != null or p.right_segments != null) return self.writePowerlinePrefix(p, sink);
-        if (p.left != null or p.right != null) return self.writeTemplatedPrefix(p, sink);
-        return self.writeDefaultPrefix(sink);
-    }
-
-    /// The cursor `w` display-columns past `from`, wrapping at `grid_cols`
-    /// onto later rows. Locates where input begins after a prefix has been
-    /// appended to a batch, so no post-draw `getCursor` round trip (which
-    /// couldn't see the not-yet-sent batch anyway) is needed.
-    fn cursorAfter(self: *Prompt, from: glyphwire.Cursor, w: usize) glyphwire.Cursor {
-        if (self.grid_cols == 0) return .{ .row = from.row, .col = from.col + w };
-        const abs = from.col + w;
-        return .{ .row = from.row + abs / self.grid_cols, .col = abs % self.grid_cols };
-    }
+    // ── Prompt rendering (render.zig) ────────────────────────────────────
+    pub const resolveIconMetrics = render.resolveIconMetrics;
+    pub const writePromptPrefix = render.writePromptPrefix;
+    pub const cursorAfter = render.cursorAfter;
+    pub const writeDefaultPrefix = render.writeDefaultPrefix;
+    pub const PromptDataBufs = render.PromptDataBufs;
+    pub const buildPromptData = render.buildPromptData;
+    pub const cmdVarResolver = render.cmdVarResolver;
+    pub const resolveCmdVarThunk = render.resolveCmdVarThunk;
+    pub const resolveCmdVar = render.resolveCmdVar;
+    pub const runCmdVar = render.runCmdVar;
+    pub const cmdWhenTrue = render.cmdWhenTrue;
+    pub const formatTime = render.formatTime;
+    pub const writeTemplatedPrefix = render.writeTemplatedPrefix;
+    pub const RenderedSeg = render.RenderedSeg;
+    pub const renderChain = render.renderChain;
+    pub const chainWidth = render.chainWidth;
+    pub const ChainSink = render.ChainSink;
+    pub const sinkSetCursor = render.sinkSetCursor;
+    pub const sinkWriteText = render.sinkWriteText;
+    pub const sinkWriteTextTransparent = render.sinkWriteTextTransparent;
+    pub const sinkDrawIconStyled = render.sinkDrawIconStyled;
+    pub const drawChain = render.drawChain;
+    pub const drawRightChain = render.drawRightChain;
+    pub const writePowerlinePrefix = render.writePowerlinePrefix;
+    pub const writeSpaces = render.writeSpaces;
+    pub const EmitOpts = render.EmitOpts;
+    pub const emitOps = render.emitOps;
+    pub const collapseHome = render.collapseHome;
+    pub const caretCol = render.caretCol;
+    pub const renderInputLine = render.renderInputLine;
+    pub const appendInputLine = render.appendInputLine;
+    pub const placeInputCursor = render.placeInputCursor;
+    pub const showPrompt = render.showPrompt;
 
     /// The working directory shown in the prompt -- the maintained
     /// `$PWD` (see `chdir`'s doc comment) rather than the process's raw
@@ -1685,309 +1630,10 @@ const Prompt = struct {
     /// symlink's own name. Falls back to the real physical cwd if `$PWD`
     /// is somehow unset (seeded at startup in `runPrompt`, so only a
     /// script explicitly unsetting it hits this path).
-    fn logicalCwd(self: *Prompt, buf: []u8) []const u8 {
+    pub fn logicalCwd(self: *Prompt, buf: []u8) []const u8 {
         if (self.env.get("PWD")) |pwd| return pwd;
         const n = std.process.currentPath(self.client.io, buf) catch 0;
         return buf[0..n];
-    }
-
-    /// The built-in prompt: the absolute working directory followed by
-    /// `" > "`. Unchanged from before prompt templating existed.
-    fn writeDefaultPrefix(self: *Prompt, sink: ChainSink) !glyphwire.Cursor {
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = self.logicalCwd(&cwd_buf);
-
-        var prefix_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
-        const prefix = std.fmt.bufPrint(&prefix_buf, "{s} > ", .{cwd}) catch "> ";
-
-        const start = try self.drawGetCursor();
-
-        var local = self.client.batch();
-        defer local.deinit();
-        const b: *glyphwire.Client.Batch = sink orelse &local;
-        try self.batchSetCursor(b, start.row, start.col);
-        try self.batchText(b, prefix, null, null);
-        if (sink == null) {
-            var res = try local.send();
-            res.deinit();
-        }
-
-        return self.cursorAfter(start, prompt_template.displayWidth(prefix));
-    }
-
-    /// Stack buffers backing a `prompt_template.Data` snapshot -- the
-    /// caller holds one of these for the lifetime of the `Data`.
-    const PromptDataBufs = struct {
-        cwd: [std.fs.max_path_bytes]u8 = undefined,
-        tilde: [std.fs.max_path_bytes]u8 = undefined,
-        time: [64]u8 = undefined,
-    };
-
-    /// Fills a `prompt_template.Data` from the shell's live state, using
-    /// `b` for the strings that need somewhere to live.
-    fn buildPromptData(self: *Prompt, b: *PromptDataBufs, p: *const config.PromptConfig) prompt_template.Data {
-        const cwd_full = self.logicalCwd(&b.cwd);
-        return .{
-            .cwd = self.collapseHome(cwd_full, &b.tilde),
-            .cwd_full = cwd_full,
-            .user = self.environ_map.get("USER") orelse "",
-            .host = self.host,
-            .remote = self.remoteDest(),
-            .time = self.formatTime(&b.time, p.time_format orelse "%H:%M"),
-            .environ = &self.env,
-            .last_status = self.last_status,
-            .have_status = self.have_status,
-            .last_dur_ms = self.last_dur_ms,
-            .dur_min_ms = self.durMinMs(),
-            .exit_section = p.exit,
-            .dur_section = p.dur,
-            .remote_section = p.remote,
-            .vars = self.cmdVarResolver(),
-        };
-    }
-
-    /// The `prompt_template.VarResolver` for this prompt's `commands`
-    /// vars, or `null` when none are configured (so an unknown `{token}`
-    /// keeps its literal-passthrough behaviour). The `ctx` is the
-    /// `*Prompt`; `resolveCmdVarThunk` casts it back.
-    fn cmdVarResolver(self: *Prompt) ?prompt_template.VarResolver {
-        const p = self.promptCfg() orelse return null;
-        if (p.command_vars == null) return null;
-        return .{ .ctx = self, .resolve = resolveCmdVarThunk };
-    }
-
-    fn resolveCmdVarThunk(ctx: *anyopaque, name: []const u8) ?[]const u8 {
-        const self: *Prompt = @ptrCast(@alignCast(ctx));
-        return self.resolveCmdVar(name);
-    }
-
-    /// Resolves a `{name}` token against `prompt{ commands = { ... } }`.
-    /// Returns `null` when `name` isn't a declared command var (the
-    /// template then leaves the token verbatim); otherwise the command's
-    /// trimmed stdout, or `""` when it was gated off by its `when`,
-    /// failed, timed out, or hit the cycle/depth guard. Memoised in
-    /// `cmd_var_cache` for the life of the current prompt.
-    fn resolveCmdVar(self: *Prompt, name: []const u8) ?[]const u8 {
-        const p = self.promptCfg() orelse return null;
-        const vars = p.command_vars orelse return null;
-
-        const cv: *const config.CommandVar = blk: {
-            for (vars) |*entry| {
-                if (std.mem.eql(u8, entry.name, name)) break :blk entry;
-            }
-            return null;
-        };
-
-        if (self.cmd_var_cache.get(name)) |cached| return cached;
-
-        // Cycle / runaway-depth guard: a `when` that (transitively)
-        // references its own var resolves to empty rather than looping.
-        if (self.cmd_var_depth >= self.cmd_var_stack.len) return "";
-        for (self.cmd_var_stack[0..self.cmd_var_depth]) |n| {
-            if (std.mem.eql(u8, n, name)) return "";
-        }
-        self.cmd_var_stack[self.cmd_var_depth] = name;
-        self.cmd_var_depth += 1;
-        defer self.cmd_var_depth -= 1;
-
-        // `runCmdVar` hands back a `client.alloc`-owned slice (or a static
-        // "" on failure / empty output); the cache takes it as-is and
-        // `resetCmdVars` frees it. The gated-off path stores the same
-        // static "".
-        const gated_off = if (cv.when) |w| !self.cmdWhenTrue(w) else false;
-        const owned: []const u8 = if (gated_off) "" else self.runCmdVar(cv);
-
-        self.cmd_var_cache.put(self.client.alloc, name, owned) catch {};
-        return owned;
-    }
-
-    /// Runs `cv.run` through `/bin/sh -c`, synchronously, and returns its
-    /// trimmed stdout as a fresh `client.alloc` slice -- or `""` on a
-    /// spawn failure, an exit with no output, or the timeout firing (the
-    /// child is killed). Exit status is otherwise ignored: `{name}` *is*
-    /// the command's output, and a `when` clause treats a non-empty
-    /// output as true.
-    fn runCmdVar(self: *Prompt, cv: *const config.CommandVar) []const u8 {
-        const gpa = self.client.alloc;
-        const timeout_ms: i64 = @intCast(cv.timeout_ms orelse default_cmd_var_timeout_ms);
-
-        const argv = [_][]const u8{ "/bin/sh", "-c", cv.run };
-        const res = std.process.run(gpa, self.client.io, .{
-            .argv = &argv,
-            .stdout_limit = .limited(64 * 1024),
-            .stderr_limit = .limited(4 * 1024),
-            .timeout = .{ .duration = .{ .raw = .fromMilliseconds(timeout_ms), .clock = .awake } },
-        }) catch return "";
-        defer gpa.free(res.stdout);
-        defer gpa.free(res.stderr);
-
-        const trimmed = std.mem.trim(u8, res.stdout, " \t\r\n");
-        if (trimmed.len == 0) return "";
-        return gpa.dupe(u8, trimmed) catch "";
-    }
-
-    /// Evaluates a `when` template expression (a segment's `when_expr` or
-    /// a command var's own `when`) against the command vars: renders it,
-    /// trims, and reports whether the result is "truthy" -- non-empty and
-    /// not `0` / `false`. A leading `!` (repeatable) negates. A render
-    /// failure counts as falsy (before negation).
-    fn cmdWhenTrue(self: *Prompt, expr_in: []const u8) bool {
-        var expr = std.mem.trim(u8, expr_in, " \t");
-        var negate = false;
-        while (expr.len > 0 and expr[0] == '!') {
-            negate = !negate;
-            expr = std.mem.trim(u8, expr[1..], " \t");
-        }
-
-        var arena_state = std.heap.ArenaAllocator.init(self.client.alloc);
-        defer arena_state.deinit();
-        const a = arena_state.allocator();
-
-        const data = prompt_template.Data{
-            .environ = &self.env,
-            .vars = self.cmdVarResolver(),
-        };
-        const ops = prompt_template.renderOps(a, expr, data) catch return negate;
-
-        var buf: std.ArrayList(u8) = .empty;
-        for (ops) |op| switch (op) {
-            .text => |t| buf.appendSlice(a, t) catch return negate,
-            .icon => {},
-        };
-        return prompt_template.whenTruthy(buf.items) != negate;
-    }
-
-    /// Local time formatted per `fmt` (a `strftime` string), into `buf`.
-    /// Uses libc directly (this reduced std has no time-formatting) and
-    /// returns "" on any failure.
-    fn formatTime(_: *Prompt, buf: []u8, fmt: []const u8) []const u8 {
-        var fmtz: [96]u8 = undefined;
-        if (fmt.len == 0 or fmt.len >= fmtz.len) return "";
-        @memcpy(fmtz[0..fmt.len], fmt);
-        fmtz[fmt.len] = 0;
-
-        const t: c_long = timelib.time(null);
-        var tm: timelib.Tm = undefined;
-        if (timelib.localtime_r(&t, &tm) == null) return "";
-        const n = timelib.strftime(buf.ptr, buf.len, @ptrCast(&fmtz), &tm);
-        return buf[0..n];
-    }
-
-    /// Renders the configured `prompt.left` / `prompt.right` template
-    /// strings (see `shell/prompt_template.zig`). `prompt.right` is drawn
-    /// right-aligned on the prompt row (a long input line overwrites it --
-    /// accepted, like starship's transient right prompt); `prompt.left`
-    /// from column 0. Returns where input begins.
-    fn writeTemplatedPrefix(self: *Prompt, p: *const config.PromptConfig, sink: ChainSink) !glyphwire.Cursor {
-        const alloc = self.client.alloc;
-
-        var bufs: PromptDataBufs = .{};
-        const data = self.buildPromptData(&bufs, p);
-
-        const start = try self.drawGetCursor();
-
-        var local = self.client.batch();
-        defer local.deinit();
-        const b: *glyphwire.Client.Batch = sink orelse &local;
-
-        if (p.right) |rt| {
-            var r = try prompt_template.render(alloc, rt, data);
-            defer r.deinit();
-            const w = prompt_template.opsWidth(r.ops, self.icon_cols);
-            if (w > 0 and w < self.grid_cols) {
-                // `emitOps` positions itself with a leading `setCursor`.
-                try self.emitOps(b, r.ops, start.row, self.grid_cols - w, .{});
-            }
-        }
-
-        var l = try prompt_template.render(alloc, p.left orelse default_prompt_left, data);
-        defer l.deinit();
-        try self.emitOps(b, l.ops, start.row, 0, .{});
-
-        if (sink == null) {
-            var res = try local.send();
-            res.deinit();
-        }
-
-        // Input begins just past the left template (single row -- templated
-        // prompts keep the right prompt on the same line).
-        return self.cursorAfter(.{ .row = start.row, .col = 0 }, prompt_template.opsWidth(l.ops, self.icon_cols));
-    }
-
-    const RenderedSeg = struct {
-        ops: []const prompt_template.Op,
-        width: usize,
-        fg: ?glyphwire.Color,
-        bg: ?glyphwire.Color,
-    };
-
-    /// Renders each *visible* segment of `segs` (dropping `when`-filtered
-    /// and empty ones) into `out` (allocated in `arena`), returns the
-    /// summed on-screen width of the segments themselves (separators and
-    /// caps not included -- see `chainWidth`).
-    fn renderChain(
-        self: *Prompt,
-        arena: std.mem.Allocator,
-        segs: []const config.PromptSegment,
-        data: prompt_template.Data,
-        out: *std.ArrayList(RenderedSeg),
-    ) !usize {
-        var total: usize = 0;
-        for (segs) |seg| {
-            switch (seg.when) {
-                .always => {},
-                .err => if (!(data.have_status and data.last_status != 0)) continue,
-                .slow => if (!(data.dur_min_ms > 0 and data.last_dur_ms >= data.dur_min_ms)) continue,
-            }
-            // A `when = "{var}"` expression form -- shown only when the
-            // expression renders truthy against the command vars.
-            if (seg.when_expr) |we| {
-                if (!self.cmdWhenTrue(we)) continue;
-            }
-            const ops = try prompt_template.renderOps(arena, seg.text, data);
-            const w = prompt_template.opsWidth(ops, self.icon_cols);
-            if (w == 0) continue;
-            try out.append(arena, .{
-                .ops = ops,
-                .width = w,
-                .fg = plColor(seg.fg),
-                .bg = plColor(seg.bg),
-            });
-            total += w;
-        }
-        return total;
-    }
-
-    /// Total on-screen width of a rendered chain: segment widths (`seg_sum`)
-    /// plus `count - 1` separators plus the caps that are non-empty.
-    fn chainWidth(count: usize, seg_sum: usize, sep: []const u8, head: []const u8, tail: []const u8) usize {
-        if (count == 0) return 0;
-        var w = seg_sum + prompt_template.displayWidth(sep) * (count - 1);
-        if (head.len > 0) w += prompt_template.displayWidth(head);
-        if (tail.len > 0) w += prompt_template.displayWidth(tail);
-        return w;
-    }
-
-    /// Draw target for the powerline chain helpers: either straight to the
-    /// client (`null`) or accumulated into one `batch` frame. `drawRightChain`
-    /// batches so the periodic redraw of the right chain plus the trailing
-    /// caret restore land in a single render -- no visible caret blip out
-    /// to the right side and back.
-    const ChainSink = ?*glyphwire.Client.Batch;
-
-    fn sinkSetCursor(self: *Prompt, sink: ChainSink, row: usize, col: usize) !void {
-        if (sink) |b| try self.batchSetCursor(b, row, col) else try self.drawSetCursor(row, col);
-    }
-    fn sinkWriteText(self: *Prompt, sink: ChainSink, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
-        if (sink) |b| try self.batchText(b, text, fg, bg) else try self.drawText(text, fg, bg);
-    }
-    fn sinkWriteTextTransparent(self: *Prompt, sink: ChainSink, text: []const u8, fg: ?glyphwire.Color) !void {
-        if (sink) |b| try b.writeText(text, .{ .layer = self.layer, .fg = fg, .transparent_bg = true }) else try self.drawTextTransparent(text, fg);
-    }
-    fn sinkDrawIconStyled(self: *Prompt, sink: ChainSink, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
-        if (sink) |b| {
-            if (self.layer) |l| try b.drawIconOnStyled(l, row, col, name, opts) else try b.drawIconStyled(row, col, name, opts);
-        } else try self.drawIconStyled(row, col, name, opts);
     }
 
     // ── The host's control pipe (`--embed`) ─────────────────────────────
@@ -1996,7 +1642,7 @@ const Prompt = struct {
     /// it. Called from the prompt loop rather than from a reader thread:
     /// a directive that arrives mid-command shouldn't take effect until
     /// the loop is somewhere it can honour it.
-    fn drainControl(self: *Prompt) void {
+    pub fn drainControl(self: *Prompt) void {
         const ctl = self.control orelse return;
         ctl.drain(self, applyDirective) catch {};
         // Every writer closed: the host exited and took the layer we draw
@@ -2004,7 +1650,7 @@ const Prompt = struct {
         if (ctl.host_gone) self.should_exit = true;
     }
 
-    fn applyDirective(self: *Prompt, d: embed.Directive) void {
+    pub fn applyDirective(self: *Prompt, d: embed.Directive) void {
         switch (d) {
             .cd => |path| {
                 const alloc = self.client.alloc;
@@ -2035,7 +1681,7 @@ const Prompt = struct {
     /// keyboard, and it sets the caret up for itself (see
     /// `applib/shellpanel.zig`); a hide from here would land after the
     /// host's own caret for the mode it returned to, and win.
-    fn setFocused(self: *Prompt, on: bool) void {
+    pub fn setFocused(self: *Prompt, on: bool) void {
         if (self.focused == on) return;
         self.focused = on;
         if (self.layer) |l| {
@@ -2053,7 +1699,7 @@ const Prompt = struct {
 
     /// Applies a directory the host asked for, if one is waiting. Called
     /// where a new prompt is about to be drawn.
-    fn applyPendingCd(self: *Prompt) void {
+    pub fn applyPendingCd(self: *Prompt) void {
         const path = self.pending_cd orelse return;
         self.pending_cd = null;
         defer self.client.alloc.free(path);
@@ -2069,78 +1715,78 @@ const Prompt = struct {
     // panel in someone else's context. The batch forms take the frame to
     // add to, since a `Batch` mirrors `Client` message for message.
 
-    fn drawText(self: *Prompt, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
+    pub fn drawText(self: *Prompt, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
         try self.client.writeText(text, .{ .layer = self.layer, .fg = fg, .bg = bg });
     }
 
-    fn drawTextTransparent(self: *Prompt, text: []const u8, fg: ?glyphwire.Color) !void {
+    pub fn drawTextTransparent(self: *Prompt, text: []const u8, fg: ?glyphwire.Color) !void {
         try self.client.writeText(text, .{ .layer = self.layer, .fg = fg, .transparent_bg = true });
     }
 
-    fn batchText(self: *Prompt, b: *glyphwire.Client.Batch, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
+    pub fn batchText(self: *Prompt, b: *glyphwire.Client.Batch, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
         try b.writeText(text, .{ .layer = self.layer, .fg = fg, .bg = bg });
     }
 
-    fn drawSetCursor(self: *Prompt, row: usize, col: usize) !void {
+    pub fn drawSetCursor(self: *Prompt, row: usize, col: usize) !void {
         if (self.layer) |l| return self.client.setCursorOn(l, row, col);
         try self.client.setCursor(row, col);
     }
 
-    fn batchSetCursor(self: *Prompt, b: *glyphwire.Client.Batch, row: usize, col: usize) !void {
+    pub fn batchSetCursor(self: *Prompt, b: *glyphwire.Client.Batch, row: usize, col: usize) !void {
         if (self.layer) |l| return b.setCursorOn(l, row, col);
         try b.setCursor(row, col);
     }
 
-    fn batchClear(self: *Prompt, b: *glyphwire.Client.Batch, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
+    pub fn batchClear(self: *Prompt, b: *glyphwire.Client.Batch, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
         try b.clearOn(self.layer, row, col, rows, cols);
     }
 
-    fn drawGetCursor(self: *Prompt) !glyphwire.Cursor {
+    pub fn drawGetCursor(self: *Prompt) !glyphwire.Cursor {
         return self.client.getCursorOn(self.layer);
     }
 
-    fn drawClear(self: *Prompt, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
+    pub fn drawClear(self: *Prompt, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
         try self.client.clearOn(self.layer, row, col, rows, cols);
     }
 
-    fn drawScrollView(self: *Prompt, offset: ?usize, delta: ?i64) !glyphwire.LayerScroll {
+    pub fn drawScrollView(self: *Prompt, offset: ?usize, delta: ?i64) !glyphwire.LayerScroll {
         return self.client.scrollViewOn(self.layer, offset, delta);
     }
 
-    fn drawGetScroll(self: *Prompt) !glyphwire.LayerScroll {
+    pub fn drawGetScroll(self: *Prompt) !glyphwire.LayerScroll {
         return self.client.getScrollOn(self.layer);
     }
 
-    fn drawGetCells(self: *Prompt) !glyphwire.CellsSnapshot {
+    pub fn drawGetCells(self: *Prompt) !glyphwire.CellsSnapshot {
         if (self.layer) |l| return self.client.getCellsOn(l);
         return self.client.getCells();
     }
 
-    fn drawGetCellsView(self: *Prompt, view_offset: usize) !glyphwire.CellsSnapshot {
+    pub fn drawGetCellsView(self: *Prompt, view_offset: usize) !glyphwire.CellsSnapshot {
         return self.client.getCellsViewOn(self.layer, view_offset);
     }
 
-    fn drawGetMetadata(self: *Prompt, row: usize, col: usize, view_offset: usize) @TypeOf(self.client.getMetadata(null, 0, 0, 0)) {
+    pub fn drawGetMetadata(self: *Prompt, row: usize, col: usize, view_offset: usize) @TypeOf(self.client.getMetadata(null, 0, 0, 0)) {
         return self.client.getMetadata(self.layer, row, col, view_offset);
     }
 
-    fn drawFindMetadata(self: *Prompt, above: i64, col: usize, dir: glyphwire.MetadataSpanDir) !?glyphwire.MetadataSpanHit {
+    pub fn drawFindMetadata(self: *Prompt, above: i64, col: usize, dir: glyphwire.MetadataSpanDir) !?glyphwire.MetadataSpanHit {
         return self.client.findMetadata(self.layer, above, col, dir);
     }
 
-    fn drawToggleHighlight(self: *Prompt, row: usize, col: usize, view_offset: usize) !glyphwire.HighlightSnapshot {
+    pub fn drawToggleHighlight(self: *Prompt, row: usize, col: usize, view_offset: usize) !glyphwire.HighlightSnapshot {
         return self.client.toggleHighlight(self.layer, row, col, view_offset);
     }
 
-    fn drawActivateAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !glyphwire.Client.ActivateResult {
+    pub fn drawActivateAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !glyphwire.Client.ActivateResult {
         return self.client.activateAt(self.layer, row, col, view_offset);
     }
 
-    fn drawClearHighlight(self: *Prompt) !glyphwire.HighlightSnapshot {
+    pub fn drawClearHighlight(self: *Prompt) !glyphwire.HighlightSnapshot {
         return self.client.clearHighlight(self.layer);
     }
 
-    fn drawIconStyled(self: *Prompt, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
+    pub fn drawIconStyled(self: *Prompt, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
         if (self.layer) |l| return self.client.drawIconOnStyled(l, row, col, name, opts);
         try self.client.drawIconStyled(row, col, name, opts);
     }
@@ -2160,12 +1806,12 @@ const Prompt = struct {
     /// the shell owns the context, the panel's `cell_position` when
     /// embedded. Falls back to zero if the host can't be asked, which
     /// leaves a click where it used to be rather than dropping it.
-    fn surfaceOrigin(self: *Prompt) glyphwire.CellPos {
+    pub fn surfaceOrigin(self: *Prompt) glyphwire.CellPos {
         const layer = self.layer orelse return .{};
         return self.client.getLayerCellPosition(layer) catch .{};
     }
 
-    fn surfaceCell(self: *Prompt, cell: glyphwire.CellPos) ?glyphwire.CellPos {
+    pub fn surfaceCell(self: *Prompt, cell: glyphwire.CellPos) ?glyphwire.CellPos {
         const layer = self.layer orelse return cell;
         const pos = self.client.getLayerCellPosition(layer) catch return null;
         return embed.surfaceCell(cell, pos, self.grid_cols, self.grid_rows);
@@ -2173,7 +1819,7 @@ const Prompt = struct {
 
     /// The surface's cell size: the window when the shell owns its
     /// context, the popup's layer when embedded.
-    fn drawGetSize(self: *Prompt) !glyphwire.LayerSize {
+    pub fn drawGetSize(self: *Prompt) !glyphwire.LayerSize {
         if (self.layer) |l| return self.client.getLayerSize(l);
         return self.client.getSize();
     }
@@ -2181,7 +1827,7 @@ const Prompt = struct {
     /// The escape-sequence machine a foreground child's byte stream needs
     /// kept across `write_text` calls, on whichever layer that stream is
     /// being written to.
-    fn drawSetPtyMode(self: *Prompt, enabled: bool) !void {
+    pub fn drawSetPtyMode(self: *Prompt, enabled: bool) !void {
         try self.client.setLayerPtyMode(self.layer orelse glyphwire.root_layer_handle, enabled);
     }
 
@@ -2189,443 +1835,13 @@ const Prompt = struct {
     /// (`core.Layer.mouse_report`), on the same layer its output goes to,
     /// so the host forwards raw clicks, drags and wheel notches instead
     /// of selecting text.
-    fn drawSetMouseReport(self: *Prompt, enabled: bool) !void {
+    pub fn drawSetMouseReport(self: *Prompt, enabled: bool) !void {
         try self.client.setLayerMouseReport(self.layer orelse glyphwire.root_layer_handle, enabled);
-    }
-
-    /// Draws a rendered chain left to right starting at `(row, start_col)`:
-    /// optional `head` cap, then each segment (a background strip, then its
-    /// text/icons composited over it), with `sep` between adjacent
-    /// segments, then optional `tail` cap. A separator is drawn in the two
-    /// neighbours' backgrounds -- for `right_side` chains the fg/bg are
-    /// swapped so a left-pointing glyph reads correctly. `sink` routes
-    /// every draw either straight to the client or into a `batch`.
-    fn drawChain(
-        self: *Prompt,
-        row: usize,
-        start_col: usize,
-        segs: []const RenderedSeg,
-        sep: []const u8,
-        head: []const u8,
-        tail: []const u8,
-        right_side: bool,
-        sink: ChainSink,
-    ) !void {
-        if (segs.len == 0) return;
-        var col = start_col;
-
-        if (head.len > 0) {
-            try self.sinkSetCursor(sink, row, col);
-            try self.sinkWriteText(sink, head, segs[0].bg, null);
-            col += prompt_template.displayWidth(head);
-        }
-
-        for (segs, 0..) |seg, i| {
-            if (i > 0 and sep.len > 0) {
-                const prev = segs[i - 1];
-                try self.sinkSetCursor(sink, row, col);
-                if (right_side) {
-                    try self.sinkWriteText(sink, sep, seg.bg, prev.bg);
-                } else {
-                    try self.sinkWriteText(sink, sep, prev.bg, seg.bg);
-                }
-                col += prompt_template.displayWidth(sep);
-            }
-            // Background strip, then text/icons composited over it.
-            try self.sinkSetCursor(sink, row, col);
-            try self.writeSpaces(sink, seg.width, seg.fg, seg.bg);
-            try self.emitOps(sink, seg.ops, row, col, .{ .fg = seg.fg, .transparent = true });
-            col += seg.width;
-        }
-
-        if (tail.len > 0) {
-            try self.sinkSetCursor(sink, row, col);
-            try self.sinkWriteText(sink, tail, segs[segs.len - 1].bg, null);
-        }
-    }
-
-    /// Re-renders and redraws the `right_segments` chain at its pinned
-    /// position -- called on the idle timeout so `{time}` ticks, and (on a
-    /// single-line prompt) after every keystroke so it stays put while the
-    /// input line is repainted. A no-op when no right chain is configured.
-    ///
-    /// The whole redraw plus a trailing "put the caret back on the input
-    /// line" go out as one `batch` frame, so the host never renders a
-    /// frame with the caret stranded out on the right where the chain is
-    /// drawn -- the "cursor blip to the right" this used to cause.
-    fn drawRightChain(self: *Prompt) !void {
-        const rt0: ?std.Io.Timestamp = if (self.profiler.enabled) self.profiler.nowTs() else null;
-        defer if (rt0) |s| self.profiler.record(.right_chain, self.profiler.elapsedNs(s));
-
-        const p = self.promptCfg() orelse return;
-        const segs = p.right_segments orelse return;
-
-        var arena_state = std.heap.ArenaAllocator.init(self.client.alloc);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
-
-        var bufs: PromptDataBufs = .{};
-        const data = self.buildPromptData(&bufs, p);
-
-        var list: std.ArrayList(RenderedSeg) = .empty;
-        const seg_sum = try self.renderChain(arena, segs, data, &list);
-        if (list.items.len == 0) return;
-
-        const sep_right = p.sep_right orelse (p.sep orelse "");
-        // `right_head` caps the left edge of the right-aligned chain (the
-        // side facing the input). Unset, it falls back to `head` -- the
-        // same left-cap glyph the left chain uses -- mirroring how
-        // `sep_right` falls back to `sep`. `drawChain` draws it in the
-        // first visible segment's bg (red on an error segment, the time's
-        // bg otherwise).
-        const right_head = p.right_head orelse (p.head orelse "");
-        const w = chainWidth(list.items.len, seg_sum, sep_right, right_head, "");
-        if (w >= self.grid_cols) return;
-        const row = if (self.grid_rows > 0) @min(self.pl_top_row, self.grid_rows - 1) else self.pl_top_row;
-
-        var b = self.client.batch();
-        defer b.deinit();
-        try self.drawChain(row, self.grid_cols - w, list.items, sep_right, right_head, "", true, &b);
-        // Caret restore, same frame -- mirrors `placeInputCursor`. Always
-        // the input line: the idle-tick caller gates on `browse_pos == null`
-        // and `renderInputLine` only runs for the live line.
-        const caret_row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
-        try self.batchSetCursor(&b, caret_row, self.line_start_col + self.caretCol());
-        var res = try b.send();
-        res.deinit();
-        self.profiler.add(.batch_sends, 1);
-    }
-
-    /// The powerline prompt: `left_segments` from column 0, `right_segments`
-    /// right-aligned, on `prompt_lines`-1 rows above the input line (or all
-    /// on one row when `prompt_lines == 1`). Returns where input begins.
-    fn writePowerlinePrefix(self: *Prompt, p: *const config.PromptConfig, sink: ChainSink) !glyphwire.Cursor {
-        var arena_state = std.heap.ArenaAllocator.init(self.client.alloc);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
-
-        var bufs: PromptDataBufs = .{};
-        const data = self.buildPromptData(&bufs, p);
-
-        self.prompt_lines = p.lines orelse 1;
-
-        // Every draw below goes into one frame: the caller's batch when
-        // `sink` is set, otherwise a batch this function opens and sends.
-        var local = self.client.batch();
-        defer local.deinit();
-        const b: *glyphwire.Client.Batch = sink orelse &local;
-
-        // The prompt needs `prompt_lines` consecutive rows. If the cursor
-        // (left where the last command's output ended) is close enough to
-        // the bottom that they wouldn't fit, scroll the layer up-front by
-        // writing that many newlines at the bottom row -- so every draw
-        // below works with an on-grid `top` and the recorded
-        // `line_start_row` can't end up one past the last row (which made
-        // every later `renderInputLine` / idle refresh scroll again).
-        const start = try self.drawGetCursor();
-        var top = start.row;
-        if (self.grid_rows > 0 and top + self.prompt_lines > self.grid_rows) {
-            const overshoot = top + self.prompt_lines - self.grid_rows;
-            try self.batchSetCursor(b, self.grid_rows - 1, 0);
-            var k: usize = 0;
-            while (k < overshoot) : (k += 1) try self.batchText(b, "\n", null, null);
-            top -= overshoot;
-        }
-        self.pl_top_row = top;
-
-        const sep = p.sep orelse "";
-        const sep_right = p.sep_right orelse sep;
-        const head = p.head orelse "";
-        const tail = p.tail orelse "";
-        // See `drawRightChain`: unset, the right chain's left cap reuses
-        // `head`, the same fallback shape as `sep_right` -> `sep`.
-        const right_head = p.right_head orelse head;
-
-        var left_end: usize = 0;
-        if (p.left_segments) |segs| {
-            var list: std.ArrayList(RenderedSeg) = .empty;
-            const seg_sum = try self.renderChain(arena, segs, data, &list);
-            try self.drawChain(top, 0, list.items, sep, head, tail, false, b);
-            left_end = @min(chainWidth(list.items.len, seg_sum, sep, head, tail), self.grid_cols);
-        }
-
-        var right_w: usize = 0;
-        if (p.right_segments) |segs| {
-            var list: std.ArrayList(RenderedSeg) = .empty;
-            const seg_sum = try self.renderChain(arena, segs, data, &list);
-            right_w = chainWidth(list.items.len, seg_sum, sep_right, right_head, "");
-            if (list.items.len > 0 and right_w < self.grid_cols) {
-                self.right_dynamic = true;
-                try self.drawChain(top, self.grid_cols - right_w, list.items, sep_right, right_head, "", true, b);
-            }
-        }
-
-        const input_prefix = p.input orelse "> ";
-        if (self.prompt_lines >= 2) {
-            // `top + prompt_lines <= grid_rows` now, so this row is on-grid.
-            const irow = top + self.prompt_lines - 1;
-            try self.batchSetCursor(b, irow, 0);
-            if (input_prefix.len > 0) try self.batchText(b, input_prefix, null, null);
-            self.line_start_row = irow;
-            self.line_start_col = prompt_template.displayWidth(input_prefix);
-            self.input_max_col = self.grid_cols;
-        } else {
-            var col = left_end;
-            try self.batchSetCursor(b, top, col);
-            if (input_prefix.len > 0) {
-                try self.batchText(b, input_prefix, null, null);
-                col += prompt_template.displayWidth(input_prefix);
-            }
-            self.line_start_row = top;
-            self.line_start_col = col;
-            self.input_max_col = if (self.right_dynamic and right_w + 1 < self.grid_cols)
-                self.grid_cols - right_w - 1
-            else
-                self.grid_cols;
-            if (self.input_max_col <= self.line_start_col) self.input_max_col = self.grid_cols;
-        }
-        self.input_scroll = 0;
-        if (sink == null) {
-            var res = try local.send();
-            res.deinit();
-        }
-        return .{ .row = self.line_start_row, .col = self.line_start_col };
-    }
-
-    /// Writes `n` spaces at the cursor with the given fg/bg -- the
-    /// background strip a powerline segment's text then composites over.
-    fn writeSpaces(self: *Prompt, sink: ChainSink, n: usize, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
-        var buf: [256]u8 = undefined;
-        var left = n;
-        while (left > 0) {
-            const chunk = @min(left, buf.len);
-            @memset(buf[0..chunk], ' ');
-            try self.sinkWriteText(sink, buf[0..chunk], fg, bg);
-            left -= chunk;
-        }
-    }
-
-    const EmitOpts = struct { fg: ?glyphwire.Color = null, transparent: bool = false };
-
-    /// Walks a rendered template's ops, starting at `(row, col)`. Text runs
-    /// go through `write_text` (or `write_text` transparent, keeping any
-    /// background strip) with `opts.fg`; icons through `draw_icon` at the
-    /// running cell (which `draw_icon` doesn't advance, so the column is
-    /// bumped by hand).
-    ///
-    /// Straight-to-client (`sink == null`), text runs resync the cursor
-    /// from `getCursor` so an embedded `\n` (server CR+LF) needs no local
-    /// bookkeeping. Batched (`sink != null`), there's no round trip:
-    /// segment text has no `\n`, so the column is advanced by its display
-    /// width instead.
-    ///
-    /// The explicit `setCursor` up front matters: `drawChain` calls this
-    /// right after `writeSpaces` has left the cursor at the *end* of the
-    /// segment's background strip, not its start.
-    fn emitOps(self: *Prompt, sink: ChainSink, ops: []const prompt_template.Op, row: usize, col: usize, opts: EmitOpts) !void {
-        try self.sinkSetCursor(sink, row, col);
-        var cur_row = row;
-        var cur_col = col;
-        for (ops) |op| switch (op) {
-            .text => |t| {
-                if (opts.transparent) {
-                    try self.sinkWriteTextTransparent(sink, t, opts.fg);
-                } else {
-                    try self.sinkWriteText(sink, t, opts.fg, null);
-                }
-                if (sink == null) {
-                    const cur = try self.drawGetCursor();
-                    cur_row = cur.row;
-                    cur_col = cur.col;
-                } else {
-                    cur_col += prompt_template.displayWidth(t);
-                    try self.sinkSetCursor(sink, cur_row, cur_col);
-                }
-            },
-            .icon => |name| {
-                // A `draw_icon` notification for an unregistered name is
-                // logged and dropped server-side, not returned as an error.
-                // With cell metrics: draw it at its natural size, capped to
-                // one cell-height (fills the row, no vertical spill), and
-                // step past the `icon_cols` cells it covers. Without them:
-                // the old aspect-fit-in-one-cell behavior.
-                if (self.icon_max_h > 0) {
-                    try self.sinkDrawIconStyled(sink, cur_row, cur_col, name, .{
-                        .scale = .natural,
-                        .h_align = .start,
-                        .v_align = .center,
-                        .max_h = self.icon_max_h,
-                        .foreground = opts.transparent,
-                    });
-                    cur_col += self.icon_cols;
-                } else {
-                    try self.sinkDrawIconStyled(sink, cur_row, cur_col, name, .{ .foreground = opts.transparent });
-                    cur_col += 1;
-                }
-                try self.sinkSetCursor(sink, cur_row, cur_col);
-            },
-        };
-    }
-
-    /// Returns `path` with a leading `$HOME` replaced by `~` (`~` alone
-    /// for exactly `$HOME`), written into `buf`. Falls back to `path`
-    /// unchanged when there's no `$HOME`, it isn't a prefix, or `buf` is
-    /// too small. The rule itself lives in `logicalpath` so it can be
-    /// tested without a prompt; this just supplies `$HOME`.
-    fn collapseHome(self: *Prompt, path: []const u8, buf: []u8) []const u8 {
-        return homepath.collapseHome(path, self.environ_map.get("HOME"), buf);
-    }
-
-    /// The caret's column offset from `line_start_col` -- the display
-    /// width of `line` between `input_scroll` and its caret (both byte
-    /// offsets on codepoint boundaries). Byte count and column count only
-    /// coincide for ASCII; a CJK char is one codepoint, two columns.
-    fn caretCol(self: *Prompt) usize {
-        const buf = self.line.text();
-        const from = @min(self.input_scroll, buf.len);
-        const to = @min(self.line.caret, buf.len);
-        if (to <= from) return 0;
-        return lineedit.displayCol(buf[from..], to - from);
-    }
-
-    /// Repaints the whole input box -- `[line_start_col, input_max_col)` on
-    /// `line_start_row` -- from `buffer`, scrolling horizontally
-    /// (`input_scroll`, a byte offset kept on a codepoint boundary) so the
-    /// caret stays visible, then places the server cursor. Replaces the
-    /// old per-edit `insert_cells` / `delete_cells` dance: every editing
-    /// op mutates `buffer`/`cursor` locally and calls this. All width math
-    /// is in display columns (`lineedit`), so a CJK line lays out right.
-    /// On a single-line powerline prompt it also redraws the pinned right
-    /// chain so typing can't disturb it.
-    fn renderInputLine(self: *Prompt) !void {
-        const pt0: ?std.Io.Timestamp = if (self.profiler.enabled) self.profiler.nowTs() else null;
-        defer if (pt0) |s| self.profiler.record(.prompt_render, self.profiler.elapsedNs(s));
-
-        // Box repaint + caret placement go out as one `batch` frame, so
-        // the host never renders an intermediate frame with the caret
-        // parked at the box's left edge -- the brief caret "jump" seen on
-        // a history recall or line swap otherwise. Same trick as
-        // `drawRightChain`.
-        var b = self.client.batch();
-        defer b.deinit();
-        try self.appendInputLine(&b);
-        var res = try b.send();
-        res.deinit();
-        self.profiler.add(.batch_sends, 1);
-
-        // The dynamic right chain is its own `batch` frame (ending with
-        // its own caret restore); it only redraws when configured.
-        if (self.right_dynamic and self.prompt_lines == 1) self.drawRightChain() catch {};
-    }
-
-    /// Appends the input-box repaint (visible slice + completion hint +
-    /// blank fill) and the trailing caret placement to `b`, updating
-    /// `input_scroll` along the way. Split out of `renderInputLine` so
-    /// `handleResize` can fold the input box into the same frame as its
-    /// clear + prefix redraw.
-    fn appendInputLine(self: *Prompt, b: *glyphwire.Client.Batch) !void {
-        const buf = self.line.text();
-        // Clamp to the last real row: a stale `line_start_row` past the
-        // grid bottom (see `writePowerlinePrefix`) would otherwise make
-        // every `setCursor` below scroll the layer.
-        const row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
-        const left = self.line_start_col;
-        const right = if (self.input_max_col > left + 1) self.input_max_col else self.grid_cols;
-        const box_w = right -| left;
-        if (box_w == 0) {
-            try self.batchSetCursor(b, row, @min(left, self.grid_cols -| 1));
-            return;
-        }
-
-        // Keep the caret within the box, working in columns not bytes.
-        if (self.line.caret < self.input_scroll) {
-            self.input_scroll = self.line.caret;
-        } else {
-            while (self.input_scroll < self.line.caret and
-                lineedit.displayCol(buf[self.input_scroll..], self.line.caret - self.input_scroll) >= box_w)
-            {
-                self.input_scroll = lineedit.nextBoundary(buf, self.input_scroll);
-            }
-        }
-        if (lineedit.cellWidth(buf) <= box_w) self.input_scroll = 0;
-
-        // Visible slice: whole codepoints from `input_scroll` while they fit.
-        const vis_start = @min(self.input_scroll, buf.len);
-        var vis_end = vis_start;
-        var w: usize = 0;
-        while (vis_end < buf.len) {
-            const nb = lineedit.nextBoundary(buf, vis_end);
-            const cw = lineedit.cellWidth(buf[vis_end..nb]);
-            if (w + cw > box_w) break;
-            w += cw;
-            vis_end = nb;
-        }
-        const visible = buf[vis_start..vis_end];
-
-        var hint_end: usize = 0;
-        var hint_w: usize = 0;
-        if (self.completion_hint_visible and vis_end == buf.len) {
-            const room = box_w -| w;
-            const hint = self.completion_hint.items;
-            while (hint_end < hint.len) {
-                const nb = lineedit.nextBoundary(hint, hint_end);
-                const cw = lineedit.cellWidth(hint[hint_end..nb]);
-                if (hint_w + cw > room) break;
-                hint_w += cw;
-                hint_end = nb;
-            }
-        }
-
-        var spaces: [1024]u8 = undefined;
-        const fill_w = box_w -| (w + hint_w);
-        const fill = @min(fill_w, spaces.len);
-        @memset(spaces[0..fill], ' ');
-
-        try self.batchSetCursor(b, row, left);
-        if (visible.len > 0) try self.batchText(b, visible, null, null);
-        if (hint_end > 0) try self.batchText(b, self.completion_hint.items[0..hint_end], autocomplete_hint_color, null);
-        if (fill > 0) try self.batchText(b, spaces[0..fill], null, null);
-        try self.batchSetCursor(b, row, self.line_start_col + self.caretCol());
-    }
-
-    /// Puts the server cursor at the caret's screen cell -- `line_start_col`
-    /// plus `caretCol()` (the display-width offset of `cursor` from
-    /// `input_scroll`), on the input row clamped to the grid. Used by
-    /// `renderInputLine` and the idle right-chain refresh (which moves the
-    /// cursor while redrawing).
-    fn placeInputCursor(self: *Prompt) !void {
-        const row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
-        try self.drawSetCursor(row, self.line_start_col + self.caretCol());
-    }
-
-    /// A fresh prompt: writes the prefix, resets the line, repaints the
-    /// (empty) input box. Used to start a brand new input line (after
-    /// `submitLine` or at startup); see `clearScreen` for ctrl+l, which
-    /// keeps whatever's already typed.
-    fn showPrompt(self: *Prompt) !void {
-        // A directory the host asked for lands here, just before the
-        // prompt that will show it -- see `applyPendingCd`.
-        self.applyPendingCd();
-        self.syncPromptTitle();
-        const cur = try self.writePromptPrefix(null);
-        self.line_start_row = cur.row;
-        self.line_start_col = cur.col;
-        self.line.clear();
-        // A plain typed invocation of a result-returning program (e.g.
-        // `gw-hist` run by hand rather than via its Ctrl+R binding) left
-        // its pick here instead of an empty line -- see
-        // `pending_result_line`.
-        if (self.takePendingResultLine()) |line| {
-            defer self.client.alloc.free(line);
-            try self.line.setText(self.client.alloc, line);
-        }
-        self.armCompletionHint();
-        try self.renderInputLine();
     }
 
     /// Takes and clears `pending_result_line`, if a foreground child left
     /// one -- see `runCommand`'s use of `result_fd_env`. Caller frees.
-    fn takePendingResultLine(self: *Prompt) ?[]u8 {
+    pub fn takePendingResultLine(self: *Prompt) ?[]u8 {
         const line = self.pending_result_line;
         self.pending_result_line = null;
         return line;
@@ -2635,7 +1851,7 @@ const Prompt = struct {
     /// the size to settle (`resize_settle_ms`), since a resize drag emits
     /// one event per frame and redrawing on each looks messy. Coalesces a
     /// burst: keeps only the latest size, each event pushes the deadline.
-    fn noteResize(self: *Prompt, cols: usize, rows: usize) void {
+    pub fn noteResize(self: *Prompt, cols: usize, rows: usize) void {
         self.pending_resize = .{ .cols = cols, .rows = rows };
         self.resize_seen_at = std.Io.Clock.Timestamp.now(self.client.io, .awake);
     }
@@ -2643,7 +1859,7 @@ const Prompt = struct {
     /// Applies a pending resize once it's been quiet for `resize_settle_ms`
     /// -- or immediately when `force` (the user pressed a key, so the drag
     /// is over and the keystroke should land on a correct layout).
-    fn applyPendingResize(self: *Prompt, force: bool) !void {
+    pub fn applyPendingResize(self: *Prompt, force: bool) !void {
         const rev = self.pending_resize orelse return;
         if (!force) {
             const quiet = self.resize_seen_at.?.untilNow(self.client.io).raw.toMilliseconds();
@@ -2676,7 +1892,7 @@ const Prompt = struct {
     /// same way `core.Layer.resize` moves the cursor -- it's only a
     /// fallback here, but a stale one is how the next prompt ends up over
     /// old output.
-    fn adoptPendingResize(self: *Prompt) void {
+    pub fn adoptPendingResize(self: *Prompt) void {
         const rev = self.pending_resize orelse return;
         self.pending_resize = null;
         self.resize_seen_at = null;
@@ -2716,7 +1932,7 @@ const Prompt = struct {
     /// the old right chain out in the middle where nothing redraws over
     /// it, and a shrink that changes `prompt_lines`' worth of rows can
     /// leave a stale segment row above the new input line.
-    fn handleResize(self: *Prompt, cols: usize, rows: usize) !void {
+    pub fn handleResize(self: *Prompt, cols: usize, rows: usize) !void {
         if (cols == 0 or rows == 0) return;
         if (cols == self.grid_cols and rows == self.grid_rows) return;
 
@@ -2773,7 +1989,7 @@ const Prompt = struct {
     /// rows included) at the top, then repaints the input box with
     /// whatever's already typed. Unlike `showPrompt`, doesn't touch
     /// `buffer`/`cursor`.
-    fn clearScreen(self: *Prompt) !void {
+    pub fn clearScreen(self: *Prompt) !void {
         try self.drawClear(0, 0, null, null);
         try self.drawSetCursor(0, 0);
 
@@ -2788,7 +2004,7 @@ const Prompt = struct {
     /// Replaces the whole line -- `buffer` and on screen -- with `text`,
     /// cursor at its end. Shared by `historyUp`/`historyDown`. With the
     /// repaint model this is just a buffer swap plus `renderInputLine`.
-    fn setLine(self: *Prompt, text: []const u8) !void {
+    pub fn setLine(self: *Prompt, text: []const u8) !void {
         self.browse_pos = null;
         if (self.view_scroll != 0) {
             const res = try self.drawScrollView(0, null);
@@ -2805,7 +2021,7 @@ const Prompt = struct {
     /// line in `scratch` so `historyDown` can get back to it later;
     /// further presses just walk `history_index` back, stopping at the
     /// oldest entry rather than wrapping.
-    fn historyUp(self: *Prompt) !void {
+    pub fn historyUp(self: *Prompt) !void {
         if (self.history.items.len == 0) return;
 
         if (self.history_index) |i| {
@@ -2825,7 +2041,7 @@ const Prompt = struct {
     /// was on before recall started. A no-op when not currently recalling
     /// (`history_index == null`): there's nothing further "down" than the
     /// line already on screen.
-    fn historyDown(self: *Prompt) !void {
+    pub fn historyDown(self: *Prompt) !void {
         const i = self.history_index orelse return;
         if (i + 1 < self.history.items.len) {
             self.history_index = i + 1;
@@ -2839,13 +2055,13 @@ const Prompt = struct {
     /// Deletes the codepoint before the cursor (backspace). The field
     /// does the edit; `setCursorAt` -> `renderInputLine` repaints the box
     /// (no `delete_cells` in the repaint model).
-    fn deleteBackward(self: *Prompt) !void {
+    pub fn deleteBackward(self: *Prompt) !void {
         if (!self.line.deleteBackward()) return;
         try self.afterEdit();
     }
 
     /// Deletes the codepoint at the cursor (forward delete).
-    fn deleteForward(self: *Prompt) !void {
+    pub fn deleteForward(self: *Prompt) !void {
         if (!self.line.deleteForward()) return;
         try self.afterEdit();
     }
@@ -2854,14 +2070,14 @@ const Prompt = struct {
     /// Ctrl+Left would jump over (`wordLeft` -- character-class based, so
     /// it stops at `/` the way Ctrl+Left/Right already do on this line
     /// editor, unlike bash's whitespace-only `unix-word-rubout`).
-    fn deleteWordBackward(self: *Prompt) !void {
+    pub fn deleteWordBackward(self: *Prompt) !void {
         if (!self.line.deleteWordBackward()) return;
         try self.afterEdit();
     }
 
     /// Ctrl+Delete: deletes the word ahead of the cursor -- the mirror of
     /// `deleteWordBackward`, using `wordRight`'s span.
-    fn deleteWordForward(self: *Prompt) !void {
+    pub fn deleteWordForward(self: *Prompt) !void {
         if (!self.line.deleteWordForward()) return;
         try self.afterEdit();
     }
@@ -2870,7 +2086,7 @@ const Prompt = struct {
     /// Unlike the other edits this closes the completion picker instead
     /// of re-filtering it -- there is no word left under the caret for it
     /// to have been filtering on.
-    fn killToStart(self: *Prompt) !void {
+    pub fn killToStart(self: *Prompt) !void {
         if (self.line.caret == 0) return;
         if (self.completion_picker != null) try self.closeCompletionPicker();
         _ = self.line.killToStart();
@@ -2881,7 +2097,7 @@ const Prompt = struct {
     /// ctrl+k: deletes from the cursor to the end of the line. The
     /// mirror of `killToStart`, and picker-closing for the same reason:
     /// the word it was filtering ends at the caret.
-    fn killToEnd(self: *Prompt) !void {
+    pub fn killToEnd(self: *Prompt) !void {
         if (self.line.caret >= self.line.text().len) return;
         if (self.completion_picker != null) try self.closeCompletionPicker();
         _ = self.line.killToEnd();
@@ -2894,7 +2110,7 @@ const Prompt = struct {
     /// and re-filter an open completion picker against the word now under
     /// it (an edit keeps the picker open, unlike a deliberate reposition
     /// -- see `moveCursorTo`).
-    fn afterEdit(self: *Prompt) !void {
+    pub fn afterEdit(self: *Prompt) !void {
         self.armCompletionHint();
         try self.setCursorAt(self.line.caret);
         try self.refreshCompletionPickerIfOpen();
@@ -2906,7 +2122,7 @@ const Prompt = struct {
     /// completion picker (if open) was filtering, so it closes first --
     /// unlike an edit (`insertText`/`deleteBackward`/...), which keeps it
     /// open and re-filters instead (see `refreshCompletionPickerIfOpen`).
-    fn moveCursorTo(self: *Prompt, offset: usize) !void {
+    pub fn moveCursorTo(self: *Prompt, offset: usize) !void {
         if (self.completion_picker != null) try self.closeCompletionPicker();
         try self.setCursorAt(offset);
     }
@@ -2916,7 +2132,7 @@ const Prompt = struct {
     /// clamped result (offset + max) the server hands back. This is the
     /// "scroll the window along" half of browsing: `browseUp`/`browseDown`
     /// compute the target with `browsescroll` and apply it here.
-    fn scrollWindow(self: *Prompt, offset: usize) !void {
+    pub fn scrollWindow(self: *Prompt, offset: usize) !void {
         const res = try self.drawScrollView(offset, null);
         self.view_scroll = res.offset;
         self.view_max = res.max;
@@ -2926,7 +2142,7 @@ const Prompt = struct {
     /// the view -- a get-only `get_property("scroll")` query (no `scroll`
     /// broadcast). Called when entering browse so `browsescroll.up` starts
     /// from a current scrollback size.
-    fn syncScrollState(self: *Prompt) !void {
+    pub fn syncScrollState(self: *Prompt) !void {
         const res = try self.drawGetScroll();
         self.view_scroll = res.offset;
         self.view_max = res.max;
@@ -2949,7 +2165,7 @@ const Prompt = struct {
     /// allowed to climb the rest of the way to row 0. Entering browse at
     /// the very first prompt (`line_start_row == 0`) is fine -- an empty
     /// `scroll_view` clamps to a no-op.
-    fn browseUp(self: *Prompt, count: usize) !void {
+    pub fn browseUp(self: *Prompt, count: usize) !void {
         const entering = self.browse_pos == null;
         if (entering) try self.syncScrollState();
 
@@ -2981,7 +2197,7 @@ const Prompt = struct {
     /// just above the prompt). Reaching the prompt row ends browsing and
     /// lands back on the real prompt cursor -- it can't be scrolled past.
     /// A no-op when not currently browsing.
-    fn browseDown(self: *Prompt, count: usize) !void {
+    pub fn browseDown(self: *Prompt, count: usize) !void {
         var bp = self.browse_pos orelse return;
         const bottom = self.line_start_row -| 1; // last browsable row
 
@@ -3011,14 +2227,14 @@ const Prompt = struct {
     /// bigger step (matching ctrl+Up/Down while browsing). No-ops when not
     /// browsing; the caller is expected to check `browse_pos` first and
     /// call `moveCursorTo` instead (plain line editing) when it's null.
-    fn browseLeft(self: *Prompt, count: usize) !void {
+    pub fn browseLeft(self: *Prompt, count: usize) !void {
         var bp = self.browse_pos orelse return;
         bp.col -|= count;
         self.browse_pos = bp;
         try self.drawSetCursor(bp.row, bp.col);
     }
 
-    fn browseRight(self: *Prompt, count: usize) !void {
+    pub fn browseRight(self: *Prompt, count: usize) !void {
         var bp = self.browse_pos orelse return;
         bp.col = @min(bp.col + count, self.grid_cols -| 1);
         self.browse_pos = bp;
@@ -3027,7 +2243,7 @@ const Prompt = struct {
 
     /// Home while browsing: move the browse cursor to column 0 of the row
     /// it's on, staying in browse mode. No-op when not browsing.
-    fn browseHome(self: *Prompt) !void {
+    pub fn browseHome(self: *Prompt) !void {
         var bp = self.browse_pos orelse return;
         bp.col = 0;
         self.browse_pos = bp;
@@ -3040,7 +2256,7 @@ const Prompt = struct {
     /// browsing. Costs one `get_cells` snapshot of the current view --
     /// acceptable on a key pressed this rarely; there's no lighter
     /// per-row text query on the wire.
-    fn browseEnd(self: *Prompt) !void {
+    pub fn browseEnd(self: *Prompt) !void {
         var bp = self.browse_pos orelse return;
         bp.col = self.rowContentEnd(bp.row) catch bp.col;
         self.browse_pos = bp;
@@ -3050,7 +2266,7 @@ const Prompt = struct {
     /// The column just past the last non-blank cell of window row `row`
     /// as the view currently sits (`view_scroll`), clamped to
     /// `grid_cols - 1`. A blank row returns 0. Used by `browseEnd`.
-    fn rowContentEnd(self: *Prompt, row: usize) !usize {
+    pub fn rowContentEnd(self: *Prompt, row: usize) !usize {
         var snap = try self.drawGetCellsView(self.view_scroll);
         defer snap.deinit();
         if (row >= snap.rows()) return 0;
@@ -3083,7 +2299,7 @@ const Prompt = struct {
     /// into a `{view_scroll, browse row}` pair, scrolling the host window
     /// if the target sits outside it (`browsescroll.locate` keeps the
     /// normal scrolloff margin above it when the scrollback allows).
-    fn metadataJump(self: *Prompt, dir: glyphwire.MetadataSpanDir) !void {
+    pub fn metadataJump(self: *Prompt, dir: glyphwire.MetadataSpanDir) !void {
         const entering = self.browse_pos == null;
         if (entering and dir == .next) return;
 
@@ -3124,7 +2340,7 @@ const Prompt = struct {
     /// marked (Space / Ctrl+click), Enter runs the marked set
     /// (`runMarkedAction`); otherwise it acts on the single entry under the
     /// cursor (`activateSelectionAt`).
-    fn browseEnter(self: *Prompt) !void {
+    pub fn browseEnter(self: *Prompt) !void {
         const bp = self.browse_pos orelse return;
 
         const act = try self.drawActivateAt(bp.row, bp.col, self.view_scroll);
@@ -3157,14 +2373,14 @@ const Prompt = struct {
     /// `ls/main.zig`'s `entryMetadataJson`). `kind` and `path` are always
     /// present; `mimetype` only for a regular file; `line` only from
     /// `gw-grep`, which tags each hit and context line with its own.
-    const MetaEntry = struct { kind: ?[]const u8 = null, path: ?[]const u8 = null, mimetype: ?[]const u8 = null, line: ?u64 = null };
+    pub const MetaEntry = struct { kind: ?[]const u8 = null, path: ?[]const u8 = null, mimetype: ?[]const u8 = null, line: ?u64 = null };
 
     /// Parses the metadata at `(row, col)` in the view scrolled back by
     /// `view_offset`, or null if there's no tag there / it doesn't parse /
     /// it's missing `kind` or `path`. On success the caller must, in this
     /// order, `.parsed.deinit()` then free `.json` with `client.alloc`
     /// (the parsed strings can point into `json`).
-    fn metaEntryAt(self: *Prompt, row: usize, col: usize, view_offset: usize) ?struct {
+    pub fn metaEntryAt(self: *Prompt, row: usize, col: usize, view_offset: usize) ?struct {
         json: []u8,
         parsed: std.json.Parsed(MetaEntry),
     } {
@@ -3197,7 +2413,7 @@ const Prompt = struct {
     /// `view_offset` is how far the host was scrolled back when
     /// `(row, col)` was picked -- forwarded to `get_metadata` so a click
     /// on a scrolled-back row resolves against the cell actually there.
-    fn activateSelectionAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !void {
+    pub fn activateSelectionAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !void {
         const alloc = self.client.alloc;
 
         const got = self.metaEntryAt(row, col, view_offset) orelse return;
@@ -3228,7 +2444,7 @@ const Prompt = struct {
     /// template given more than one entry surfaces an error line and
     /// returns null (nothing runs). `{line}` comes from the first entry
     /// too. Owned result; free with `alloc`.
-    fn openActionLine(self: *Prompt, alloc: std.mem.Allocator, entries: []const openaction.Entry) !?[]u8 {
+    pub fn openActionLine(self: *Prompt, alloc: std.mem.Allocator, entries: []const openaction.Entry) !?[]u8 {
         std.debug.assert(entries.len >= 1);
         const user: []const openaction.Action = if (self.prompt_config) |pc| pc.open_actions.items else &.{};
         const action = openaction.resolve(user, entries[0]) orelse return null;
@@ -3252,7 +2468,7 @@ const Prompt = struct {
 
     // ── Multi-select marks ─────────────────────────────────────────────
 
-    fn freeMark(alloc: std.mem.Allocator, m: Mark) void {
+    pub fn freeMark(alloc: std.mem.Allocator, m: Mark) void {
         alloc.free(m.path);
         alloc.free(m.kind);
         if (m.mimetype) |mt| alloc.free(mt);
@@ -3260,7 +2476,7 @@ const Prompt = struct {
 
     /// Frees every mark and empties the list -- local only, no wire
     /// traffic. `applyHighlight` and `deinit` use it.
-    fn clearMarks(self: *Prompt) void {
+    pub fn clearMarks(self: *Prompt) void {
         const alloc = self.client.alloc;
         for (self.marks.items) |m| freeMark(alloc, m);
         self.marks.clearRetainingCapacity();
@@ -3270,7 +2486,7 @@ const Prompt = struct {
     /// back (`toggle_highlight` / `clear_highlight` / `set_highlight`
     /// response). Each entry carries the highlighted id's metadata blob;
     /// an entry with no blob, or one missing `kind`/`path`, is skipped.
-    fn applyHighlight(self: *Prompt, snap: *const glyphwire.HighlightSnapshot) !void {
+    pub fn applyHighlight(self: *Prompt, snap: *const glyphwire.HighlightSnapshot) !void {
         const alloc = self.client.alloc;
         self.clearMarks();
         for (snap.entries()) |e| {
@@ -3296,7 +2512,7 @@ const Prompt = struct {
     /// The host resolves the cell to a metadata id, flood-fills it, and
     /// hands back every highlighted id with its blob -- the shell does no
     /// grid scanning of its own.
-    fn toggleHighlightAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !void {
+    pub fn toggleHighlightAt(self: *Prompt, row: usize, col: usize, view_offset: usize) !void {
         var snap = try self.drawToggleHighlight(row, col, view_offset);
         defer snap.deinit();
         try self.applyHighlight(&snap);
@@ -3305,7 +2521,7 @@ const Prompt = struct {
     /// Clears the marks and the host's highlight overlay
     /// (`clear_highlight`). A no-op (no wire message) when nothing was
     /// marked.
-    fn resetMarks(self: *Prompt) !void {
+    pub fn resetMarks(self: *Prompt) !void {
         if (self.marks.items.len == 0) return;
         var snap = try self.drawClearHighlight();
         defer snap.deinit();
@@ -3318,7 +2534,7 @@ const Prompt = struct {
     /// quoted. This is what Ctrl+Shift+C copies while a listing has marks;
     /// pasting it after a command name (`ls `, `cp ... `) gives a valid
     /// argument list. Owned; free with `alloc`.
-    fn markedPathsText(self: *Prompt, alloc: std.mem.Allocator) ![]u8 {
+    pub fn markedPathsText(self: *Prompt, alloc: std.mem.Allocator) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(alloc);
         for (self.marks.items, 0..) |m, i| {
@@ -3334,7 +2550,7 @@ const Prompt = struct {
     /// command line (the first mark's type picks the action, every marked
     /// path is passed). Marks and their highlight are dropped by
     /// `submitLine`. A no-op if nothing resolves.
-    fn runMarkedAction(self: *Prompt) !void {
+    pub fn runMarkedAction(self: *Prompt) !void {
         if (self.marks.items.len == 0) return;
         const alloc = self.client.alloc;
 
@@ -3354,12 +2570,12 @@ const Prompt = struct {
     }
 
     /// The offset ctrl+right lands on -- see `lineedit.wordRightFrom`.
-    fn wordRight(self: *const Prompt) usize {
+    pub fn wordRight(self: *const Prompt) usize {
         return self.line.wordRightOffset();
     }
 
     /// The offset ctrl+left lands on -- see `lineedit.wordLeftFrom`.
-    fn wordLeft(self: *const Prompt) usize {
+    pub fn wordLeft(self: *const Prompt) usize {
         return self.line.wordLeftOffset();
     }
 
@@ -3381,7 +2597,7 @@ const Prompt = struct {
     /// past the top, or the host's own wheel/scrollbar), snap it back to
     /// the live tail here too -- starting to type, moving the cursor, etc.
     /// all mean "I'm done looking at history".
-    fn setCursorAt(self: *Prompt, offset: usize) !void {
+    pub fn setCursorAt(self: *Prompt, offset: usize) !void {
         self.browse_pos = null;
         if (self.view_scroll != 0) {
             const res = try self.drawScrollView(0, null);
@@ -3409,7 +2625,7 @@ const Prompt = struct {
     /// that cursor is still the row this dropped to, so its prompt lands
     /// one blank row under the command line with the shell's scrollback
     /// untouched.
-    fn submitLine(self: *Prompt) !void {
+    pub fn submitLine(self: *Prompt) !void {
         // A metadata activation (`activateSelectionAt` / `runMarkedAction`)
         // set `chdir_method` just before calling us; make sure it's back
         // to `.command` for the next line whichever way we return.
@@ -3510,7 +2726,7 @@ const Prompt = struct {
     /// pending) so a line submitted earlier this session, not yet due for
     /// the periodic flush gate, is already in the file `gw-hist` reads
     /// directly rather than over any live connection to this process.
-    fn historySearch(self: *Prompt) !void {
+    pub fn historySearch(self: *Prompt) !void {
         try self.runHistPicker(false);
     }
 
@@ -3521,13 +2737,13 @@ const Prompt = struct {
     /// directory change still goes through a line the user submitted.
     /// The flush in `runHistPicker` matters here too: it writes this
     /// session's `zj` visits into the `z.db` gw-hist reads.
-    fn dirSearch(self: *Prompt) !void {
+    pub fn dirSearch(self: *Prompt) !void {
         try self.runHistPicker(true);
     }
 
     /// The shared body of Ctrl+R and Alt+C. `dirs` adds gw-hist's leading
     /// `--dirs` flag.
-    fn runHistPicker(self: *Prompt, dirs: bool) !void {
+    pub fn runHistPicker(self: *Prompt, dirs: bool) !void {
         self.flushPersistentState(.due);
         // Whatever is already typed seeds the search (`gw-hist [query...]`,
         // see hist/main.zig's `seedQuery`), so Ctrl+R after `git com`
@@ -3571,7 +2787,7 @@ const Prompt = struct {
     /// exact. Replaces whatever was typed outright, with the caret at the
     /// end of the path (`setLine`), which is where an edit almost always
     /// starts.
-    fn cdCwdLine(self: *Prompt) !void {
+    pub fn cdCwdLine(self: *Prompt) !void {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         var tilde_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = self.collapseHome(self.logicalCwd(&cwd_buf), &tilde_buf);
@@ -3585,7 +2801,7 @@ const Prompt = struct {
 
     /// At the prompt, this shell's context is `gw-shell <cwd>` -- the
     /// directory is what changes while you move around. See `setTitle`.
-    fn syncPromptTitle(self: *Prompt) void {
+    pub fn syncPromptTitle(self: *Prompt) void {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         var home_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = self.collapseHome(self.logicalCwd(&cwd_buf), &home_buf);
@@ -3600,7 +2816,7 @@ const Prompt = struct {
     /// glyphwire-aware one; `foregroundJob` puts the prompt title back
     /// once it knows the child is aware. Cut to the title cap on a UTF-8
     /// boundary.
-    fn syncCommandTitle(self: *Prompt, line: []const u8) void {
+    pub fn syncCommandTitle(self: *Prompt, line: []const u8) void {
         const text = std.mem.trimEnd(u8, line, " \t\r\n");
         if (text.len == 0) return;
         var len = @min(text.len, glyphwire.Context.max_title_len);
@@ -3616,7 +2832,7 @@ const Prompt = struct {
     /// line only stays up for plain terminal programs. Embedded, the
     /// context is the host program's, and its title is not ours to set.
     /// Sends only on change.
-    fn setTitle(self: *Prompt, title: []const u8) void {
+    pub fn setTitle(self: *Prompt, title: []const u8) void {
         if (self.layer != null) return;
         if (std.mem.eql(u8, title, self.title_buf[0..self.title_len])) return;
         self.client.setContextTitle(title) catch return;
@@ -3647,14 +2863,14 @@ const Prompt = struct {
     /// (`cd`, `exit`, a `defcmd`) works as a whole stage in an
     /// `&&` / `||` / `;` chain, but not as one stage of a `|` pipeline
     /// (see `runPipeline`).
-    fn dispatchLine(self: *Prompt) !void {
+    pub fn dispatchLine(self: *Prompt) !void {
         return self.dispatchLineText(self.line.text());
     }
 
     /// The body of `dispatchLine`, split out so the `on{ chdir }`
     /// auto-listing can dispatch a command line that isn't sitting in
     /// `self.line`. See `dispatchLine`'s doc comment for the rules.
-    fn dispatchLineText(self: *Prompt, text: []const u8) !void {
+    pub fn dispatchLineText(self: *Prompt, text: []const u8) !void {
         const alloc = self.client.alloc;
         const trimmed = std.mem.trimStart(u8, text, " \t");
 
@@ -3710,7 +2926,7 @@ const Prompt = struct {
     /// The bare-command path: the pre-pipeline dispatch, unchanged in
     /// behavior from before pipelines existed. `cmd` is always a single
     /// stage with no redirects (`Line.isBareCommand`).
-    fn dispatchBareCommand(self: *Prompt, cmd: parse.Command) !void {
+    pub fn dispatchBareCommand(self: *Prompt, cmd: parse.Command) !void {
         const alloc = self.client.alloc;
 
         var args = try alloc.alloc(wordsplit.Arg, cmd.words.len);
@@ -3766,7 +2982,7 @@ const Prompt = struct {
     /// exit status. Returns the status of the last pipeline actually run
     /// (0 if a chain short-circuited before running anything). Interactive
     /// path only -- `sh.run` / `sh.exec` drive `runPipeline` directly.
-    fn runLine(self: *Prompt, line: parse.Line) !u8 {
+    pub fn runLine(self: *Prompt, line: parse.Line) !u8 {
         var status: u8 = 0;
         for (line.segments) |seg| {
             const run = switch (seg.sep) {
@@ -3783,7 +2999,7 @@ const Prompt = struct {
 
     /// Where a running pipeline's output goes and where its stdin / Ctrl-C
     /// come from.
-    const PipeSink = union(enum) {
+    pub const PipeSink = union(enum) {
         /// A typed line: mirror stdout+stderr to the grid, forward
         /// `Prompt.listener` keystrokes to stage 0, Ctrl-C -> SIGINT.
         interactive,
@@ -3795,7 +3011,7 @@ const Prompt = struct {
         capture: *Capture,
     };
 
-    const Capture = struct {
+    pub const Capture = struct {
         out: *std.ArrayList(u8),
         err_buf: *std.ArrayList(u8),
         stdin: []const u8,
@@ -3808,7 +3024,7 @@ const Prompt = struct {
     /// with redirects, or two-plus stages -- goes to `pipeexec.spawn`.
     /// Returns the last stage's exit status (bash semantics, no
     /// `pipefail`).
-    fn runPipeline(self: *Prompt, pl: parse.Pipeline, sink: PipeSink) !u8 {
+    pub fn runPipeline(self: *Prompt, pl: parse.Pipeline, sink: PipeSink) !u8 {
         const alloc = self.client.alloc;
 
         if (pl.commands.len == 1) {
@@ -3848,7 +3064,7 @@ const Prompt = struct {
     /// alias-expands then glob-expands one parsed command into an owned
     /// argv (`wordsplit.freeTokens` to free). The per-token "quoted" flag
     /// is carried into `expandGlobs` so a quoted `*` stays literal.
-    fn resolveArgv(self: *Prompt, cmd: parse.Command) ![]const []const u8 {
+    pub fn resolveArgv(self: *Prompt, cmd: parse.Command) ![]const []const u8 {
         const alloc = self.client.alloc;
         var args = try alloc.alloc(wordsplit.Arg, cmd.words.len);
         defer alloc.free(args);
@@ -3859,72 +3075,43 @@ const Prompt = struct {
         return self.expandGlobs(expanded);
     }
 
-    fn isBuiltinName(self: *Prompt, name: []const u8) bool {
-        if (std.mem.eql(u8, name, "exit") or std.mem.eql(u8, name, "unalias") or
-            std.mem.eql(u8, name, "cd") or std.mem.eql(u8, name, "alias") or
-            std.mem.eql(u8, name, "export") or std.mem.eql(u8, name, "unset") or
-            std.mem.eql(u8, name, "zj") or std.mem.eql(u8, name, "gwssh") or
-            std.mem.eql(u8, name, "reload") or std.mem.eql(u8, name, "jobs") or
-            std.mem.eql(u8, name, "fg")) return true;
-        if (self.script_engine) |eng| return eng.hasCommand(name);
-        return false;
-    }
-
-    /// Dispatches a builtin that is the sole stage of its pipeline. `cd` /
-    /// `unalias` report their own errors onto the grid and are treated as
-    /// status 0 here; `alias` mid-chain isn't supported (its rest-of-line
-    /// value is already gone by parse time).
-    fn runBuiltin(self: *Prompt, argv: []const []const u8) !u8 {
-        if (std.mem.eql(u8, argv[0], "exit")) {
-            self.should_exit = true;
-            return 0;
-        }
-        if (std.mem.eql(u8, argv[0], "unalias")) {
-            try self.doUnalias(argv[1..]);
-            return 0;
-        }
-        if (std.mem.eql(u8, argv[0], "cd")) {
-            try self.doCd(argv[1..]);
-            return 0;
-        }
-        if (std.mem.eql(u8, argv[0], "export")) {
-            return self.doExport(argv[1..]);
-        }
-        if (std.mem.eql(u8, argv[0], "unset")) {
-            return self.doUnset(argv[1..]);
-        }
-        if (std.mem.eql(u8, argv[0], "zj")) {
-            try self.doZj(argv[1..]);
-            return 0;
-        }
-        if (std.mem.eql(u8, argv[0], "gwssh")) {
-            return self.doGwssh(argv[1..]);
-        }
-        if (std.mem.eql(u8, argv[0], "reload")) {
-            return self.doReload(argv[1..]);
-        }
-        if (std.mem.eql(u8, argv[0], "jobs")) {
-            return self.doJobs();
-        }
-        if (std.mem.eql(u8, argv[0], "fg")) {
-            return self.doFg(argv[1..]);
-        }
-        if (std.mem.eql(u8, argv[0], "alias")) {
-            try self.drawText("alias: only supported as a standalone command", err_color, null);
-            return 2;
-        }
-        if (self.script_engine) |eng| {
-            if (eng.hasCommand(argv[0])) return eng.runCommand(argv[0], argv[1..]);
-        }
-        return 127;
-    }
+    // ── Builtins (builtins.zig) ──────────────────────────────────────────
+    pub const isBuiltinName = builtins.isBuiltinName;
+    pub const runBuiltin = builtins.runBuiltin;
+    pub const runScriptBuiltin = builtins.runScriptBuiltin;
+    pub const doJobs = builtins.doJobs;
+    pub const doFg = builtins.doFg;
+    pub const doCd = builtins.doCd;
+    pub const chdir = builtins.chdir;
+    pub const queueChdirListing = builtins.queueChdirListing;
+    pub const recordVisit = builtins.recordVisit;
+    pub const doGwssh = builtins.doGwssh;
+    pub const remoteAgentCommand = builtins.remoteAgentCommand;
+    pub const reportRemoteFailure = builtins.reportRemoteFailure;
+    pub const RemoteOutcome = builtins.RemoteOutcome;
+    pub const waitOutRemote = builtins.waitOutRemote;
+    pub const doZj = builtins.doZj;
+    pub const reportZjError = builtins.reportZjError;
+    pub const dirExists = builtins.dirExists;
+    pub const expandTilde = builtins.expandTilde;
+    pub const reportCdError = builtins.reportCdError;
+    pub const doAlias = builtins.doAlias;
+    pub const listAliases = builtins.listAliases;
+    pub const doUnalias = builtins.doUnalias;
+    pub const setEnvVar = builtins.setEnvVar;
+    pub const unsetEnvVar = builtins.unsetEnvVar;
+    pub const doExport = builtins.doExport;
+    pub const doUnset = builtins.doUnset;
+    pub const reportBadEnvName = builtins.reportBadEnvName;
+    pub const printEnv = builtins.printEnv;
+    pub const doReload = builtins.doReload;
 
     /// Builds `pipeexec.Stage`s for `commands` (already resolved to
     /// `argvs`), spawns them, and pumps output / input / Ctrl-C until the
     /// last stage exits. All heap scratch is freed before returning; the
     /// children hold their own copies. Reports a spawn failure onto the
     /// grid and returns 127.
-    fn spawnAndPump(
+    pub fn spawnAndPump(
         self: *Prompt,
         commands: []const parse.Command,
         argvs: []const []const []const u8,
@@ -4016,7 +3203,7 @@ const Prompt = struct {
     /// glob is an "ambiguous redirect" reported onto the grid, and the
     /// function returns null to mean "abort this pipeline". The target's
     /// NUL-terminated storage is appended to `zbufs`.
-    fn resolveRedir(
+    pub fn resolveRedir(
         self: *Prompt,
         r: parse.Redir,
         zbufs: *std.ArrayList([:0]u8),
@@ -4064,7 +3251,7 @@ const Prompt = struct {
     /// output appears as it happens; a 20 ms poll timeout paces the
     /// non-interactive sinks and `listener.waitInputEvent` paces the
     /// interactive one.
-    fn pumpPipeline(self: *Prompt, sp: *pipeexec.Spawned, sink: PipeSink) !void {
+    pub fn pumpPipeline(self: *Prompt, sp: *pipeexec.Spawned, sink: PipeSink) !void {
         var buf: [4096]u8 = undefined;
 
         var stdin_rest: []const u8 = switch (sink) {
@@ -4131,7 +3318,7 @@ const Prompt = struct {
     /// `timeout_ms` is passed to `poll` (0 for a pure poll). Returns true
     /// if it read any bytes -- the post-exit flush loop uses that to know
     /// when the pipes are truly empty.
-    fn drainPipeOnce(
+    pub fn drainPipeOnce(
         self: *Prompt,
         sp: *pipeexec.Spawned,
         sink: PipeSink,
@@ -4184,7 +3371,7 @@ const Prompt = struct {
     /// caller SIGINTs the group); Ctrl-D closes stage 0's stdin. Simpler
     /// than `runCommand`'s pty loop -- no mode tracking, mouse or resize,
     /// since a pipe has no line discipline to match.
-    fn forwardKeystroke(self: *Prompt, sp: *pipeexec.Spawned) !bool {
+    pub fn forwardKeystroke(self: *Prompt, sp: *pipeexec.Spawned) !bool {
         const listener = self.listener orelse return false;
         const alloc = self.client.alloc;
 
@@ -4241,7 +3428,7 @@ const Prompt = struct {
     /// Drains pending input events (dropped as type-ahead) while a
     /// non-interactive pipeline runs, returning true the moment it sees
     /// Ctrl-C -- the same shape as `hookPollInterrupt`.
-    fn pollPipeInterrupt(self: *Prompt) bool {
+    pub fn pollPipeInterrupt(self: *Prompt) bool {
         const listener = self.listener orelse return false;
         var hit = false;
         while (listener.pollInputEvent()) |iev| switch (iev) {
@@ -4265,1478 +3452,31 @@ const Prompt = struct {
         return hit;
     }
 
-    /// If `argv[0]` names a script builtin (a `defcmd` registration or a
-    /// `~/.config/glyphwire/scripts/<name>.lua`), runs it in-process and
-    /// returns true, recording its exit status the same way an external
-    /// command's is. Returns false -- untouched -- when there's no engine
-    /// or no such builtin, so dispatch falls through to `$PATH`.
-    fn runScriptBuiltin(self: *Prompt, argv: []const []const u8) bool {
-        const eng = self.script_engine orelse return false;
-        if (!eng.hasCommand(argv[0])) return false;
-        const code = eng.runCommand(argv[0], argv[1..]);
-        self.last_status = code;
-        self.last_dur_ms = 0;
-        self.have_status = true;
-        return true;
-    }
-
-    /// Runs `argv` under a B0 "dumb PTY" (`src/pty.zig`): the child's
-    /// stdin/stdout/stderr are a pseudo-terminal. A background thread
-    /// (`ptyReaderThread`) mirrors the master onto the grid via
-    /// `write_text` -- `Layer.writeText` interprets the child's own SGR
-    /// colour + simple cursor/erase (Phase A) -- and the key loop below
-    /// encodes `InputListener` keystrokes (`keyencode.toPtyBytes`) back
-    /// into the master. Versus the previous piped, stdin-less spawn this
-    /// gets: output as it happens (a child on a tty line-buffers instead
-    /// of block-buffering into a pipe), working stdin, `isatty()`-gated
-    /// colour/progress, and Ctrl-C as a real SIGINT via the tty line
-    /// discipline. Full-screen apps (alternate screen, scroll regions)
-    /// still need more: the screen model `core.Layer` interprets.
-    ///
-    /// The handshake (`glyphwire.handshake_marker`) is unchanged: a
-    /// glyphwire-aware child writes the marker to its stdout (= pty
-    /// slave), the reader thread detects it and stops mirroring, passing
-    /// the rest through to this process's own real stdio instead -- the
-    /// child is drawing over its own wire connection. `argv[0]` is
-    /// PATH-resolved by libc `execvp` (`PATH` already has `zig-out/bin`
-    /// prepended -- see `prependZigOutBinToPath`). A spawn failure is
-    /// reported onto the grid, not propagated.
-    ///
-    /// Every argument gets the same leading `~`/`~/...` expansion `cd`
-    /// already gives its target (see `expandTilde`) -- `runCommandOpts`
-    /// is the same thing with that switchable.
-    fn runCommand(self: *Prompt, argv: []const []const u8) !void {
-        return self.runCommandOpts(argv, .{});
-    }
-
-    /// Knobs for `runCommandOpts`. Everything here defaults to what a
-    /// typed command line gets, so plain `runCommand` is `.{}`.
-    const RunOptions = struct {
-        /// Whether each argument gets `expandTilde`. Off for an argument
-        /// that is *data* rather than a path: `gw-hist`'s seed query (see
-        /// `historySearch`), where expanding a typed `~/code` into
-        /// `/home/you/code` would stop it matching the history lines that
-        /// literally contain `~/code`.
-        expand_tilde: bool = true,
-    };
-
-    /// `runCommand`'s body -- see its doc comment. Split out only so a
-    /// caller that builds argv itself can turn off the tilde expansion
-    /// meant for a *typed* path argument.
-    fn runCommandOpts(self: *Prompt, argv: []const []const u8, opts: RunOptions) !void {
-        const alloc = self.client.alloc;
-        var expanded: std.ArrayList([]const u8) = .empty;
-        defer {
-            // Only the prefix actually appended before an early return
-            // (the HOME-not-set case below) needs freeing.
-            for (expanded.items, argv[0..expanded.items.len]) |exp, raw| {
-                if (exp.ptr != raw.ptr) alloc.free(exp);
-            }
-            expanded.deinit(alloc);
-        }
-        for (argv) |arg| {
-            const exp = if (opts.expand_tilde)
-                self.expandTilde(arg) catch {
-                    try self.drawText("~: HOME not set", err_color, null);
-                    return;
-                }
-            else
-                arg;
-            try expanded.append(alloc, exp);
-        }
-
-        // NUL-terminated, NULL-terminated argv for libc `execvp`.
-        var argv_bufs: std.ArrayList([:0]u8) = .empty;
-        defer {
-            for (argv_bufs.items) |b| alloc.free(b);
-            argv_bufs.deinit(alloc);
-        }
-        for (expanded.items) |a| try argv_bufs.append(alloc, try std.mem.concatWithSentinel(alloc, u8, &.{a}, 0));
-        const argv_z = try alloc.allocSentinel(?[*:0]const u8, argv_bufs.items.len, null);
-        defer alloc.free(argv_z);
-        for (argv_bufs.items, 0..) |b, i| argv_z[i] = b.ptr;
-
-        // Size the pty from the grid so a curses-ish child lays out right.
-        const size = self.drawGetSize() catch glyphwire.LayerSize{ .cols = self.grid_cols, .rows = 24 };
-
-        // Monotonic start time of the whole run, for `{dur}` on the next
-        // prompt (this reduced std has no `std.time.Timer`).
-        const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
-
-        // A "result pipe" every foreground child gets for free: a
-        // glyphwire-aware interactive program (`gw-hist`'s fuzzy history
-        // search is the first) can `write()` a value to
-        // `$GLYPHWIRE_RESULT_FD` before exiting and have it become this
-        // prompt's line once the child is reaped -- see `result_fd_env`
-        // and `readResultPipe`. No `O_CLOEXEC` on either end, matching
-        // `pipeexec.zig`'s pipes: the write end has to survive fork+exec
-        // into the child with no changes to `Pty.spawn` itself, and the
-        // child inheriting the unused read end too is harmless.
-        var result_pipe: [2]c_int = undefined;
-        if (c.pipe2(&result_pipe, 0) != 0) return error.PipeFailed;
-        const result_fd_var = try std.fmt.allocPrintSentinel(alloc, "{s}={d}", .{ result_fd_env, result_pipe[1] }, 0);
-        defer alloc.free(result_fd_var);
-
-        // Embedded, this prompt's surface is a layer someone else owns,
-        // and a glyphwire-aware child drawing "inline" means inline
-        // *here*. `GLYPHWIRE_LAYER` is what its `Client.connect` turns
-        // into an `attach_layer`, so it lands in the panel instead of on
-        // the root layer underneath it -- the layer counterpart of
-        // `GLYPHWIRE_PANE`. Nothing is added when the shell owns its
-        // context, so an ordinary session's children see no new variable.
-        const layer_var: ?[:0]u8 = if (self.layer) |l|
-            try std.fmt.allocPrintSentinel(alloc, "GLYPHWIRE_LAYER={d}", .{l}, 0)
-        else
-            null;
-        defer if (layer_var) |v| alloc.free(v);
-        const envp = if (layer_var) |v|
-            try glyphwire.pty.buildEnvWith(alloc, &.{ result_fd_var, v })
-        else
-            try glyphwire.pty.buildEnvWith(alloc, &.{result_fd_var});
-        defer alloc.free(envp);
-
-        const pty = Pty.spawn(argv_z.ptr, @intCast(size.cols), @intCast(size.rows), envp) catch |err| {
-            _ = c.close(result_pipe[0]);
-            _ = c.close(result_pipe[1]);
-            var buf: [160]u8 = undefined;
-            const msg = switch (err) {
-                error.CommandNotFound => std.fmt.bufPrint(&buf, "{s}: command not found", .{argv[0]}) catch "command not found",
-                else => std.fmt.bufPrint(&buf, "{s}: {t}", .{ argv[0], err }) catch "failed to start command",
-            };
-            try self.drawText(msg, err_color, null);
-            // Couldn't start it: record a status so `{exit}` reflects the
-            // failure, but no duration (it never ran).
-            self.last_status = if (err == error.CommandNotFound) 127 else 1;
-            self.last_dur_ms = 0;
-            self.have_status = true;
-            return;
-        };
-        // The child now holds its own copy of the write end (or, if it
-        // never touches it, will simply exit and close it); this process
-        // only ever reads (`readResultPipe`, once the child is reaped).
-        // Closing the parent's own write-end copy now is what lets that
-        // read see EOF once every process holding the write end -- just
-        // the child -- has exited.
-        _ = c.close(result_pipe[1]);
-
-        // A foreground child's output is the only thing this layer draws
-        // until it exits -- turn on cross-call VT state
-        // (`core.Layer.pty_mode`) so a `CSI`/OSC sequence split across two
-        // master reads still parses as one and a colour it sets stays set
-        // until it resets it, instead of the shell's usual call-scoped
-        // reset (which exists for exactly the opposite reason: interleaved
-        // prompt/echo writes on this same layer). Best-effort -- a failure
-        // here just means this run keeps the old call-scoped behaviour.
-        self.drawSetPtyMode(true) catch {};
-
-        // From here the job owns the pty, the result pipe's read end and
-        // the reader thread -- on the heap, since a job put in the
-        // background outlives this call.
-        const job = try self.startJob(expanded.items, pty, result_pipe[0], started);
-
-        // No listener means this isn't the interactive prompt (shouldn't
-        // happen -- the exec path in `main` never calls here). Just wait.
-        if (self.listener == null) {
-            job.pty.wait();
-            self.finishForegroundJob(job);
-            return;
-        }
-
-        switch (self.foregroundJob(job)) {
-            .exited => self.finishForegroundJob(job),
-            .backgrounded => try self.parkJob(job),
-        }
-    }
-
-    /// A program started from this prompt, from spawn until it is reaped.
-    /// Heap-owned, because one that is put in the background (see
-    /// `foregroundJob`) keeps running while the prompt takes the next
-    /// line, and its pty, reader thread and result pipe go with it.
-    const Job = struct {
-        /// `jobs` / `fg` number, assigned when it first goes to the
-        /// background; 0 while it never has.
-        id: u32 = 0,
-        /// The command line, space-joined, for `jobs` when the program
-        /// never named its context.
-        name: []u8,
-        pty: Pty,
-        modes: ModeTracker = .{},
-        reader_ctx: PtyReaderCtx = undefined,
-        reader: std.Thread = undefined,
-        /// The result pipe's read end -- see `result_fd_env`.
-        result_fd: c_int,
-        started: std.Io.Clock.Timestamp,
-        /// The context the program drew its screen on, learned from this
-        /// pane's stack while it ran (see `noteVisibleContext`). Null for a
-        /// program that never made one: that includes every plain PTY
-        /// program, which draws on the shell's own layer and so can't be
-        /// put behind it.
-        context: ?glyphwire.ContextHandle = null,
-    };
-
-    /// Wraps a just-spawned child as a `Job` and starts its output reader.
-    /// On failure the child is killed and everything is released, the
-    /// same as the old inline path did for a failed reader spawn.
-    fn startJob(self: *Prompt, argv: []const []const u8, pty: Pty, result_fd: c_int, started: std.Io.Clock.Timestamp) !*Job {
-        const alloc = self.client.alloc;
-        errdefer {
-            var p = pty;
-            p.signalGroup(std.posix.SIG.KILL);
-            p.wait();
-            p.deinit();
-            _ = c.close(result_fd);
-        }
-        const job = try alloc.create(Job);
-        errdefer alloc.destroy(job);
-        const name = try std.mem.join(alloc, " ", argv);
-        errdefer alloc.free(name);
-        job.* = .{ .name = name, .pty = pty, .result_fd = result_fd, .started = started };
-        job.reader_ctx = .{ .prompt = self, .master = job.pty.master, .modes = &job.modes };
-        job.reader = try std.Thread.spawn(.{}, ptyReaderThread, .{&job.reader_ctx});
-        return job;
-    }
-
-    /// How a stretch of `foregroundJob` ended.
-    const ForegroundEnd = enum {
-        /// The child was reaped (or the host is going away).
-        exited,
-        /// This shell's own context came back on top of its pane while
-        /// the child was still running -- the context switcher, or the
-        /// program deactivating itself. The child keeps running behind.
-        backgrounded,
-    };
-
-    /// Forwards input to `job`'s pty until the child exits or is put in
-    /// the background, in the order the host sent it -- a click, a resize
-    /// and a keystroke reach the child in the sequence they happened.
-    /// `pty.reaped()` polls (WNOHANG) once per loop; every event wakes
-    /// the wait, so its timeout only bounds how long an exit-with-no-input
-    /// waits. `fg` re-enters this for a job it brings back.
-    fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
-        const alloc = self.client.alloc;
-        const listener = self.listener.?;
-        const pty = &job.pty;
-        const modes = &job.modes;
-
-        // Where the surface's top-left cell sits in the context, so a
-        // click can be reported to the child in *its* screen's
-        // coordinates. Zero when the shell owns the context and its
-        // screen is the whole grid. Read once rather than per event: the
-        // panel only moves on a window resize, which is handled in the
-        // loop, and motion reporting would otherwise put a round trip on
-        // every pointer move.
-        var mouse_origin = self.surfaceOrigin();
-
-        // Whether this pane's stack may have changed since it was last
-        // read. A `context` event only sets this; the stack is read once
-        // the child is known to be glyphwire-aware. The two race: an aware
-        // program writes its handshake marker and creates its context
-        // within a few milliseconds, so the event announcing its context
-        // routinely arrives before the reader thread has resolved the
-        // handshake. Acting on the event immediately dropped it, the
-        // shell never learned the program's context, and switching back to
-        // the shell left it stuck waiting. Starts true so a job brought
-        // back by `fg` is checked straight away too.
-        var stack_dirty = true;
-
-        while (!pty.reaped()) {
-            // Once the handshake resolves an aware child, it's drawing
-            // over its own wire connection and never reads its own stdin
-            // -- forwarding anything into its pty would just sit unread
-            // or, worse, come back as a kernel-line-discipline echo (the
-            // pty's termios is never put in raw/no-echo mode for it) that
-            // the block below would then pass straight through to this
-            // process's own real stdout as if the child had printed it.
-            const is_aware = awareState(&job.reader_ctx) orelse false;
-
-            // Only an aware child has a context of its own to put behind
-            // the shell; a plain PTY child draws on this very layer. Also
-            // the only case where the `Client` is free to ask: for a plain
-            // child the reader thread is drawing through it.
-            if (is_aware and stack_dirty) {
-                stack_dirty = false;
-                // The command-line title `dispatchLineText` set is now the
-                // program's own context's job; left on this one, the
-                // switcher would list two near-identical entries. Back to
-                // `gw-shell <cwd>` (a no-op after the first time).
-                self.syncPromptTitle();
-                if (self.noteVisibleContext(job)) return .backgrounded;
-            }
-
-            const any_ev = (listener.next(.{ .duration = .{ .raw = .fromMilliseconds(120), .clock = .awake } }) catch null) orelse continue;
-            const input_ev = any_ev.asInput() orelse {
-                defer any_ev.deinit(alloc);
-                switch (any_ev) {
-                    // Terminal resize -> SIGWINCH the child (via the kernel
-                    // line discipline). The listener coalesces a burst.
-                    //
-                    // It is also recorded for *this* process: the prompt's
-                    // own `grid_cols`/`grid_rows` and `line_start_row`
-                    // describe a grid that just moved out from under it,
-                    // and this loop is the only place those events are
-                    // read while a child holds the foreground. Dropping
-                    // them here (what used to happen) left the shell
-                    // laying out the next prompt against the pre-resize
-                    // grid -- the prompt landing mid-screen on top of
-                    // retained output, unusable until a ctrl+l. Applied by
-                    // `adoptPendingResize` once the child is reaped; not
-                    // here, since `handleResize` would redraw a prompt
-                    // over whatever the child is showing.
-                    .resize => |rev| {
-                        pty.resize(@intCast(rev.cols), @intCast(rev.rows));
-                        self.noteResize(rev.cols, rev.rows);
-                        // A resize is also when an embedded panel is
-                        // re-placed, so the click origin moves with it.
-                        mouse_origin = self.surfaceOrigin();
-                    },
-                    // Visibility moved: read the pane's stack at the top of
-                    // the next pass, where awareness is current (see
-                    // `stack_dirty`).
-                    .context => stack_dirty = true,
-                    // Mouse: encoded to the child when it asked for
-                    // reporting, dropped otherwise.
-                    .mouse_button => |mev| if (!is_aware) ptyMouseButton(pty, modes, mev, mouse_origin),
-                    .mouse_move => |mev| if (!is_aware) ptyMouseMove(listener, pty, modes, mev, mouse_origin),
-                    // Terminal query replies (`CSI 6n` / DA / DECRQM) the
-                    // host parsed out of the child's own output on the way
-                    // to the grid.
-                    .terminal_reply => |reply| if (!is_aware) pty.writeAll(reply),
-                    // `?1004`: tell the child it gained or lost the
-                    // keyboard. The server sends `focus` per connection,
-                    // so under gmux this follows the focused pane.
-                    .focus => |fev| if (!is_aware and modes.focusEvents())
-                        pty.writeAll(if (fev.focused) "\x1b[I" else "\x1b[O"),
-                    else => {},
-                }
-                continue;
-            };
-
-            if (is_aware) {
-                switch (input_ev) {
-                    .text => |tev| alloc.free(tev.text),
-                    .paste => |tev| alloc.free(tev.text),
-                    // Ctrl+C interrupts an aware child the way the tty line
-                    // discipline does a plain one: SIGINT to its whole
-                    // group (a `gw-grep` and its `rg`). Nothing reaches its
-                    // pty to be turned into one. A program that wants
-                    // Ctrl+C as a key of its own (zoe, gw-hist) ignores
-                    // SIGINT -- see `applib.interrupt` -- and still gets
-                    // the key on its own listener. Ctrl+Shift+C is copy.
-                    .key => |kev| {
-                        defer alloc.free(kev.key);
-                        if (kev.pressed and kev.ctrl() and !kev.shift() and std.mem.eql(u8, kev.key, "c"))
-                            pty.signalGroup(std.posix.SIG.INT);
-                    },
-                    .copy_request => {},
-                    .shutdown => {
-                        self.should_exit = true;
-                        pty.signalGroup(std.posix.SIG.HUP);
-                        return .exited;
-                    },
-                    // A window manager's own commands (see `InputEvent.window_key`).
-                    // Never delivered here: this program is not one.
-                    .window_key, .window_text => {},
-                }
-                continue;
-            }
-
-            // Typed text (layout/dead-key/IME resolved) goes to the child's
-            // stdin verbatim, exactly as a terminal feeds a pty -- taken
-            // from the same ordered queue as key events so it can't
-            // reorder around an Enter.
-            const ev = switch (input_ev) {
-                .text => |tev| {
-                    defer alloc.free(tev.text);
-                    pty.writeAll(tev.text);
-                    continue;
-                },
-                .paste => |tev| {
-                    // Ctrl+Shift+V while a child owns the pty: feed the
-                    // clipboard straight to its stdin, like a terminal
-                    // pasting into a running program. Wrap it in the
-                    // bracketed-paste guards if the child turned that mode
-                    // on (`?2004`), so an editor treats it as one literal
-                    // block instead of interpreting each line.
-                    defer alloc.free(tev.text);
-                    if (modes.bracketedPaste()) pty.writeAll("\x1b[200~");
-                    pty.writeAll(tev.text);
-                    if (modes.bracketedPaste()) pty.writeAll("\x1b[201~");
-                    continue;
-                },
-                // No shell prompt to copy while a child is foregrounded;
-                // a selection copy is handled entirely host-side.
-                .copy_request => continue,
-                // Host window closing: SIGHUP the child and break the
-                // foreground loop so the shell can flush and exit.
-                .shutdown => {
-                    self.should_exit = true;
-                    pty.signalGroup(std.posix.SIG.HUP);
-                    return .exited;
-                },
-                // A window manager's own commands (see
-                // `InputEvent.window_key`). Never delivered here.
-                .window_key => |kev| {
-                    alloc.free(kev.key);
-                    continue;
-                },
-                .window_text => |tev| {
-                    alloc.free(tev.text);
-                    continue;
-                },
-                .key => |kev| kev,
-            };
-            defer alloc.free(ev.key);
-            if (!ev.pressed) continue;
-            const mods = ptyMods(ev.mods);
-            // A plain printable key (no ctrl/alt) is delivered as a `text`
-            // event, not re-encoded here -- otherwise the child sees it
-            // twice. `toPtyBytes` still handles the named keys (Enter,
-            // arrows, ...) and ctrl/alt combos, which produce no `text`.
-            if (!mods.ctrl and !mods.alt and keyencode.charFromKeyName(ev.key, false) != null) continue;
-            var kb: [32]u8 = undefined;
-            if (keyencode.toPtyBytesOpts(ev.key, mods, modes.encodeOpts(), &kb)) |seq| pty.writeAll(seq);
-        }
-        return .exited;
-    }
-
-    /// Reads this pane's stack after a visibility change while `job` holds
-    /// the foreground. Returns true when this shell's own context is back
-    /// on top with the job's context still behind it -- the job has been
-    /// put in the background. Otherwise
-    /// remembers whatever else is on top as the job's screen the first
-    /// time there is one, which is how `fg` later knows what to activate.
-    ///
-    /// The pane's stack rather than the event's own `context`: the event
-    /// names the *focused* context, and under a multiplexer that moves
-    /// every time focus changes pane, which says nothing about this one.
-    fn noteVisibleContext(self: *Prompt, job: *Job) bool {
-        var list = self.client.listContexts() catch return false;
-        defer list.deinit();
-        const entries = list.entries();
-        if (entries.len == 0) return false;
-        const top = entries[0].context;
-        if (top != list.current()) {
-            if (job.context == null) job.context = top;
-            return false;
-        }
-        // Back on top, but only a switch away if the job's screen is still
-        // in the stack behind this one. A program on its way out destroys
-        // its context before it is reaped, which also puts this shell back
-        // on top; that is an exit in progress, and the loop keeps waiting
-        // for the reap instead of announcing a background job.
-        const ctx = job.context orelse return false;
-        for (entries[1..]) |entry| {
-            if (entry.context == ctx) return true;
-        }
-        return false;
-    }
-
-    /// The end of a foreground run: collects the reader thread and the
-    /// result pipe, puts the layer back in prompt mode, records `{exit}`
-    /// and `{dur}`, and frees the job. `job` has been reaped.
-    fn finishForegroundJob(self: *Prompt, job: *Job) void {
-        const alloc = self.client.alloc;
-
-        // Child reaped -> its slave is closed -> the reader's next master
-        // read returns EOF/EIO and the thread exits on its own.
-        job.reader.join();
-
-        // Every process that held the write end (just the child) has now
-        // exited, so this is a bounded read to EOF, not a block -- see
-        // `readResultPipe`.
-        if (self.readResultPipe(job.result_fd) catch null) |line| {
-            if (self.pending_result_line) |old| alloc.free(old);
-            self.pending_result_line = line;
-        }
-
-        // Back to the shell's own prompt/echo writes on this layer --
-        // restore the call-scoped reset (setting the property either way
-        // also clears whatever the child left half-open or un-reset, the
-        // re-arm `core.Layer.pty_mode`'s doc comment describes) before the
-        // reset write below and the next prompt redraw.
-        self.drawSetPtyMode(false) catch {};
-        // And the mouse is the host's again, even if the child died with
-        // mouse reporting still on.
-        self.drawSetMouseReport(false) catch {};
-
-        // Undo the screen state a program that died without cleaning up
-        // could leave behind: `?1049l` exits the alt screen, then `! p`
-        // (DECSTR soft reset) puts the scroll region back to full and
-        // un-hides the caret without moving the cursor or clearing
-        // anything. Both are no-ops if the program already reset them.
-        // This matters for `less -X` / `bat` / git's default pager, which
-        // set a bottom-margin scroll region on the *primary* screen (no
-        // alt screen) and would otherwise leave `regionActive()` stuck,
-        // freezing scrollback and making the host wheel page the shell.
-        self.drawText("\x1b[?1049l\x1b[!p", null, null) catch {};
-
-        self.reportCrash(job);
-
-        // Record the run's outcome for the next prompt's `{exit}` / `{dur}`.
-        const elapsed_ms = job.started.untilNow(self.client.io).raw.toMilliseconds();
-        self.last_dur_ms = if (elapsed_ms > 0) @intCast(elapsed_ms) else 0;
-        self.last_status = job.pty.exit_code;
-        self.have_status = true;
-
-        self.freeJob(job);
-    }
-
-    /// Closes what `job` still holds and frees it. The reader thread must
-    /// already be joined.
-    fn freeJob(self: *Prompt, job: *Job) void {
-        const alloc = self.client.alloc;
-        _ = c.close(job.result_fd);
-        job.pty.deinit();
-        alloc.free(job.name);
-        alloc.destroy(job);
-    }
-
-    /// Puts `job` on the background list and says so, bash-style:
-    /// `[1] zoe main.zig`. It keeps its number if it had one (`fg` then
-    /// back again).
-    fn parkJob(self: *Prompt, job: *Job) !void {
-        const alloc = self.client.alloc;
-        if (job.id == 0) {
-            self.next_job_id += 1;
-            job.id = self.next_job_id;
-        }
-        self.jobs.append(alloc, job) catch |err| {
-            // Nowhere to keep it: stop it rather than lose track of a
-            // running child.
-            job.pty.signalGroup(std.posix.SIG.HUP);
-            job.pty.wait();
-            job.reader.join();
-            self.freeJob(job);
-            return err;
-        };
-        // The child isn't writing this layer any more; the prompt is.
-        self.drawSetPtyMode(false) catch {};
-        self.drawSetMouseReport(false) catch {};
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "[{d}] {s}  (background)", .{ job.id, self.jobTitle(job) }) catch "[?] (background)";
-        try self.drawText(msg, job_color, null);
-    }
-
-    /// What `jobs` and the background notice call `job`: its context's
-    /// title when the program named one, else the command line. The
-    /// returned slice may point into `job_title_buf`, so use it before the
-    /// next call.
-    fn jobTitle(self: *Prompt, job: *const Job) []const u8 {
-        const ctx = job.context orelse return job.name;
-        var list = self.client.listContexts() catch return job.name;
-        defer list.deinit();
-        const title = list.title(ctx) orelse return job.name;
-        if (title.len == 0) return job.name;
-        const n = @min(title.len, self.job_title_buf.len);
-        @memcpy(self.job_title_buf[0..n], title[0..n]);
-        return self.job_title_buf[0..n];
-    }
-
-    /// Reaps every background job that has exited, printing a `[1] done`
-    /// line for each (bash reports these just before the next prompt,
-    /// which is where this runs). The exit status goes in the line, not in
-    /// `{exit}` -- that belongs to whatever was run in the foreground.
-    fn reportFinishedJobs(self: *Prompt) void {
-        var fresh_row = false;
-        var i: usize = 0;
-        while (i < self.jobs.items.len) {
-            const job = self.jobs.items[i];
-            if (!job.pty.reaped()) {
-                i += 1;
-                continue;
-            }
-            _ = self.jobs.orderedRemove(i);
-            job.reader.join();
-            // Onto a row of its own, not the tail of the last command's
-            // output.
-            if (!fresh_row) {
-                fresh_row = true;
-                const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = 0, .col = 0 };
-                if (cur.col != 0) self.drawText("\n", null, null) catch {};
-            }
-            var buf: [256]u8 = undefined;
-            const msg = if (job.pty.exit_code == 0)
-                std.fmt.bufPrint(&buf, "[{d}] done  {s}\n", .{ job.id, job.name }) catch "[?] done\n"
-            else
-                std.fmt.bufPrint(&buf, "[{d}] exit {d}  {s}\n", .{ job.id, job.pty.exit_code, job.name }) catch "[?] done\n";
-            self.drawText(msg, job_color, null) catch {};
-            self.reportCrash(job);
-            self.freeJob(job);
-        }
-    }
-
-    /// Lines of a crashed program's output shown in the scrollback; the
-    /// log file keeps all of `crashlog.Tail`.
-    const crash_report_lines = 40;
-
-    /// When a glyphwire-aware `job` died badly (see
-    /// `crashlog.shouldReport`), puts what it last wrote to its pty where
-    /// someone will see it: a banner and the tail of that output in the
-    /// scrollback, and the whole of it in a log file under
-    /// `crashlog.logDir`. A plain child needs none of this -- its output
-    /// was on the grid all along. `job` has been reaped and its reader
-    /// joined. Best-effort throughout.
-    fn reportCrash(self: *Prompt, job: *Job) void {
-        const alloc = self.client.alloc;
-        if (awareState(&job.reader_ctx) != true) return;
-        const exit: crashlog.Exit = if (job.pty.term_signal != 0)
-            .{ .signal = job.pty.term_signal }
-        else
-            .{ .code = job.pty.exit_code };
-        const tail = &job.reader_ctx.tail;
-        if (!crashlog.shouldReport(exit, tail.len)) return;
-
-        const raw = alloc.alloc(u8, crashlog.Tail.capacity) catch return;
-        defer alloc.free(raw);
-        const clean_buf = alloc.alloc(u8, crashlog.Tail.capacity) catch return;
-        defer alloc.free(clean_buf);
-        const output = crashlog.stripAnsi(tail.contents(raw), clean_buf);
-
-        var program_it = std.mem.tokenizeScalar(u8, job.name, ' ');
-        const program = std.fs.path.basename(program_it.next() orelse job.name);
-        var what_buf: [128]u8 = undefined;
-        const what = crashlog.describe(&what_buf, program, exit);
-
-        const log_path = self.writeCrashLog(job, program, what, output);
-        defer if (log_path) |p| alloc.free(p);
-
-        // Onto a row of its own, not the tail of whatever was last drawn.
-        const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = 0, .col = 0 };
-        if (cur.col != 0) self.drawText("\n", null, null) catch {};
-        var banner_buf: [192]u8 = undefined;
-        const banner = std.fmt.bufPrint(&banner_buf, "{s}; its last output:\n", .{what}) catch "crashed; its last output:\n";
-        self.drawText(banner, err_color, null) catch {};
-
-        const shown = crashlog.lastLines(output, crash_report_lines);
-        if (shown.len > 0) {
-            self.drawText(shown, null, null) catch {};
-            if (shown[shown.len - 1] != '\n') self.drawText("\n", null, null) catch {};
-        } else {
-            self.drawText("(nothing)\n", null, null) catch {};
-        }
-
-        if (log_path) |p| {
-            var line_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
-            const line = std.fmt.bufPrint(&line_buf, "full log: {s}\n", .{p}) catch "";
-            self.drawText(line, err_color, null) catch {};
-        }
-    }
-
-    /// Writes a crash report for `job` into `crashlog.logDir`, creating
-    /// the directory as needed. Returns the file's path (owned), or null
-    /// when there is nowhere to put it or the write failed -- the
-    /// scrollback report stands on its own either way.
-    fn writeCrashLog(self: *Prompt, job: *const Job, program: []const u8, what: []const u8, output: []const u8) ?[]u8 {
-        const alloc = self.client.alloc;
-        const io = self.client.io;
-
-        const dir = (crashlog.logDir(alloc, self.environ_map) catch return null) orelse return null;
-        defer alloc.free(dir);
-        std.Io.Dir.cwd().createDirPath(io, dir) catch |err| {
-            std.log.warn("gw-shell: cannot create crash log dir {s}: {t}", .{ dir, err });
-            return null;
-        };
-
-        var stamp_buf: [32]u8 = undefined;
-        const stamp = self.formatTime(&stamp_buf, "%Y%m%d-%H%M%S");
-        var name_buf: [std.fs.max_name_bytes]u8 = undefined;
-        const name = crashlog.logName(&name_buf, program, stamp, job.pty.pid);
-        const path = std.fs.path.join(alloc, &.{ dir, name }) catch return null;
-
-        var when_buf: [64]u8 = undefined;
-        const when = self.formatTime(&when_buf, "%Y-%m-%d %H:%M:%S %z");
-        const body = std.fmt.allocPrint(alloc, "command: {s}\nresult: {s}\ntime: {s}\n\n{s}", .{ job.name, what, when, output }) catch {
-            alloc.free(path);
-            return null;
-        };
-        defer alloc.free(body);
-
-        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = body }) catch |err| {
-            std.log.warn("gw-shell: cannot write crash log {s}: {t}", .{ path, err });
-            alloc.free(path);
-            return null;
-        };
-        return path;
-    }
-
-    /// Stops every background job on the way out, the way a closing
-    /// terminal hangs up its session: SIGHUP, a short grace period to save
-    /// and exit, then SIGKILL for anything still there.
-    fn hangUpJobs(self: *Prompt) void {
-        const alloc = self.client.alloc;
-        for (self.jobs.items) |job| job.pty.signalGroup(std.posix.SIG.HUP);
-        var waited_ms: u32 = 0;
-        while (waited_ms < job_hangup_grace_ms) : (waited_ms += 20) {
-            var all = true;
-            for (self.jobs.items) |job| {
-                if (!job.pty.reaped()) all = false;
-            }
-            if (all) break;
-            std.Io.sleep(self.client.io, .fromMilliseconds(20), .awake) catch break;
-        }
-        for (self.jobs.items) |job| {
-            if (!job.pty.reaped()) {
-                job.pty.signalGroup(std.posix.SIG.KILL);
-                job.pty.wait();
-            }
-            job.reader.join();
-            self.freeJob(job);
-        }
-        self.jobs.deinit(alloc);
-    }
-
-    /// `jobs`: one line per background job, `[n] title`, newest last.
-    fn doJobs(self: *Prompt) !u8 {
-        self.reportFinishedJobs();
-        for (self.jobs.items) |job| {
-            var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "[{d}] {s}\n", .{ job.id, self.jobTitle(job) }) catch continue;
-            try self.drawText(msg, null, null);
-        }
-        return 0;
-    }
-
-    /// `fg [n]` (`%n` also accepted): brings a background job's screen
-    /// back and gives it the keyboard again, until it exits or is put in
-    /// the background once more. With no argument, the newest job.
-    fn doFg(self: *Prompt, args: []const []const u8) !u8 {
-        self.reportFinishedJobs();
-        if (self.jobs.items.len == 0) {
-            try self.drawText("fg: no current job", err_color, null);
-            return 1;
-        }
-        const index: usize = if (args.len == 0) self.jobs.items.len - 1 else blk: {
-            const spec = std.mem.trimStart(u8, args[0], "%");
-            const id = std.fmt.parseInt(u32, spec, 10) catch {
-                try self.drawText("fg: usage: fg [n]", err_color, null);
-                return 2;
-            };
-            for (self.jobs.items, 0..) |job, i| {
-                if (job.id == id) break :blk i;
-            }
-            var buf: [64]u8 = undefined;
-            try self.drawText(std.fmt.bufPrint(&buf, "fg: {d}: no such job", .{id}) catch "fg: no such job", err_color, null);
-            return 1;
-        };
-        const job = self.jobs.items[index];
-        const ctx = job.context orelse {
-            try self.drawText("fg: that job has no screen to bring back", err_color, null);
-            return 1;
-        };
-        _ = self.jobs.orderedRemove(index);
-        self.client.activateContext(ctx) catch {};
-
-        switch (self.foregroundJob(job)) {
-            .exited => {
-                self.finishForegroundJob(job);
-                return self.last_status;
-            },
-            .backgrounded => {
-                try self.parkJob(job);
-                return 0;
-            },
-        }
-    }
-
-    /// Drains `read_fd` (the result pipe's read end) to EOF and returns
-    /// what it held, trimming exactly one trailing `\n` for convenience --
-    /// or `null` if the child never wrote anything (the ordinary case: a
-    /// plain command that doesn't know about `$GLYPHWIRE_RESULT_FD`, or a
-    /// cancelled interactive picker). Caller frees a non-null result;
-    /// caller also owns closing `read_fd` itself (see `runCommand`'s
-    /// `defer`) -- this only reads.
-    fn readResultPipe(self: *Prompt, read_fd: c_int) !?[]u8 {
-        const alloc = self.client.alloc;
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(alloc);
-
-        var chunk: [1024]u8 = undefined;
-        while (true) {
-            const n = c.read(read_fd, &chunk, chunk.len);
-            if (n <= 0) break;
-            try out.appendSlice(alloc, chunk[0..@intCast(n)]);
-        }
-        if (out.items.len == 0) {
-            out.deinit(alloc);
-            return null;
-        }
-        if (out.items[out.items.len - 1] == '\n') out.items.len -= 1;
-        return try out.toOwnedSlice(alloc);
-    }
-
-    /// Context for `ptyReaderThread`. `master` is owned by `runCommand`
-    /// (which closes it after the thread joins); the thread only reads it.
-    const PtyReaderCtx = struct {
-        prompt: *Prompt,
-        master: std.c.fd_t,
-        /// Fed every master chunk so the foreground loop can see the DEC
-        /// private modes the child sets.
-        modes: *ModeTracker,
-        /// Set once the handshake resolves: 0 = still unknown, 1 = aware,
-        /// 2 = plain. The foreground loop below reads this to stop
-        /// forwarding keystrokes/mouse/replies into an aware child's pty
-        /// -- see `runCommand`'s use of `awareState`.
-        aware: std.atomic.Value(u8) = .init(0),
-        /// An aware child's output after the handshake, which goes to this
-        /// process's real stdout where nobody sees it. Kept so a crash can
-        /// be reported (see `reportCrash`). Written only by the reader
-        /// thread and read only after it is joined.
-        tail: crashlog.Tail = .{},
-        /// The `mouse_report` value last sent for this child, so the
-        /// reader only sends on a change (see `syncMouseReport`).
-        mouse_report_sent: bool = false,
-    };
-
-    /// Mirrors the child's mouse-reporting modes onto the layer's
-    /// `mouse_report` whenever `ModeTracker` says they flipped. On the
-    /// reader thread, which is already the one drawing through the
-    /// client for a plain child.
-    fn syncMouseReport(ctx: *PtyReaderCtx) void {
-        const on = ctx.modes.mouseReporting();
-        if (on == ctx.mouse_report_sent) return;
-        ctx.mouse_report_sent = on;
-        ctx.prompt.drawSetMouseReport(on) catch {};
-    }
-
-    fn awareState(ctx: *const PtyReaderCtx) ?bool {
-        return switch (ctx.aware.load(.acquire)) {
-            1 => true,
-            2 => false,
-            else => null,
-        };
-    }
-
-    /// Reads the pty master and mirrors it onto the grid via `write_text`
-    /// with the default foreground -- `Layer.writeText` interprets the
-    /// child's own SGR colour + simple cursor/erase sequences (Phase A),
-    /// so no line-splitting or cursor bookkeeping is needed here (a pty
-    /// also merges the child's stdout and stderr onto the one fd).
-    ///
-    /// The first bytes are sniffed for `glyphwire.handshake_marker`: once
-    /// a definite answer is in, an aware child's remaining output goes to
-    /// this process's real stdout instead (it's drawing over its own wire
-    /// connection), a plain child's keeps mirroring. Runs until the master
-    /// hits EOF/EIO, which happens right after the child exits. Errors are
-    /// logged at worst, never propagated -- there's no caller waiting.
-    fn ptyReaderThread(ctx: *PtyReaderCtx) void {
-        const self = ctx.prompt;
-        const alloc = self.client.alloc;
-        const io = self.client.io;
-
-        var pending: std.ArrayList(u8) = .empty; // held until the handshake resolves
-        defer pending.deinit(alloc);
-        var aware: ?bool = null;
-
-        var out_buf: [512]u8 = undefined;
-        var real_out = std.Io.File.stdout().writer(io, &out_buf);
-
-        // Mirrored output goes out as `write_text`, which must be valid
-        // UTF-8: a character split across two reads is held back to the
-        // next one, and stray non-UTF-8 bytes become U+FFFD. See
-        // `pty.Utf8Carry`.
-        var carry: glyphwire.pty.Utf8Carry = .{};
-        defer carry.deinit(alloc);
-        var text: std.ArrayList(u8) = .empty;
-        defer text.deinit(alloc);
-        const mirror: Mirror = .{ .carry = &carry, .text = &text };
-
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            var pfd = [_]std.posix.pollfd{.{ .fd = ctx.master, .events = std.posix.POLL.IN, .revents = 0 }};
-            _ = std.posix.poll(&pfd, 1000) catch break;
-            if (pfd[0].revents == 0) continue; // timeout, nothing ready
-
-            const n = std.c.read(ctx.master, &buf, buf.len);
-            if (n <= 0) break; // EOF, or EIO once the slave is fully closed
-            const chunk = buf[0..@intCast(n)];
-
-            // Watch for `ESC [ ? ... h/l` the child emits regardless of
-            // whether we're mirroring it or handing it to an aware child
-            // (aware output is wire JSON -- no such sequences, harmless).
-            ctx.modes.feed(chunk);
-            // Only a plain child's screen is this layer; an aware child
-            // draws on its own and handles its own mouse.
-            if (aware == null or aware.? == false) syncMouseReport(ctx);
-
-            if (aware == null) {
-                pending.appendSlice(alloc, chunk) catch break;
-                aware = hs.aware(pending.items);
-                if (aware == null) continue; // still a prefix of the marker
-                ctx.aware.store(if (aware.?) 1 else 2, .release);
-                const body = if (aware.?) pending.items[hs.marker.len..] else pending.items;
-                emitChunk(ctx, &real_out, mirror, aware.?, body);
-                pending.clearRetainingCapacity();
-                continue;
-            }
-            emitChunk(ctx, &real_out, mirror, aware.?, chunk);
-        }
-
-        // EOF before the handshake could resolve (total output shorter
-        // than the marker) -> treat as a plain child, flush what we held.
-        if (aware == null and pending.items.len > 0) {
-            emitChunk(ctx, &real_out, mirror, false, pending.items);
-        }
-        // A character the child's last write cut short.
-        if (aware != true) {
-            carry.finish(alloc, &text) catch {};
-            if (text.items.len > 0) self.drawText(text.items, null, null) catch {};
-        }
-    }
-
-    /// `ptyReaderThread`'s UTF-8 repair state for mirrored output, handed
-    /// to `emitChunk`.
-    const Mirror = struct {
-        carry: *glyphwire.pty.Utf8Carry,
-        text: *std.ArrayList(u8),
-    };
-
-    /// One chunk from `ptyReaderThread`: onto the grid (plain child) or to
-    /// this process's real stdout and the crash tail (aware child).
-    /// Best-effort -- a write failure here has nowhere useful to go.
-    fn emitChunk(ctx: *PtyReaderCtx, real_out: *std.Io.File.Writer, mirror: Mirror, aware: bool, bytes: []const u8) void {
-        if (bytes.len == 0) return;
-        const self = ctx.prompt;
-        if (aware) {
-            ctx.tail.append(bytes);
-            real_out.interface.writeAll(bytes) catch {};
-            real_out.interface.flush() catch {};
-        } else {
-            mirror.carry.feed(self.client.alloc, bytes, mirror.text) catch return;
-            if (mirror.text.items.len > 0) self.drawText(mirror.text.items, null, null) catch {};
-        }
-    }
-
-    /// `cd` is a shell builtin, not a spawned program -- unlike
-    /// `runCommand`, changing directory in a *child* process wouldn't
-    /// affect this one, so it has to happen here directly. No args (or a
-    /// bare `~`) goes to `$HOME`, matching a real shell; a bad path or
-    /// missing `$HOME` is reported onto the grid the same way
-    /// `runCommand` reports a spawn failure, rather than propagated.
-    fn doCd(self: *Prompt, args: []const []const u8) !void {
-        const alloc = self.client.alloc;
-        const raw_target: []const u8 = if (args.len > 0) args[0] else "~";
-
-        const target = self.expandTilde(raw_target) catch {
-            try self.drawText("cd: HOME not set", err_color, null);
-            return;
-        };
-        defer if (target.ptr != raw_target.ptr) alloc.free(target);
-
-        self.chdir(target) catch |err| try self.reportCdError(target, err);
-    }
-
-    /// Changes the shell's working directory to `target` (already
-    /// tilde-expanded) and, on success, records the new directory as a
-    /// `zj` visit. Every directory change funnels through here -- an
-    /// interactive `cd`, a `zj` jump, a script's `sh.chdir` -- so a visit
-    /// is recorded exactly once per change and in exactly one place. The
-    /// `openDir` / `setCurrentDir` error is returned unreported: `cd` and
-    /// `zj` word their failure messages differently.
-    ///
-    /// Also maintains `$PWD`/`$OLDPWD` the way bash/fish do: `$PWD` is
-    /// built by joining `target` onto the *previous* `$PWD`
-    /// (`logicalpath.resolve`) -- lexical `.`/`..` collapsing, no
-    /// filesystem lookups -- so a linked directory keeps its own name
-    /// instead of expanding to whatever it points at.
-    ///
-    /// Critically, the actual `chdir(2)` targets that computed logical
-    /// path, not the raw `target` -- otherwise the two would drift apart
-    /// the moment a `..` follows a symlink hop. E.g. from
-    /// `/home/j/temp/pics` (`pics -> /home/j/Pictures`), `cd ..`'s literal
-    /// kernel `..` is relative to the *physical* cwd, landing in
-    /// `/home/j` -- one level up from the symlink target, not from the
-    /// symlink itself -- while the lexical `$PWD` computation says
-    /// `/home/j/temp`. Real bash avoids exactly this split by `chdir`ing
-    /// to its own computed logical path rather than the typed argument;
-    /// doing the same here keeps the process's real cwd and the displayed
-    /// `$PWD` in agreement, at the cost of a `cd` that fails outright
-    /// (rather than silently landing somewhere else) if the lexical
-    /// collapse ever names a path that doesn't itself exist -- no `cd -P`
-    /// physical mode is offered as a fallback for that case.
-    ///
-    /// `recordVisit` (the `zj` frecency database) intentionally keeps
-    /// using the real physical cwd, not this logical one, so two
-    /// different links to the same real directory accumulate one
-    /// ranking, not two.
-    fn chdir(self: *Prompt, target: []const u8) !void {
-        const io = self.client.io;
-        const alloc = self.client.alloc;
-
-        var old_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const old_pwd = self.logicalCwd(&old_buf);
-        const new_pwd = try logicalpath.resolve(alloc, old_pwd, target);
-        defer alloc.free(new_pwd);
-
-        var dir = try std.Io.Dir.cwd().openDir(io, new_pwd, .{});
-        defer dir.close(io);
-        try std.process.setCurrentDir(io, dir);
-
-        self.setEnvVar("OLDPWD", old_pwd);
-        self.setEnvVar("PWD", new_pwd);
-
-        self.recordVisit();
-        self.queueChdirListing();
-    }
-
-    /// After a successful directory change, decides whether the
-    /// `on{ chdir = { command = ... } }` listing should run once the
-    /// current line finishes dispatching, per the configured `list` mode:
-    /// `off` never, `always` for any change, `metadata` only when
-    /// `chdir_method == .metadata` (a directory activated in gw-ls
-    /// output). `submitLine` picks `chdir_pending_list` up and runs it.
-    fn queueChdirListing(self: *Prompt) void {
-        const cfg = self.prompt_config orelse return;
-        const oc = cfg.on.chdir;
-        const fire = switch (oc.list) {
-            .off => false,
-            .always => true,
-            .metadata => self.chdir_method == .metadata,
-        };
-        if (!fire or oc.command.len == 0) return;
-        self.chdir_pending_list = oc.command;
-    }
-
-    /// Records the shell's current directory (post-`chdir`) in the `zj`
-    /// database. A no-op when `zj` is disabled or unavailable. `$HOME`
-    /// and `/` are skipped on purpose -- both are a single keystroke away
-    /// without any help (`zj` with no argument, `cd /`) and would only
-    /// crowd the rankings -- as is anything under a configured
-    /// `exclude_dirs` entry.
-    fn recordVisit(self: *Prompt) void {
-        if (!self.zj_enabled) return;
-        if (self.zdb == null) return;
-
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = std.process.currentPath(self.client.io, &buf) catch return;
-        const cwd = buf[0..n];
-
-        if (self.environ_map.get("HOME")) |home| {
-            if (std.mem.eql(u8, cwd, home)) return;
-        }
-        if (std.mem.eql(u8, cwd, "/")) return;
-        if (zjump.isExcluded(cwd, self.zj_excludes)) return;
-
-        const now = self.nowSecs();
-        self.zdb.?.record(cwd, now) catch return;
-        // Also as a delta, for the flush to replay onto the re-read file
-        // -- see `zdb_journal`.
-        if (self.zdb_journal) |*j| j.recordVisit(cwd, now) catch return;
-        self.zdb_dirty = true;
-        self.persist_gate.note();
-    }
-
-    /// `gwssh <dest>` -- drop this pane into a remote session.
-    ///
-    /// The host does the work (`start_remote`): it spawns `ssh`, surfaces
-    /// its auth prompts on the grid, and turns the trunk's channels back
-    /// into connections, so the remote `gw-shell` draws into this pane
-    /// exactly as this one does. What is left here is the waiting, and the
-    /// waiting is the point -- this shell is not replaced. It sits behind
-    /// the session and has the pane back the moment it ends, the way it
-    /// sits behind `ssh` in an ordinary terminal.
-    ///
-    /// A builtin rather than a program because the thing that has to be
-    /// seated in the pane is *this process's* connection: a child would
-    /// hand over its own pane binding, not ours.
-    fn doGwssh(self: *Prompt, args: []const []const u8) !u8 {
-        const spec = remotecmd.parse(args) catch |err| {
-            try self.drawText(remotecmd.errorText(err), err_color, null);
-            return 2;
-        };
-
-        const listener = self.listener orelse {
-            try self.drawText("gwssh: no interactive session", err_color, null);
-            return 1;
-        };
-
-        const session = self.client.startRemote(spec.dest, spec.ssh_args, self.remoteAgentCommand(spec)) catch |err| {
-            var buf: [160]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "gwssh: {s}: {t}", .{ spec.dest, err }) catch "gwssh: could not start remote session";
-            try self.drawText(msg, err_color, null);
-            return 1;
-        };
-
-        const outcome = self.waitOutRemote(listener, session);
-
-        // The remote shell left its own output on this pane's grid, and
-        // may have resized it; the caller's prompt redraw picks up from
-        // wherever that ended, like returning from any foreground program.
-        drainResizes(listener, self);
-        if (!outcome.started) try self.reportRemoteFailure(spec, outcome.status);
-        self.last_status = outcome.status;
-        self.have_status = true;
-        return outcome.status;
-    }
-
-    /// The far-side agent command: `--remote-command` if given, else
-    /// `$GLYPHWIRE_REMOTE_COMMAND`, else null (the host's own `gw-agent`
-    /// default).
-    ///
-    /// The variable exists because the default only works when `gw-agent`
-    /// is on the remote box's `PATH` -- and a non-login `ssh -T` session
-    /// has a minimal one, which misses a work tree's `zig-out/bin`
-    /// entirely. Setting it once beats retyping `--remote-command` on
-    /// every connection.
-    fn remoteAgentCommand(self: *Prompt, spec: remotecmd.Spec) ?[]const u8 {
-        if (spec.remote_command) |cmd| return cmd;
-        const from_env = self.env.get("GLYPHWIRE_REMOTE_COMMAND") orelse return null;
-        return if (from_env.len == 0) null else from_env;
-    }
-
-    /// Says why a session that never connected didn't, in the pane.
-    /// Without this the only evidence is a line `ssh` wrote to the
-    /// *host's* stderr, which is not where anyone running `gwssh` is
-    /// looking.
-    ///
-    /// Only for a session that never came up. A remote shell that ran and
-    /// exited non-zero is left to speak for itself, exactly as `ssh`
-    /// leaves it: the status is in `$?` and `{exit}` already.
-    ///
-    /// 127 is singled out because it is both the likeliest failure and the
-    /// least self-explanatory -- `ssh` passes the remote command's status
-    /// through, so "no `gw-agent` on that box's PATH" arrives as a bare
-    /// 127.
-    fn reportRemoteFailure(self: *Prompt, spec: remotecmd.Spec, status: u8) !void {
-        var buf: [512]u8 = undefined;
-        const msg = if (status == 127)
-            std.fmt.bufPrint(
-                &buf,
-                "gwssh: {s}: no '{s}' there. provision_remote installs it at {s}; pass that with --remote-command, or set GLYPHWIRE_REMOTE_COMMAND.",
-                .{ spec.dest, self.remoteAgentCommand(spec) orelse "gw-agent", provisioned_agent_path },
-            ) catch "gwssh: the remote agent was not found"
-        else
-            std.fmt.bufPrint(&buf, "gwssh: {s}: could not connect (ssh exited {d})", .{ spec.dest, status }) catch
-                "gwssh: could not connect";
-        try self.drawText(msg, err_color, null);
-    }
-
-    /// Parks until the remote session `session` ends, keeping this
-    /// connection quiet while it runs.
-    ///
-    /// Quiet is the whole job. Both shells are attached to the same pane,
-    /// so both are handed every keystroke while it has focus (see
-    /// `Server.broadcast`) -- exactly the situation the pty foreground
-    /// loop is already in with a glyphwire-aware child. Draining and
-    /// dropping is what keeps this shell from echoing over the remote
-    /// one's screen, and keeps `InputListener`'s queues from filling.
-    ///
-    /// Ctrl-C asks the host to tear the session down rather than returning
-    /// here, so the pane is never left with an orphaned `ssh` drawing into
-    /// it; the loop still exits on the `remote_exit` that follows.
-    const RemoteOutcome = struct {
-        status: u8,
-        /// False when the session never connected at all -- the only
-        /// thing that distinguishes that from a remote shell exiting with
-        /// the same status. See `protocol.RemoteExitParams.started`.
-        started: bool,
-    };
-
-    fn waitOutRemote(self: *Prompt, listener: *glyphwire.InputListener, session: u64) RemoteOutcome {
-        const alloc = self.client.alloc;
-        while (true) {
-            while (listener.pollRemoteExitEvent()) |ev| {
-                if (ev.session != session) continue;
-                return .{
-                    .status = std.math.cast(u8, ev.status) orelse 1,
-                    .started = ev.started,
-                };
-            }
-
-            // The wait is woken by `remote_exit` itself; the timeout is
-            // only a floor on how long a missed wake-up could cost.
-            const ev = (listener.waitInputEvent(.{
-                .duration = .{ .raw = .fromMilliseconds(200), .clock = .awake },
-            }) catch null) orelse continue;
-
-            switch (ev) {
-                .key => |kev| {
-                    defer alloc.free(kev.key);
-                    if (kev.pressed and kev.ctrl() and std.mem.eql(u8, kev.key, "c")) {
-                        self.client.stopRemote(session) catch {};
-                    }
-                },
-                .text => |tev| alloc.free(tev.text),
-                .paste => |tev| alloc.free(tev.text),
-                .copy_request => {},
-                // Host window closing: end the session and let the caller
-                // flush and exit, the same as a foregrounded child.
-                .shutdown => {
-                    self.should_exit = true;
-                    self.client.stopRemote(session) catch {};
-                    // `started: true` -- the window closing is not a
-                    // connection failure, and there is nothing to report
-                    // into a pane that is going away.
-                    return .{ .status = 1, .started = true };
-                },
-                // A window manager's own commands (see
-                // `InputEvent.window_key`). Never delivered here.
-                .window_key => |kev| alloc.free(kev.key),
-                .window_text => |tev| alloc.free(tev.text),
-            }
-        }
-    }
-
-    /// `zj [QUERY...]` -- the directory-jump builtin. Bare `zj` goes to
-    /// `$HOME`; a single argument that is itself an existing directory
-    /// acts like `cd` (so `zj ../sibling` and `zj ./build` still work);
-    /// otherwise every argument is a query term matched against the `zj`
-    /// database and the best-ranked directory wins. A jump target that
-    /// has since disappeared is pruned and reported.
-    fn doZj(self: *Prompt, args: []const []const u8) !void {
-        const alloc = self.client.alloc;
-
-        if (self.zdb == null) {
-            try self.drawText("zj: directory database unavailable", err_color, null);
-            return;
-        }
-
-        if (args.len == 0) {
-            const home = self.environ_map.get("HOME") orelse {
-                try self.drawText("zj: HOME not set", err_color, null);
-                return;
-            };
-            self.chdir(home) catch |err| try self.reportZjError(home, err);
-            return;
-        }
-
-        if (args.len == 1) {
-            const expanded = self.expandTilde(args[0]) catch args[0];
-            defer if (expanded.ptr != args[0].ptr) alloc.free(expanded);
-            if (self.dirExists(expanded)) {
-                self.chdir(expanded) catch |err| try self.reportZjError(expanded, err);
-                return;
-            }
-        }
-
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd: ?[]const u8 = if (std.process.currentPath(self.client.io, &buf)) |n| buf[0..n] else |_| null;
-
-        const hit = self.zdb.?.bestMatch(args, self.nowSecs(), .{
-            .cwd = cwd,
-            .exclude = self.zj_excludes,
-            .exists = zjExistsProbe,
-            .exists_ctx = self,
-        }) orelse {
-            const joined = try std.mem.join(alloc, " ", args);
-            defer alloc.free(joined);
-            var msg: [320]u8 = undefined;
-            const line = std.fmt.bufPrint(&msg, "zj: no match for '{s}'", .{joined}) catch "zj: no match";
-            try self.drawText(line, err_color, null);
-            return;
-        };
-
-        // `bestMatch` hands back a slice borrowed from the database, and
-        // `chdir` then records into (mutates) it -- and a failure prunes
-        // the entry. Copy the path out before either can move it.
-        const target = try alloc.dupe(u8, hit);
-        defer alloc.free(target);
-
-        self.chdir(target) catch |err| {
-            self.zdb.?.remove(target);
-            if (self.zdb_journal) |*j| j.recordForget(target) catch {};
-            self.zdb_dirty = true;
-            try self.reportZjError(target, err);
-        };
-    }
-
-    fn reportZjError(self: *Prompt, target: []const u8, err: anyerror) !void {
-        var buf: [320]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "zj: {s}: {t}", .{ target, err }) catch "zj: jump failed";
-        try self.drawText(msg, err_color, null);
-    }
-
-    /// Whether `path` opens as a directory. Used by `zj`'s "single
-    /// existing-dir argument acts like cd" shortcut and, via
-    /// `zjExistsProbe`, to filter vanished entries out of a match.
-    fn dirExists(self: *Prompt, path: []const u8) bool {
-        var d = std.Io.Dir.cwd().openDir(self.client.io, path, .{}) catch return false;
-        d.close(self.client.io);
-        return true;
-    }
-
-    /// Expands a leading `~` to `$HOME` -- bare `~` or `~/rest`; `~user`
-    /// (another account's home directory) isn't supported, matching how
-    /// most shells treat that as a rarer case not worth the lookup here.
-    /// Returns `target` itself (same pointer) when there's nothing to
-    /// expand, so `doCd` knows whether the result needs freeing.
-    fn expandTilde(self: *Prompt, target: []const u8) ![]const u8 {
-        if (!homepath.isHomeRelative(target)) return target;
-        const home = self.environ_map.get("HOME") orelse return error.HomeNotSet;
-        return homepath.expandHomeAlloc(self.client.alloc, target, home);
-    }
-
-    fn reportCdError(self: *Prompt, target: []const u8, err: anyerror) !void {
-        var buf: [160]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "cd: {s}: {t}", .{ target, err }) catch "cd: failed";
-        try self.drawText(msg, err_color, null);
-    }
-
-    /// `alias` builtin. Given a `NAME=VALUE` argument
-    /// (`wordsplit.parseAliasDef` -- rest-of-line value, one binding per
-    /// line), records the binding; a bare `alias` lists every current
-    /// binding, one `NAME='VALUE'` per row sorted by name, matching
-    /// bash's output shape. Takes the raw prompt line because the value
-    /// is not word-split.
-    fn doAlias(self: *Prompt, line: []const u8) !void {
-        const alloc = self.client.alloc;
-        if (wordsplit.parseAliasDef(line)) |def| {
-            try self.aliases.set(alloc, def.name, def.value);
-            return;
-        }
-        try self.listAliases();
-    }
-
-    fn listAliases(self: *Prompt) !void {
-        const alloc = self.client.alloc;
-        var names: std.ArrayList([]const u8) = .empty;
-        defer names.deinit(alloc);
-        var it = self.aliases.map.iterator();
-        while (it.next()) |e| try names.append(alloc, e.key_ptr.*);
-
-        std.mem.sort([]const u8, names.items, {}, struct {
-            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-                return std.mem.lessThan(u8, a, b);
-            }
-        }.lessThan);
-
-        for (names.items) |name| {
-            const value = self.aliases.get(name).?;
-            var buf: [1024]u8 = undefined;
-            const rendered = std.fmt.bufPrint(&buf, "alias {s}='{s}'\n", .{ name, value }) catch continue;
-            try self.drawText(rendered, null, null);
-        }
-    }
-
-    /// `unalias NAME...` builtin. A name with no current binding is
-    /// reported onto the grid (bash-style) rather than propagated as an
-    /// error.
-    fn doUnalias(self: *Prompt, names: []const []const u8) !void {
-        const alloc = self.client.alloc;
-        for (names) |name| {
-            if (!self.aliases.remove(alloc, name)) {
-                var buf: [160]u8 = undefined;
-                const msg = std.fmt.bufPrint(&buf, "unalias: {s}: not found", .{name}) catch "unalias: not found";
-                try self.drawText(msg, err_color, null);
-            }
-        }
-    }
-
-    /// Sets `name` to `value` in this process's libc environment (so
-    /// children spawned afterwards inherit it -- `pty.zig` / `pipeexec`
-    /// both `execvp` against the live environ) and in `Prompt.env`, the
-    /// overlay `{env:NAME}` renders from. The mirror of `sh.setenv`;
-    /// `name` must already be a valid identifier (`envassign.validName`).
-    fn setEnvVar(self: *Prompt, name: []const u8, value: []const u8) void {
-        const alloc = self.client.alloc;
-        const name_z = std.mem.concatWithSentinel(alloc, u8, &.{name}, 0) catch return;
-        defer alloc.free(name_z);
-        const value_z = std.mem.concatWithSentinel(alloc, u8, &.{value}, 0) catch return;
-        defer alloc.free(value_z);
-        _ = c.setenv(name_z, value_z, 1);
-        self.env.put(name, value) catch {};
-    }
-
-    /// Removes `name` from the libc environment and `Prompt.env`. The
-    /// mirror of `sh.unsetenv`.
-    fn unsetEnvVar(self: *Prompt, name: []const u8) void {
-        const alloc = self.client.alloc;
-        const name_z = std.mem.concatWithSentinel(alloc, u8, &.{name}, 0) catch return;
-        defer alloc.free(name_z);
-        _ = c.unsetenv(name_z);
-        _ = self.env.swapRemove(name);
-    }
-
-    /// `export` builtin. No args -> print every variable as `NAME=VALUE`,
-    /// sorted. `export NAME=VALUE` -> set it (`$NAME` / `${NAME}` and a
-    /// leading `~` in VALUE are expanded against the current environment;
-    /// see `envassign`). `export NAME` with no `=` -> ensure NAME exists
-    /// (created empty if unset), since this shell keeps a single
-    /// environment and has no separate "not yet exported" state. An
-    /// invalid name is reported and makes the builtin's status 1.
-    fn doExport(self: *Prompt, args: []const []const u8) !u8 {
-        const alloc = self.client.alloc;
-
-        if (args.len == 0) {
-            try self.printEnv();
-            return 0;
-        }
-
-        var status: u8 = 0;
-        for (args) |arg| {
-            if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
-                const name = arg[0..eq];
-                if (!envassign.validName(name)) {
-                    try self.reportBadEnvName("export", arg);
-                    status = 1;
-                    continue;
-                }
-                const value = envassign.expandValue(alloc, arg[eq + 1 ..], &self.env) catch {
-                    status = 1;
-                    continue;
-                };
-                defer alloc.free(value);
-                self.setEnvVar(name, value);
-            } else {
-                if (!envassign.validName(arg)) {
-                    try self.reportBadEnvName("export", arg);
-                    status = 1;
-                    continue;
-                }
-                if (self.env.get(arg) == null) self.setEnvVar(arg, "");
-            }
-        }
-        return status;
-    }
-
-    /// `unset NAME...` builtin. Removes each name; an unset name is not an
-    /// error (bash). An invalid name is reported and makes the status 1.
-    fn doUnset(self: *Prompt, names: []const []const u8) !u8 {
-        var status: u8 = 0;
-        for (names) |name| {
-            if (!envassign.validName(name)) {
-                try self.reportBadEnvName("unset", name);
-                status = 1;
-                continue;
-            }
-            self.unsetEnvVar(name);
-        }
-        return status;
-    }
-
-    fn reportBadEnvName(self: *Prompt, comptime builtin: []const u8, name: []const u8) !void {
-        var buf: [200]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, builtin ++ ": `{s}`: not a valid variable name", .{name}) catch
-            builtin ++ ": not a valid variable name";
-        try self.drawText(msg, err_color, null);
-    }
-
-    /// Writes the whole environment to the grid, one `NAME=VALUE` per
-    /// line, name-sorted -- `export` with no arguments.
-    fn printEnv(self: *Prompt) !void {
-        const alloc = self.client.alloc;
-
-        var lines: std.ArrayList([]const u8) = .empty;
-        defer {
-            for (lines.items) |l| alloc.free(l);
-            lines.deinit(alloc);
-        }
-
-        var it = self.env.iterator();
-        while (it.next()) |entry| {
-            try lines.append(alloc, try std.fmt.allocPrint(alloc, "{s}={s}\n", .{
-                entry.key_ptr.*,
-                entry.value_ptr.*,
-            }));
-        }
-
-        std.mem.sort([]const u8, lines.items, {}, struct {
-            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-                return std.mem.lessThan(u8, a, b);
-            }
-        }.lessThan);
-
-        for (lines.items) |l| try self.drawText(l, null, null);
-    }
+    // ── Jobs (jobs.zig) ──────────────────────────────────────────────────
+    pub const runCommand = jobs.runCommand;
+    pub const RunOptions = jobs.RunOptions;
+    pub const runCommandOpts = jobs.runCommandOpts;
+    pub const Job = jobs.Job;
+    pub const startJob = jobs.startJob;
+    pub const ForegroundEnd = jobs.ForegroundEnd;
+    pub const foregroundJob = jobs.foregroundJob;
+    pub const noteVisibleContext = jobs.noteVisibleContext;
+    pub const finishForegroundJob = jobs.finishForegroundJob;
+    pub const freeJob = jobs.freeJob;
+    pub const parkJob = jobs.parkJob;
+    pub const jobTitle = jobs.jobTitle;
+    pub const reportFinishedJobs = jobs.reportFinishedJobs;
+    pub const crash_report_lines = jobs.crash_report_lines;
+    pub const reportCrash = jobs.reportCrash;
+    pub const writeCrashLog = jobs.writeCrashLog;
+    pub const hangUpJobs = jobs.hangUpJobs;
+    pub const readResultPipe = jobs.readResultPipe;
+    pub const PtyReaderCtx = jobs.PtyReaderCtx;
+    pub const syncMouseReport = jobs.syncMouseReport;
+    pub const awareState = jobs.awareState;
+    pub const ptyReaderThread = jobs.ptyReaderThread;
+    pub const Mirror = jobs.Mirror;
+    pub const emitChunk = jobs.emitChunk;
 
     /// The `NAME=VALUE cmd ...` / bare `NAME=VALUE` path. `assignments`
     /// were already peeled and `expandValue`'d by `envassign.scanLeading`;
@@ -5754,7 +3494,7 @@ const Prompt = struct {
     /// Explicit `anyerror` rather than an inferred set: this and
     /// `dispatchLineText` call each other, and two inferred error sets in
     /// a cycle don't resolve.
-    fn dispatchWithAssignments(
+    pub fn dispatchWithAssignments(
         self: *Prompt,
         assignments: []const envassign.Assignment,
         rest: []const u8,
@@ -5807,7 +3547,7 @@ const Prompt = struct {
     /// to this prompt's environment overlay, cwd and grid. Safe to skip:
     /// on failure `script_engine` stays null and script builtins are just
     /// unavailable.
-    fn initScriptEngine(self: *Prompt, config_dir: []const u8) !void {
+    pub fn initScriptEngine(self: *Prompt, config_dir: []const u8) !void {
         self.script_engine = try script_engine.ScriptEngine.init(
             self.client.alloc,
             self.client.io,
@@ -5818,7 +3558,7 @@ const Prompt = struct {
 
     /// The `script_engine.HostHooks` for this prompt -- how a running
     /// script reaches the live shell (env, cwd, grid, Ctrl-C).
-    fn scriptHooks(self: *Prompt) script_engine.HostHooks {
+    pub fn scriptHooks(self: *Prompt) script_engine.HostHooks {
         return .{
             .ctx = self,
             .setenv = hookSetenv,
@@ -5836,13 +3576,13 @@ const Prompt = struct {
     /// What `readConfSource` can fail with. `FileNotFound` is split out
     /// from the rest because the two callers disagree about it: startup
     /// treats no config file as perfectly normal, `reload` reports it.
-    const ConfReadError = error{ FileNotFound, ReadFailed, OutOfMemory };
+    pub const ConfReadError = error{ FileNotFound, ReadFailed, OutOfMemory };
 
     /// Reads `<config_dir>/shell.conf.lua` into a null-terminated buffer
     /// (what the Lua loader takes), owned by the caller. An IO failure
     /// other than a missing file is logged here and reported as
     /// `error.ReadFailed`.
-    fn readConfSource(self: *Prompt, config_dir: []const u8) ConfReadError![:0]u8 {
+    pub fn readConfSource(self: *Prompt, config_dir: []const u8) ConfReadError![:0]u8 {
         return config.conf.readIn(self.client.alloc, self.client.io, config_dir);
     }
 
@@ -5851,7 +3591,7 @@ const Prompt = struct {
     /// builtin), then applies what it declared. A missing file, an
     /// unreadable one, or no engine at all is fine -- the shell starts
     /// with its defaults.
-    fn loadStartupConfig(self: *Prompt, config_dir: []const u8) !void {
+    pub fn loadStartupConfig(self: *Prompt, config_dir: []const u8) !void {
         const alloc = self.client.alloc;
 
         const eng = self.script_engine orelse return;
@@ -5871,7 +3611,7 @@ const Prompt = struct {
     /// every redraw reads, and the `zj{}` settings. A syntax/runtime error
     /// from the run is shown in red, with whatever ran before it still in
     /// effect. Shared by startup and `reload` so the two can't drift.
-    fn applyConfig(self: *Prompt, eng: *script_engine.ScriptEngine) !void {
+    pub fn applyConfig(self: *Prompt, eng: *script_engine.ScriptEngine) !void {
         const alloc = self.client.alloc;
 
         for (eng.cfg.aliases.items) |a| {
@@ -5924,7 +3664,7 @@ const Prompt = struct {
 
     /// Frees the `~`-expanded `zj{ exclude_dirs }` copies and leaves the
     /// list empty. Called before `reload` rebuilds them, and from `deinit`.
-    fn clearZjExcludes(self: *Prompt) void {
+    pub fn clearZjExcludes(self: *Prompt) void {
         const alloc = self.client.alloc;
         if (self.zj_excludes.len == 0) return;
         for (self.zj_excludes) |s| alloc.free(s);
@@ -5932,327 +3672,24 @@ const Prompt = struct {
         self.zj_excludes = &.{};
     }
 
-    /// `reload` builtin -- re-reads `shell.conf.lua` and applies it to the
-    /// running shell, so editing the config doesn't need a restart.
-    ///
-    /// The conf re-runs in the *same* Lua state: `defcmd` registrations,
-    /// globals a script built up and anything `sh.setenv` changed all
-    /// survive, which is what a source-style reload should do. What does
-    /// not survive is the parsed config -- it is reset rather than merged
-    /// into (see `config.ShellConfig.reset`), or a `prompt{}` key or
-    /// `open_actions` entry deleted from the file would keep its old value
-    /// until the next restart. The alias table goes the same way, wiped
-    /// and reseeded from the conf, so a deleted `alias` line really goes
-    /// away; the price is that aliases typed interactively this session go
-    /// with it.
-    ///
-    /// Everything outside the config file is untouched: cwd, environment,
-    /// history and the `zj` database all carry on.
-    fn doReload(self: *Prompt, args: []const []const u8) !u8 {
-        const alloc = self.client.alloc;
-
-        if (args.len > 0) {
-            try self.drawText("reload: takes no arguments\n", err_color, null);
-            return 2;
-        }
-
-        const config_dir = self.config_dir orelse {
-            try self.drawText("reload: no config directory ($HOME and $XDG_CONFIG_HOME are unset)\n", err_color, null);
-            return 1;
-        };
-        const eng = self.script_engine orelse {
-            try self.drawText("reload: the script engine isn't running\n", err_color, null);
-            return 1;
-        };
-
-        // Read the file *before* touching anything live, so a config that
-        // has gone missing (or won't read) leaves the session exactly as
-        // it was instead of wiping it.
-        const source = self.readConfSource(config_dir) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.FileNotFound => {
-                try self.drawText("reload: no shell.conf.lua to reload\n", err_color, null);
-                return 1;
-            },
-            error.ReadFailed => {
-                try self.drawText("reload: could not read shell.conf.lua\n", err_color, null);
-                return 1;
-            },
-        };
-        defer alloc.free(source);
-
-        // A `cd` earlier on this same line (`cd /tmp && reload`) queues an
-        // `on{ chdir }` listing that `submitLine` runs once dispatch
-        // finishes. That queued string belongs to the config we're about
-        // to throw away, so note that one is waiting and re-point it at
-        // the reloaded command below rather than swallowing the listing.
-        const listing_queued = self.chdir_pending_list != null;
-
-        // Drop every borrow into the previous parse before the arena
-        // backing it goes away: the memoised command-var values are keyed
-        // by config-owned names, the queued listing *is* a config-owned
-        // string, and `prompt_config` has to read as null across the reset
-        // -- a resize arriving mid-reload then redraws the default prompt
-        // instead of following a dangling pointer.
-        self.prompt_config = null;
-        self.resetCmdVars();
-        self.chdir_pending_list = null;
-        self.clearZjExcludes();
-        // Back to the built-in default; the conf turns it off again if it
-        // still says so.
-        self.zj_enabled = true;
-        self.aliases.deinit(alloc);
-        self.aliases = .{};
-
-        eng.cfg.reset();
-        try eng.runConf(source);
-        try self.applyConfig(eng);
-
-        // The re-pointed listing (see above). An `on{ chdir }` the new conf
-        // turned off leaves it dropped, which is the reloaded config
-        // getting the last word.
-        if (listing_queued and eng.cfg.on.chdir.command.len > 0) {
-            self.chdir_pending_list = eng.cfg.on.chdir.command;
-        }
-
-        // `applyConfig` has already drawn the diagnostic in red -- no
-        // "reloaded" line on top of it.
-        if (eng.conf_err != null) return 1;
-
-        var buf: [160]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "reload: shell.conf.lua -- {d} aliases, {d} open actions\n", .{
-            eng.cfg.aliases.items.len,
-            eng.cfg.open_actions.items.len,
-        }) catch "reload: shell.conf.lua\n";
-        try self.drawText(line, null, null);
-        return 0;
-    }
-
-    /// Loads `~/.config/glyphwire/history` into `self.history` so Up-arrow
-    /// recall picks up where the last session left off, then records the
-    /// file path in `self.history_path` and rewrites the file once
-    /// (trimmed to the last `history.max_entries`, consecutive duplicates
-    /// dropped) so it stays bounded. Creates the config directory if it's
-    /// missing. Any IO failure just leaves `history_path` null -- the
-    /// session runs with in-memory-only history rather than failing.
-    ///
-    /// `self.history` is a startup *snapshot*: lines another shell adds to
-    /// the file afterwards don't appear in this session's recall. That's
-    /// deliberate -- what must not happen is this session writing its
-    /// snapshot back over them, which is why flushes append
-    /// `history_pending` to a re-read file instead (`writeHistoryFile`).
-    ///
-    /// Setting `$GLYPHWIRE_NO_HISTORY` (to any non-empty value) skips all
-    /// of this: no file is read or written and `history_path` stays null,
-    /// so recall works within the session but nothing is persisted. The
-    /// e2e tests set it so driving the real shell binary doesn't touch
-    /// the developer's own history file.
-    fn loadHistory(self: *Prompt, config_dir: []const u8) !void {
-        const alloc = self.client.alloc;
-        const io = self.client.io;
-
-        if (self.environ_map.get("GLYPHWIRE_NO_HISTORY")) |v| {
-            if (v.len > 0) return;
-        }
-
-        std.Io.Dir.cwd().createDirPath(io, config_dir) catch |err| {
-            std.log.warn("history: could not create {s}: {t}", .{ config_dir, err });
-            return;
-        };
-
-        const path = try std.fs.path.join(alloc, &.{ config_dir, "history" });
-        errdefer alloc.free(path);
-
-        if (std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20))) |bytes| {
-            defer alloc.free(bytes);
-            const entries = try history.parse(alloc, bytes);
-            defer history.freeEntries(alloc, entries);
-            for (entries) |e| try self.history.append(alloc, try alloc.dupe(u8, e));
-        } else |err| switch (err) {
-            error.FileNotFound => {}, // first run -- nothing to load
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {
-                std.log.warn("history: could not read {s}: {t}", .{ path, err });
-                alloc.free(path);
-                return;
-            },
-        }
-
-        self.history_path = path;
-        // Rewrite once now so a file that was over the cap / had
-        // consecutive dupes is trimmed on disk even for a session that
-        // never adds a line.
-        self.writeHistoryFile();
-    }
-
-    /// Loads `~/.config/glyphwire/z.db` for the `zj` builtin. A missing
-    /// file just yields an empty in-memory database, so `zj` still
-    /// records visits this session; the file is created on the first
-    /// flush. `$GLYPHWIRE_NO_HISTORY` opts out completely (no read, no
-    /// path stored, no write), the same lever the e2e tests use to keep
-    /// off the developer's real files. Any IO or parse failure leaves a
-    /// memory-only database with no path.
-    fn loadZjump(self: *Prompt, config_dir: []const u8) !void {
-        const alloc = self.client.alloc;
-        const io = self.client.io;
-
-        if (self.environ_map.get("GLYPHWIRE_NO_HISTORY")) |v| {
-            if (v.len > 0) {
-                // Memory-only: no journal either, since nothing will ever
-                // replay it onto a file.
-                self.zdb = zjump.Db.init(alloc);
-                return;
-            }
-        }
-
-        const path = try std.fs.path.join(alloc, &.{ config_dir, "z.db" });
-        errdefer alloc.free(path);
-
-        var db: zjump.Db = undefined;
-        if (std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20))) |bytes| {
-            defer alloc.free(bytes);
-            db = try zjump.Db.parse(alloc, bytes);
-        } else |err| switch (err) {
-            error.FileNotFound => db = zjump.Db.init(alloc),
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {
-                std.log.warn("zj: could not read {s}: {t}", .{ path, err });
-                db = zjump.Db.init(alloc);
-            },
-        }
-
-        self.zdb = db;
-        self.zdb_path = path;
-        self.zdb_journal = zjump.Journal.init(alloc);
-    }
-
-    /// Re-reads the history file and writes it back with
-    /// `history_pending` -- this session's lines since the last flush --
-    /// appended, trimmed to the last `history.max_entries`. History is
-    /// kept in memory and this is called lazily (see
-    /// `flushPersistentState` / `persist_gate`), plus unconditionally on
-    /// a clean exit and the host `shutdown`. A no-op when there's no
-    /// `history_path`; an IO failure is logged, not propagated.
-    ///
-    /// The re-read is what makes several shells in one `gmux` session
-    /// share the file: writing `self.history` back instead would carry
-    /// this session's startup snapshot with it and revert everything
-    /// another shell had added in the meantime. `history_pending` is
-    /// cleared only once the write succeeds, so a failed flush still has
-    /// its lines to try again with.
-    fn writeHistoryFile(self: *Prompt) void {
-        const path = self.history_path orelse return;
-        const alloc = self.client.alloc;
-        const io = self.client.io;
-
-        const on_disk: ?[]u8 = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20)) catch |err| switch (err) {
-            error.FileNotFound => null, // another shell hasn't created it either
-            else => {
-                std.log.warn("history: could not re-read {s}: {t}", .{ path, err });
-                return;
-            },
-        };
-        defer if (on_disk) |b| alloc.free(b);
-
-        const bytes = history.mergeSerialize(alloc, on_disk orelse "", self.history_pending.items) catch return;
-        defer alloc.free(bytes);
-
-        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
-            std.log.warn("history: could not write {s}: {t}", .{ path, err });
-            return;
-        };
-        self.clearHistoryPending();
-    }
-
-    /// Drops every line in `history_pending` -- called once a flush has
-    /// actually written them.
-    fn clearHistoryPending(self: *Prompt) void {
-        const alloc = self.client.alloc;
-        for (self.history_pending.items) |line| alloc.free(line);
-        self.history_pending.clearRetainingCapacity();
-    }
-
-    /// Re-reads `~/.config/glyphwire/z.db`, replays `zdb_journal` -- this
-    /// session's visits and prunes since the last flush -- onto it, and
-    /// writes the merged result back. Same lazy / forced flush cadence as
-    /// `writeHistoryFile`, and the same reason for the re-read: several
-    /// shells share this file, and writing `self.zdb` straight back would
-    /// revert the others' visits (see `zjump.Journal`). A no-op without a
-    /// `zdb_path`, database or journal; IO failures are logged.
-    fn writeZdbFile(self: *Prompt) void {
-        const path = self.zdb_path orelse return;
-        const journal = if (self.zdb_journal) |*j| j else return;
-        const alloc = self.client.alloc;
-        const io = self.client.io;
-
-        var merged: zjump.Db = blk: {
-            const on_disk = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20)) catch |err| switch (err) {
-                error.FileNotFound => break :blk zjump.Db.init(alloc),
-                else => {
-                    std.log.warn("zj: could not re-read {s}: {t}", .{ path, err });
-                    return;
-                },
-            };
-            defer alloc.free(on_disk);
-            // A file another shell left half-written parses as "whatever
-            // lines were intact" (see `Db.parse`), which is the right
-            // failure mode here: this session's deltas still land.
-            break :blk zjump.Db.parse(alloc, on_disk) catch zjump.Db.init(alloc);
-        };
-        defer merged.deinit();
-
-        merged.applyJournal(journal) catch return;
-
-        const bytes = merged.serialize(alloc) catch return;
-        defer alloc.free(bytes);
-
-        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
-            std.log.warn("zj: could not write {s}: {t}", .{ path, err });
-            return;
-        };
-        journal.clear();
-    }
-
-    const FlushMode = enum { due, force };
-
-    /// Writes history and/or `z.db`. `.force` writes both regardless of
-    /// the dirty flags (the clean-exit / `shutdown` path); `.due` writes
-    /// only what actually changed. Either way the dirty flags clear and
-    /// the gate's clock restarts. IO failures are swallowed (logged in
-    /// the write helpers), never propagated.
-    ///
-    /// Both writes are read-modify-write merges against the file as it
-    /// stands (`writeHistoryFile` / `writeZdbFile`), so a flush is safe
-    /// to repeat and safe to interleave with another shell's -- a forced
-    /// flush with nothing pending just rewrites equivalent content.
-    fn flushPersistentState(self: *Prompt, mode: FlushMode) void {
-        const force = mode == .force;
-        if (self.history_dirty or force) {
-            self.writeHistoryFile();
-            self.history_dirty = false;
-        }
-        if (self.zdb_dirty or force) {
-            self.writeZdbFile();
-            self.zdb_dirty = false;
-        }
-        self.persist_gate.reset(self.nowMillis());
-    }
-
-    /// Flushes only when the gate says it is due (enough un-flushed
-    /// changes, or enough elapsed time). Called at idle ticks and after
-    /// each submitted line.
-    fn maybeFlushPersistentState(self: *Prompt) void {
-        if (self.persist_gate.shouldFlush(self.nowMillis())) self.flushPersistentState(.due);
-    }
+    // ── Persistent state (persist.zig) ───────────────────────────────────
+    pub const loadHistory = persist.loadHistory;
+    pub const loadZjump = persist.loadZjump;
+    pub const writeHistoryFile = persist.writeHistoryFile;
+    pub const clearHistoryPending = persist.clearHistoryPending;
+    pub const writeZdbFile = persist.writeZdbFile;
+    pub const FlushMode = persist.FlushMode;
+    pub const flushPersistentState = persist.flushPersistentState;
+    pub const maybeFlushPersistentState = persist.maybeFlushPersistentState;
 
     /// Wall-clock time, unix seconds -- the timestamp `zj` entries carry.
-    fn nowSecs(self: *Prompt) i64 {
+    pub fn nowSecs(self: *Prompt) i64 {
         return std.Io.Timestamp.now(self.client.io, .real).toSeconds();
     }
 
     /// Monotonic milliseconds -- what the flush gate measures elapsed
     /// time with (immune to the wall clock being stepped).
-    fn nowMillis(self: *Prompt) i64 {
+    pub fn nowMillis(self: *Prompt) i64 {
         return std.Io.Timestamp.now(self.client.io, .awake).toMilliseconds();
     }
 
@@ -6270,7 +3707,7 @@ const Prompt = struct {
     /// `alias x='echo *'` expand the `*` in the caller's directory, the
     /// same as bash. Tokens carried over from the original line keep
     /// their own `quoted` flag.
-    fn expandAliases(self: *Prompt, words: []const wordsplit.Arg) ![]wordsplit.Arg {
+    pub fn expandAliases(self: *Prompt, words: []const wordsplit.Arg) ![]wordsplit.Arg {
         const alloc = self.client.alloc;
 
         var list: std.ArrayList(wordsplit.Arg) = .empty;
@@ -6325,7 +3762,7 @@ const Prompt = struct {
     /// nullglob off). Only the last segment is a pattern; a wildcard in
     /// the `dir/` part is not expanded yet (see decisions.md). Free the
     /// result with `wordsplit.freeTokens`.
-    fn expandGlobs(self: *Prompt, args: []const wordsplit.Arg) ![]const []const u8 {
+    pub fn expandGlobs(self: *Prompt, args: []const wordsplit.Arg) ![]const []const u8 {
         const alloc = self.client.alloc;
         const io = self.client.io;
 
@@ -6387,385 +3824,11 @@ const Prompt = struct {
     /// buffer edit plus `setCursorAt` -> `renderInputLine` repaint the box;
     /// column math in the repaint is display-width-correct so a CJK run
     /// lands right.
-    fn insertText(self: *Prompt, text: []const u8) !void {
+    pub fn insertText(self: *Prompt, text: []const u8) !void {
         if (!try self.line.insert(self.client.alloc, text)) return;
         try self.afterEdit(); // -> renderInputLine repaints the box
     }
 
-    /// Tab: filename completion for the word under the cursor. Reads the
-    /// directory named by the word's leading `dir/` part (cwd if none;
-    /// `~`/`~/` expanded), keeps entries whose name starts with the
-    /// word's final segment, and:
-    ///
-    ///   * 0 matches       -> nothing;
-    ///   * exactly 1 match -> fills it in and appends `/` (a directory) or
-    ///                        a space (anything else);
-    ///   * >1 matches with a longer shared prefix -> extends the word to
-    ///                        that common prefix (bash's first-Tab behaviour);
-    ///   * >1 matches, nothing more to share -> opens the interactive
-    ///                        completion picker (see `recomputeAndDrawPicker`)
-    ///                        instead of bash's flat printed list.
-    ///
-    /// Dot-files are skipped unless the typed prefix itself starts with a
-    /// dot, matching every shell. Quoting inside the word isn't
-    /// interpreted -- see `complete.wordRange`.
-    fn doComplete(self: *Prompt) !void {
-        const alloc = self.client.alloc;
-
-        const line = self.line.text();
-        const wr = complete.wordRange(line, self.line.caret);
-        const word = line[wr.start..self.line.caret];
-        const dp = complete.dirPrefix(word);
-
-        var cands: std.ArrayList(CompletionCandidate) = .empty;
-        defer {
-            for (cands.items) |cand| alloc.free(cand.name);
-            cands.deinit(alloc);
-        }
-        try self.collectCompletionCandidates(&cands, line, wr, dp);
-        if (cands.items.len == 0) return;
-
-        if (cands.items.len == 1) {
-            const only = cands.items[0];
-            const escaped = try wordsplit.escapeSpecial(alloc, only.name[dp.prefix.len..]);
-            defer alloc.free(escaped);
-            try self.insertText(escaped);
-            try self.insertText(if (only.source == .dir) "/" else " ");
-            return;
-        }
-
-        var names: std.ArrayList([]const u8) = .empty;
-        defer names.deinit(alloc);
-        for (cands.items) |cand| try names.append(alloc, cand.name);
-        const lcp = complete.commonPrefixLen(names.items);
-
-        if (lcp > dp.prefix.len) {
-            const escaped = try wordsplit.escapeSpecial(alloc, cands.items[0].name[dp.prefix.len..lcp]);
-            defer alloc.free(escaped);
-            try self.insertText(escaped);
-            return;
-        }
-
-        try self.recomputeAndDrawPicker(0);
-    }
-
-    /// Appends the command-position names matching `prefix` to `cands`
-    /// (which already holds the cwd filesystem matches): the `alias`
-    /// bindings, the core builtins (`core_builtin_names`), and the script
-    /// builtins (`ScriptEngine.collectCommandNames` -- `defcmd` names plus
-    /// `~/.config/glyphwire/scripts/*.lua`). A name already in `cands`
-    /// (from the directory scan or an earlier source here) is skipped, so
-    /// a script and a like-named file are offered once. `doComplete` sorts
-    /// the merged list.
-    fn appendCommandNameCandidates(
-        self: *Prompt,
-        cands: *std.ArrayList(CompletionCandidate),
-        prefix: []const u8,
-    ) !void {
-        const alloc = self.client.alloc;
-
-        const push = struct {
-            fn f(a: std.mem.Allocator, list: *std.ArrayList(CompletionCandidate), name: []const u8, source: CompletionSource) !void {
-                for (list.items) |cand| {
-                    if (std.mem.eql(u8, cand.name, name)) return;
-                }
-                try list.append(a, .{ .name = try a.dupe(u8, name), .source = source });
-            }
-        }.f;
-
-        for (core_builtin_names) |name| {
-            if (std.mem.startsWith(u8, name, prefix)) try push(alloc, cands, name, .builtin);
-        }
-
-        var ai = self.aliases.map.keyIterator();
-        while (ai.next()) |key| {
-            if (std.mem.startsWith(u8, key.*, prefix)) try push(alloc, cands, key.*, .alias);
-        }
-
-        if (self.script_engine) |eng| {
-            var names: std.ArrayList([]const u8) = .empty;
-            defer {
-                for (names.items) |n| alloc.free(n);
-                names.deinit(alloc);
-            }
-            try eng.collectCommandNames(alloc, prefix, &names);
-            for (names.items) |n| try push(alloc, cands, n, .script);
-        }
-    }
-
-    /// Gathers the same sorted candidate set used by Tab completion. The
-    /// inline hint path calls this too, so a dim suggestion agrees with
-    /// what pressing Tab would consider completions for the current word.
-    fn collectCompletionCandidates(
-        self: *Prompt,
-        cands: *std.ArrayList(CompletionCandidate),
-        line: []const u8,
-        wr: complete.WordRange,
-        dp: complete.DirPrefix,
-    ) !void {
-        const alloc = self.client.alloc;
-        const io = self.client.io;
-
-        const scan_dir = try self.completionDir(dp.dir);
-        defer alloc.free(scan_dir);
-
-        const matches = try complete.scanDir(alloc, io, scan_dir, dp.prefix);
-        defer complete.freeMatches(alloc, matches);
-        for (matches) |m| {
-            try cands.append(alloc, .{
-                .name = try alloc.dupe(u8, m.name),
-                .source = if (m.is_dir) .dir else .file,
-            });
-        }
-
-        // In command position (`argv[0]`, no `dir/` part) completion also
-        // offers the names the plain directory scan can't see: aliases,
-        // core builtins, and script builtins.
-        if (dp.dir.len == 0 and std.mem.indexOfNone(u8, line[0..wr.start], " \t") == null)
-            try self.appendCommandNameCandidates(cands, dp.prefix);
-
-        sortCompletionCandidates(cands.items);
-    }
-
-    fn sortCompletionCandidates(cands: []CompletionCandidate) void {
-        std.mem.sort(CompletionCandidate, cands, {}, struct {
-            fn lessThan(_: void, a: CompletionCandidate, b: CompletionCandidate) bool {
-                return std.mem.lessThan(u8, a.name, b.name);
-            }
-        }.lessThan);
-    }
-
-    /// On an idle tick, compute and draw the first completion candidate as
-    /// dimmed text after the caret. Returns true when it repainted the
-    /// input row, letting the caller skip a redundant idle redraw.
-    fn maybeShowCompletionHint(self: *Prompt) !bool {
-        if (!self.completion_hint_dirty or self.completion_hint_visible) return false;
-        if (self.browse_pos != null or self.pending_resize != null) return false;
-        if (self.completion_picker != null) return false;
-        const active_at = self.completion_hint_activity_at orelse return false;
-        if (active_at.untilNow(self.client.io).raw.toMilliseconds() < autocomplete_idle_ms) return false;
-
-        const line = self.line.text();
-        if (self.line.caret != line.len) return false;
-
-        const wr = complete.wordRange(line, self.line.caret);
-        if (wr.end != self.line.caret) return false;
-
-        const word = line[wr.start..self.line.caret];
-        if (word.len == 0) return false;
-
-        self.completion_hint_dirty = false;
-        self.completion_hint.clearRetainingCapacity();
-
-        const dp = complete.dirPrefix(word);
-        var cands: std.ArrayList(CompletionCandidate) = .empty;
-        defer {
-            for (cands.items) |cand| self.client.alloc.free(cand.name);
-            cands.deinit(self.client.alloc);
-        }
-        try self.collectCompletionCandidates(&cands, line, wr, dp);
-        if (cands.items.len == 0) return false;
-
-        const first = cands.items[0];
-        const suffix = (try complete.candidateSuffix(self.client.alloc, dp.prefix, first.name, first.source == .dir)) orelse return false;
-        defer self.client.alloc.free(suffix);
-        if (suffix.len == 0) return false;
-
-        try self.completion_hint.appendSlice(self.client.alloc, suffix);
-        self.completion_hint_visible = true;
-        try self.renderInputLine();
-        return true;
-    }
-
-    /// Right arrow at the end of the input accepts the visible inline
-    /// hint. If no hint has been drawn yet, use the same completion path
-    /// as Tab so Right-at-end is still a completion gesture.
-    fn acceptCompletionHintOrComplete(self: *Prompt) !void {
-        if (self.line.caret != self.line.text().len or self.line.text().len == 0) return;
-        if (self.completion_hint_visible and self.completion_hint.items.len > 0) {
-            try self.insertText(self.completion_hint.items);
-            return;
-        }
-        try self.doComplete();
-    }
-
-    /// Resolves the `dir/` portion of a completion word to a path
-    /// `openDir` can take: an owned copy of `"."` when there's no
-    /// directory part, otherwise the part itself with `~`/`~/` expanded.
-    /// Always returns an owned string for the caller to free.
-    fn completionDir(self: *Prompt, dir_part: []const u8) ![]const u8 {
-        const alloc = self.client.alloc;
-        if (dir_part.len == 0) return alloc.dupe(u8, ".");
-        const expanded = self.expandTilde(dir_part) catch return alloc.dupe(u8, dir_part);
-        if (expanded.ptr == dir_part.ptr) return alloc.dupe(u8, dir_part);
-        return expanded; // expandTilde already returned an owned allocation
-    }
-
-    /// The interactive Tab-completion dropdown: recomputes the candidate
-    /// list from the *current* buffer/cursor (never cached -- see
-    /// `CompletionPickerState`), then either resolves it away (0 or, on a
-    /// fresh recompute, exactly 1 match) or (re)draws up to
-    /// `completionMaxItems()` dimmed rows below the input line, one of
-    /// them highlighted as the current selection.
-    ///
-    /// `move_delta` is 0 for "the buffer changed, re-filter in place"
-    /// (called from `doComplete`'s first open and from every edit while
-    /// open -- `insertText`/`deleteBackward`/... via
-    /// `refreshCompletionPickerIfOpen`) and +-1 for "Up/Down/Tab moved the
-    /// selection" (`moveCompletionPicker`), which skips the single-match
-    /// auto-accept (the candidate count can't have changed from pure
-    /// navigation) and wraps the selection instead of resetting it.
-    fn recomputeAndDrawPicker(self: *Prompt, move_delta: isize) anyerror!void {
-        const alloc = self.client.alloc;
-
-        const line = self.line.text();
-        const wr = complete.wordRange(line, self.line.caret);
-        const word = line[wr.start..self.line.caret];
-        const dp = complete.dirPrefix(word);
-
-        var cands: std.ArrayList(CompletionCandidate) = .empty;
-        defer {
-            for (cands.items) |cand| alloc.free(cand.name);
-            cands.deinit(alloc);
-        }
-        try self.collectCompletionCandidates(&cands, line, wr, dp);
-
-        if (cands.items.len == 0) {
-            try self.closeCompletionPicker();
-            return;
-        }
-        if (move_delta == 0 and cands.items.len == 1) {
-            const only = cands.items[0];
-            try self.closeCompletionPicker();
-            const escaped = try wordsplit.escapeSpecial(alloc, only.name[dp.prefix.len..]);
-            defer alloc.free(escaped);
-            try self.insertText(escaped);
-            try self.insertText(if (only.source == .dir) "/" else " ");
-            return;
-        }
-
-        if (self.completion_picker == null) self.completion_picker = .{};
-        var st = self.completion_picker.?;
-
-        const max_items = self.completionMaxItems();
-        const visible = @min(max_items, cands.items.len);
-
-        if (move_delta == 0) {
-            st.list.reset();
-        } else {
-            st.list.step(move_delta, cands.items.len, .wrap);
-        }
-        st.list.follow(visible);
-
-        if (st.drawn_rows == 0) try self.reservePickerRows(visible);
-
-        var b = self.client.batch();
-        defer b.deinit();
-        try self.batchClear(&b, self.line_start_row + 1, 0, @max(st.drawn_rows, visible), self.grid_cols);
-
-        var i: usize = 0;
-        while (i < visible) : (i += 1) {
-            const idx = st.list.top + i;
-            const cand = cands.items[idx];
-            const selected = idx == st.list.selected;
-            const dim: ?glyphwire.Color = if (selected) null else autocomplete_hint_color;
-
-            try self.batchSetCursor(&b, self.line_start_row + 1 + i, 0);
-            try self.batchText(&b, if (selected) "> " else "  ", dim, null);
-            try self.batchText(&b, cand.name, dim, null);
-            if (cand.source == .dir) try self.batchText(&b, "/", dim, null);
-            try self.batchText(&b, "  [", autocomplete_hint_color, null);
-            try self.batchText(&b, completionSourceTag(cand.source), autocomplete_hint_color, null);
-            try self.batchText(&b, "]", autocomplete_hint_color, null);
-        }
-
-        try self.appendInputLine(&b); // restores the caret to the live line
-        var res = try b.send();
-        res.deinit();
-
-        st.drawn_rows = visible;
-        self.completion_picker = st;
-    }
-
-    /// Reserves `rows_needed` grid rows below the input line for the
-    /// picker's first draw, scrolling the layer up-front (same trick as
-    /// `writePowerlinePrefix`'s overshoot) if the input line is close
-    /// enough to the bottom that they wouldn't otherwise fit.
-    fn reservePickerRows(self: *Prompt, rows_needed: usize) !void {
-        if (self.grid_rows == 0 or rows_needed == 0) return;
-        const need_bottom = self.line_start_row + rows_needed;
-        if (need_bottom < self.grid_rows) return;
-
-        const overshoot = need_bottom - self.grid_rows + 1;
-        var b = self.client.batch();
-        defer b.deinit();
-        try self.batchSetCursor(&b, self.grid_rows - 1, 0);
-        var k: usize = 0;
-        while (k < overshoot) : (k += 1) try self.batchText(&b, "\n", null, null);
-        var res = try b.send();
-        res.deinit();
-        self.line_start_row -= overshoot;
-    }
-
-    /// Up/Down (or Tab, to cycle) while the picker is open: wraps the
-    /// selection by `delta` and redraws. A no-op if the picker isn't open
-    /// (callers already gate on that, but this stays safe to call bare).
-    fn moveCompletionPicker(self: *Prompt, delta: isize) !void {
-        if (self.completion_picker == null) return;
-        try self.recomputeAndDrawPicker(delta);
-    }
-
-    /// Buffer changed (typed a character, backspaced, ...) while the
-    /// picker is open: re-filter in place. A no-op if it isn't open.
-    fn refreshCompletionPickerIfOpen(self: *Prompt) !void {
-        if (self.completion_picker != null) try self.recomputeAndDrawPicker(0);
-    }
-
-    /// Enter while the picker is open: completes the word with the
-    /// highlighted candidate (same suffix + terminator insertion as a
-    /// single-match Tab) and closes the picker, without submitting the
-    /// line.
-    fn acceptCompletionPicker(self: *Prompt) !void {
-        const st = self.completion_picker orelse return;
-        const alloc = self.client.alloc;
-
-        const line = self.line.text();
-        const wr = complete.wordRange(line, self.line.caret);
-        const word = line[wr.start..self.line.caret];
-        const dp = complete.dirPrefix(word);
-
-        var cands: std.ArrayList(CompletionCandidate) = .empty;
-        defer {
-            for (cands.items) |cand| alloc.free(cand.name);
-            cands.deinit(alloc);
-        }
-        try self.collectCompletionCandidates(&cands, line, wr, dp);
-
-        try self.closeCompletionPicker();
-        if (st.list.selected >= cands.items.len) return; // stale -- nothing sane to accept
-
-        const chosen = cands.items[st.list.selected];
-        const escaped = try wordsplit.escapeSpecial(alloc, chosen.name[dp.prefix.len..]);
-        defer alloc.free(escaped);
-        try self.insertText(escaped);
-        try self.insertText(if (chosen.source == .dir) "/" else " ");
-    }
-
-    /// Escape, an explicit cursor move, or the candidate list narrowing to
-    /// nothing all close the picker: clears its drawn rows and repaints
-    /// the input line + caret in their place, in one batch frame.
-    fn closeCompletionPicker(self: *Prompt) !void {
-        const st = self.completion_picker orelse return;
-        self.completion_picker = null;
-        if (st.drawn_rows == 0) return;
-
-        var b = self.client.batch();
-        defer b.deinit();
-        try self.batchClear(&b, self.line_start_row + 1, 0, st.drawn_rows, self.grid_cols);
-        try self.appendInputLine(&b);
-        var res = try b.send();
-        res.deinit();
-    }
 };
 
 // ─── script engine host hooks ────────────────────────────────────────
@@ -6812,7 +3875,7 @@ fn hookChdir(ctx: *anyopaque, path: [:0]const u8) bool {
 }
 
 /// The `zjump.MatchOpts.exists` probe -- `ctx` is the `*Prompt`.
-fn zjExistsProbe(ctx: ?*anyopaque, path: []const u8) bool {
+pub fn zjExistsProbe(ctx: ?*anyopaque, path: []const u8) bool {
     const self: *Prompt = @ptrCast(@alignCast(ctx.?));
     return self.dirExists(path);
 }
