@@ -155,7 +155,7 @@ pub const Selection = struct {
     /// `create_layer` layer has no scrollback ring, so its `above` is
     /// simply the negated *content* row -- the viewport row plus the
     /// layer's own `scroll_off`, which is exactly the coordinate the
-    /// renderer's selection-tint pass asks `selectionColRange` for.
+    /// renderer's selection-tint pass asks `LayerSelection.colRange` for.
     fn pointAtPixel(self: *Selection, px: f32, py: f32) glyphwire.SelectionPoint {
         const handle = self.layer orelse {
             const cell = geometry.cellFromPixel(px, py);

@@ -1533,8 +1533,8 @@ pub const Server = struct {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             const layer = self.ctx.layerPtr(layer_handle) orelse return;
-            layer.setSelection(anchor, active);
-            break :blk layer.selection;
+            layer.sel.set(anchor, active);
+            break :blk layer.sel.range;
         };
         const body = try rpc.selectionNotification(alloc, snapshot);
         defer alloc.free(body);
@@ -1547,7 +1547,7 @@ pub const Server = struct {
             self.ctx_mutex.lockUncancelable(self.io);
             defer self.ctx_mutex.unlock(self.io);
             const layer = self.ctx.layerPtr(layer_handle) orelse return;
-            layer.clearSelection();
+            layer.sel.clear();
         }
         const body = try rpc.selectionNotification(alloc, null);
         defer alloc.free(body);
@@ -1574,7 +1574,7 @@ pub const Server = struct {
             i -= 1;
             const handle = self.ctx.layer_order.items[i];
             const layer = self.ctx.layers.getPtr(handle) orelse continue;
-            if (layer.selection != null) return handle;
+            if (layer.sel.range != null) return handle;
         }
         return null;
     }
@@ -1585,17 +1585,17 @@ pub const Server = struct {
         self.ctx_mutex.lockUncancelable(self.io);
         defer self.ctx_mutex.unlock(self.io);
         const layer = self.ctx.layerPtr(layer_handle) orelse return null;
-        return layer.selectionText(alloc);
+        return layer.sel.text(alloc);
     }
 
     /// The word or line around `p` on `layer_handle` (null = root) -- what
     /// glyphwire-host's double/triple-click selects. Null when the layer
-    /// is gone. See `core.Layer.unitSpanAt`.
+    /// is gone. See `core.LayerSelection.unitSpanAt`.
     pub fn selectionUnitAt(self: *Server, layer_handle: ?core.LayerHandle, p: core.SelectionPoint, unit: core.SelectUnit) ?core.UnitSpan {
         self.ctx_mutex.lockUncancelable(self.io);
         defer self.ctx_mutex.unlock(self.io);
         const layer = self.ctx.layerPtr(layer_handle) orelse return null;
-        return layer.unitSpanAt(p, unit);
+        return layer.sel.unitSpanAt(p, unit);
     }
 
     /// Replaces the session clipboard buffer (and bumps its serial, so

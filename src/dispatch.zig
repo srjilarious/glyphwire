@@ -3401,7 +3401,7 @@ pub const Dispatcher = struct {
     /// notification -- shared tail of `set_selection` / `update_selection`
     /// / `clear_selection`, so all three fan out the same shape.
     fn selectionBroadcast(alloc: std.mem.Allocator, layer: *const core.Layer) !HandleResult {
-        const body = try rpc.selectionNotification(alloc, layer.selection);
+        const body = try rpc.selectionNotification(alloc, layer.sel.range);
         return .{ .broadcast = .{ .event = "selection", .body = body } };
     }
 
@@ -3409,7 +3409,7 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.SetSelectionParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
-        layer.setSelection(pointFromWire(parsed.value.anchor), pointFromWire(parsed.value.active));
+        layer.sel.set(pointFromWire(parsed.value.anchor), pointFromWire(parsed.value.active));
         return selectionBroadcast(alloc, layer);
     }
 
@@ -3417,7 +3417,7 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.UpdateSelectionParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
-        layer.updateSelectionActive(pointFromWire(parsed.value.active));
+        layer.sel.updateActive(pointFromWire(parsed.value.active));
         return selectionBroadcast(alloc, layer);
     }
 
@@ -3425,7 +3425,7 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.LayerOnlyParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
-        layer.clearSelection();
+        layer.sel.clear();
         return selectionBroadcast(alloc, layer);
     }
 
@@ -3433,7 +3433,7 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.LayerOnlyParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
-        const state: protocol.SelectionState = if (layer.selection) |s| .{
+        const state: protocol.SelectionState = if (layer.sel.range) |s| .{
             .active = true,
             .anchor = .{ .above = s.anchor.above, .col = s.anchor.col },
             .active_end = .{ .above = s.active.above, .col = s.active.col },
@@ -3445,7 +3445,7 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.LayerOnlyParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
-        const text = (try layer.selectionText(alloc)) orelse try alloc.dupe(u8, "");
+        const text = (try layer.sel.text(alloc)) orelse try alloc.dupe(u8, "");
         defer alloc.free(text);
         return try self.respond(alloc, id, protocol.SelectionTextResult{ .text = text });
     }
@@ -3453,7 +3453,7 @@ pub const Dispatcher = struct {
     /// Builds the `HighlightState` response for `layer`: every currently
     /// highlighted id with its stored JSON blob (null for a dangling id).
     fn highlightStateResponse(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, layer: *const core.Layer) ![]u8 {
-        const ids = layer.highlighted_ids.items;
+        const ids = layer.sel.highlighted_ids.items;
         const entries = try alloc.alloc(protocol.HighlightEntry, ids.len);
         defer alloc.free(entries);
         for (ids, entries) |mid, *e| e.* = .{ .id = mid, .json = self.ctx.metadataJson(mid) };
@@ -3476,7 +3476,7 @@ pub const Dispatcher = struct {
                 layer.cell(p.row, p.col).metadata_id)
         else
             null;
-        if (metadata_id) |mid| try layer.toggleHighlightId(mid);
+        if (metadata_id) |mid| try layer.sel.toggleHighlight(mid);
 
         return try self.highlightStateResponse(alloc, id, layer);
     }
@@ -3534,7 +3534,7 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.SetHighlightParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
-        try layer.setHighlightIds(parsed.value.ids);
+        try layer.sel.setHighlights(parsed.value.ids);
         return try self.highlightStateResponse(alloc, id, layer);
     }
 
@@ -3542,7 +3542,7 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.LayerOnlyParams, alloc, params_value);
         defer parsed.deinit();
         const layer = try self.resolveLayer(parsed.value.layer);
-        layer.clearHighlightIds();
+        layer.sel.clearHighlights();
         return try self.highlightStateResponse(alloc, id, layer);
     }
 

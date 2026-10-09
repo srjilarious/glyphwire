@@ -804,7 +804,7 @@ dictionary and dictionary-build panels, and the notify toast.
 ## Selection & Clipboard
 
 Real server-side state, like Table — a linear (stream, not rectangular)
-text selection lives on a `Layer` (`core.Layer.selection`), and one
+text selection lives on a `Layer` (`core.Layer.sel`, a `core.LayerSelection`), and one
 session clipboard buffer lives on the `Context`. See decisions.md's
 Selection & clipboard section for the reasoning (why selection is server
 state, why endpoints are content-anchored, why the clipboard is a buffer
@@ -825,7 +825,7 @@ either half of a 2-cell East Asian character (a drag doesn't know where
 glyphs fall, and neither does a client computing columns itself). What
 the selection *covers* snaps outward instead: a start on a spacer moves
 back onto its lead, an end on a lead takes in its spacer. The renderer's
-tint (`Layer.selectionColRange`) and `get_selection_text` share the same
+tint (`LayerSelection.colRange`) and `get_selection_text` share the same
 snap, so they always agree on whole characters. The stored points and
 the `selection` notification report the raw cells as set.
 
@@ -877,7 +877,7 @@ it starts at the root cursor and walks the root grid.
 
 ## Highlights
 
-A tinted **set of metadata ids** on a `Layer` (`core.Layer.highlighted_ids`),
+A tinted **set of metadata ids** on a `Layer` (`core.LayerSelection.highlighted_ids`),
 separate from the selection: many at once, and the copy path never touches
 them. glyphwire-shell uses it to mark `ls` entries for a multi-open. It's
 stored as ids, not cell ranges — the renderer tints any cell whose

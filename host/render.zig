@@ -1082,7 +1082,7 @@ pub const Renderer = struct {
 
         self.deferred_icons.clearRetainingCapacity();
         self.deferred_scaled_text.clearRetainingCapacity();
-        const any_highlight = layer.highlighted_ids.items.len > 0;
+        const any_highlight = layer.sel.highlighted_ids.items.len > 0;
 
         // `shadow` (see `core.Shadow`): drawn around the viewport's
         // pixel rect, before -- so under -- everything else here.
@@ -1147,7 +1147,7 @@ pub const Renderer = struct {
                 // Highlight tint: any cell whose `metadata_id` is in the
                 // layer's highlighted-id set. Into `color_bg` so the text
                 // pass paints over it and stays readable.
-                if (any_highlight and layer.isHighlighted(c.metadata_id)) {
+                if (any_highlight and layer.sel.isHighlighted(c.metadata_id)) {
                     addRect(
                         &lb.color_bg,
                         host_eng.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
@@ -1218,17 +1218,17 @@ pub const Renderer = struct {
         }
 
         // Selection tint: one rect per selected row span
-        // (`Layer.selectionColRange`), `above = view_offset - row` the
+        // (`LayerSelection.colRange`), `above = view_offset - row` the
         // scroll-stable row key. Into `color_bg`, same reason as the
         // highlight tint.
-        if (layer.selection != null) {
+        if (layer.sel.range != null) {
             var srow: usize = 0;
             while (srow < vp_rows) : (srow += 1) {
                 // The selection is keyed on *content* rows, so the
                 // viewport's own scroll offset has to go back in before
                 // asking, and come back out of the drawn column span.
                 const above: i64 = @as(i64, @intCast(view_offset)) - @as(i64, @intCast(off.row + srow));
-                const range = layer.selectionColRange(above) orelse continue;
+                const range = layer.sel.colRange(above) orelse continue;
                 const start = @max(range.start, off.col);
                 const end = @min(range.end, off.col + vp_cols);
                 if (end <= start) continue;

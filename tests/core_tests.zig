@@ -2697,9 +2697,9 @@ pub fn selectionTextSpansRowsLinearlyTest(io: std.Io, alloc: std.mem.Allocator) 
 
     // From row 0 col 2 ("cdefgh") through row 2 col 4 ("third"). All ends
     // are live-viewport rows, so `above` is 0/-1/-2.
-    layer.setSelection(.{ .above = 0, .col = 2 }, .{ .above = -2, .col = 4 });
+    layer.sel.set(.{ .above = 0, .col = 2 }, .{ .above = -2, .col = 4 });
 
-    const text = (try layer.selectionText(alloc)).?;
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("cdefgh\nsecond line\nthird", text);
 }
@@ -2713,8 +2713,8 @@ pub fn selectionTextIsOrderIndependentTest(io: std.Io, alloc: std.mem.Allocator)
     try layer.writeText("one\ntwo", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     // active end before anchor end in reading order.
-    layer.setSelection(.{ .above = -1, .col = 3 }, .{ .above = 0, .col = 0 });
-    const text = (try layer.selectionText(alloc)).?;
+    layer.sel.set(.{ .above = -1, .col = 3 }, .{ .above = 0, .col = 0 });
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("one\ntwo", text);
 }
@@ -2727,16 +2727,16 @@ pub fn selectionTextEmptyForZeroWidthTest(io: std.Io, alloc: std.mem.Allocator) 
     defer layer.deinit();
     try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
-    layer.setSelection(.{ .above = 0, .col = 2 }, .{ .above = 0, .col = 2 });
-    const text = (try layer.selectionText(alloc)).?;
+    layer.sel.set(.{ .above = 0, .col = 2 }, .{ .above = 0, .col = 2 });
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("", text);
 
-    layer.clearSelection();
-    try testz.expectTrue((try layer.selectionText(alloc)) == null);
+    layer.sel.clear();
+    try testz.expectTrue((try layer.sel.text(alloc)) == null);
 }
 
-/// `selectionColRange` reports the selected span per row for the
+/// `LayerSelection.colRange` reports the selected span per row for the
 /// renderer: clipped on the first/last row, the whole row between, null
 /// outside.
 pub fn selectionColRangeClipsEndsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -2745,19 +2745,19 @@ pub fn selectionColRangeClipsEndsTest(io: std.Io, alloc: std.mem.Allocator) !voi
     defer layer.deinit();
     try layer.writeText("0123456789\n0123456789\n0123456789", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
-    layer.setSelection(.{ .above = 0, .col = 3 }, .{ .above = -2, .col = 6 });
+    layer.sel.set(.{ .above = 0, .col = 3 }, .{ .above = -2, .col = 6 });
 
-    try testz.expectTrue(layer.selectionColRange(1) == null); // above the selection
-    const first = layer.selectionColRange(0).?;
+    try testz.expectTrue(layer.sel.colRange(1) == null); // above the selection
+    const first = layer.sel.colRange(0).?;
     try testz.expectEqual(first.start, 3);
     try testz.expectEqual(first.end, 10);
-    const mid = layer.selectionColRange(-1).?;
+    const mid = layer.sel.colRange(-1).?;
     try testz.expectEqual(mid.start, 0);
     try testz.expectEqual(mid.end, 10);
-    const last = layer.selectionColRange(-2).?;
+    const last = layer.sel.colRange(-2).?;
     try testz.expectEqual(last.start, 0);
     try testz.expectEqual(last.end, 7); // end col + 1
-    try testz.expectTrue(layer.selectionColRange(-3) == null); // below
+    try testz.expectTrue(layer.sel.colRange(-3) == null); // below
 }
 
 /// A selection wrapping onto the next line tints each row only up to
@@ -2769,16 +2769,16 @@ pub fn selectionColRangeStopsAtRowTextTest(io: std.Io, alloc: std.mem.Allocator)
     defer layer.deinit();
     try layer.writeText("hello there\n\nnext line", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
-    layer.setSelection(.{ .above = 0, .col = 6 }, .{ .above = -2, .col = 3 });
+    layer.sel.set(.{ .above = 0, .col = 6 }, .{ .above = -2, .col = 3 });
 
-    const first = layer.selectionColRange(0).?;
+    const first = layer.sel.colRange(0).?;
     try testz.expectEqual(first.start, 6);
     try testz.expectEqual(first.end, 11);
-    try testz.expectTrue(layer.selectionColRange(-1) == null);
-    const last = layer.selectionColRange(-2).?;
+    try testz.expectTrue(layer.sel.colRange(-1) == null);
+    const last = layer.sel.colRange(-2).?;
     try testz.expectEqual(last.start, 0);
     try testz.expectEqual(last.end, 4);
-    const text = (try layer.selectionText(alloc)).?;
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("there\n\nnext", text);
 }
@@ -2801,36 +2801,36 @@ pub fn selectionTracksScaledGlyphRowsTest(io: std.Io, alloc: std.mem.Allocator) 
     try layer.writeTextOpts("cd", fg, bg, .{ .scale = .x2 });
 
     // From `b` (row 0, col 2) back onto the lower half of `a` (row 1).
-    layer.setSelection(.{ .above = 0, .col = 2 }, .{ .above = -1, .col = 1 });
-    const top = layer.selectionColRange(0).?;
+    layer.sel.set(.{ .above = 0, .col = 2 }, .{ .above = -1, .col = 1 });
+    const top = layer.sel.colRange(0).?;
     try testz.expectEqual(top.start, 0);
     try testz.expectEqual(top.end, 4);
-    const lower = layer.selectionColRange(-1).?;
+    const lower = layer.sel.colRange(-1).?;
     try testz.expectEqual(lower.start, 0);
     try testz.expectEqual(lower.end, 4);
-    try testz.expectTrue(layer.selectionColRange(-2) == null);
+    try testz.expectTrue(layer.sel.colRange(-2) == null);
     {
-        const text = (try layer.selectionText(alloc)).?;
+        const text = (try layer.sel.text(alloc)).?;
         defer alloc.free(text);
         try testz.expectEqualStr("ab", text);
     }
 
     // From `b` down onto the lower half of `c` (row 3, col 1): two
     // pieces, `b` on the first line and `c` on the second.
-    layer.setSelection(.{ .above = 0, .col = 2 }, .{ .above = -3, .col = 1 });
-    const first = layer.selectionColRange(0).?;
+    layer.sel.set(.{ .above = 0, .col = 2 }, .{ .above = -3, .col = 1 });
+    const first = layer.sel.colRange(0).?;
     try testz.expectEqual(first.start, 2);
     try testz.expectEqual(first.end, 4);
-    const first_lower = layer.selectionColRange(-1).?;
+    const first_lower = layer.sel.colRange(-1).?;
     try testz.expectEqual(first_lower.start, 2);
     try testz.expectEqual(first_lower.end, 4);
-    const second = layer.selectionColRange(-2).?;
+    const second = layer.sel.colRange(-2).?;
     try testz.expectEqual(second.start, 0);
     try testz.expectEqual(second.end, 2);
-    const second_lower = layer.selectionColRange(-3).?;
+    const second_lower = layer.sel.colRange(-3).?;
     try testz.expectEqual(second_lower.start, 0);
     try testz.expectEqual(second_lower.end, 2);
-    const text = (try layer.selectionText(alloc)).?;
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("b\nc", text);
 }
@@ -2856,13 +2856,13 @@ pub fn selectionSkipsUnselectableChromeTest(io: std.Io, alloc: std.mem.Allocator
     layer.setProperty(.{ .cursor = .{ .row = 3, .col = 0 } });
     try layer.writeTextOpts("+------+", fg, bg, chrome);
 
-    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = -3, .col = 7 });
-    try testz.expectTrue(layer.selectionColRange(0) == null);
-    const row1 = layer.selectionColRange(-1).?;
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = -3, .col = 7 });
+    try testz.expectTrue(layer.sel.colRange(0) == null);
+    const row1 = layer.sel.colRange(-1).?;
     try testz.expectEqual(row1.start, 2);
     try testz.expectEqual(row1.end, 4);
-    try testz.expectTrue(layer.selectionColRange(-3) == null);
-    const text = (try layer.selectionText(alloc)).?;
+    try testz.expectTrue(layer.sel.colRange(-3) == null);
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("hi\nyo", text);
 }
@@ -2903,19 +2903,19 @@ pub fn verticalSelectionReadsColumnsRightToLeftTest(io: std.Io, alloc: std.mem.A
     defer layer.deinit();
 
     // あ (top of the right column) to き (top of the left one).
-    layer.setSelection(.{ .above = 0, .col = 5 }, .{ .above = 0, .col = 1 });
-    const text = (try layer.selectionText(alloc)).?;
+    layer.sel.set(.{ .above = 0, .col = 5 }, .{ .above = 0, .col = 1 });
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("あいう\nえおか\nき", text);
 
-    const row0 = layer.selectionColRange(0).?;
+    const row0 = layer.sel.colRange(0).?;
     try testz.expectEqual(row0.start, 1);
     try testz.expectEqual(row0.end, 7);
     // Below き the end column is out, and the blank under it is trimmed.
-    const row1 = layer.selectionColRange(-1).?;
+    const row1 = layer.sel.colRange(-1).?;
     try testz.expectEqual(row1.start, 3);
     try testz.expectEqual(row1.end, 7);
-    try testz.expectTrue(layer.selectionColRange(-3) == null);
+    try testz.expectTrue(layer.sel.colRange(-3) == null);
 }
 
 /// A vertical selection that starts and ends mid-column: the start
@@ -2929,18 +2929,18 @@ pub fn verticalSelectionClipsFirstAndLastColumnTest(io: std.Io, alloc: std.mem.A
 
     // い (row 1, right column) to お (row 1, middle column), dragged
     // backwards so the anchor is the later end.
-    layer.setSelection(.{ .above = -1, .col = 3 }, .{ .above = -1, .col = 6 });
-    const text = (try layer.selectionText(alloc)).?;
+    layer.sel.set(.{ .above = -1, .col = 3 }, .{ .above = -1, .col = 6 });
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("いう\nえお", text);
 
-    const row0 = layer.selectionColRange(0).?;
+    const row0 = layer.sel.colRange(0).?;
     try testz.expectEqual(row0.start, 3);
     try testz.expectEqual(row0.end, 5);
-    const row1 = layer.selectionColRange(-1).?;
+    const row1 = layer.sel.colRange(-1).?;
     try testz.expectEqual(row1.start, 3);
     try testz.expectEqual(row1.end, 7);
-    const row2 = layer.selectionColRange(-2).?;
+    const row2 = layer.sel.colRange(-2).?;
     try testz.expectEqual(row2.start, 5);
     try testz.expectEqual(row2.end, 7);
 }
@@ -2960,15 +2960,15 @@ pub fn selectionCopiesCopyTextTest(io: std.Io, alloc: std.mem.Allocator) !void {
     try layer.writeTextOpts("︒", fg, bg, .{ .copy_text = "。", .max_cols = 4, .pad = true });
     try testz.expectEqualStr("︒", layer.cell(0, 2).grapheme());
 
-    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 9 });
-    const flat = (try layer.selectionText(alloc)).?;
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 9 });
+    const flat = (try layer.sel.text(alloc)).?;
     defer alloc.free(flat);
     try testz.expectEqualStr("あ。", flat);
 
     // Overwriting the cell without a `copy_text` drops it.
     layer.setProperty(.{ .cursor = .{ .row = 0, .col = 2 } });
     try layer.writeTextOpts("い", fg, bg, .{});
-    const plain = (try layer.selectionText(alloc)).?;
+    const plain = (try layer.sel.text(alloc)).?;
     defer alloc.free(plain);
     try testz.expectEqualStr("あい", plain);
 
@@ -2976,8 +2976,8 @@ pub fn selectionCopiesCopyTextTest(io: std.Io, alloc: std.mem.Allocator) !void {
     layer.setProperty(.{ .cursor = .{ .row = 1, .col = 0 } });
     try layer.writeTextOpts("︑", fg, bg, .{ .copy_text = "、" });
     layer.setProperty(.{ .selection_flow = .{ .mode = .vertical_rl, .column_cols = 2, .origin_col = 0 } });
-    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = -1, .col = 0 });
-    const vertical = (try layer.selectionText(alloc)).?;
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = -1, .col = 0 });
+    const vertical = (try layer.sel.text(alloc)).?;
     defer alloc.free(vertical);
     try testz.expectEqualStr("あ、", vertical);
 }
@@ -2992,16 +2992,16 @@ pub fn selectionSnapsToWholeWideCharactersTest(io: std.Io, alloc: std.mem.Alloca
 
     // "a" at 0, "日" at 1-2, "本" at 3-4, "b" at 5.
     try layer.writeText("a日本b", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    layer.setSelection(.{ .above = 0, .col = 2 }, .{ .above = 0, .col = 3 });
+    layer.sel.set(.{ .above = 0, .col = 2 }, .{ .above = 0, .col = 3 });
 
-    const range = layer.selectionColRange(0).?;
+    const range = layer.sel.colRange(0).?;
     try testz.expectEqual(range.start, 1);
     try testz.expectEqual(range.end, 5);
-    const text = (try layer.selectionText(alloc)).?;
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("日本", text);
     // The stored points are left as set.
-    try testz.expectEqual(layer.selection.?.anchor.col, 2);
+    try testz.expectEqual(layer.sel.range.?.anchor.col, 2);
 }
 
 /// A selection stays pinned to its content as fresh output scrolls rows
@@ -3013,19 +3013,19 @@ pub fn selectionFollowsScrollAndDropsOnEvictionTest(io: std.Io, alloc: std.mem.A
     defer layer.deinit();
 
     try layer.writeText("row0\nrow1", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 4 });
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 4 });
 
     // Two newlines past the bottom scroll once: the selected row is now
     // one row further above the viewport top.
     try layer.writeText("\n\n", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.selection.?.anchor.above, 1);
-    const text = (try layer.selectionText(alloc)).?;
+    try testz.expectEqual(layer.sel.range.?.anchor.above, 1);
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("row0", text);
 
     // Enough further newlines evict that row from the 2-row scrollback.
     try layer.writeText("\n\n\n", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectTrue(layer.selection == null);
+    try testz.expectTrue(layer.sel.range == null);
 }
 
 /// `resize` rebuilds the ring buffer, so it drops any selection.
@@ -3033,50 +3033,50 @@ pub fn selectionClearedByResizeTest(io: std.Io, alloc: std.mem.Allocator) !void 
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
     defer layer.deinit();
-    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 2 });
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 2 });
     try layer.resize(12, 4);
-    try testz.expectTrue(layer.selection == null);
+    try testz.expectTrue(layer.sel.range == null);
 }
 
 // ─── highlights ───────────────────────────────────────────────────────
 
-/// `toggleHighlightId` flips membership; `isHighlighted` is the per-cell
+/// `LayerSelection.toggleHighlight` flips membership; `isHighlighted` is the per-cell
 /// test the renderer runs, and an untagged (`null`) cell is never hit.
 pub fn highlightToggleAndMembershipTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
     defer layer.deinit();
 
-    try testz.expectFalse(layer.isHighlighted(7));
-    try testz.expectFalse(layer.isHighlighted(null));
+    try testz.expectFalse(layer.sel.isHighlighted(7));
+    try testz.expectFalse(layer.sel.isHighlighted(null));
 
-    try layer.toggleHighlightId(7);
-    try layer.toggleHighlightId(9);
-    try testz.expectTrue(layer.isHighlighted(7));
-    try testz.expectTrue(layer.isHighlighted(9));
-    try testz.expectFalse(layer.isHighlighted(8));
-    try testz.expectEqual(layer.highlighted_ids.items.len, 2);
+    try layer.sel.toggleHighlight(7);
+    try layer.sel.toggleHighlight(9);
+    try testz.expectTrue(layer.sel.isHighlighted(7));
+    try testz.expectTrue(layer.sel.isHighlighted(9));
+    try testz.expectFalse(layer.sel.isHighlighted(8));
+    try testz.expectEqual(layer.sel.highlighted_ids.items.len, 2);
 
-    try layer.toggleHighlightId(7); // off again
-    try testz.expectFalse(layer.isHighlighted(7));
-    try testz.expectTrue(layer.isHighlighted(9));
-    try testz.expectEqual(layer.highlighted_ids.items.len, 1);
+    try layer.sel.toggleHighlight(7); // off again
+    try testz.expectFalse(layer.sel.isHighlighted(7));
+    try testz.expectTrue(layer.sel.isHighlighted(9));
+    try testz.expectEqual(layer.sel.highlighted_ids.items.len, 1);
 }
 
-/// `setHighlightIds` replaces the whole set; `clearHighlightIds` empties it.
+/// `setHighlights` replaces the whole set; `clearHighlights` empties it.
 pub fn highlightSetAndClearIdsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
     defer layer.deinit();
 
-    try layer.toggleHighlightId(1);
-    try layer.setHighlightIds(&.{ 4, 5, 6 });
-    try testz.expectEqual(layer.highlighted_ids.items.len, 3);
-    try testz.expectFalse(layer.isHighlighted(1));
-    try testz.expectTrue(layer.isHighlighted(5));
+    try layer.sel.toggleHighlight(1);
+    try layer.sel.setHighlights(&.{ 4, 5, 6 });
+    try testz.expectEqual(layer.sel.highlighted_ids.items.len, 3);
+    try testz.expectFalse(layer.sel.isHighlighted(1));
+    try testz.expectTrue(layer.sel.isHighlighted(5));
 
-    layer.clearHighlightIds();
-    try testz.expectEqual(layer.highlighted_ids.items.len, 0);
+    layer.sel.clearHighlights();
+    try testz.expectEqual(layer.sel.highlighted_ids.items.len, 0);
 }
 
 /// Highlights are keyed by metadata id, not rows, so a `resize` leaves the
@@ -3085,10 +3085,10 @@ pub fn highlightSurvivesResizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
     defer layer.deinit();
-    try layer.setHighlightIds(&.{ 2, 3 });
+    try layer.sel.setHighlights(&.{ 2, 3 });
     try layer.resize(12, 4);
-    try testz.expectEqual(layer.highlighted_ids.items.len, 2);
-    try testz.expectTrue(layer.isHighlighted(3));
+    try testz.expectEqual(layer.sel.highlighted_ids.items.len, 2);
+    try testz.expectTrue(layer.sel.isHighlighted(3));
 }
 
 /// `setClipboard` replaces the buffer and bumps the serial each call;
@@ -3163,27 +3163,27 @@ pub fn renderGenBumpsOnSelectionAndHighlightTest(io: std.Io, alloc: std.mem.Allo
     defer layer.deinit();
 
     const g0 = layer.renderGeneration();
-    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 4 });
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 4 });
     try testz.expectTrue(layer.renderGeneration() != g0);
 
     const g1 = layer.renderGeneration();
-    layer.updateSelectionActive(.{ .above = 0, .col = 6 });
+    layer.sel.updateActive(.{ .above = 0, .col = 6 });
     try testz.expectTrue(layer.renderGeneration() != g1);
 
     const g2 = layer.renderGeneration();
-    layer.clearSelection();
+    layer.sel.clear();
     try testz.expectTrue(layer.renderGeneration() != g2);
 
     const g3 = layer.renderGeneration();
-    try layer.setHighlightIds(&.{ 1, 2 });
+    try layer.sel.setHighlights(&.{ 1, 2 });
     try testz.expectTrue(layer.renderGeneration() != g3);
 
     const g4 = layer.renderGeneration();
-    try layer.toggleHighlightId(1);
+    try layer.sel.toggleHighlight(1);
     try testz.expectTrue(layer.renderGeneration() != g4);
 
     const g5 = layer.renderGeneration();
-    layer.clearHighlightIds();
+    layer.sel.clearHighlights();
     try testz.expectTrue(layer.renderGeneration() != g5);
 }
 
@@ -3199,9 +3199,9 @@ pub fn renderGenStableAcrossPureReadsTest(io: std.Io, alloc: std.mem.Allocator) 
     _ = layer.getProperty(.cursor);
     _ = layer.capacity();
     _ = layer.renderGeneration();
-    _ = layer.selectionColRange(0);
-    // A no-op `updateSelectionActive` (nothing selected) must not bump.
-    layer.updateSelectionActive(.{ .above = 0, .col = 2 });
+    _ = layer.sel.colRange(0);
+    // A no-op `sel.updateActive` (nothing selected) must not bump.
+    layer.sel.updateActive(.{ .above = 0, .col = 2 });
     try testz.expectEqual(layer.renderGeneration(), g0);
 }
 
@@ -5720,23 +5720,23 @@ pub fn unitSpanWordStopsAtBlanksAndDelimitersTest(io: std.Io, alloc: std.mem.All
     try layer.writeText("see \"src/core.zig:42\" ok", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     // Inside the path: the quotes stop it, `/ . :` don't.
-    const path = layer.unitSpanAt(.{ .above = 0, .col = 9 }, .word);
+    const path = layer.sel.unitSpanAt(.{ .above = 0, .col = 9 }, .word);
     try testz.expectEqual(path.start.col, 5);
     try testz.expectEqual(path.end.col, 19);
     try testz.expectEqual(path.start.above, 0);
 
     // A quote is a word of its own.
-    const quote = layer.unitSpanAt(.{ .above = 0, .col = 4 }, .word);
+    const quote = layer.sel.unitSpanAt(.{ .above = 0, .col = 4 }, .word);
     try testz.expectEqual(quote.start.col, 4);
     try testz.expectEqual(quote.end.col, 4);
 
     // The first word, from its middle.
-    const see = layer.unitSpanAt(.{ .above = 0, .col = 1 }, .word);
+    const see = layer.sel.unitSpanAt(.{ .above = 0, .col = 1 }, .word);
     try testz.expectEqual(see.start.col, 0);
     try testz.expectEqual(see.end.col, 2);
 
     // A blank run selects the blanks, out to the edge past the text.
-    const tail = layer.unitSpanAt(.{ .above = 0, .col = 30 }, .word);
+    const tail = layer.sel.unitSpanAt(.{ .above = 0, .col = 30 }, .word);
     try testz.expectEqual(tail.start.col, 24);
     try testz.expectEqual(tail.end.col, 39);
 }
@@ -5747,9 +5747,9 @@ pub fn unitSpanWordCopiesTheWordTest(io: std.Io, alloc: std.mem.Allocator) !void
     defer layer.deinit();
     try layer.writeText("ls ~/code/glyphwire|wc", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
-    const s = layer.unitSpanAt(.{ .above = 0, .col = 6 }, .word);
-    layer.setSelection(s.start, s.end);
-    const text = (try layer.selectionText(alloc)).?;
+    const s = layer.sel.unitSpanAt(.{ .above = 0, .col = 6 }, .word);
+    layer.sel.set(s.start, s.end);
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("~/code/glyphwire", text);
 }
@@ -5761,11 +5761,11 @@ pub fn unitSpanWordStepsOverWideGlyphsTest(io: std.Io, alloc: std.mem.Allocator)
     try layer.writeText("a 日本語 b", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
     // Clicked on 本's spacer: the whole CJK run, spacers included.
-    const s = layer.unitSpanAt(.{ .above = 0, .col = 5 }, .word);
+    const s = layer.sel.unitSpanAt(.{ .above = 0, .col = 5 }, .word);
     try testz.expectEqual(s.start.col, 2);
     try testz.expectEqual(s.end.col, 7);
-    layer.setSelection(s.start, s.end);
-    const text = (try layer.selectionText(alloc)).?;
+    layer.sel.set(s.start, s.end);
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("日本語", text);
 }
@@ -5776,11 +5776,11 @@ pub fn unitSpanLineCoversTheRowTest(io: std.Io, alloc: std.mem.Allocator) !void 
     defer layer.deinit();
     try layer.writeText("first line\r\nsecond line", glyphwire.default_style.fg, glyphwire.default_style.bg);
 
-    const s = layer.unitSpanAt(.{ .above = -1, .col = 3 }, .line);
+    const s = layer.sel.unitSpanAt(.{ .above = -1, .col = 3 }, .line);
     try testz.expectEqual(s.start.col, 0);
     try testz.expectEqual(s.end.col, 19);
-    layer.setSelection(s.start, s.end);
-    const text = (try layer.selectionText(alloc)).?;
+    layer.sel.set(s.start, s.end);
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("second line", text);
 }

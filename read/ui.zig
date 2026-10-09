@@ -951,7 +951,7 @@ pub const Ui = struct {
 
         // A selection belongs to the text that was on the panel, and
         // `clear` doesn't drop one -- `core.Layer.clear` resets cells and
-        // leaves `Layer.selection` alone, so without this the old tint
+        // leaves `Layer.sel` alone, so without this the old tint
         // would sit over the *new* bubble's text at the old coordinates,
         // and the copy shortcut would copy whatever now lies under it.
         if (o.at != next) {

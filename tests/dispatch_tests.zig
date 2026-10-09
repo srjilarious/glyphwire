@@ -2198,8 +2198,8 @@ pub fn toggleHighlightFlipsIdAndReturnsStateTest(io: std.Io, alloc: std.mem.Allo
         \\{"jsonrpc":"2.0","id":2,"method":"toggle_highlight","params":{"row":0,"col":0}}
     );
     defer if (on.response) |r| alloc.free(r);
-    try testz.expectEqual(ctx.root.highlighted_ids.items.len, 1);
-    try testz.expectEqual(ctx.root.highlighted_ids.items[0], 1);
+    try testz.expectEqual(ctx.root.sel.highlighted_ids.items.len, 1);
+    try testz.expectEqual(ctx.root.sel.highlighted_ids.items[0], 1);
     try testz.expectTrue(std.mem.indexOf(u8, on.response.?, "\"id\":1") != null);
     try testz.expectTrue(std.mem.indexOf(u8, on.response.?, "\\\"path\\\":\\\"/tmp/d\\\"") != null);
 
@@ -2208,14 +2208,14 @@ pub fn toggleHighlightFlipsIdAndReturnsStateTest(io: std.Io, alloc: std.mem.Allo
         \\{"jsonrpc":"2.0","id":3,"method":"toggle_highlight","params":{"row":0,"col":5}}
     );
     defer if (untagged.response) |r| alloc.free(r);
-    try testz.expectEqual(ctx.root.highlighted_ids.items.len, 1);
+    try testz.expectEqual(ctx.root.sel.highlighted_ids.items.len, 1);
 
     // Toggling the same tagged cell again removes the id.
     const off = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":4,"method":"toggle_highlight","params":{"row":0,"col":0}}
     );
     defer if (off.response) |r| alloc.free(r);
-    try testz.expectEqual(ctx.root.highlighted_ids.items.len, 0);
+    try testz.expectEqual(ctx.root.sel.highlighted_ids.items.len, 0);
     try testz.expectTrue(std.mem.indexOf(u8, off.response.?, "\"entries\":[]") != null);
 }
 
@@ -2289,7 +2289,7 @@ pub fn setAndClearHighlightReplaceTheIdSetTest(io: std.Io, alloc: std.mem.Alloca
         \\{"jsonrpc":"2.0","id":1,"method":"set_highlight","params":{"ids":[3,7,9]}}
     );
     defer if (set_result.response) |r| alloc.free(r);
-    try testz.expectEqual(ctx.root.highlighted_ids.items.len, 3);
+    try testz.expectEqual(ctx.root.sel.highlighted_ids.items.len, 3);
     // No metadata was created, so every entry's json is null (dangling).
     try testz.expectTrue(std.mem.indexOf(u8, set_result.response.?, "\"id\":7") != null);
 
@@ -2297,7 +2297,7 @@ pub fn setAndClearHighlightReplaceTheIdSetTest(io: std.Io, alloc: std.mem.Alloca
         \\{"jsonrpc":"2.0","id":2,"method":"clear_highlight","params":{}}
     );
     defer if (clear_result.response) |r| alloc.free(r);
-    try testz.expectEqual(ctx.root.highlighted_ids.items.len, 0);
+    try testz.expectEqual(ctx.root.sel.highlighted_ids.items.len, 0);
 }
 
 /// `set_clipboard` stores the text on the context; `get_clipboard`
@@ -2525,12 +2525,12 @@ pub fn selectionFlowPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator)
     defer ctx.deinit();
     var d = dispatch.Dispatcher.init(&ctx);
     const panel = try ctx.createLayer(20, 20, 0);
-    try testz.expectEqual(ctx.layerPtr(panel).?.selection_flow.mode, .horizontal);
+    try testz.expectEqual(ctx.layerPtr(panel).?.sel.flow.mode, .horizontal);
 
     try notifyThrough(alloc, &d,
         \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"selection_flow","mode":"vertical_rl","cols":4,"col":2}}
     );
-    const flow = ctx.layerPtr(panel).?.selection_flow;
+    const flow = ctx.layerPtr(panel).?.sel.flow;
     try testz.expectEqual(flow.mode, .vertical_rl);
     try testz.expectEqual(flow.column_cols, 4);
     try testz.expectEqual(flow.origin_col, 2);
@@ -2557,12 +2557,12 @@ pub fn selectionFlowPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator)
     const bad_decoded = try roundTripThroughWire(alloc, bad_msg);
     defer alloc.free(bad_decoded);
     try testz.expectError(d.handle(alloc, bad_decoded), dispatch.DispatchError.InvalidSelectionFlow);
-    try testz.expectEqual(ctx.layerPtr(panel).?.selection_flow.mode, .vertical_rl);
+    try testz.expectEqual(ctx.layerPtr(panel).?.sel.flow.mode, .vertical_rl);
 
     try notifyThrough(alloc, &d,
         \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"selection_flow"}}
     );
-    try testz.expectEqual(ctx.layerPtr(panel).?.selection_flow.mode, .horizontal);
+    try testz.expectEqual(ctx.layerPtr(panel).?.sel.flow.mode, .horizontal);
 }
 
 /// `resize_edge` sets and reports a layer's draggable edge; an unknown
@@ -2705,8 +2705,8 @@ pub fn writeTextCopyTextIsWhatSelectionCopiesTest(io: std.Io, alloc: std.mem.All
         \\{"jsonrpc":"2.0","method":"write_text","params":{"layer":1,"text":"あ"}}
     );
     const layer = ctx.layerPtr(panel).?;
-    layer.setSelection(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 3 });
-    const text = (try layer.selectionText(alloc)).?;
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 3 });
+    const text = (try layer.sel.text(alloc)).?;
     defer alloc.free(text);
     try testz.expectEqualStr("「あ", text);
 }
