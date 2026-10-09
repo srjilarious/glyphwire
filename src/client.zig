@@ -8,6 +8,7 @@ const net_read = @import("net_read.zig");
 const protocol = @import("protocol.zig");
 const codec = @import("codec.zig");
 const msgpack = @import("msgpack.zig");
+const client_ops = @import("client_ops.zig");
 
 pub const PxPos = core.PxPos;
 pub const CellPos = core.CellPos;
@@ -301,6 +302,113 @@ pub const Client = struct {
         self.stream.close(self.io);
     }
 
+    // Every notification op, written once in client_ops.zig and aliased
+    // here and on `Batch` with the same list. See `client_ops.Ops`.
+    const ops = client_ops.Ops(Client);
+
+    // -- Text, clearing and the cursor --
+    pub const writeText = ops.writeText;
+    pub const writeSpans = ops.writeSpans;
+    pub const clearArea = ops.clearArea;
+    pub const setBg = ops.setBg;
+    pub const setFg = ops.setFg;
+    pub const setUnderline = ops.setUnderline;
+    pub const setCursor = ops.setCursor;
+    pub const setCursorOn = ops.setCursorOn;
+    pub const insertCells = ops.insertCells;
+    pub const deleteCells = ops.deleteCells;
+    pub const moveContent = ops.moveContent;
+    pub const tagMetadata = ops.tagMetadata;
+    pub const clear = ops.clear;
+    pub const clearOn = ops.clearOn;
+
+    // -- Images and icons --
+    pub const destroyImage = ops.destroyImage;
+    pub const drawImage = ops.drawImage;
+    pub const drawImageOn = ops.drawImageOn;
+    pub const drawIcon = ops.drawIcon;
+    pub const drawIconStyled = ops.drawIconStyled;
+    pub const drawIconOn = ops.drawIconOn;
+    pub const drawIconOnStyled = ops.drawIconOnStyled;
+
+    // -- Layers and contexts --
+    pub const destroyLayer = ops.destroyLayer;
+    pub const adoptLayer = ops.adoptLayer;
+    pub const setContextTitle = ops.setContextTitle;
+    pub const setTheme = ops.setTheme;
+    pub const setDividerStyle = ops.setDividerStyle;
+    pub const setThemeByName = ops.setThemeByName;
+    pub const setWindowScrollbar = ops.setWindowScrollbar;
+    pub const setCaretLayer = ops.setCaretLayer;
+    pub const setCaretVisible = ops.setCaretVisible;
+    pub const setCaretShape = ops.setCaretShape;
+    pub const setKeyRepeat = ops.setKeyRepeat;
+    pub const destroyContext = ops.destroyContext;
+    pub const activateContext = ops.activateContext;
+    pub const adoptContext = ops.adoptContext;
+
+    // -- Panes --
+    pub const setWindowPrefix = ops.setWindowPrefix;
+    pub const destroyPane = ops.destroyPane;
+    pub const focusPane = ops.focusPane;
+    pub const destroyPaneSplit = ops.destroyPaneSplit;
+    pub const setPaneSplitChildren = ops.setPaneSplitChildren;
+    pub const setRootPaneSplit = ops.setRootPaneSplit;
+    pub const movePaneDivider = ops.movePaneDivider;
+    pub const stopRemote = ops.stopRemote;
+
+    // -- Layer properties --
+    pub const setLayerPosition = ops.setLayerPosition;
+    pub const setLayerCellPosition = ops.setLayerCellPosition;
+    pub const setLayerSize = ops.setLayerSize;
+    pub const setLayerVisible = ops.setLayerVisible;
+    pub const setLayerOpacity = ops.setLayerOpacity;
+    pub const setLayerViewport = ops.setLayerViewport;
+    pub const setLayerScrollOffset = ops.setLayerScrollOffset;
+    pub const setLayerContentExtent = ops.setLayerContentExtent;
+    pub const setLayerScrollMode = ops.setLayerScrollMode;
+    pub const setLayerBackground = ops.setLayerBackground;
+    pub const setLayerShadow = ops.setLayerShadow;
+    pub const setLayerResizeEdge = ops.setLayerResizeEdge;
+    pub const setLayerPtyMode = ops.setLayerPtyMode;
+    pub const setLayerMouseSelect = ops.setLayerMouseSelect;
+    pub const setLayerSelectionFlow = ops.setLayerSelectionFlow;
+    pub const setLayerMouseReport = ops.setLayerMouseReport;
+    pub const setLayerScrollbars = ops.setLayerScrollbars;
+
+    // -- Splits and stacking --
+    pub const destroySplit = ops.destroySplit;
+    pub const setSplitChildren = ops.setSplitChildren;
+    pub const setRootSplit = ops.setRootSplit;
+    pub const moveDivider = ops.moveDivider;
+    pub const raiseLayer = ops.raiseLayer;
+    pub const lowerLayer = ops.lowerLayer;
+
+    // -- Tables and outlines --
+    pub const destroyTable = ops.destroyTable;
+    pub const tableSetRows = ops.tableSetRows;
+    pub const tableSetSort = ops.tableSetSort;
+    pub const tableSetStyle = ops.tableSetStyle;
+    pub const destroyOutline = ops.destroyOutline;
+    pub const outlineSetNodes = ops.outlineSetNodes;
+    pub const outlineSetCollapsed = ops.outlineSetCollapsed;
+    pub const outlineSetAllCollapsed = ops.outlineSetAllCollapsed;
+    pub const outlineSetStyle = ops.outlineSetStyle;
+
+    // -- Rects, nine-patches and metadata --
+    pub const updateRect = ops.updateRect;
+    pub const destroyRect = ops.destroyRect;
+    pub const setDropTarget = ops.setDropTarget;
+    pub const updateNinePatch = ops.updateNinePatch;
+    pub const destroyNinePatch = ops.destroyNinePatch;
+    pub const destroyMetadata = ops.destroyMetadata;
+
+    // -- Selection and clipboard --
+    pub const setSelection = ops.setSelection;
+    pub const updateSelection = ops.updateSelection;
+    pub const clearSelection = ops.clearSelection;
+    pub const setClipboard = ops.setClipboard;
+
     /// Everything `write_text` can take besides the text, as one options
     /// struct, so one write call covers placement, colours, metadata and
     /// scale without a separate cursor move. `.{}` writes at the root
@@ -343,13 +451,6 @@ pub const Client = struct {
         underline_color: ?core.Color = null,
     };
 
-    /// `write_text` -- a notification, no response. Every option is in
-    /// `TextOpts`; a null `fg`/`bg` means the server's default style (see
-    /// `core.default_style`).
-    pub fn writeText(self: *Client, text: []const u8, opts: TextOpts) !void {
-        try self.notify("write_text", textParams(text, null, opts));
-    }
-
     /// One styled piece of a `writeSpans` write. Every null field inherits
     /// the write's `TextOpts` value.
     pub const Span = struct {
@@ -364,62 +465,6 @@ pub const Client = struct {
         underline: ?core.Underline = null,
         underline_color: ?core.Color = null,
     };
-
-    /// `write_text` with `spans`: several differently styled runs written
-    /// back to back in one message -- a syntax-coloured row, a status line
-    /// whose mode word has its own colour. `opts` places the write, gives
-    /// each span its defaults, and its `max_cols`/`pad` cover the whole
-    /// write. A notification.
-    pub fn writeSpans(self: *Client, spans: []const Span, opts: TextOpts) !void {
-        const wire_spans = try spansToWire(self.alloc, spans);
-        defer self.alloc.free(wire_spans);
-        try self.notify("write_text", textParams(null, wire_spans, opts));
-    }
-
-    fn spansToWire(alloc: std.mem.Allocator, spans: []const Span) ![]protocol.SpanParams {
-        const out = try alloc.alloc(protocol.SpanParams, spans.len);
-        for (spans, out) |s, *w| w.* = .{
-            .text = s.text,
-            .fg = colorToJson(s.fg),
-            .bg = colorToJson(s.bg),
-            .metadata_id = s.metadata_id,
-            .transparent_bg = s.transparent_bg,
-            .scale = if (s.scale) |sc| @tagName(sc) else null,
-            .underline = if (s.underline) |u| @tagName(u) else null,
-            .underline_color = colorToJson(s.underline_color),
-        };
-        return out;
-    }
-
-    /// The wire params for a `TextOpts` write: either `text` or `spans`.
-    /// Shared with `Batch`. Every field left null here is absent on the
-    /// wire (see `notify`) -- which is why the server-side defaults (`pad`
-    /// false, `selectable` true, `transparent_bg` false, `scale` x1) are
-    /// written as null rather than spelled out: a syntax-coloured row is
-    /// mostly spans, and every byte per span counts.
-    fn textParams(text: ?[]const u8, spans: ?[]const protocol.SpanParams, opts: TextOpts) protocol.WriteTextParams {
-        return .{
-            .layer = opts.layer,
-            .row = opts.row,
-            .col = opts.col,
-            .text = text,
-            .spans = spans,
-            .fg = colorToJson(opts.fg),
-            .bg = colorToJson(opts.bg),
-            .transparent_bg = if (opts.transparent_bg) true else null,
-            .metadata_id = opts.metadata_id,
-            .scale = if (opts.scale == .x1) null else @tagName(opts.scale),
-            .max_cols = opts.max_cols,
-            .pad = if (opts.pad) true else null,
-            .selectable = if (opts.selectable) null else false,
-            .copy_text = opts.copy_text,
-            // Omitted entirely for the overwhelmingly common no-underline
-            // write, so nothing grows on the wire for every existing
-            // caller. Same reason `spans` is null for a plain write.
-            .underline = if (opts.underline == .none) null else @tagName(opts.underline),
-            .underline_color = colorToJson(opts.underline_color),
-        };
-    }
 
     /// `clear`'s options: the region (defaulting to the whole layer) and
     /// an optional fill colour. Shared by `Client.clearArea` and
@@ -437,22 +482,6 @@ pub const Client = struct {
         bg: ?core.Color = null,
     };
 
-    /// `clear` with every option (see `ClearOpts`) -- a notification.
-    pub fn clearArea(self: *Client, opts: ClearOpts) !void {
-        try self.notify("clear", clearParams(opts));
-    }
-
-    fn clearParams(opts: ClearOpts) protocol.ClearParams {
-        return .{
-            .layer = opts.layer,
-            .row = opts.row,
-            .col = opts.col,
-            .rows = opts.rows,
-            .cols = opts.cols,
-            .bg = colorToJson(opts.bg),
-        };
-    }
-
     /// `set_bg`'s options: `ClearOpts`' region, with `bg` required --
     /// the call is "paint this background". Shared by `Client.setBg` and
     /// `Batch.setBg`.
@@ -467,24 +496,6 @@ pub const Client = struct {
         bg: core.Color,
     };
 
-    /// `set_bg` -- repaints a region's background and nothing else, so a
-    /// client that moves a highlight sends two of these instead of two
-    /// rows of text. A notification.
-    pub fn setBg(self: *Client, opts: SetBgOpts) !void {
-        try self.notify("set_bg", setBgParams(opts));
-    }
-
-    fn setBgParams(opts: SetBgOpts) protocol.SetBgParams {
-        return .{
-            .layer = opts.layer,
-            .row = opts.row,
-            .col = opts.col,
-            .rows = opts.rows,
-            .cols = opts.cols,
-            .bg = colorToJson(opts.bg).?,
-        };
-    }
-
     /// `set_fg`'s options: `SetBgOpts`' region, with `fg` required.
     /// Shared by `Client.setFg` and `Batch.setFg`.
     pub const SetFgOpts = struct {
@@ -497,24 +508,6 @@ pub const Client = struct {
         cols: ?usize = null,
         fg: core.Color,
     };
-
-    /// `set_fg` -- repaints a region's text colour and nothing else: the
-    /// foreground half of moving a highlight whose text changes colour
-    /// with it. A notification.
-    pub fn setFg(self: *Client, opts: SetFgOpts) !void {
-        try self.notify("set_fg", setFgParams(opts));
-    }
-
-    fn setFgParams(opts: SetFgOpts) protocol.SetFgParams {
-        return .{
-            .layer = opts.layer,
-            .row = opts.row,
-            .col = opts.col,
-            .rows = opts.rows,
-            .cols = opts.cols,
-            .fg = colorToJson(opts.fg).?,
-        };
-    }
 
     /// `set_underline`'s options: `SetBgOpts`' region for the underline
     /// channel. Shared by `Client.setUnderline` and `Batch.setUnderline`.
@@ -530,71 +523,6 @@ pub const Client = struct {
         /// null follows each cell's own `fg`.
         underline_color: ?core.Color = null,
     };
-
-    /// `set_underline` -- marks a region's underline and nothing else, for a
-    /// mark that goes *over* text already drawn: a diagnostic squiggle under
-    /// a row that has already been syntax-coloured, search-highlighted and
-    /// selection-tinted. `.none` takes the mark off. A notification.
-    pub fn setUnderline(self: *Client, opts: SetUnderlineOpts) !void {
-        try self.notify("set_underline", setUnderlineParams(opts));
-    }
-
-    fn setUnderlineParams(opts: SetUnderlineOpts) protocol.SetUnderlineParams {
-        return .{
-            .layer = opts.layer,
-            .row = opts.row,
-            .col = opts.col,
-            .rows = opts.rows,
-            .cols = opts.cols,
-            .underline = @tagName(opts.underline),
-            .underline_color = colorToJson(opts.underline_color),
-        };
-    }
-
-    /// `set_property(layer, "cursor", {row, col})` -- a notification.
-    pub fn setCursor(self: *Client, row: usize, col: usize) !void {
-        try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
-    }
-
-    /// `insert_cells(count)` -- a notification. ECMA-48's ICH: shifts
-    /// cells at and after the cursor rightward by `count` within its row,
-    /// opening `count` blank cells at the cursor without moving it -- the
-    /// primitive a line editor needs to insert into already-drawn text
-    /// without retransmitting everything after the insertion point.
-    pub fn insertCells(self: *Client, count: usize) !void {
-        try self.notify("insert_cells", .{ .count = count });
-    }
-
-    /// `delete_cells(count)` -- a notification. ECMA-48's DCH: removes
-    /// `count` cells at and after the cursor, shifting the row's
-    /// remainder left and blanking `count` cells at the row's tail.
-    pub fn deleteCells(self: *Client, count: usize) !void {
-        try self.notify("delete_cells", .{ .count = count });
-    }
-
-    /// `move_content(layer, count, direction)` -- a notification. Shifts
-    /// `count` rows of `layer`'s content grid (the whole grid, or the
-    /// inclusive `[top, bot]` band) vertically in place, the wire face of
-    /// CSI SU/SD: a client-scrolled pane scrolls by moving the rows it
-    /// still has and redrawing only the newly-exposed band rather than
-    /// retransmitting every visible row. Usually issued from inside a
-    /// `batch` right before that partial redraw -- see `Batch.moveContent`.
-    pub fn moveContentOn(
-        self: *Client,
-        layer: core.LayerHandle,
-        top: ?usize,
-        bot: ?usize,
-        count: usize,
-        direction: core.Layer.ScrollDir,
-    ) !void {
-        try self.notify("move_content", .{
-            .layer = layer,
-            .top = top,
-            .bot = bot,
-            .count = count,
-            .direction = @tagName(direction),
-        });
-    }
 
     /// `get_property(layer, "cursor")` -- a request.
     pub fn getCursor(self: *Client) !core.Cursor {
@@ -855,86 +783,12 @@ pub const Client = struct {
         return parsed.value.result.handle;
     }
 
-    /// `destroy_image(handle)` -- a notification releasing a loaded
-    /// image's bytes. Cells still backed by the handle are left as they
-    /// are and simply render nothing from then on; clear them first if
-    /// that matters -- see `core.Context.destroyImage`.
-    ///
-    /// Mostly unnecessary for a short-lived program (an image loaded over
-    /// a connection is reclaimed automatically once that connection is
-    /// gone and the image has scrolled out of the scrollback -- see
-    /// `core.Session.sweepImages`); this is for a long-running client that
-    /// wants its own memory back at a moment of its choosing.
-    pub fn destroyImage(self: *Client, handle: core.ImageHandle) !void {
-        try self.notify("destroy_image", .{ .handle = handle });
-    }
-
     /// `get_image_info(handle)` -- a request returning the image's natural
     /// pixel dimensions.
     pub fn getImageInfo(self: *Client, handle: core.ImageHandle) !core.ImageInfo {
         var parsed = try self.request(protocol.ImageInfoResult, "get_image_info", .{ .handle = handle });
         defer parsed.deinit();
         return .{ .width = parsed.value.result.width, .height = parsed.value.result.height };
-    }
-
-    /// `draw_image(handle, row?, col?, row_span, col_span, scale, src)` --
-    /// a notification. Places the image anchored at `(row, col)`
-    /// (defaulting to the layer's cursor when either is omitted, same as
-    /// `write_text`'s documented convention), clipped to the given span
-    /// rather than stretched to fill it — see decisions.md's Image
-    /// section. `scale` is the uniform factor the image is drawn at:
-    /// `1.0` is its natural pixel size (the original behavior); `< 1.0`
-    /// shrinks it (glyphwire-view passes `target_width_px / image_width_px`
-    /// for `--size fit-width`). `src` optionally restricts sampling to a
-    /// sub-rectangle of the image (sprite-sheet support) -- `.{}` draws
-    /// from the whole image, the original behavior. Aspect-ratio-aware
-    /// placement (choosing `row_span`/`col_span` to match the image's
-    /// *scaled* shape) is the caller's job; `getImageInfo` plus
-    /// `getCellMetrics` and `getSize` give it what it needs to compute
-    /// that.
-    pub fn drawImage(self: *Client, handle: core.ImageHandle, row: ?usize, col: ?usize, row_span: usize, col_span: usize, scale: f32, src: core.ImageSrcRect) !void {
-        try self.drawImageOn(null, handle, row, col, row_span, col_span, scale, src);
-    }
-
-    /// `draw_image(layer, ...)` -- the explicitly-targeted form of
-    /// `drawImage`, matching `drawIconOn`.
-    /// The wire message has always carried `layer?`; only the Zig helper
-    /// was missing it, so a TUI drawing a picture into one of its own
-    /// layers (gw-read's page layer) had no way to say which.
-    pub fn drawImageOn(
-        self: *Client,
-        layer: ?core.LayerHandle,
-        handle: core.ImageHandle,
-        row: ?usize,
-        col: ?usize,
-        row_span: usize,
-        col_span: usize,
-        scale: f32,
-        src: core.ImageSrcRect,
-    ) !void {
-        try self.notify("draw_image", .{
-            .layer = layer,
-            .handle = handle,
-            .row = row,
-            .col = col,
-            .row_span = row_span,
-            .col_span = col_span,
-            .scale = scale,
-            .src_x = src.x,
-            .src_y = src.y,
-            .src_w = src.w,
-            .src_h = src.h,
-        });
-    }
-
-    /// `draw_icon(row?, col?, name)` -- a notification. Draws a bundled,
-    /// named icon (decisions.md's Icon section; the default set is the
-    /// `assets/icons/` tree, each icon named by its path there minus the
-    /// `.png`) into exactly one cell, anchored at the
-    /// layer's cursor when `row`/`col` is omitted -- unlike `drawImage`, no
-    /// span: an icon is scoped to a single cell for now.
-    pub fn drawIcon(self: *Client, row: ?usize, col: ?usize, name: []const u8) !void {
-        try self.notify("draw_icon", .{ .row = row, .col = col, .name = name });
     }
 
     /// `scale`/`h_align`/`v_align`/`max_w`/`max_h` for `drawIconStyled` --
@@ -959,85 +813,6 @@ pub const Client = struct {
         foreground: bool = false,
     };
 
-    /// `draw_icon(row?, col?, name, scale?, h_align?, v_align?, max_w?,
-    /// max_h?, metadata_id?)` -- like `drawIcon`, but lets the icon be
-    /// drawn at its own native pixel size (`opts.scale = .natural`,
-    /// optionally capped by `opts.max_w`/`opts.max_h`) or stretched to
-    /// exactly fill the cell (`.stretch`) instead of shrunk to fit the
-    /// anchor cell, aligned relative to the anchor cell per
-    /// `opts.h_align`/`opts.v_align`, and optionally tagged with
-    /// `opts.metadata_id`. A separate method rather than extra params on
-    /// `drawIcon` itself since Zig has no default parameter values.
-    pub fn drawIconStyled(self: *Client, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
-        try self.notify("draw_icon", iconParams(opts.layer, row, col, name, opts));
-    }
-
-    /// The wire params for a styled `draw_icon`. `layer` is passed
-    /// separately so the `*On*` forms can override `opts.layer`. Shared
-    /// with `Batch`.
-    fn iconParams(layer: ?core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) protocol.DrawIconParams {
-        return .{
-            .layer = layer,
-            .row = row,
-            .col = col,
-            .name = name,
-            .scale = @tagName(opts.scale),
-            .h_align = @tagName(opts.h_align),
-            .v_align = @tagName(opts.v_align),
-            .max_w = opts.max_w,
-            .max_h = opts.max_h,
-            .metadata_id = opts.metadata_id,
-            .foreground = opts.foreground,
-        };
-    }
-
-    /// `draw_icon(layer, row?, col?, name)` on a non-root layer -- see
-    /// `drawIcon` for the root-layer version.
-    pub fn drawIconOn(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8) !void {
-        try self.notify("draw_icon", .{ .layer = layer, .row = row, .col = col, .name = name });
-    }
-
-    /// `draw_icon(layer, row?, col?, name, scale?, h_align?, v_align?,
-    /// max_w?, max_h?, metadata_id?)` on a non-root layer -- see
-    /// `drawIconStyled` for the root-layer version.
-    pub fn drawIconOnStyled(self: *Client, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
-        try self.notify("draw_icon", iconParams(layer, row, col, name, opts));
-    }
-
-    /// `tag_metadata(layer?, row, col, metadata_id)` -- a notification.
-    /// Sets exactly one cell's metadata tag without touching its
-    /// background/text -- unlike `writeText`/`drawIconStyled`,
-    /// which tag as a side effect of drawing something. For a client that
-    /// needs a cell tagged without changing what's drawn there, e.g.
-    /// tagging the extra cells a `.natural`-scaled icon visually
-    /// overflows into (see `core.IconScale`'s doc comment on why that
-    /// overflow has no automatic data-model footprint on its own).
-    ///
-    /// `focus` marks the cell as its span's landing point for
-    /// `findMetadata` (Ctrl+PgUp/PgDn in `glyphwire-shell`) -- see
-    /// `core.Cell.meta_focus`. A server-painted table names its focus
-    /// column with `TableColumnInput.focus` instead, since the client
-    /// can't know where the column landed.
-    pub fn tagMetadata(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle, focus: bool) !void {
-        try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id, .focus = focus });
-    }
-
-    /// `clear(layer?, row?, col?, rows?, cols?)` -- a notification.
-    /// Resets cells in the given region of the root layer back to
-    /// blank/default style. `rows`/`cols` null means
-    /// "the rest of the layer from `row`/`col`", so `clear(0, 0, null,
-    /// null)` wipes the whole layer.
-    pub fn clear(self: *Client, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-        try self.clearOn(null, row, col, rows, cols);
-    }
-
-    /// `clear(layer, ...)` -- the explicitly-targeted form of `clear`,
-    /// matching `drawImageOn`, for a TUI wiping one of its
-    /// own layers.
-    pub fn clearOn(self: *Client, layer: ?core.LayerHandle, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-        try self.notify("clear", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols });
-    }
-
     /// `create_layer(width?, height?, scrollback_rows)` -- a request.
     /// Allocates a fresh layer parented to the root, defaulting to the
     /// context's base size when `width`/`height` is omitted -- see
@@ -1051,26 +826,6 @@ pub const Client = struct {
         });
         defer parsed.deinit();
         return parsed.value.result.handle;
-    }
-
-    /// `destroy_layer(layer)` -- a notification. Frees a layer created by
-    /// `createLayer` and drops it from compositing; there's nothing more
-    /// to do afterward, including no need to `clear` it first. The server
-    /// honors this only from a connection that owns the layer (created it,
-    /// or `adoptLayer`'d it); a non-owner's call is logged and ignored.
-    /// You don't have to call this on a clean exit either -- the server
-    /// culls a layer once every connection that owned it has disconnected.
-    pub fn destroyLayer(self: *Client, layer: core.LayerHandle) !void {
-        try self.notify("destroy_layer", .{ .layer = layer });
-    }
-
-    /// `adopt_layer(layer)` -- a notification. Adds this connection to
-    /// `layer`'s set of owners, so the layer outlives its original
-    /// creator disconnecting for as long as this connection stays up, and
-    /// this connection may itself `destroyLayer` it. Use it when one
-    /// process hands ongoing responsibility for a layer to another.
-    pub fn adoptLayer(self: *Client, layer: core.LayerHandle) !void {
-        try self.notify("adopt_layer", .{ .layer = layer });
     }
 
     /// `create_context(width?, height?, scrollback_rows)` -- a request.
@@ -1106,51 +861,6 @@ pub const Client = struct {
         return parsed.value.result.context;
     }
 
-    /// `set_context_title(title)` -- a notification. Names this
-    /// connection's active context for display: glyphwire-host's context
-    /// switcher lists it and a shell's `jobs` prints it. Send it right
-    /// after `createContext` (a program that inherited its context, like
-    /// the shell, can name that one too).
-    pub fn setContextTitle(self: *Client, title: []const u8) !void {
-        try self.notify("set_context_title", .{ .title = title });
-    }
-
-    /// `set_theme` -- a notification. Gives this connection's active
-    /// context its own theme: every slot and role of `t`, which the host
-    /// resolves this context's colours against from now on, whatever the
-    /// window's theme becomes. Null goes back to following the window's.
-    pub fn setTheme(self: *Client, t: ?*const core.theme.Theme) !void {
-        const th = t orelse return self.notify("set_theme", .{});
-        var slots: [core.theme.slot_count]protocol.Color = undefined;
-        for (th.slots, 0..) |c, i| slots[i] = protocol.colorToWire(c);
-        var roles: std.json.ArrayHashMap(protocol.Color) = .{};
-        defer roles.deinit(self.alloc);
-        for (std.enums.values(core.theme.Role)) |r| {
-            try roles.map.put(self.alloc, @tagName(r), protocol.roleValueToWire(th.roles.get(r)));
-        }
-        try self.notify("set_theme", .{ .theme = protocol.ThemeWire{
-            .name = th.name,
-            .dark = th.dark,
-            .panel_style = th.panel_style,
-            .slots = &slots,
-            .roles = roles,
-        } });
-    }
-
-    /// `set_divider_style` -- a notification. How the host draws the
-    /// bands of this connection's active context's own split tree: a
-    /// preset and/or single glyphs, each falling back to the host's
-    /// `pane_divider_style` when null. An empty override (`.{}`) goes
-    /// back to the host's style entirely.
-    pub fn setDividerStyle(self: *Client, style: *const core.divider_style.Override) !void {
-        try self.notify("set_divider_style", protocol.DividerStyleWire.fromOverride(style));
-    }
-
-    /// `set_theme` by built-in name -- a notification.
-    pub fn setThemeByName(self: *Client, name: []const u8) !void {
-        try self.notify("set_theme", .{ .name = name });
-    }
-
     /// `get_theme` -- a request. This connection's active context's
     /// theme as the host resolves it: the window's, or the one this
     /// context set. Roles and slots the reply leaves out (an older host)
@@ -1171,78 +881,6 @@ pub const Client = struct {
         return .{ .parsed = parsed };
     }
 
-    /// `set_window_scrollbar(visible)` -- a notification. Toggles the
-    /// always-on window scrollbar for this connection's active context
-    /// after the fact (see `createContext`'s `window_scrollbar`).
-    pub fn setWindowScrollbar(self: *Client, visible: bool) !void {
-        try self.notify("set_window_scrollbar", .{ .visible = visible });
-    }
-
-    /// `set_caret_layer(layer)` -- a notification. Points glyphwire-host's
-    /// caret at `layer` for this connection's active context instead of
-    /// the root cursor; `null` restores the root cursor (see
-    /// `core.Context.caret_layer`). A multi-pane client re-sends this on
-    /// every focus change so the caret follows the active pane.
-    pub fn setCaretLayer(self: *Client, layer: ?core.LayerHandle) !void {
-        try self.notify("set_caret_layer", .{ .layer = layer });
-    }
-
-    /// `set_caret_visible(visible)` -- a notification. Shows or hides
-    /// glyphwire-host's caret for this connection's active context (see
-    /// `core.Context.caret_visible`). A program with no insertion point,
-    /// like `gw-read`, sends `false` once after `createContext`.
-    pub fn setCaretVisible(self: *Client, visible: bool) !void {
-        try self.notify("set_caret_visible", .{ .visible = visible });
-    }
-
-    /// `set_caret_shape(shape)` -- a notification. Sets the shape
-    /// glyphwire-host draws the caret in for this connection's active
-    /// context (see `core.Context.caret_shape`); `null` goes back to the
-    /// shape `host.conf.lua` chose. A modal editor sends `.line` in
-    /// insert mode and `null` otherwise.
-    pub fn setCaretShape(self: *Client, shape: ?core.CaretShape) !void {
-        try self.notify("set_caret_shape", .{ .shape = shape });
-    }
-
-    /// `set_key_repeat(delay_ms, interval_ms)` -- a notification. Retimes
-    /// the typematic key repeat glyphwire-host synthesizes while this
-    /// connection's active context is focused: `delay_ms` is how long a
-    /// key must be held before repeating, `interval_ms` how often it
-    /// repeats after that (see `core.KeyRepeat`). Equal values mean no
-    /// distinct initial hold, which is what an editor wants and a shell
-    /// does not. Both `null` clears the override and goes back to the
-    /// host's default.
-    pub fn setKeyRepeat(self: *Client, delay_ms: ?f64, interval_ms: ?f64) !void {
-        try self.notify("set_key_repeat", .{ .delay_ms = delay_ms, .interval_ms = interval_ms });
-    }
-
-    /// `destroy_context(context)` -- a notification. Frees a context
-    /// created by `createContext` and everything in it, and (if it was
-    /// visible) drops visibility back to whatever context was under it --
-    /// the alt-screen auto-restore. Honored only from a connection that
-    /// owns the context. Like `destroyLayer`, you don't have to call this
-    /// on a clean exit: the server culls the context once every owning
-    /// connection has disconnected.
-    pub fn destroyContext(self: *Client, context: core.ContextHandle) !void {
-        try self.notify("destroy_context", .{ .context = context });
-    }
-
-    /// `activate_context(context)` -- a notification. Makes `context` the
-    /// one on screen *without* changing which context this `Client`
-    /// draws on. A program backgrounds itself by activating
-    /// `glyphwire.root_context_handle` and restores itself by activating
-    /// its own handle again.
-    pub fn activateContext(self: *Client, context: core.ContextHandle) !void {
-        try self.notify("activate_context", .{ .context = context });
-    }
-
-    /// `adopt_context(context)` -- a notification. The context-level
-    /// mirror of `adoptLayer`: adds this connection to `context`'s owner
-    /// set so it outlives its creator disconnecting.
-    pub fn adoptContext(self: *Client, context: core.ContextHandle) !void {
-        try self.notify("adopt_context", .{ .context = context });
-    }
-
     /// `attach_context(context)` -- a notification. Retargets this
     /// connection onto an existing context without creating or owning it
     /// -- every later `layer?`-scoped call resolves against it. `create_context`
@@ -1259,16 +897,6 @@ pub const Client = struct {
     // protocol: a program that merely *runs inside* a pane never calls any
     // of it, and doesn't need to know panes exist. See session.zig's Panes
     // section.
-
-    /// `set_window_prefix`: the chord after which one keystroke is a window
-    /// command rather than input for the focused pane. `null` clears it.
-    ///
-    /// The session enforces this, so a manager receives only its own
-    /// commands and never a program's keystrokes -- see
-    /// `core.WindowPrefix`.
-    pub fn setWindowPrefix(self: *Client, key: ?[]const u8, ctrl: bool, alt: bool, shift: bool) !void {
-        try self.notify("set_window_prefix", .{ .key = key, .ctrl = ctrl, .alt = alt, .shift = shift });
-    }
 
     /// `attach_pane`: binds this connection to a pane. Called automatically
     /// at connect time when `GLYPHWIRE_PANE` is set (see
@@ -1311,17 +939,6 @@ pub const Client = struct {
         return .{ .pane = parsed.value.result.pane, .context = parsed.value.result.context };
     }
 
-    /// `destroy_pane`: stops whatever is running in the pane and frees it
-    /// and every context in it.
-    pub fn destroyPane(self: *Client, pane: core.PaneHandle) !void {
-        try self.notify("destroy_pane", .{ .pane = pane });
-    }
-
-    /// `focus_pane`: which pane raw input goes to.
-    pub fn focusPane(self: *Client, pane: core.PaneHandle) !void {
-        try self.notify("focus_pane", .{ .pane = pane });
-    }
-
     pub fn createPaneSplit(self: *Client, axis: core.SplitAxis, resizable: bool) !core.PaneSplitHandle {
         var parsed = try self.request(
             protocol.CreatePaneSplitResult,
@@ -1330,29 +947,6 @@ pub const Client = struct {
         );
         defer parsed.deinit();
         return parsed.value.result.split;
-    }
-
-    pub fn destroyPaneSplit(self: *Client, split: core.PaneSplitHandle) !void {
-        try self.notify("destroy_pane_split", .{ .split = split });
-    }
-
-    pub fn setPaneSplitChildren(
-        self: *Client,
-        split: core.PaneSplitHandle,
-        children: []const PaneSplitChildInput,
-    ) !void {
-        try self.notify("set_pane_split_children", .{ .split = split, .children = children });
-    }
-
-    pub fn setRootPaneSplit(self: *Client, split: ?core.PaneSplitHandle) !void {
-        try self.notify("set_root_pane_split", .{ .split = split });
-    }
-
-    /// `move_pane_divider`: drags the band after child `index` by `delta`
-    /// cells. Positive grows the child at `index` and shrinks its
-    /// neighbour.
-    pub fn movePaneDivider(self: *Client, split: core.PaneSplitHandle, index: usize, delta: i64) !void {
-        try self.notify("move_pane_divider", .{ .split = split, .index = index, .delta = delta });
     }
 
     /// `spawn_in_pane`: starts a program seated in a pane, and answers its
@@ -1405,55 +999,12 @@ pub const Client = struct {
         return parsed.value.result.session;
     }
 
-    /// `stop_remote`: ends a session `startRemote` returned. Safe to send
-    /// for one that has already ended -- the caller racing `remote_exit`
-    /// is the normal case, not an error.
-    pub fn stopRemote(self: *Client, session: u64) !void {
-        try self.notify("stop_remote", .{ .session = session });
-    }
-
-    /// `set_property(layer, "cursor", {row, col})` on a non-root layer --
-    /// see `setCursor` for the root-layer version. `write_text` is always
-    /// cursor-implicit (no `row`/`col` params of its own), so placing text
-    /// on a layer other than root goes through this first.
-    pub fn setCursorOn(self: *Client, layer: core.LayerHandle, row: usize, col: usize) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = col });
-    }
-
-    /// `set_property(layer, "position", {x, y})` -- a notification. Moves
-    /// `layer` to a pixel-precise position relative to the root (see
-    /// `PropertyName.position`'s doc comment) -- e.g. sliding a
-    /// notification layer across the screen one small step at a time.
-    pub fn setLayerPosition(self: *Client, layer: core.LayerHandle, x: f32, y: f32) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "position", .x = x, .y = y });
-    }
-
-    /// `set_property(layer, "cell_position", {row, col})` -- a
-    /// notification. The same placement as `setLayerPosition` but in grid
-    /// cells, and *sticky*: the server re-derives the pixel position when
-    /// the cell metrics change, so a layer placed this way stays on its
-    /// column across a font-size change. See
-    /// `core.PropertyName.cell_position`.
-    pub fn setLayerCellPosition(self: *Client, layer: core.LayerHandle, row: usize, col: usize) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "cell_position", .row = row, .col = col });
-    }
-
     /// `get_property(layer?, "cell_position")` -- the cell a layer's
     /// top-left corner sits on.
     pub fn getLayerCellPosition(self: *Client, layer: ?core.LayerHandle) !CellPos {
         var parsed = try self.request(protocol.CellPositionResult, "get_property", .{ .layer = layer, .property = "cell_position" });
         defer parsed.deinit();
         return .{ .row = parsed.value.result.row, .col = parsed.value.result.col };
-    }
-
-    /// `set_property(layer, "size", {cols, rows})` -- a notification.
-    /// Resizes a `createLayer` layer's cell grid, bottom-anchored like
-    /// every other resize (see `core.Layer.resize`). This is how a
-    /// multi-pane TUI reflows its panes on a `resize` notification
-    /// without destroying and rebuilding them. Rejected for the root
-    /// layer, whose size the host owns.
-    pub fn setLayerSize(self: *Client, layer: core.LayerHandle, cols: usize, rows: usize) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "size", .cols = cols, .rows = rows });
     }
 
     /// `get_property(layer, "size")` on a non-root layer -- see `getSize`
@@ -1464,29 +1015,11 @@ pub const Client = struct {
         return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
     }
 
-    /// `set_property(layer, "visibility", {visible})` -- a notification.
-    /// Hides or shows a layer without destroying it: its cells, tables
-    /// and metadata ids all survive, glyphwire-host just stops
-    /// compositing it. Rejected for the root layer.
-    pub fn setLayerVisible(self: *Client, layer: core.LayerHandle, visible: bool) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "visibility", .visible = visible });
-    }
-
     /// `get_property(layer?, "visibility")`.
     pub fn getLayerVisible(self: *Client, layer: ?core.LayerHandle) !bool {
         var parsed = try self.request(protocol.VisibilityResult, "get_property", .{ .layer = layer, .property = "visibility" });
         defer parsed.deinit();
         return parsed.value.result.visible;
-    }
-
-    /// `set_property(layer, "opacity", {value})` -- a notification.
-    /// `value` is 0.0..1.0 and multiplies the alpha of everything the
-    /// layer composites, so what's behind it shows through. Unlike
-    /// `setLayerVisible` the layer stays in the stack and keeps taking
-    /// the mouse -- see `core.PropertyName.opacity`. Out-of-range values
-    /// are clamped server-side.
-    pub fn setLayerOpacity(self: *Client, layer: core.LayerHandle, value: f32) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "opacity", .value = value });
     }
 
     /// `get_property(layer?, "opacity")`.
@@ -1496,28 +1029,11 @@ pub const Client = struct {
         return parsed.value.result.value;
     }
 
-    /// `set_property(layer, "viewport", {cols, rows})` -- a notification.
-    /// How much of the layer's content grid the host draws; zero on an
-    /// axis means all of it. This is what makes a pane a *window onto*
-    /// its content rather than the whole of it -- see
-    /// `core.PropertyName.viewport`. A layer inside a split tree has this
-    /// set for it by the layout.
-    pub fn setLayerViewport(self: *Client, layer: core.LayerHandle, cols: usize, rows: usize) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "viewport", .cols = cols, .rows = rows });
-    }
-
     /// `get_property(layer?, "viewport")`.
     pub fn getLayerViewport(self: *Client, layer: ?core.LayerHandle) !core.Viewport {
         var parsed = try self.request(protocol.SizeResult, "get_property", .{ .layer = layer, .property = "viewport" });
         defer parsed.deinit();
         return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
-    }
-
-    /// `set_property(layer, "scroll_offset", {row, col})` -- a
-    /// notification. Where the viewport sits in the content grid, clamped
-    /// server-side to what the content actually has.
-    pub fn setLayerScrollOffset(self: *Client, layer: core.LayerHandle, row: usize, col: usize) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "scroll_offset", .row = row, .col = col });
     }
 
     /// `get_property(layer?, "scroll_offset")` -- the offset plus each
@@ -1529,29 +1045,6 @@ pub const Client = struct {
         return parsed.value.result;
     }
 
-    /// `set_property(layer, "content_extent", {cols, rows})` -- a
-    /// notification. Declares the size of the whole content a
-    /// self-scrolling pane redraws (a TUI editor's buffer), so the host
-    /// can draw a proportional scrollbar and turn a wheel / drag over the
-    /// pane into a `scroll_offset` the client obeys. `{0, 0}` clears it.
-    /// See `core.PropertyName.content_extent`.
-    ///
-    /// Only accepted on a layer in `.client` scroll mode
-    /// (`setLayerScrollMode`); on a host-scrolled layer the host reports
-    /// `WrongScrollMode` and changes nothing.
-    pub fn setLayerContentExtent(self: *Client, layer: core.LayerHandle, cols: usize, rows: usize) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "content_extent", .cols = cols, .rows = rows });
-    }
-
-    /// `set_property(layer, "scroll_mode", {mode})` -- a notification.
-    /// `.host` (the default): the host slides the viewport over a real
-    /// content grid. `.client`: the program redraws its visible rows and
-    /// reports a virtual `content_extent`. Switching resets the scroll
-    /// position. See `core.PropertyName.scroll_mode`.
-    pub fn setLayerScrollMode(self: *Client, layer: core.LayerHandle, mode: core.ScrollMode) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "scroll_mode", .mode = @tagName(mode) });
-    }
-
     /// `get_property(layer?, "scroll_mode")`.
     pub fn getLayerScrollMode(self: *Client, layer: ?core.LayerHandle) !core.ScrollMode {
         var parsed = try self.request(protocol.ScrollModeResult, "get_property", .{ .layer = layer, .property = "scroll_mode" });
@@ -1559,82 +1052,11 @@ pub const Client = struct {
         return std.meta.stringToEnum(core.ScrollMode, parsed.value.result.mode) orelse error.InvalidScrollMode;
     }
 
-    /// `set_property(layer, "background", {color?})` -- a notification.
-    /// The colour every transparent cell of the layer composites as;
-    /// `null` restores see-through. See `core.PropertyName.background`.
-    pub fn setLayerBackground(self: *Client, layer: core.LayerHandle, color: ?core.Color) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "background", .color = colorToJson(color) });
-    }
-
-    /// `set_property(layer, "shadow", {shadow})` -- a notification. Gives
-    /// the layer a soft drop shadow drawn by the host under its bounds, or
-    /// removes it with `null`. See `core.Shadow`.
-    pub fn setLayerShadow(self: *Client, layer: core.LayerHandle, shadow: ?core.Shadow) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "shadow", .shadow = shadowToJson(shadow) });
-    }
-
-    /// `set_property(layer, "resize_edge", {edge})` -- a notification.
-    /// Gives a floating layer an edge the host lets the user drag; the
-    /// drag comes back as a `layer_resize` event (subscribe to
-    /// `"layout"`), which the client applies itself. See
-    /// `core.ResizeEdge`.
-    pub fn setLayerResizeEdge(self: *Client, layer: core.LayerHandle, edge: core.ResizeEdge) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "resize_edge", .edge = @tagName(edge) });
-    }
-
-    /// `core.Shadow` in its wire shape. Shared with `Batch.setLayerShadow`.
-    fn shadowToJson(shadow: ?core.Shadow) ?protocol.ShadowWire {
-        const sh = shadow orelse return null;
-        return protocol.ShadowWire.fromCore(sh);
-    }
-
-    /// `set_property(layer, "pty_mode", {enabled})` -- a notification.
-    /// Turns on cross-`write_text`-call persistence of the layer's
-    /// escape-sequence / charset / SGR-pen state, so a sequence a PTY
-    /// child split across two chunks still parses as one and a colour
-    /// stays set until the program resets it (see `core.Layer.pty_mode`).
-    /// Sending it -- with either value -- also clears that transient
-    /// state, so a client re-sends `true` after a foreground program
-    /// exits to drop anything it left half-open.
-    pub fn setLayerPtyMode(self: *Client, layer: core.LayerHandle, enabled: bool) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "pty_mode", .enabled = enabled });
-    }
-
     /// `get_property(layer?, "pty_mode")`.
     pub fn getLayerPtyMode(self: *Client, layer: ?core.LayerHandle) !bool {
         var parsed = try self.request(protocol.PtyModeResult, "get_property", .{ .layer = layer, .property = "pty_mode" });
         defer parsed.deinit();
         return parsed.value.result.enabled;
-    }
-
-    /// `set_property(layer, "mouse_select", {enabled})` -- a
-    /// notification. Lets glyphwire-host run its own drag-to-select on
-    /// this layer even though this client owns the context, for a layer
-    /// whose content is terminal output the user will want to copy (the
-    /// embedded shell panel). Off by default, because on a layer the
-    /// client draws itself the left button is the client's -- see
-    /// `core.Layer.mouse_select`.
-    pub fn setLayerMouseSelect(self: *Client, layer: core.LayerHandle, enabled: bool) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "mouse_select", .enabled = enabled });
-    }
-
-    /// `set_property(layer, "selection_flow", {mode, cols, col})` -- a
-    /// notification. Which way a selection on `layer` reads: the
-    /// ordinary horizontal stream, or vertical columns right to left,
-    /// each `flow.column_cols` cells wide starting at cell column
-    /// `flow.origin_col`. See `core.SelectionFlow`.
-    pub fn setLayerSelectionFlow(self: *Client, layer: core.LayerHandle, flow: core.SelectionFlow) !void {
-        try self.notify("set_property", selectionFlowParams(layer, flow));
-    }
-
-    fn selectionFlowParams(layer: core.LayerHandle, flow: core.SelectionFlow) protocol.PropertyParams {
-        return .{
-            .layer = layer,
-            .property = "selection_flow",
-            .mode = @tagName(flow.mode),
-            .cols = flow.column_cols,
-            .col = flow.origin_col,
-        };
     }
 
     /// `get_property(layer?, "selection_flow")`.
@@ -1649,16 +1071,6 @@ pub const Client = struct {
         };
     }
 
-    /// `set_property(layer, "mouse_report", {enabled})` -- a notification.
-    /// Says the program whose output `layer` shows has turned xterm mouse
-    /// reporting on or off, so glyphwire-host hands it the raw button,
-    /// drag and wheel events instead of selecting text. glyphwire-shell
-    /// sends it as its pty child flips `?1000`/`?1002`/`?1003`. See
-    /// `core.Layer.mouse_report`.
-    pub fn setLayerMouseReport(self: *Client, layer: core.LayerHandle, enabled: bool) !void {
-        try self.notify("set_property", .{ .layer = layer, .property = "mouse_report", .enabled = enabled });
-    }
-
     /// `get_property(layer?, "mouse_report")`.
     pub fn getLayerMouseReport(self: *Client, layer: ?core.LayerHandle) !bool {
         var parsed = try self.request(protocol.PtyModeResult, "get_property", .{ .layer = layer, .property = "mouse_report" });
@@ -1671,18 +1083,6 @@ pub const Client = struct {
         var parsed = try self.request(protocol.PtyModeResult, "get_property", .{ .layer = layer, .property = "mouse_select" });
         defer parsed.deinit();
         return parsed.value.result.enabled;
-    }
-
-    /// `set_property(layer, "scrollbars", {vertical, horizontal})` -- a
-    /// notification. Opt in per axis; the host draws the bars inside the
-    /// layer's own bounds and drives `scroll_offset` from them.
-    pub fn setLayerScrollbars(self: *Client, layer: core.LayerHandle, vertical: bool, horizontal: bool) !void {
-        try self.notify("set_property", .{
-            .layer = layer,
-            .property = "scrollbars",
-            .vertical = vertical,
-            .horizontal = horizontal,
-        });
     }
 
     /// `get_property(layer?, "scrollbars")` -- the flags plus the current
@@ -1706,48 +1106,6 @@ pub const Client = struct {
         });
         defer parsed.deinit();
         return parsed.value.result.handle;
-    }
-
-    /// `destroy_split(split)` -- a notification. Frees the container; its
-    /// children (layers and nested splits) survive.
-    pub fn destroySplit(self: *Client, split: core.SplitHandle) !void {
-        try self.notify("destroy_split", .{ .split = split });
-    }
-
-    /// `set_split_children(split, children)` -- a notification. Replaces
-    /// the child list wholesale. Each entry names a layer *or* a nested
-    /// split, and is sized either by `weight` (a share of what's left) or
-    /// `fixed` (that many cells along the split's axis).
-    pub fn setSplitChildren(self: *Client, split: core.SplitHandle, children: []const SplitChildInput) !void {
-        try self.notify("set_split_children", .{ .split = split, .children = children });
-    }
-
-    /// `set_root_split(split?)` -- a notification. Which split fills the
-    /// window; null tears the layout down without destroying anything.
-    pub fn setRootSplit(self: *Client, split: ?core.SplitHandle) !void {
-        try self.notify("set_root_split", .{ .split = split });
-    }
-
-    /// `move_divider(split, index, delta)` -- a notification. Drags the
-    /// band after child `index` by `delta` cells. glyphwire-host sends
-    /// this for a mouse drag; a client sends it for a keyboard "grow this
-    /// pane" binding.
-    pub fn moveDivider(self: *Client, split: core.SplitHandle, index: usize, delta: i64) !void {
-        try self.notify("move_divider", .{ .split = split, .index = index, .delta = delta });
-    }
-
-    /// `raise_layer(layer, above?)` -- a notification. Moves `layer` up
-    /// the compositing order: directly above `above`, or to the very top
-    /// when it's null. Creation order is only the *initial* stacking, so
-    /// this is what puts a completion popup created early back over a
-    /// sidebar created later.
-    pub fn raiseLayer(self: *Client, layer: core.LayerHandle, above: ?core.LayerHandle) !void {
-        try self.notify("raise_layer", .{ .layer = layer, .above = above });
-    }
-
-    /// `lower_layer(layer, below?)` -- the mirror of `raiseLayer`.
-    pub fn lowerLayer(self: *Client, layer: core.LayerHandle, below: ?core.LayerHandle) !void {
-        try self.notify("lower_layer", .{ .layer = layer, .below = below });
     }
 
     /// `get_cell_metrics` -- a request returning the session's fixed cell
@@ -1865,16 +1223,10 @@ pub const Client = struct {
             .row = row,
             .col = col,
             .columns = wire_columns,
-            .style = tableStyleToJson(style),
+            .style = client_ops.tableStyleToJson(style),
         });
         defer parsed.deinit();
         return parsed.value.result.handle;
-    }
-
-    /// `destroy_table(layer?, table)` -- a notification. Blanks whatever
-    /// the table last painted and frees it server-side.
-    pub fn destroyTable(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle) !void {
-        try self.notify("destroy_table", .{ .layer = layer, .table = table });
     }
 
     /// One styled run of an outline node's row, in renderer-friendly form
@@ -1905,16 +1257,6 @@ pub const Client = struct {
         alt_row_bg: ?core.Color = null,
     };
 
-    fn outlineStyleToJson(st: OutlineStyleInput) protocol.OutlineStyle {
-        return .{
-            .indent = st.indent,
-            .marker_collapsed = st.marker_collapsed,
-            .marker_expanded = st.marker_expanded,
-            .marker_fg = colorToJson(st.marker_fg),
-            .alt_row_bg = colorToJson(st.alt_row_bg),
-        };
-    }
-
     /// `create_outline(layer?, row?, col?, width?, style?)`. `row`/`col`
     /// default to the layer's cursor and `width` to the rest of the
     /// layer, so the common "draw a result list right here" call passes
@@ -1932,113 +1274,10 @@ pub const Client = struct {
             .row = row,
             .col = col,
             .width = width,
-            .style = outlineStyleToJson(style),
+            .style = client_ops.outlineStyleToJson(style),
         });
         defer parsed.deinit();
         return parsed.value.result.handle;
-    }
-
-    pub fn destroyOutline(self: *Client, layer: ?core.LayerHandle, outline: core.OutlineHandle) !void {
-        try self.notify("destroy_outline", .{ .layer = layer, .outline = outline });
-    }
-
-    /// Flattens the node list to its wire shape. The caller frees the
-    /// returned slice (and the per-node run slices) -- both
-    /// `Client.outlineSetNodes` and `Batch.outlineSetNodes` need the same
-    /// conversion, and the batch form has to keep it alive until `send`.
-    fn outlineNodesToJson(alloc: std.mem.Allocator, nodes: []const OutlineNodeInput) ![]protocol.OutlineNode {
-        const out = try alloc.alloc(protocol.OutlineNode, nodes.len);
-        var built: usize = 0;
-        errdefer {
-            for (out[0..built]) |n| alloc.free(@constCast(n.runs));
-            alloc.free(out);
-        }
-        for (nodes, 0..) |n, i| {
-            const runs = try alloc.alloc(protocol.OutlineRun, n.runs.len);
-            for (n.runs, 0..) |r, ri| {
-                runs[ri] = .{
-                    .text = r.text,
-                    .fg = colorToJson(r.fg),
-                    .bg = colorToJson(r.bg),
-                    .metadata_id = r.metadata_id,
-                };
-            }
-            out[i] = .{
-                .depth = n.depth,
-                .runs = runs,
-                .icon = n.icon,
-                .metadata_id = n.metadata_id,
-                .collapsible = n.collapsible,
-                .collapsed = n.collapsed,
-            };
-            built = i + 1;
-        }
-        return out;
-    }
-
-    fn freeOutlineNodesJson(alloc: std.mem.Allocator, nodes: []protocol.OutlineNode) void {
-        for (nodes) |n| alloc.free(@constCast(n.runs));
-        alloc.free(nodes);
-    }
-
-    /// `outline_set_nodes(layer?, outline, nodes)` -- replaces the node
-    /// list wholesale and repaints, like `table_set_rows`.
-    pub fn outlineSetNodes(
-        self: *Client,
-        layer: ?core.LayerHandle,
-        outline: core.OutlineHandle,
-        nodes: []const OutlineNodeInput,
-    ) !void {
-        const wire_nodes = try outlineNodesToJson(self.alloc, nodes);
-        defer freeOutlineNodesJson(self.alloc, wire_nodes);
-        try self.notify("outline_set_nodes", .{ .layer = layer, .outline = outline, .nodes = wire_nodes });
-    }
-
-    /// `outline_set_collapsed(layer?, outline, node, collapsed?)`.
-    /// A null `collapsed` toggles.
-    pub fn outlineSetCollapsed(
-        self: *Client,
-        layer: ?core.LayerHandle,
-        outline: core.OutlineHandle,
-        node: usize,
-        collapsed: ?bool,
-    ) !void {
-        try self.notify("outline_set_collapsed", .{
-            .layer = layer,
-            .outline = outline,
-            .node = node,
-            .collapsed = collapsed,
-        });
-    }
-
-    /// `outline_set_all_collapsed(layer?, outline, collapsed, depth?)` --
-    /// every collapsible node, or every one at `depth`, in one reflow.
-    pub fn outlineSetAllCollapsed(
-        self: *Client,
-        layer: ?core.LayerHandle,
-        outline: core.OutlineHandle,
-        collapsed: bool,
-        depth: ?u8,
-    ) !void {
-        try self.notify("outline_set_all_collapsed", .{
-            .layer = layer,
-            .outline = outline,
-            .collapsed = collapsed,
-            .depth = depth,
-        });
-    }
-
-    pub fn outlineSetStyle(
-        self: *Client,
-        layer: ?core.LayerHandle,
-        outline: core.OutlineHandle,
-        style: OutlineStyleInput,
-    ) !void {
-        try self.notify("outline_set_style", .{
-            .layer = layer,
-            .outline = outline,
-            .style = outlineStyleToJson(style),
-        });
     }
 
     pub const OutlineNodeState = struct {
@@ -2092,62 +1331,6 @@ pub const Client = struct {
             .painted = .{ .row = r.painted.row, .col = r.painted.col, .rows = r.painted.rows, .cols = r.painted.cols },
             .revision = r.revision,
         };
-    }
-
-    fn sortKeyToJson(key: ?SortKeyInput) ?std.json.Value {
-        const k = key orelse return null;
-        return switch (k) {
-            .text => |t| .{ .string = t },
-            .number => |n| .{ .float = n },
-        };
-    }
-
-    /// `table_set_rows(layer?, table, rows)` -- a notification. Replaces
-    /// every row wholesale, re-sorts per the table's current sort state,
-    /// and repaints -- see `core.Table.render`. `rows` is a plain matrix
-    /// of borrowed values (`[row][col]`); this only needs a small
-    /// temporary array to reshape it into wire JSON, freed before
-    /// returning.
-    pub fn tableSetRows(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle, rows: []const []const TableCellInput) !void {
-        const wire_rows = try self.alloc.alloc([]protocol.TableCell, rows.len);
-        defer {
-            for (wire_rows) |r| self.alloc.free(r);
-            self.alloc.free(wire_rows);
-        }
-        for (rows, 0..) |row, ri| {
-            const wire_row = try self.alloc.alloc(protocol.TableCell, row.len);
-            wire_rows[ri] = wire_row;
-            for (row, 0..) |c, ci| {
-                wire_row[ci] = .{
-                    .display = c.display,
-                    .sort_key = sortKeyToJson(c.sort_key),
-                    .icon = c.icon,
-                    .fg = colorToJson(c.fg),
-                    .metadata_id = c.metadata_id,
-                };
-            }
-        }
-        try self.notify("table_set_rows", .{ .layer = layer, .table = table, .rows = wire_rows });
-    }
-
-    /// `table_set_sort(layer?, table, column?, direction?)` -- a
-    /// notification. `column: null` or `direction: .none` both mean "back
-    /// to insertion order". Repaints immediately -- this is the message a
-    /// future sort-aware `glyphwire-shell` click handler would call.
-    pub fn tableSetSort(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle, column: ?usize, direction: core.SortDirection) !void {
-        try self.notify("table_set_sort", .{
-            .layer = layer,
-            .table = table,
-            .column = column,
-            .direction = @tagName(direction),
-        });
-    }
-
-    /// `table_set_style(layer?, table, style)` -- a notification. Replaces
-    /// the table's whole style (e.g. toggling `alt_row_bg` on/off) and
-    /// repaints.
-    pub fn tableSetStyle(self: *Client, layer: ?core.LayerHandle, table: core.TableHandle, style: TableStyleInput) !void {
-        try self.notify("table_set_style", .{ .layer = layer, .table = table, .style = tableStyleToJson(style) });
     }
 
     /// Where a table last painted, relative to its own layer -- see
@@ -2216,52 +1399,6 @@ pub const Client = struct {
         };
     }
 
-    /// `update_rect(layer?, rect, ...)` -- a notification. Merges `patch`'s
-    /// non-null fields into the existing rect; a field left `null` keeps
-    /// its current value -- see `core.RectUpdate`'s doc comment.
-    pub fn updateRect(self: *Client, layer: ?core.LayerHandle, handle: core.RectHandle, patch: core.RectUpdate) !void {
-        try self.notify("update_rect", rectUpdateParams(layer, handle, patch));
-    }
-
-    /// `update_rect`'s wire params. Shared with `Batch.updateRect`.
-    fn rectUpdateParams(layer: ?core.LayerHandle, handle: core.RectHandle, patch: core.RectUpdate) protocol.UpdateRectParams {
-        return .{
-            .layer = layer,
-            .rect = handle,
-            .x = patch.x,
-            .y = patch.y,
-            .w = patch.w,
-            .h = patch.h,
-            .color = Client.colorToJson(patch.color),
-            .line_width = patch.line_width,
-            .filled = patch.filled,
-        };
-    }
-
-    /// `destroy_rect(layer?, rect)` -- a notification. Removes the rect;
-    /// it stops painting immediately.
-    pub fn destroyRect(self: *Client, layer: ?core.LayerHandle, handle: core.RectHandle) !void {
-        try self.notify("destroy_rect", .{ .layer = layer, .rect = handle });
-    }
-
-    /// `set_drop_target(layer?, mode, row?, col?, rows?, cols?)` -- a
-    /// notification. Highlights where a drag would drop on `layer`, in
-    /// the theme's `drop_target` colour, or clears it with null. Cheap
-    /// to repeat: the host ignores a target it already shows.
-    pub fn setDropTarget(self: *Client, layer: ?core.LayerHandle, target: ?core.DropTarget) !void {
-        try self.notify("set_drop_target", dropTargetParams(layer, target));
-    }
-
-    /// `set_drop_target`'s wire params. Shared with `Batch.setDropTarget`.
-    fn dropTargetParams(layer: ?core.LayerHandle, target: ?core.DropTarget) protocol.SetDropTargetParams {
-        const t = target orelse return .{ .layer = layer, .mode = "none" };
-        return switch (t) {
-            .layer => .{ .layer = layer, .mode = "layer" },
-            .cells => |c| .{ .layer = layer, .mode = "cells", .row = c.row, .col = c.col, .rows = c.rows, .cols = c.cols },
-            .insert => |i| .{ .layer = layer, .mode = "insert", .row = i.row, .col = i.col, .rows = i.rows },
-        };
-    }
-
     /// `create_nine_patch(layer?, row, col, rows, cols, style)` -- a
     /// request. Frames the `rows x cols` cell rect at `row`/`col` with the
     /// registered `.9.png` named `style` (corners at native pixel size,
@@ -2291,32 +1428,6 @@ pub const Client = struct {
         style: ?[]const u8 = null,
     };
 
-    /// `update_nine_patch(layer?, nine_patch, ...)` -- a notification.
-    /// Moves, resizes, or restyles a nine-patch; see `NinePatchUpdate`.
-    pub fn updateNinePatch(self: *Client, layer: ?core.LayerHandle, handle: core.NinePatchHandle, patch: NinePatchUpdate) !void {
-        try self.notify("update_nine_patch", ninePatchUpdateParams(layer, handle, patch));
-    }
-
-    /// `update_nine_patch`'s wire params. Shared with
-    /// `Batch.updateNinePatch`.
-    fn ninePatchUpdateParams(layer: ?core.LayerHandle, handle: core.NinePatchHandle, patch: NinePatchUpdate) protocol.UpdateNinePatchParams {
-        return .{
-            .layer = layer,
-            .nine_patch = handle,
-            .row = patch.row,
-            .col = patch.col,
-            .rows = patch.rows,
-            .cols = patch.cols,
-            .style = patch.style,
-        };
-    }
-
-    /// `destroy_nine_patch(layer?, nine_patch)` -- a notification. Removes
-    /// the nine-patch; it stops painting immediately.
-    pub fn destroyNinePatch(self: *Client, layer: ?core.LayerHandle, handle: core.NinePatchHandle) !void {
-        try self.notify("destroy_nine_patch", .{ .layer = layer, .nine_patch = handle });
-    }
-
     /// `create_metadata(json)` -- a request. Stores `json` verbatim (the
     /// server never parses it, only stores/returns it -- see decisions.md's
     /// Metadata section) and returns a fresh handle that
@@ -2326,15 +1437,6 @@ pub const Client = struct {
         var parsed = try self.request(protocol.CreateMetadataResult, "create_metadata", .{ .json = json });
         defer parsed.deinit();
         return parsed.value.result.handle;
-    }
-
-    /// `destroy_metadata(id)` -- a notification. Frees `id`'s stored JSON;
-    /// any cell still tagged with it afterward is left with a dangling
-    /// reference -- `getMetadata` resolves that gracefully (reports the
-    /// id, `json: null`) rather than erroring. There's no reference
-    /// counting yet, so this is the caller's responsibility to get right.
-    pub fn destroyMetadata(self: *Client, id: core.MetadataHandle) !void {
-        try self.notify("destroy_metadata", .{ .id = id });
     }
 
     /// `get_metadata(layer?, row, col)` -- a request. Resolves `(row, col)`
@@ -2393,32 +1495,6 @@ pub const Client = struct {
     }
 
     // ── Selection & clipboard ──────────────────────────────────────────
-
-    /// `set_selection(layer?, anchor, active)` -- a notification. Starts
-    /// or replaces the layer's selection (root when `layer` is omitted).
-    /// Points are `{above, col}` in the scroll-stable coordinate
-    /// `core.SelectionPoint` documents.
-    pub fn setSelection(self: *Client, layer: ?core.LayerHandle, anchor: core.SelectionPoint, active: core.SelectionPoint) !void {
-        try self.notify("set_selection", .{
-            .layer = layer,
-            .anchor = .{ .above = anchor.above, .col = anchor.col },
-            .active = .{ .above = active.above, .col = active.col },
-        });
-    }
-
-    /// `update_selection(layer?, active)` -- a notification. Moves only
-    /// the active (dragging) end; a no-op if nothing is selected.
-    pub fn updateSelection(self: *Client, layer: ?core.LayerHandle, active: core.SelectionPoint) !void {
-        try self.notify("update_selection", .{
-            .layer = layer,
-            .active = .{ .above = active.above, .col = active.col },
-        });
-    }
-
-    /// `clear_selection(layer?)` -- a notification.
-    pub fn clearSelection(self: *Client, layer: ?core.LayerHandle) !void {
-        try self.notify("clear_selection", .{ .layer = layer });
-    }
 
     /// `get_selection(layer?)` -- a request. `active` false means nothing
     /// is selected (`anchor`/`active_end` null then).
@@ -2509,12 +1585,6 @@ pub const Client = struct {
         return .{ .parsed = try self.request(protocol.HighlightState, "get_highlight", .{ .layer = layer }) };
     }
 
-    /// `set_clipboard(text)` -- a notification. Replaces the session
-    /// clipboard buffer; glyphwire-host mirrors it to the OS clipboard.
-    pub fn setClipboard(self: *Client, text: []const u8) !void {
-        try self.notify("set_clipboard", .{ .text = text });
-    }
-
     /// `get_clipboard()` -- a request. Returns the session clipboard
     /// buffer (see `core.Context.clipboard` for its freshness caveat on
     /// glyphwire-host); caller owns the result.
@@ -2550,13 +1620,14 @@ pub const Client = struct {
 
     /// Sends `method` as a notification. `params` is the struct the
     /// server's handler parses (`protocol.ParamsOf`), so an anonymous
-    /// literal here is checked field by field against it.
+    /// literal here is checked field by field against it. Public because
+    /// `client_ops.Ops` sends through it; `Batch.notify` is its twin.
     ///
     /// Null fields are left out rather than sent as `null`: every optional
     /// in `protocol`'s params defaults to null, so absent and null mean the
     /// same thing to the server, and on a syntax-coloured `write_text`
     /// frame the nulls were over half the bytes.
-    fn notify(self: *Client, comptime method: []const u8, params: protocol.ParamsOf(method)) !void {
+    pub fn notify(self: *Client, comptime method: []const u8, params: protocol.ParamsOf(method)) !void {
         const body = try codec.notification(self.format, self.alloc, method, params, .{ .omit_nulls = true });
         defer self.alloc.free(body);
         try self.frameAndFlush(body);
@@ -2624,10 +1695,11 @@ pub const Client = struct {
     }
 
     /// Accumulates sub-messages for one `batch` frame. Notification
-    /// adders (`notify` and the typed conveniences) append fire-and-forget
-    /// sub-messages; request adders (`request`, `createMetadata`) append a
-    /// sub-message carrying a batch-local id and hand back a `Slot` to
-    /// pull that sub-message's result out of `send`'s `BatchResults`.
+    /// adders (`notify`, and every typed op `Client` has, shared through
+    /// `client_ops.Ops`) append fire-and-forget sub-messages; request
+    /// adders (`request`, `createMetadata`, ...) append a sub-message
+    /// carrying a batch-local id and hand back a `Slot` to pull that
+    /// sub-message's result out of `send`'s `BatchResults`.
     ///
     /// Every adder serializes its sub-message immediately into the
     /// `Batch`'s own arena, so a caller may reuse the buffers backing
@@ -2664,10 +1736,8 @@ pub const Client = struct {
         }
 
         /// Appends a notification sub-message (no result). `method`/
-        /// `params` are the same pair `Client`'s own notification methods
-        /// build, typed the same way (`protocol.ParamsOf`) -- this is the
-        /// generic escape hatch for anything without a typed convenience
-        /// below.
+        /// `params` are typed as for `Client.notify` (`protocol.ParamsOf`).
+        /// Every typed op below sends through it.
         pub fn notify(self: *Batch, comptime method: []const u8, params: protocol.ParamsOf(method)) !void {
             try self.append(null, method, params);
         }
@@ -2682,239 +1752,127 @@ pub const Client = struct {
             return .{ .id = sub_id };
         }
 
-        // Every typed adder below mirrors the `Client` method of the same
-        // name and sends the same params, so moving a sequence of draws
-        // into a batch is a mechanical `client.` -> `b.` swap. Root-implicit
-        // forms (no `layer` argument, or a null one) target the root; the
-        // `*On` forms and every `setLayer*` target the layer they name.
+        // The same notification ops as `Client`, from client_ops.zig, so
+        // moving a sequence of draws into a batch is a mechanical
+        // `client.` -> `b.` swap. Keep this list in step with `Client`'s.
+        const batch_ops = client_ops.Ops(Batch);
+
+        // An op added to client_ops.zig but left out of either alias list
+        // fails the build here, rather than going missing on one of them.
+        comptime {
+            for (std.meta.declarations(batch_ops)) |name| {
+                if (!@hasDecl(Batch, name) or !@hasDecl(Client, name))
+                    @compileError("client_ops." ++ name ++ " is not aliased on both Client and Batch");
+            }
+        }
 
         // -- Text, clearing and the cursor --
+        pub const writeText = batch_ops.writeText;
+        pub const writeSpans = batch_ops.writeSpans;
+        pub const clearArea = batch_ops.clearArea;
+        pub const setBg = batch_ops.setBg;
+        pub const setFg = batch_ops.setFg;
+        pub const setUnderline = batch_ops.setUnderline;
+        pub const setCursor = batch_ops.setCursor;
+        pub const setCursorOn = batch_ops.setCursorOn;
+        pub const insertCells = batch_ops.insertCells;
+        pub const deleteCells = batch_ops.deleteCells;
+        pub const moveContent = batch_ops.moveContent;
+        pub const tagMetadata = batch_ops.tagMetadata;
+        pub const clear = batch_ops.clear;
+        pub const clearOn = batch_ops.clearOn;
 
-        /// Batched `write_text` -- see `Client.writeText`.
-        pub fn writeText(self: *Batch, text: []const u8, opts: TextOpts) !void {
-            try self.notify("write_text", textParams(text, null, opts));
-        }
+        // -- Images and icons --
+        pub const destroyImage = batch_ops.destroyImage;
+        pub const drawImage = batch_ops.drawImage;
+        pub const drawImageOn = batch_ops.drawImageOn;
+        pub const drawIcon = batch_ops.drawIcon;
+        pub const drawIconStyled = batch_ops.drawIconStyled;
+        pub const drawIconOn = batch_ops.drawIconOn;
+        pub const drawIconOnStyled = batch_ops.drawIconOnStyled;
 
-        /// Batched `write_text` with `spans` -- see `Client.writeSpans`.
-        pub fn writeSpans(self: *Batch, spans: []const Span, opts: TextOpts) !void {
-            const wire_spans = try spansToWire(self.arena.allocator(), spans);
-            try self.notify("write_text", textParams(null, wire_spans, opts));
-        }
+        // -- Layers and contexts --
+        pub const destroyLayer = batch_ops.destroyLayer;
+        pub const adoptLayer = batch_ops.adoptLayer;
+        pub const setContextTitle = batch_ops.setContextTitle;
+        pub const setTheme = batch_ops.setTheme;
+        pub const setDividerStyle = batch_ops.setDividerStyle;
+        pub const setThemeByName = batch_ops.setThemeByName;
+        pub const setWindowScrollbar = batch_ops.setWindowScrollbar;
+        pub const setCaretLayer = batch_ops.setCaretLayer;
+        pub const setCaretVisible = batch_ops.setCaretVisible;
+        pub const setCaretShape = batch_ops.setCaretShape;
+        pub const setKeyRepeat = batch_ops.setKeyRepeat;
+        pub const destroyContext = batch_ops.destroyContext;
+        pub const activateContext = batch_ops.activateContext;
+        pub const adoptContext = batch_ops.adoptContext;
 
-        /// Batched `clear` with every option -- see `Client.ClearOpts`.
-        pub fn clearArea(self: *Batch, opts: ClearOpts) !void {
-            try self.notify("clear", clearParams(opts));
-        }
+        // -- Panes --
+        pub const setWindowPrefix = batch_ops.setWindowPrefix;
+        pub const destroyPane = batch_ops.destroyPane;
+        pub const focusPane = batch_ops.focusPane;
+        pub const destroyPaneSplit = batch_ops.destroyPaneSplit;
+        pub const setPaneSplitChildren = batch_ops.setPaneSplitChildren;
+        pub const setRootPaneSplit = batch_ops.setRootPaneSplit;
+        pub const movePaneDivider = batch_ops.movePaneDivider;
+        pub const stopRemote = batch_ops.stopRemote;
 
-        /// Batched `clear` on the root layer -- see `Client.clear`.
-        /// `rows`/`cols` null means "the rest of the layer from
-        /// `row`/`col`".
-        pub fn clear(self: *Batch, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-            try self.clearOn(null, row, col, rows, cols);
-        }
+        // -- Layer properties --
+        pub const setLayerPosition = batch_ops.setLayerPosition;
+        pub const setLayerCellPosition = batch_ops.setLayerCellPosition;
+        pub const setLayerSize = batch_ops.setLayerSize;
+        pub const setLayerVisible = batch_ops.setLayerVisible;
+        pub const setLayerOpacity = batch_ops.setLayerOpacity;
+        pub const setLayerViewport = batch_ops.setLayerViewport;
+        pub const setLayerScrollOffset = batch_ops.setLayerScrollOffset;
+        pub const setLayerContentExtent = batch_ops.setLayerContentExtent;
+        pub const setLayerScrollMode = batch_ops.setLayerScrollMode;
+        pub const setLayerBackground = batch_ops.setLayerBackground;
+        pub const setLayerShadow = batch_ops.setLayerShadow;
+        pub const setLayerResizeEdge = batch_ops.setLayerResizeEdge;
+        pub const setLayerPtyMode = batch_ops.setLayerPtyMode;
+        pub const setLayerMouseSelect = batch_ops.setLayerMouseSelect;
+        pub const setLayerSelectionFlow = batch_ops.setLayerSelectionFlow;
+        pub const setLayerMouseReport = batch_ops.setLayerMouseReport;
+        pub const setLayerScrollbars = batch_ops.setLayerScrollbars;
 
-        /// Batched `Client.clearOn`.
-        pub fn clearOn(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-            try self.notify("clear", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols });
-        }
+        // -- Splits and stacking --
+        pub const destroySplit = batch_ops.destroySplit;
+        pub const setSplitChildren = batch_ops.setSplitChildren;
+        pub const setRootSplit = batch_ops.setRootSplit;
+        pub const moveDivider = batch_ops.moveDivider;
+        pub const raiseLayer = batch_ops.raiseLayer;
+        pub const lowerLayer = batch_ops.lowerLayer;
 
-        /// Batched `set_bg` -- see `Client.SetBgOpts`. This is the one
-        /// that matters batched: the two rows a highlight moves between
-        /// go out together, in one frame.
-        pub fn setBg(self: *Batch, opts: SetBgOpts) !void {
-            try self.notify("set_bg", setBgParams(opts));
-        }
+        // -- Tables and outlines --
+        pub const destroyTable = batch_ops.destroyTable;
+        pub const tableSetRows = batch_ops.tableSetRows;
+        pub const tableSetSort = batch_ops.tableSetSort;
+        pub const tableSetStyle = batch_ops.tableSetStyle;
+        pub const destroyOutline = batch_ops.destroyOutline;
+        pub const outlineSetNodes = batch_ops.outlineSetNodes;
+        pub const outlineSetCollapsed = batch_ops.outlineSetCollapsed;
+        pub const outlineSetAllCollapsed = batch_ops.outlineSetAllCollapsed;
+        pub const outlineSetStyle = batch_ops.outlineSetStyle;
 
-        /// Batched `set_fg` -- see `Client.SetFgOpts`. Goes out in the
-        /// same frame as the `set_bg`s it recolours text under.
-        pub fn setFg(self: *Batch, opts: SetFgOpts) !void {
-            try self.notify("set_fg", setFgParams(opts));
-        }
+        // -- Rects, nine-patches and metadata --
+        pub const updateRect = batch_ops.updateRect;
+        pub const destroyRect = batch_ops.destroyRect;
+        pub const setDropTarget = batch_ops.setDropTarget;
+        pub const updateNinePatch = batch_ops.updateNinePatch;
+        pub const destroyNinePatch = batch_ops.destroyNinePatch;
+        pub const destroyMetadata = batch_ops.destroyMetadata;
 
-        /// Batched `set_underline` -- see `Client.SetUnderlineOpts`. Batched
-        /// is how an editor uses it: every diagnostic mark on the visible
-        /// rows goes out in the same frame as the text it sits under.
-        pub fn setUnderline(self: *Batch, opts: SetUnderlineOpts) !void {
-            try self.notify("set_underline", setUnderlineParams(opts));
-        }
+        // -- Selection and clipboard --
+        pub const setSelection = batch_ops.setSelection;
+        pub const updateSelection = batch_ops.updateSelection;
+        pub const clearSelection = batch_ops.clearSelection;
+        pub const setClipboard = batch_ops.setClipboard;
 
-        /// Batched `set_property(cursor)` on the root layer -- see
-        /// `Client.setCursor`.
-        pub fn setCursor(self: *Batch, row: usize, col: usize) !void {
-            try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
-        }
-
-        /// Batched `Client.setCursorOn`.
-        pub fn setCursorOn(self: *Batch, layer: core.LayerHandle, row: usize, col: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = col });
-        }
-
-        /// Batched `tag_metadata` -- see `Client.tagMetadata`.
-        pub fn tagMetadata(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle, focus: bool) !void {
-            try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id, .focus = focus });
-        }
-
-        /// Batched `move_content` -- see `Client.moveContentOn`. `null`
-        /// `top`/`bot` means the whole content grid.
-        pub fn moveContent(
-            self: *Batch,
-            layer: ?core.LayerHandle,
-            top: ?usize,
-            bot: ?usize,
-            count: usize,
-            direction: core.Layer.ScrollDir,
-        ) !void {
-            try self.notify("move_content", .{
-                .layer = layer,
-                .top = top,
-                .bot = bot,
-                .count = count,
-                .direction = @tagName(direction),
-            });
-        }
-
-        // -- Icons, boxes and images --
-
-        /// Batched `Client.drawIcon`.
-        pub fn drawIcon(self: *Batch, row: ?usize, col: ?usize, name: []const u8) !void {
-            try self.notify("draw_icon", .{ .row = row, .col = col, .name = name });
-        }
-
-        /// Batched `draw_icon` with options -- see `Client.drawIconStyled`.
-        /// `opts.layer` picks the layer.
-        pub fn drawIconStyled(self: *Batch, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
-            try self.notify("draw_icon", iconParams(opts.layer, row, col, name, opts));
-        }
-
-        /// Batched `Client.drawIconOn`.
-        pub fn drawIconOn(self: *Batch, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8) !void {
-            try self.notify("draw_icon", .{ .layer = layer, .row = row, .col = col, .name = name });
-        }
-
-        /// Batched `Client.drawIconOnStyled`.
-        pub fn drawIconOnStyled(self: *Batch, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
-            try self.notify("draw_icon", iconParams(layer, row, col, name, opts));
-        }
-
-        /// Batched `Client.drawImageOn` (null `layer` = root).
-        pub fn drawImageOn(
-            self: *Batch,
-            layer: ?core.LayerHandle,
-            handle: core.ImageHandle,
-            row: ?usize,
-            col: ?usize,
-            row_span: usize,
-            col_span: usize,
-            scale: f32,
-            src: core.ImageSrcRect,
-        ) !void {
-            try self.notify("draw_image", .{
-                .layer = layer,
-                .handle = handle,
-                .row = row,
-                .col = col,
-                .row_span = row_span,
-                .col_span = col_span,
-                .scale = scale,
-                .src_x = src.x,
-                .src_y = src.y,
-                .src_w = src.w,
-                .src_h = src.h,
-            });
-        }
-
-        // -- Layer properties and stacking --
-
-        /// Batched `Client.setLayerPosition`.
-        pub fn setLayerPosition(self: *Batch, layer: core.LayerHandle, x: f32, y: f32) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "position", .x = x, .y = y });
-        }
-
-        /// Batched `Client.setLayerCellPosition`, so a popup moves in the
-        /// same frame its contents are redrawn.
-        pub fn setLayerCellPosition(self: *Batch, layer: core.LayerHandle, row: usize, col: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "cell_position", .row = row, .col = col });
-        }
-
-        /// Batched `Client.setLayerSize`, so a resize reflow and the rows
-        /// redrawn for the new size land in one frame.
-        pub fn setLayerSize(self: *Batch, layer: core.LayerHandle, cols: usize, rows: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "size", .cols = cols, .rows = rows });
-        }
-
-        /// Batched `Client.setLayerVisible`. Showing a layer as the last
-        /// sub-message of the batch that drew it means it never appears
-        /// half-drawn.
-        pub fn setLayerVisible(self: *Batch, layer: core.LayerHandle, visible: bool) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "visibility", .visible = visible });
-        }
-
-        /// Batched `Client.setLayerOpacity`.
-        pub fn setLayerOpacity(self: *Batch, layer: core.LayerHandle, value: f32) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "opacity", .value = value });
-        }
-
-        /// Batched `Client.setLayerSelectionFlow`, so a panel's text and
-        /// the way a selection reads it change in the same frame.
-        pub fn setLayerSelectionFlow(self: *Batch, layer: core.LayerHandle, flow: core.SelectionFlow) !void {
-            try self.notify("set_property", selectionFlowParams(layer, flow));
-        }
-
-        /// Batched `Client.setLayerViewport`.
-        pub fn setLayerViewport(self: *Batch, layer: core.LayerHandle, cols: usize, rows: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "viewport", .cols = cols, .rows = rows });
-        }
-
-        /// Batched `Client.setLayerScrollOffset`, so a frame's scroll
-        /// position lands with the rows drawn for it.
-        pub fn setLayerScrollOffset(self: *Batch, layer: core.LayerHandle, row: usize, col: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "scroll_offset", .row = row, .col = col });
-        }
-
-        /// Batched `Client.setLayerContentExtent`.
-        pub fn setLayerContentExtent(self: *Batch, layer: core.LayerHandle, cols: usize, rows: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "content_extent", .cols = cols, .rows = rows });
-        }
-
-        /// Batched `Client.setLayerScrollMode`.
-        pub fn setLayerScrollMode(self: *Batch, layer: core.LayerHandle, mode: core.ScrollMode) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "scroll_mode", .mode = @tagName(mode) });
-        }
-
-        /// Batched `Client.setLayerScrollbars`.
-        pub fn setLayerScrollbars(self: *Batch, layer: core.LayerHandle, vertical: bool, horizontal: bool) !void {
-            try self.notify("set_property", .{
-                .layer = layer,
-                .property = "scrollbars",
-                .vertical = vertical,
-                .horizontal = horizontal,
-            });
-        }
-
-        /// Batched `Client.setLayerBackground`.
-        pub fn setLayerBackground(self: *Batch, layer: core.LayerHandle, color: ?core.Color) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "background", .color = colorToJson(color) });
-        }
-
-        /// Batched `Client.setLayerShadow`.
-        pub fn setLayerShadow(self: *Batch, layer: core.LayerHandle, shadow: ?core.Shadow) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "shadow", .shadow = Client.shadowToJson(shadow) });
-        }
-
-        /// Batched `Client.setLayerResizeEdge`.
-        pub fn setLayerResizeEdge(self: *Batch, layer: core.LayerHandle, edge: core.ResizeEdge) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "resize_edge", .edge = @tagName(edge) });
-        }
-
-        /// Batched `Client.raiseLayer`.
-        pub fn raiseLayer(self: *Batch, layer: core.LayerHandle, above: ?core.LayerHandle) !void {
-            try self.notify("raise_layer", .{ .layer = layer, .above = above });
-        }
-
-        /// Batched `Client.lowerLayer`.
-        pub fn lowerLayer(self: *Batch, layer: core.LayerHandle, below: ?core.LayerHandle) !void {
-            try self.notify("lower_layer", .{ .layer = layer, .below = below });
-        }
+        // -- Requests --
+        //
+        // These differ from `Client`'s: each returns a `Slot` to resolve
+        // from `send`'s `BatchResults` rather than the result itself.
 
         /// Batched `create_rect` -- see `Client.createRect`. Resolve the
         /// returned slot with `BatchResults.rectHandle`: a page's worth of
@@ -2923,35 +1881,10 @@ pub const Client = struct {
             return self.request("create_rect", Client.rectParams(layer, rect));
         }
 
-        /// Batched `update_rect` -- see `Client.updateRect`.
-        pub fn updateRect(self: *Batch, layer: ?core.LayerHandle, handle: core.RectHandle, patch: core.RectUpdate) !void {
-            try self.notify("update_rect", Client.rectUpdateParams(layer, handle, patch));
-        }
-
-        /// Batched `destroy_rect` -- see `Client.destroyRect`.
-        pub fn destroyRect(self: *Batch, layer: ?core.LayerHandle, handle: core.RectHandle) !void {
-            try self.notify("destroy_rect", .{ .layer = layer, .rect = handle });
-        }
-
-        /// Batched `set_drop_target` -- see `Client.setDropTarget`.
-        pub fn setDropTarget(self: *Batch, layer: ?core.LayerHandle, target: ?core.DropTarget) !void {
-            try self.notify("set_drop_target", Client.dropTargetParams(layer, target));
-        }
-
         /// Batched `create_nine_patch` -- see `Client.createNinePatch`.
         /// Resolve the returned slot with `BatchResults.ninePatchHandle`.
         pub fn createNinePatch(self: *Batch, layer: ?core.LayerHandle, row: usize, col: usize, rows: usize, cols: usize, style: []const u8) !Slot {
             return self.request("create_nine_patch", Client.ninePatchParams(layer, row, col, rows, cols, style));
-        }
-
-        /// Batched `update_nine_patch` -- see `Client.updateNinePatch`.
-        pub fn updateNinePatch(self: *Batch, layer: ?core.LayerHandle, handle: core.NinePatchHandle, patch: Client.NinePatchUpdate) !void {
-            try self.notify("update_nine_patch", Client.ninePatchUpdateParams(layer, handle, patch));
-        }
-
-        /// Batched `destroy_nine_patch` -- see `Client.destroyNinePatch`.
-        pub fn destroyNinePatch(self: *Batch, layer: ?core.LayerHandle, handle: core.NinePatchHandle) !void {
-            try self.notify("destroy_nine_patch", .{ .layer = layer, .nine_patch = handle });
         }
 
         /// Batched `create_outline` -- see `Client.createOutline`.
@@ -2969,61 +1902,8 @@ pub const Client = struct {
                 .row = row,
                 .col = col,
                 .width = width,
-                .style = Client.outlineStyleToJson(style),
+                .style = client_ops.outlineStyleToJson(style),
             });
-        }
-
-        /// Batched `outline_set_nodes` -- see `Client.outlineSetNodes`.
-        /// This is the one worth batching: `gw-grep` sends its whole
-        /// result list in a single frame alongside the metadata handles
-        /// its nodes are tagged with.
-        pub fn outlineSetNodes(
-            self: *Batch,
-            layer: ?core.LayerHandle,
-            outline: core.OutlineHandle,
-            nodes: []const Client.OutlineNodeInput,
-        ) !void {
-            const wire_nodes = try Client.outlineNodesToJson(self.client.alloc, nodes);
-            defer Client.freeOutlineNodesJson(self.client.alloc, wire_nodes);
-            try self.notify("outline_set_nodes", .{ .layer = layer, .outline = outline, .nodes = wire_nodes });
-        }
-
-        /// Batched `outline_set_collapsed` -- see `Client.outlineSetCollapsed`.
-        pub fn outlineSetCollapsed(
-            self: *Batch,
-            layer: ?core.LayerHandle,
-            outline: core.OutlineHandle,
-            node: usize,
-            collapsed: ?bool,
-        ) !void {
-            try self.notify("outline_set_collapsed", .{
-                .layer = layer,
-                .outline = outline,
-                .node = node,
-                .collapsed = collapsed,
-            });
-        }
-
-        /// Batched `outline_set_all_collapsed` -- see
-        /// `Client.outlineSetAllCollapsed`.
-        pub fn outlineSetAllCollapsed(
-            self: *Batch,
-            layer: ?core.LayerHandle,
-            outline: core.OutlineHandle,
-            collapsed: bool,
-            depth: ?u8,
-        ) !void {
-            try self.notify("outline_set_all_collapsed", .{
-                .layer = layer,
-                .outline = outline,
-                .collapsed = collapsed,
-                .depth = depth,
-            });
-        }
-
-        /// Batched `destroy_outline` -- see `Client.destroyOutline`.
-        pub fn destroyOutline(self: *Batch, layer: ?core.LayerHandle, outline: core.OutlineHandle) !void {
-            try self.notify("destroy_outline", .{ .layer = layer, .outline = outline });
         }
 
         /// Batched `create_metadata` -- see `Client.createMetadata`.
@@ -3269,25 +2149,6 @@ pub const BatchResults = struct {
         return r.handle;
     }
 };
-
-/// The wire shapes this file builds requests from and parses responses
-/// into all live in `protocol.zig`, shared verbatim with `dispatch.zig`
-/// so the two ends can't drift. `tableStyleToJson` is the one bit of
-/// client-only glue left here: it flattens the ergonomic
-/// `Client.TableStyleInput` (real `core.Color` / enum fields) down to the
-/// wire `protocol.TableStyle`.
-fn tableStyleToJson(s: Client.TableStyleInput) protocol.TableStyle {
-    return .{
-        .borders = s.borders,
-        .header_separator = s.header_separator,
-        .box_style = s.box_style,
-        .alt_row_bg = Client.colorToJson(s.alt_row_bg),
-        .header_fg = Client.colorToJson(s.header_fg),
-        .header_bg = Client.colorToJson(s.header_bg),
-        .row_height = s.row_height,
-        .max_icon_px = s.max_icon_px,
-    };
-}
 
 /// A cell in renderer-friendly form: `core.Color`/`core.ImageBg` fields
 /// instead of raw JSON. Exactly one of `bg`/`bg_image`/`bg_icon` is

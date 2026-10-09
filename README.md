@@ -161,7 +161,7 @@ keeps its size and the grid gains or loses cells to match.
 
 | Path | What |
 |---|---|
-| `src/` | Protocol core: grid model (`core.zig` for cells and `Layer`, with `vt.zig` for its VT machine, `layer_selection.zig`, `unicode_width.zig`), layer components (`table.zig`, `outline.zig`, `rect.zig`, `nine_patch.zig`), `context.zig`, `session.zig`, dispatch, server, client, wire framing, PTY |
+| `src/` | Protocol core: grid model (`core.zig` for cells and `Layer`, with `vt.zig` for its VT machine, `layer_selection.zig`, `unicode_width.zig`), layer components (`table.zig`, `outline.zig`, `rect.zig`, `nine_patch.zig`), `context.zig`, `session.zig`, dispatch, server, client (`client.zig`, with `client_ops.zig` for the notification ops `Client` and `Batch` share), wire framing, PTY |
 | `applib/` | Helpers shared by two or more applications: line editor, keymaps, fuzzy finder, shell panel, history |
 | `host/`, `host_eng/` | `glyphwire`, the SDL3 / OpenGL host, and its engine backend |
 | `shell/`, `hist/` | `gw-shell` and `gw-hist` |

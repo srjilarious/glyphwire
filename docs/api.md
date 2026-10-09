@@ -947,6 +947,13 @@ band at a time. See decisions.md's Batch section for the reasoning.
   `subscribe`, `scroll_view`, …) are accepted but their server→client
   broadcast is suppressed, so a batch is really for draw / layer / table
   / metadata commands.
+- **Zig client:** `Client.Batch` has every notification method `Client`
+  has, under the same name and signature (both alias
+  `src/client_ops.zig`'s `Ops`), so moving draws into a batch is a
+  `client.` → `b.` swap. The exceptions are `report_*` (their broadcast
+  would be suppressed, see above) and `attach_*` (they rebind the
+  connection). Request methods differ: on a `Batch` they return a
+  `Slot` to read from `send`'s `BatchResults`.
 - **A notification-form batch costs one frame and no round trip**, so
   over a remote session (`--ssh`) the budget to watch is *payload*, not
   message count — a full-screen repaint is one frame of tens of

@@ -244,6 +244,47 @@ pub fn clientBatchTypedAddersTargetNamedLayerTest(io: std.Io, alloc: std.mem.All
     try testz.expectEqualStr("", ctx.root.cell(1, 0).grapheme());
 }
 
+/// Ops that were `Client`-only before `client_ops.Ops` gave `Batch` every
+/// notification apply from a batch too, and `moveContent` with a null
+/// layer scrolls the root.
+pub fn clientBatchSharesEveryNotificationOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    const pane = try ctx.createLayer(4, 1, 0);
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    errdefer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    errdefer client.deinit();
+
+    try client.writeText("a", .{ .row = 1, .col = 0 });
+    {
+        var b = client.batch();
+        defer b.deinit();
+        try b.setLayerPtyMode(pane, true);
+        try b.setCaretVisible(false);
+        try b.moveContent(null, null, null, 1, .up);
+        var results = try b.send();
+        results.deinit();
+    }
+
+    client.deinit();
+    thread.join();
+
+    try testz.expectTrue(ctx.layerPtr(pane).?.pty_mode);
+    try testz.expectFalse(ctx.caret_visible);
+    try testz.expectEqualStr("a", ctx.root.cell(0, 0).grapheme());
+    try testz.expectEqualStr("", ctx.root.cell(1, 0).grapheme());
+}
+
 /// `BatchResults` finds each slot's response by index when nothing
 /// failed, and still finds it when a failed sub-message was dropped from
 /// the reply and shifted every later response down one.
