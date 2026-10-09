@@ -2027,7 +2027,7 @@ pub fn altScreenIsolatesContentAndCursorTest(io: std.Io, alloc: std.mem.Allocato
 
     // Enter the alt screen: cleared, cursor homed, primary stashed.
     try layer.writeText("\x1b[?1049h", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.on_alt, true);
+    try testz.expectEqual(layer.vt.on_alt, true);
     try testz.expectEqual(layer.cursor.row, 0);
     try testz.expectEqual(layer.cursor.col, 0);
     try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
@@ -2037,7 +2037,7 @@ pub fn altScreenIsolatesContentAndCursorTest(io: std.Io, alloc: std.mem.Allocato
 
     // Back to primary: its content and cursor are exactly as they were.
     try layer.writeText("\x1b[?1049l", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.on_alt, false);
+    try testz.expectEqual(layer.vt.on_alt, false);
     try testz.expectEqual(layer.cursor.row, 1);
     try testz.expectEqual(layer.cursor.col, 3);
     try testz.expectEqualStr("p", layer.cell(0, 0).grapheme());
@@ -2088,8 +2088,8 @@ pub fn scrollRegionConfinesLineFeedTest(io: std.Io, alloc: std.mem.Allocator) !v
     try layer.writeText("AA\nBB\nCC\nDD\nEE", glyphwire.default_style.fg, glyphwire.default_style.bg);
     // Region rows 2..4 (1-based 3;5), cursor homed inside it by DECSTBM.
     try layer.writeText("\x1b[3;5r", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    try testz.expectEqual(layer.scroll_top, 2);
-    try testz.expectEqual(layer.scroll_bot, 4);
+    try testz.expectEqual(layer.vt.scroll_top, 2);
+    try testz.expectEqual(layer.vt.scroll_bot, 4);
     try testz.expectEqual(layer.cursor.row, 2);
 
     // Move to the bottom margin and line-feed: rows 2..4 scroll up, rows

@@ -1472,7 +1472,7 @@ pub const Context = struct {
         for (layer.buf) |c| {
             if (c.style.bg == .image) try seen.put(c.style.bg.image.handle, {});
         }
-        if (layer.alt_cells) |alt| {
+        if (layer.vt.alt_cells) |alt| {
             for (alt) |c| {
                 if (c.style.bg == .image) try seen.put(c.style.bg.image.handle, {});
             }

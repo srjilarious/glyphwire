@@ -119,5 +119,5 @@ pub fn panesSig(session: *glyphwire.Session) u64 {
 /// `scroll.rootOwned` -- duplicated here (a few field reads) to keep this
 /// module free of the engine-linked `scroll.zig`.
 fn rootScreenOwned(root: *const glyphwire.Layer) bool {
-    return root.on_alt or root.regionActive() or root.vt.app_cursor_keys;
+    return root.vt.on_alt or root.regionActive() or root.vt.app_cursor_keys;
 }

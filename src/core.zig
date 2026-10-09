@@ -1229,27 +1229,6 @@ pub const Layer = struct {
     mouse_report: bool = false,
     /// The edge the host lets the user drag. See `ResizeEdge`.
     resize_edge: ResizeEdge = .none,
-    /// --- B1 screen model (see `execCsi` / decisions.md's VT fallback) ---
-    /// Alternate-screen buffer (xterm `?1049` / `?47` / `?1047`): a
-    /// lazily-allocated `width * height` cell array, row-major, with **no
-    /// scrollback ring** -- a full-screen program's transient screen.
-    /// Null until first entered; kept allocated after exit for reuse,
-    /// freed in `deinit`.
-    alt_cells: ?[]Cell = null,
-    /// True while the alt screen is the active target: `cell` / `liveRow`
-    /// / `viewRow` read and write `alt_cells`, and scrolling shuffles
-    /// within it with no history. `cursor` is then the alt cursor and the
-    /// primary cursor is stashed in `stashed_cursor` (and vice versa).
-    on_alt: bool = false,
-    stashed_cursor: Cursor = .{},
-    /// DECSTBM scroll region, inclusive, in viewport rows. `[0, height-1]`
-    /// (the default -- `regionActive()` false) keeps the classic
-    /// ring-buffer scroll-into-scrollback on a line feed past the bottom;
-    /// a narrower region confines line feeds, `SU`/`SD` and `IL`/`DL` to
-    /// `[scroll_top, scroll_bot]` with no scrollback. Set to `height-1`
-    /// by `init`; kept in range by `resize`.
-    scroll_top: usize = 0,
-    scroll_bot: usize = 0,
     /// See `PropertyName.revision`.
     revision: u64 = 0,
     /// Host-internal render-invalidation counter: bumped by `touchRender`
@@ -1406,13 +1385,13 @@ pub const Layer = struct {
             .owners = std.AutoHashMap(ConnId, void).init(alloc),
             .scrollback_rows = scrollback_rows,
             .buf = buf,
-            .scroll_bot = height - 1,
+            .vt = .{ .scroll_bot = height - 1 },
         };
     }
 
     pub fn deinit(self: *Layer) void {
         self.alloc.free(self.buf);
-        if (self.alt_cells) |a| self.alloc.free(a);
+        if (self.vt.alt_cells) |a| self.alloc.free(a);
         if (self.vt.tab_stops) |t| self.alloc.free(t);
         var table_it = self.tables.valueIterator();
         while (table_it.next()) |t| t.deinit();
@@ -1631,22 +1610,22 @@ pub const Layer = struct {
     }
 
     /// The `width` cells of viewport row `viewport_row` on **whichever
-    /// screen is active** -- the alt buffer while `on_alt`, otherwise the
+    /// screen is active** -- the alt buffer while `vt.on_alt`, otherwise the
     /// ring-buffer row. Every in-place mutator (`cell`, `clear`,
     /// `insertCells`/`deleteCells`, the region scrollers) goes through
     /// this so the alt screen needs no separate code path.
     fn liveRow(self: *const Layer, viewport_row: usize) []Cell {
-        if (self.on_alt) {
+        if (self.vt.on_alt) {
             const start = viewport_row * self.width;
-            return self.alt_cells.?[start .. start + self.width];
+            return self.vt.alt_cells.?[start .. start + self.width];
         }
         return self.rowSlice(self.physicalRow(viewport_row));
     }
 
     /// Whether a DECSTBM scroll region narrower than the full screen is
-    /// in effect -- see `scroll_top`/`scroll_bot`.
+    /// in effect -- see `Vt.scroll_top`/`scroll_bot`.
     pub fn regionActive(self: *const Layer) bool {
-        return self.scroll_top != 0 or self.scroll_bot != self.height - 1;
+        return self.vt.scroll_top != 0 or self.vt.scroll_bot != self.height - 1;
     }
 
     pub fn cell(self: *const Layer, row: usize, col: usize) *Cell {
@@ -1667,10 +1646,10 @@ pub const Layer = struct {
     pub fn rowAtSigned(self: *const Layer, row: i64) ?[]Cell {
         const height_i: i64 = @intCast(self.height);
         if (row >= height_i) return null;
-        if (self.on_alt) {
+        if (self.vt.on_alt) {
             if (row < 0) return null;
             const start: usize = @as(usize, @intCast(row)) * self.width;
-            return self.alt_cells.?[start .. start + self.width];
+            return self.vt.alt_cells.?[start .. start + self.width];
         }
         if (row >= 0) return self.rowSlice(self.physicalRow(@intCast(row)));
         const above: usize = @intCast(-row);
@@ -1828,10 +1807,10 @@ pub const Layer = struct {
     /// can't read past what's actually retained even if it's stale).
     pub fn viewRow(self: *const Layer, offset: usize, row: usize) []const Cell {
         // The alt screen has no scrollback -- `offset` is meaningless,
-        // every row comes straight from `alt_cells`.
-        if (self.on_alt) {
+        // every row comes straight from `vt.alt_cells`.
+        if (self.vt.on_alt) {
             const start = row * self.width;
-            return self.alt_cells.?[start .. start + self.width];
+            return self.vt.alt_cells.?[start .. start + self.width];
         }
         const clamped_offset = @min(offset, self.history_len);
         if (row < clamped_offset) {
@@ -1963,7 +1942,7 @@ pub const Layer = struct {
     ///   shortfall is taken off the bottom instead: the content below
     ///   moves *up* by the remainder and blank rows appear at the bottom.
     ///   The gap always closes by the full `delta` either way.
-    /// - The alt screen (`alt_cells`) is a flat buffer with no scrollback,
+    /// - The alt screen (`vt.alt_cells`) is a flat buffer with no scrollback,
     ///   so there is nowhere for displaced rows to go and this is a no-op.
     ///
     /// The selection is dropped rather than re-pinned, the same call
@@ -1973,7 +1952,7 @@ pub const Layer = struct {
     /// answer at all.
     pub fn reflowAt(self: *Layer, at_row: i64, delta: i64) error{OutOfMemory}!void {
         if (delta == 0) return;
-        if (self.on_alt) return;
+        if (self.vt.on_alt) return;
 
         const height_i: i64 = @intCast(self.height);
         if (at_row >= height_i) return;
@@ -2095,7 +2074,7 @@ pub const Layer = struct {
     fn resolveRow(self: *Layer, row: usize) usize {
         // The alt screen never scrolls into a ring buffer -- an
         // out-of-range row just clamps to the last line.
-        if (self.on_alt) return @min(row, self.height - 1);
+        if (self.vt.on_alt) return @min(row, self.height - 1);
         if (row < self.height) return row;
         const overshoot = @min(row - self.height + 1, self.capacity());
         var i: usize = 0;
@@ -2196,7 +2175,7 @@ pub const Layer = struct {
         // retained output. Only the *primary* cursor indexes the ring
         // buffer -- the alt buffer is rebuilt blank below, so its cursor
         // is merely clamped by the lines that follow.
-        const primary: *Cursor = if (self.on_alt) &self.stashed_cursor else &self.cursor;
+        const primary: *Cursor = if (self.vt.on_alt) &self.vt.stashed_cursor else &self.cursor;
         primary.row = shiftRowByHeightDelta(primary.row, dh, new_height);
 
         if (self.cursor.row >= new_height) self.cursor.row = new_height - 1;
@@ -2207,14 +2186,14 @@ pub const Layer = struct {
         // redraws on the SIGWINCH anyway. The scroll region resets to the
         // full new height for the same reason (a program keeping margins
         // re-sends DECSTBM after a resize).
-        if (self.alt_cells) |old| {
+        if (self.vt.alt_cells) |old| {
             self.alloc.free(old);
             const fresh = try self.alloc.alloc(Cell, new_width * new_height);
             for (fresh) |*c| c.* = .{};
-            self.alt_cells = fresh;
+            self.vt.alt_cells = fresh;
         }
-        self.scroll_top = 0;
-        self.scroll_bot = new_height - 1;
+        self.vt.scroll_top = 0;
+        self.vt.scroll_bot = new_height - 1;
         // Custom tab stops keep their columns; columns a wider grid adds
         // get the default stops.
         if (self.vt.tab_stops) |old| {
@@ -2223,8 +2202,8 @@ pub const Layer = struct {
             self.alloc.free(old);
             self.vt.tab_stops = fresh;
         }
-        if (self.stashed_cursor.row >= new_height) self.stashed_cursor.row = new_height - 1;
-        if (self.stashed_cursor.col >= new_width) self.stashed_cursor.col = new_width - 1;
+        if (self.vt.stashed_cursor.row >= new_height) self.vt.stashed_cursor.row = new_height - 1;
+        if (self.vt.stashed_cursor.col >= new_width) self.vt.stashed_cursor.col = new_width - 1;
         // A smaller content grid can leave the viewport parked past the
         // end of it (see `maxScroll`).
         _ = self.setScrollOffset(self.effectiveScrollOffset());
@@ -2441,16 +2420,13 @@ pub const Layer = struct {
         self.render_gen +%= 1;
     }
 
-    /// The cursor column with the pending-wrap position folded in. After
-    /// a character lands on the last column the cursor sits one *past*
-    /// it (`col == width`) so the next character wraps; a real terminal
-    /// keeps the cursor on the last column with a "wrap next" flag
-    /// instead. Every VT operation that isn't printing -- an erase, a
-    /// cursor report, a relative move -- sees that last column, not the
-    /// phantom one past it.
-    pub fn pendingCol(self: *const Layer) usize {
-        return @min(self.cursor.col, self.width - 1);
-    }
+    // ── Grid operations shared with the VT machine ──────────────────────
+    //
+    // The erase background, band scrolling, line feeds, glyph placement
+    // and cell insert/delete below serve plain writes and `vt.zig` alike.
+    // That is why they are `pub`: the machine lives in its own file but
+    // drives this same grid. What only escapes use (the pending-wrap
+    // column, the scroll region, the alternate screen) is in `vt.zig`.
 
     /// The background an erase paints with: the SGR pen's current
     /// background, or null for the transparent default when it has none.
@@ -2473,10 +2449,6 @@ pub const Layer = struct {
         var blank: Cell = .{};
         if (self.eraseBg()) |c| blank.style.bg = .{ .color = c };
         return blank;
-    }
-
-    pub fn rowInRegion(self: *const Layer, row: usize) bool {
-        return row >= self.scroll_top and row <= self.scroll_bot;
     }
 
     pub fn clampCursor(self: *const Layer, c: Cursor) Cursor {
@@ -2558,9 +2530,9 @@ pub const Layer = struct {
     /// at the last row. Either way the row scrolled in takes the pen's
     /// background (`eraseBg`, BCE).
     pub fn lineFeed(self: *Layer) void {
-        if (self.on_alt or self.regionActive()) {
-            if (self.cursor.row == self.scroll_bot) {
-                self.scrollRangeFill(self.scroll_top, self.scroll_bot, 1, .up, self.eraseBlank());
+        if (self.vt.on_alt or self.regionActive()) {
+            if (self.cursor.row == self.vt.scroll_bot) {
+                self.scrollRangeFill(self.vt.scroll_top, self.vt.scroll_bot, 1, .up, self.eraseBlank());
             } else if (self.cursor.row + 1 < self.height) {
                 self.cursor.row += 1;
             }
@@ -2571,38 +2543,6 @@ pub const Layer = struct {
                 if (self.eraseBg()) |bg| self.clearFill(self.cursor.row, 0, 1, self.width, bg);
             }
         }
-    }
-
-    /// `CSI ? 1049 h` (or `?47` / `?1047`) -- switch to the alternate
-    /// screen: stash the primary cursor, home, and show a cleared
-    /// full-screen buffer with no scrollback. All three variants are
-    /// treated alike (save cursor + clear on entry) -- the B1
-    /// simplification; virtually every modern full-screen program uses
-    /// `?1049`.
-    pub fn enterAltScreen(self: *Layer) !void {
-        if (self.on_alt) return;
-        if (self.alt_cells == null)
-            self.alt_cells = try self.alloc.alloc(Cell, self.width * self.height);
-        for (self.alt_cells.?) |*c| c.* = .{};
-        self.stashed_cursor = self.cursor;
-        self.cursor = .{};
-        self.scroll_top = 0;
-        self.scroll_bot = self.height - 1;
-        self.on_alt = true;
-        self.revision += 1;
-        self.render_gen +%= 1;
-    }
-
-    /// `CSI ? 1049 l` -- back to the primary screen (its scrollback and
-    /// contents were never touched), restoring the stashed cursor.
-    pub fn exitAltScreen(self: *Layer) void {
-        if (!self.on_alt) return;
-        self.on_alt = false;
-        self.cursor = self.clampCursor(self.stashed_cursor);
-        self.scroll_top = 0;
-        self.scroll_bot = self.height - 1;
-        self.revision += 1;
-        self.render_gen +%= 1;
     }
 
     /// The bytes this layer owes the program writing to it (a `CSI 6n` /

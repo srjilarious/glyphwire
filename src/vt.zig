@@ -11,9 +11,10 @@
 //! itself is free functions over the `*Layer`, since nearly every step
 //! moves the layer's cursor or writes its cells. `Layer.writeRuns` feeds
 //! it (`consumeControl`), and everything else here is reached from there.
-//! The grid operations the machine drives -- scrolling, the scroll region,
-//! the alternate screen, inserting and deleting cells -- stay `Layer`'s,
-//! because writes that never touch an escape use them too.
+//! The scroll region and the alternate screen are `Vt` state too, since
+//! only escapes change them. The grid operations the machine drives --
+//! line feeds, scrolling a band, erasing, inserting and deleting cells --
+//! stay `Layer`'s, because writes that never touch an escape use them too.
 
 const std = @import("std");
 const core = @import("core.zig");
@@ -33,9 +34,11 @@ const grapheme_inline_len = core.grapheme_inline_len;
 const tab_width = core.tab_width;
 const theme = core.theme;
 
-/// One layer's VT state. Fields are the machine's alone, except the few
-/// DEC modes glyphwire-host reads to decide how to draw and scroll the
-/// layer (`cursor_visible`, `app_cursor_keys`).
+/// One layer's VT state. Only the machine writes it. The layer's grid
+/// reads the alternate screen and the scroll region (which buffer a row
+/// comes from, where a line feed scrolls), and glyphwire-host reads the
+/// few DEC modes that decide how it draws and scrolls the layer
+/// (`cursor_visible`, `app_cursor_keys`).
 pub const Vt = struct {
     /// Escape-sequence machine state (see `EscState`). `.ground` except
     /// partway through a single `writeText` call that is
@@ -126,6 +129,27 @@ pub const Vt = struct {
     /// glyphwire-shell writes it to the pty master.
     reply_buf: [96]u8 = undefined,
     reply_len: usize = 0,
+    /// The alternate screen (xterm `?1049` / `?47` / `?1047`): a
+    /// lazily-allocated `width * height` cell array, row-major, with **no
+    /// scrollback ring** -- a full-screen program's transient screen.
+    /// Null until first entered; kept allocated after exit for reuse,
+    /// rebuilt blank by `Layer.resize`, freed in `Layer.deinit`.
+    alt_cells: ?[]Cell = null,
+    /// True while the alt screen is the active target: `Layer.cell` /
+    /// `liveRow` / `viewRow` read and write `alt_cells`, and scrolling
+    /// shuffles within it with no history. `Layer.cursor` is then the alt
+    /// cursor and the primary cursor is stashed in `stashed_cursor` (and
+    /// vice versa). See `enterAltScreen` / `exitAltScreen`.
+    on_alt: bool = false,
+    stashed_cursor: Cursor = .{},
+    /// DECSTBM scroll region, inclusive, in viewport rows. `[0, height-1]`
+    /// (the default -- `Layer.regionActive()` false) keeps the classic
+    /// ring-buffer scroll-into-scrollback on a line feed past the bottom;
+    /// a narrower region confines line feeds, `SU`/`SD` and `IL`/`DL` to
+    /// `[scroll_top, scroll_bot]` with no scrollback. `scroll_bot` is set
+    /// to `height-1` by `Layer.init` and reset by `Layer.resize`.
+    scroll_top: usize = 0,
+    scroll_bot: usize = 0,
 };
 
 /// State of `Layer`'s small escape-sequence machine (see
@@ -187,6 +211,61 @@ pub const EscState = enum {
     charset_g1,
 };
 
+
+// ── Screen state ────────────────────────────────────────────────────────
+//
+// The pending-wrap column, the scroll region and the alternate screen.
+// Only escapes set the region or switch screens, so that state is `Vt`'s;
+// `Layer`'s grid code reads it to pick a row's buffer and to decide where
+// a line feed scrolls.
+
+/// The cursor column with the pending-wrap position folded in. After
+/// a character lands on the last column the cursor sits one *past*
+/// it (`col == width`) so the next character wraps; a real terminal
+/// keeps the cursor on the last column with a "wrap next" flag
+/// instead. Every VT operation that isn't printing -- an erase, a
+/// cursor report, a relative move -- sees that last column, not the
+/// phantom one past it.
+fn pendingCol(self: *const Layer) usize {
+    return @min(self.cursor.col, self.width - 1);
+}
+
+/// Whether viewport row `row` is inside the DECSTBM scroll region.
+fn rowInRegion(self: *const Layer, row: usize) bool {
+    return row >= self.vt.scroll_top and row <= self.vt.scroll_bot;
+}
+
+/// `CSI ? 1049 h` (or `?47` / `?1047`) -- switch to the alternate
+/// screen: stash the primary cursor, home, and show a cleared
+/// full-screen buffer with no scrollback. All three variants are
+/// treated alike (save cursor + clear on entry) -- the B1
+/// simplification; virtually every modern full-screen program uses
+/// `?1049`.
+fn enterAltScreen(self: *Layer) !void {
+    if (self.vt.on_alt) return;
+    if (self.vt.alt_cells == null)
+        self.vt.alt_cells = try self.alloc.alloc(Cell, self.width * self.height);
+    for (self.vt.alt_cells.?) |*c| c.* = .{};
+    self.vt.stashed_cursor = self.cursor;
+    self.cursor = .{};
+    self.vt.scroll_top = 0;
+    self.vt.scroll_bot = self.height - 1;
+    self.vt.on_alt = true;
+    self.revision += 1;
+    self.render_gen +%= 1;
+}
+
+/// `CSI ? 1049 l` -- back to the primary screen (its scrollback and
+/// contents were never touched), restoring the stashed cursor.
+fn exitAltScreen(self: *Layer) void {
+    if (!self.vt.on_alt) return;
+    self.vt.on_alt = false;
+    self.cursor = self.clampCursor(self.vt.stashed_cursor);
+    self.vt.scroll_top = 0;
+    self.vt.scroll_bot = self.height - 1;
+    self.revision += 1;
+    self.render_gen +%= 1;
+}
 
 /// Maps a byte of the VT100 "special graphics and line drawing" set
 /// (`Layer.g0_line_drawing` / `g1_line_drawing`, designated by `ESC ( 0` /
@@ -553,7 +632,7 @@ pub fn consumeControl(self: *Layer, byte: u8) !bool {
         // program's `\n` into `\r\n`, and a raw-mode one (vim, nvim,
         // Claude Code) that sends a bare LF means "cursor down".
         '\n', 0x0b, 0x0c => {
-            self.cursor.col = if (self.pty_mode) self.pendingCol() else 0;
+            self.cursor.col = if (self.pty_mode) pendingCol(self) else 0;
             self.lineFeed();
         },
         '\r' => self.cursor.col = 0, // CR
@@ -563,7 +642,7 @@ pub fn consumeControl(self: *Layer, byte: u8) !bool {
         // From the pending-wrap position past the last column it lands
         // on the second-to-last, as on a real terminal, where the
         // cursor was really still on the last column.
-        0x08 => self.cursor.col = self.pendingCol() -| 1,
+        0x08 => self.cursor.col = pendingCol(self) -| 1,
         0x0e => self.vt.shift_out = true, // SO -- invoke G1 into GL
         0x0f => self.vt.shift_out = false, // SI -- invoke G0 into GL
         // Every other C0 byte (NUL, BEL, DLE..SUB, FS..US) and DEL: dropped.
@@ -597,13 +676,13 @@ fn stepEscape(self: *Layer, byte: u8) !void {
                 self.vt.esc_state = .ground;
             },
             'H' => { // HTS -- set a tab stop at the cursor column
-                setTabStop(self, self.pendingCol(), true) catch {};
+                setTabStop(self, pendingCol(self), true) catch {};
                 self.vt.esc_state = .ground;
             },
             'M' => { // RI -- reverse index (scroll down at the top margin)
-                if (self.cursor.row == self.scroll_top) {
-                    self.scrollRangeFill(self.scroll_top, self.scroll_bot, 1, .down, self.eraseBlank());
-                } else if (self.cursor.row < self.scroll_top) {
+                if (self.cursor.row == self.vt.scroll_top) {
+                    self.scrollRangeFill(self.vt.scroll_top, self.vt.scroll_bot, 1, .down, self.eraseBlank());
+                } else if (self.cursor.row < self.vt.scroll_top) {
                     // Above the region (a header over a scrolling
                     // pane): just move up, stopping at the top row.
                     self.cursor.row -|= 1;
@@ -674,8 +753,8 @@ fn execCsi(self: *Layer, final: u8) !void {
     // alt screen -- exactly what glyphwire-shell wants to undo after a
     // pty child that may have died mid-screen.
     if (final == 'p' and params.len == 1 and params[0] == '!') {
-        self.scroll_top = 0;
-        self.scroll_bot = self.height - 1;
+        self.vt.scroll_top = 0;
+        self.vt.scroll_bot = self.height - 1;
         self.vt.cursor_visible = true;
         self.vt.saved_cursor = null;
         self.vt.pen = .{};
@@ -697,7 +776,7 @@ fn execCsi(self: *Layer, final: u8) !void {
     // the same bytes. Checked first: `ESC [ < u` would otherwise fall
     // through to the ANSI.SYS restore-cursor `u` below.
     if (final == 'u' and params.len > 0 and (params[0] == '>' or params[0] == '<' or params[0] == '=')) {
-        _ = self.vt.kitty_keys.apply(params[0], params[1..], self.on_alt);
+        _ = self.vt.kitty_keys.apply(params[0], params[1..], self.vt.on_alt);
         return;
     }
 
@@ -724,25 +803,25 @@ fn execCsi(self: *Layer, final: u8) !void {
         'J' => csiEraseDisplay(self, csiParam(params, 0, 0)),
         'K' => csiEraseLine(self, csiParam(params, 0, 0)),
         'r' => setScrollRegion(self, params), // DECSTBM
-        'S' => self.scrollRangeFill(self.scroll_top, self.scroll_bot, n1, .up, self.eraseBlank()), // SU
-        'T' => self.scrollRangeFill(self.scroll_top, self.scroll_bot, n1, .down, self.eraseBlank()), // SD
-        'L' => if (self.rowInRegion(self.cursor.row)) { // IL
-            self.scrollRangeFill(self.cursor.row, self.scroll_bot, n1, .down, self.eraseBlank());
+        'S' => self.scrollRangeFill(self.vt.scroll_top, self.vt.scroll_bot, n1, .up, self.eraseBlank()), // SU
+        'T' => self.scrollRangeFill(self.vt.scroll_top, self.vt.scroll_bot, n1, .down, self.eraseBlank()), // SD
+        'L' => if (rowInRegion(self, self.cursor.row)) { // IL
+            self.scrollRangeFill(self.cursor.row, self.vt.scroll_bot, n1, .down, self.eraseBlank());
             self.cursor.col = 0;
         },
-        'M' => if (self.rowInRegion(self.cursor.row)) { // DL
-            self.scrollRangeFill(self.cursor.row, self.scroll_bot, n1, .up, self.eraseBlank());
+        'M' => if (rowInRegion(self, self.cursor.row)) { // DL
+            self.scrollRangeFill(self.cursor.row, self.vt.scroll_bot, n1, .up, self.eraseBlank());
             self.cursor.col = 0;
         },
         '@' => { // ICH
-            self.cursor.col = self.pendingCol();
+            self.cursor.col = pendingCol(self);
             self.insertCellsFill(n1, self.eraseBlank());
         },
         'P' => { // DCH
-            self.cursor.col = self.pendingCol();
+            self.cursor.col = pendingCol(self);
             self.deleteCellsFill(n1, self.eraseBlank());
         },
-        'X' => self.clearFill(self.cursor.row, self.pendingCol(), 1, n1, self.eraseBg()), // ECH
+        'X' => self.clearFill(self.cursor.row, pendingCol(self), 1, n1, self.eraseBg()), // ECH
         'b' => repeatLastGlyph(self, n1), // REP
         'I' => { // CHT -- forward n tab stops
             var i: usize = 0;
@@ -750,10 +829,10 @@ fn execCsi(self: *Layer, final: u8) !void {
         },
         'Z' => { // CBT -- back n tab stops
             var i: usize = 0;
-            while (i < n1) : (i += 1) self.cursor.col = prevTabStop(self, self.pendingCol());
+            while (i < n1) : (i += 1) self.cursor.col = prevTabStop(self, pendingCol(self));
         },
         'g' => switch (csiParam(params, 0, 0)) { // TBC
-            0 => setTabStop(self, self.pendingCol(), false) catch {},
+            0 => setTabStop(self, pendingCol(self), false) catch {},
             3 => clearAllTabStops(self) catch {},
             else => {},
         },
@@ -920,7 +999,7 @@ fn execPrivateCsi(self: *Layer, final: u8, params: []const u8) void {
     // how a program learns the protocol is there at all.
     if (final == 'u') {
         var b: [16]u8 = undefined;
-        const s = std.fmt.bufPrint(&b, "\x1b[?{d}u", .{self.vt.kitty_keys.flags(self.on_alt)}) catch return;
+        const s = std.fmt.bufPrint(&b, "\x1b[?{d}u", .{self.vt.kitty_keys.flags(self.vt.on_alt)}) catch return;
         queueReply(self, s);
         return;
     }
@@ -934,9 +1013,9 @@ fn execPrivateCsi(self: *Layer, final: u8, params: []const u8) void {
             7 => self.vt.autowrap = set, // DECAWM
             25 => self.vt.cursor_visible = set, // DECTCEM
             47, 1047, 1049 => if (set) {
-                if (!self.on_alt) self.vt.kitty_keys.enterAlt();
-                self.enterAltScreen() catch {};
-            } else self.exitAltScreen(),
+                if (!self.vt.on_alt) self.vt.kitty_keys.enterAlt();
+                enterAltScreen(self) catch {};
+            } else exitAltScreen(self),
             else => {},
         }
     }
@@ -949,13 +1028,13 @@ fn setScrollRegion(self: *Layer, params: []const u8) void {
     const top = @max(csiParam(params, 0, 1), 1) - 1;
     const bot = @max(csiParam(params, 1, self.height), 1) - 1;
     if (top >= bot or bot >= self.height) {
-        self.scroll_top = 0;
-        self.scroll_bot = self.height - 1;
+        self.vt.scroll_top = 0;
+        self.vt.scroll_bot = self.height - 1;
     } else {
-        self.scroll_top = top;
-        self.scroll_bot = bot;
+        self.vt.scroll_top = top;
+        self.vt.scroll_bot = bot;
     }
-    self.cursor = .{ .row = self.scroll_top, .col = 0 };
+    self.cursor = .{ .row = self.vt.scroll_top, .col = 0 };
 }
 
 /// `CSI 5 n` / `CSI 6 n` -- device status / cursor position report.
@@ -965,7 +1044,7 @@ fn csiDsr(self: *Layer, ps: usize) void {
         6 => { // CPR -- 1-based row;col, never past the last column
             var b: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&b, "\x1b[{d};{d}R", .{
-                self.cursor.row + 1, self.pendingCol() + 1,
+                self.cursor.row + 1, pendingCol(self) + 1,
             }) catch return;
             queueReply(self, s);
         },
@@ -982,7 +1061,7 @@ fn replyDecrqm(self: *Layer, ps_tok: []const u8) void {
         1 => if (self.vt.app_cursor_keys) 1 else 2,
         7 => if (self.vt.autowrap) 1 else 2,
         25 => if (self.vt.cursor_visible) 1 else 2,
-        47, 1047, 1049 => if (self.on_alt) 1 else 2,
+        47, 1047, 1049 => if (self.vt.on_alt) 1 else 2,
         else => 0,
     };
     var b: [32]u8 = undefined;
@@ -1028,7 +1107,7 @@ fn csiParam(params: []const u8, index: usize, default_val: usize) usize {
 /// starts from the last column, not from one past it.
 fn csiCursor(self: *Layer, final: u8, params: []const u8) void {
     const last_row = self.height - 1;
-    self.cursor.col = self.pendingCol();
+    self.cursor.col = pendingCol(self);
     switch (final) {
         'A' => self.cursor.row -|= @max(csiParam(params, 0, 1), 1),
         'B', 'e' => self.cursor.row = @min(self.cursor.row + @max(csiParam(params, 0, 1), 1), last_row), // CUD / VPR
@@ -1058,7 +1137,7 @@ fn csiCursor(self: *Layer, final: u8, params: []const u8) void {
 /// cells take the pen's background (`eraseBg`, BCE), and a cursor in
 /// the pending-wrap position erases from the last column.
 fn csiEraseLine(self: *Layer, mode: usize) void {
-    const col = self.pendingCol();
+    const col = pendingCol(self);
     const bg = self.eraseBg();
     switch (mode) {
         0 => self.clearFill(self.cursor.row, col, 1, self.width, bg),
@@ -1079,7 +1158,7 @@ fn csiEraseLine(self: *Layer, mode: usize) void {
 /// transcript before redrawing (`2J 3J H`). It used to be read as 2,
 /// which left every earlier copy of the redrawn screen in history.
 fn csiEraseDisplay(self: *Layer, mode: usize) void {
-    const col = self.pendingCol();
+    const col = pendingCol(self);
     const bg = self.eraseBg();
     switch (mode) {
         0 => {
