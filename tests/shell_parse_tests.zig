@@ -270,3 +270,47 @@ pub fn parseRedirectWithoutCommandIsRejectedTest(_: std.Io, alloc: std.mem.Alloc
     defer alloc.free(msg);
     try testz.expectTrue(std.mem.indexOf(u8, msg, "no command") != null);
 }
+
+// ─── chain helpers ─────────────────────────────────────────────────────
+
+pub fn parseSepPermitsFollowsExitStatusTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(parse.Sep.first.permits(1));
+    try testz.expectTrue(parse.Sep.semi.permits(1));
+    try testz.expectTrue(parse.Sep.and_then.permits(0));
+    try testz.expectFalse(parse.Sep.and_then.permits(1));
+    try testz.expectTrue(parse.Sep.or_else.permits(1));
+    try testz.expectFalse(parse.Sep.or_else.permits(0));
+}
+
+pub fn parseChainSegmentsAreBareOnlyWithoutPipesOrRedirectsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var line = try ok(alloc, "sudo true && sudo true; ls | wc -l || make > log");
+    defer line.deinit();
+    try testz.expectEqual(line.segments.len, 4);
+    try testz.expectTrue(line.segments[0].pipeline.isBare());
+    try testz.expectTrue(line.segments[1].pipeline.isBare());
+    try testz.expectFalse(line.segments[2].pipeline.isBare());
+    try testz.expectFalse(line.segments[3].pipeline.isBare());
+    try testz.expectFalse(line.isBareCommand());
+}
+
+pub fn parseCloneSegmentsOutlivesItsLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var line = try ok(alloc, "zoe x.zig && zig build 'a b' 2> err.txt || echo *");
+    var tail = try parse.Line.cloneSegments(alloc, line.segments[1..]);
+    defer tail.deinit();
+    // The copy must not point into the original's arena.
+    line.deinit();
+
+    try testz.expectEqual(tail.segments.len, 2);
+    try testz.expectEqual(tail.segments[0].sep, .and_then);
+    const build = tail.segments[0].pipeline.commands[0];
+    try testz.expectEqualStr("zig", build.words[0]);
+    try testz.expectEqualStr("a b", build.words[2]);
+    try testz.expectTrue(build.quoted[2]);
+    try testz.expectEqual(build.redirs.len, 1);
+    try testz.expectEqual(build.redirs[0].fd, 2);
+    try testz.expectEqualStr("err.txt", build.redirs[0].path);
+    try testz.expectEqual(tail.segments[1].sep, .or_else);
+    const echo = tail.segments[1].pipeline.commands[0];
+    try testz.expectEqualStr("*", echo.words[1]);
+    try testz.expectFalse(echo.quoted[1]);
+}

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 const std = @import("std");
+const builtin = @import("builtin");
 const glyphwire = @import("glyphwire");
 const wordsplit = @import("applib").wordsplit;
 const embed = @import("shell_support").embed;
@@ -130,13 +131,53 @@ pub const c = struct {
     pub extern "c" fn pipe2(fds: *[2]c_int, flags: c_int) c_int;
 };
 
-/// `signal(2)` just for the one-shot SIGPIPE ignore in `main`. Linux
-/// constants; the shell is Linux-only in practice (pty / pipeexec).
+/// `signal(2)` for the one-shot SIGPIPE ignore in `main` and the SIGHUP
+/// guard in `dropControllingTty`. Linux constants; the shell is
+/// Linux-only in practice (pty / pipeexec).
 const csig = struct {
     extern "c" fn signal(sig: c_int, handler: usize) usize;
+    const SIGHUP: c_int = 1;
     const SIGPIPE: c_int = 13;
+    const SIG_DFL: usize = 0;
     const SIG_IGN: usize = 1;
 };
+
+/// Gives up whatever controlling terminal this process inherited, so
+/// nothing it spawns can open `/dev/tty` and reach it. The inherited one
+/// is never a terminal anyone is looking at: the one `glyphwire` was
+/// launched from, or a gmux pane's pty, whose output this shell doesn't
+/// draw. A command that wants a terminal gets its own pty (`runCommand`);
+/// one that only has pipes (`pipeexec`) used to find the inherited one
+/// instead and, being outside its foreground group, get stopped by
+/// SIGTTIN/SIGTTOU the moment it touched it -- `sudo` in a pipeline
+/// waiting forever on a password prompt nobody could see. With no
+/// controlling terminal it fails straight away ("a terminal is
+/// required") instead.
+///
+/// `TIOCNOTTY`, not `setsid`: this keeps the process group, so a Ctrl-C
+/// in the terminal that ran `zig build gw-shell` still ends the shell.
+/// A session leader (a gmux pane's shell, which `Pty.spawn` started)
+/// makes the kernel SIGHUP its own foreground group on the way out --
+/// this process -- so SIGHUP is ignored around the call; it is restored
+/// after, since the host's pane kill is a SIGHUP too. Best-effort: no
+/// `/dev/tty` means there was nothing to drop.
+fn dropControllingTty() void {
+    if (builtin.os.tag != .linux) return;
+    const fd = c.open("/dev/tty", O_RDWR | O_NOCTTY, 0);
+    if (fd < 0) return;
+    defer _ = c.close(fd);
+    const leader = getsid(0) == std.os.linux.getpid();
+    if (leader) _ = csig.signal(csig.SIGHUP, csig.SIG_IGN);
+    _ = std.c.ioctl(fd, TIOCNOTTY, @as(c_int, 0));
+    if (leader) _ = csig.signal(csig.SIGHUP, csig.SIG_DFL);
+}
+
+extern "c" fn getsid(pid: c_int) c_int;
+
+// <asm-generic/fcntl.h> / <asm-generic/ioctls.h>, for `dropControllingTty`.
+const O_RDWR: c_int = 0o2;
+const O_NOCTTY: c_int = 0o400;
+const TIOCNOTTY: c_int = 0x5422;
 
 /// libc time formatting for the prompt's `{time}` token -- this reduced
 /// std has no `strftime`/`localtime`. `Tm` is glibc's `struct tm` (the
@@ -209,6 +250,10 @@ pub fn main(init: std.process.Init) !void {
     // the shell. Ignore it process-wide and take the EPIPE return
     // instead -- nothing here streams to a pipe it must not outlive.
     _ = csig.signal(csig.SIGPIPE, csig.SIG_IGN);
+
+    // Before anything is spawned, so no child inherits the terminal
+    // glyphwire was started from -- see the doc comment.
+    dropControllingTty();
 
     // Must run before *any* std.process.spawn/replace call below (both
     // the exec path a few lines down and everything Prompt.runCommand
@@ -432,6 +477,13 @@ fn promptIdleTick(prompt: *Prompt) bool {
     // An idle moment is a good time to flush persistent state if the age
     // trigger has come due.
     prompt.maybeFlushPersistentState();
+    // A background job finished and left the rest of its line to run.
+    // That draws a whole new prompt, so the redraws below are moot.
+    const ran_chain = prompt.runReadyChainsAtIdle() catch |err| blk: {
+        std.log.warn("gw-shell: running the rest of a line failed: {t}", .{err});
+        break :blk true;
+    };
+    if (ran_chain) return false;
     if (prompt.pending_resize == null and prompt.browse_pos == null) {
         const drew_hint = prompt.maybeShowCompletionHint() catch false;
         if (drew_hint) return true;
@@ -1197,6 +1249,9 @@ pub const Prompt = struct {
     /// The last `[n]` handed out. Numbers aren't reused within a session,
     /// so `fg 2` never means a different program than it did a minute ago.
     next_job_id: u32 = 0,
+    /// The rest of a line whose background job has exited, oldest first,
+    /// waiting for `runReadyChains`. Filled by `reportFinishedJobs`.
+    ready_chains: std.ArrayList(ReadyChain) = .empty,
     /// Scratch `jobTitle` copies a context title into.
     job_title_buf: [glyphwire.Context.max_title_len]u8 = undefined,
     /// Every non-empty line ever submitted, oldest first -- `submitLine`
@@ -1456,6 +1511,8 @@ pub const Prompt = struct {
         // `.force` so an untouched session writes nothing.
         self.flushPersistentState(.due);
         self.hangUpJobs();
+        for (self.ready_chains.items) |*rc| rc.rest.deinit();
+        self.ready_chains.deinit(alloc);
         for (self.history.items) |line| alloc.free(line);
         self.history.deinit(alloc);
         self.clearHistoryPending();
@@ -2706,12 +2763,53 @@ pub const Prompt = struct {
         self.adoptPendingResize();
 
         // Background jobs that ended while this line ran, reported under
-        // its output and above the next prompt.
+        // its output and above the next prompt, then the rest of any line
+        // one of them was holding.
         self.reportFinishedJobs();
+        try self.runReadyChains();
+        if (self.should_exit) return;
 
         const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
         try self.drawSetCursor(promptrow.afterCommand(cur.row, cur.col), 0);
         try self.showPrompt();
+    }
+
+    /// Runs the rest of every line in `ready_chains`, oldest first, each
+    /// judged against the status its background job exited with. One of
+    /// them can park a job of its own or finish another, so this loops
+    /// until the queue stays empty.
+    pub fn runReadyChains(self: *Prompt) !void {
+        while (self.ready_chains.items.len > 0) {
+            var rc = self.ready_chains.orderedRemove(0);
+            defer rc.rest.deinit();
+            _ = try self.runContinuation(rc.rest.segments, rc.status);
+            if (self.should_exit) return;
+            self.adoptPendingResize();
+            self.reportFinishedJobs();
+        }
+    }
+
+    /// The idle prompt's side of `runReadyChains`: a background job
+    /// holding the rest of its line exited while the prompt sat empty.
+    /// That rest runs now, below the empty prompt as if Enter had been
+    /// pressed on it, then a fresh prompt is drawn. A half-typed line, a
+    /// browse, or a resize in flight waits instead; the chain then runs
+    /// once that line is submitted (`submitLine`). Returns whether it
+    /// ran anything.
+    pub fn runReadyChainsAtIdle(self: *Prompt) !bool {
+        if (self.line.text().len > 0 or self.browse_pos != null or self.pending_resize != null) return false;
+        if (!self.chainReady()) return false;
+        if (self.completion_hint_visible) self.hideCompletionHint();
+
+        try self.drawSetCursor(promptrow.next(self.line_start_row, self.line_start_col), 0);
+        self.reportFinishedJobs();
+        try self.runReadyChains();
+        if (self.should_exit) return true;
+
+        const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = self.line_start_row + 1, .col = 0 };
+        try self.drawSetCursor(promptrow.afterCommand(cur.row, cur.col), 0);
+        try self.showPrompt();
+        return true;
     }
 
     /// Ctrl+R: fuzzy history search. Runs the bundled `gw-hist` directly
@@ -2765,7 +2863,7 @@ pub const Prompt = struct {
             try self.runCommand(argv.items);
         } else {
             argv.appendAssumeCapacity(seed);
-            try self.runCommandOpts(argv.items, .{ .expand_tilde = false });
+            _ = try self.runCommandOpts(argv.items, .{ .expand_tilde = false });
         }
         if (self.takePendingResultLine()) |line| {
             defer self.client.alloc.free(line);
@@ -2846,10 +2944,12 @@ pub const Prompt = struct {
     /// `&&` / `||` / `;`). A *bare* command -- one stage, no redirects --
     /// keeps the original PTY-backed path (`dispatchBareCommand` ->
     /// `runCommand`): interactive full-screen programs, the glyphwire
-    /// handshake and `{dur}` timing all depend on it. Anything with an
-    /// operator runs through the pipe-based executor (`runLine` ->
-    /// `runPipeline`). `alias NAME=VALUE` is still handled off the raw
-    /// line ahead of the parser -- its value has rest-of-line semantics
+    /// handshake and `{dur}` timing all depend on it. A chain
+    /// (`&&` / `||` / `;`) runs segment by segment (`runChain`): a bare
+    /// segment takes that same pty path, anything with a `|` or a
+    /// redirect the pipe-based executor (`runPipeline`).
+    /// `alias NAME=VALUE` is still handled off the raw line ahead of the
+    /// parser -- its value has rest-of-line semantics
     /// (`wordsplit.parseAliasDef`) the tokenizer would destroy.
     ///
     /// A leading `NAME=VALUE` run is also peeled off ahead of the parser
@@ -2913,12 +3013,9 @@ pub const Prompt = struct {
                     return;
                 }
 
-                const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
-                const status = try self.runLine(line);
-                const elapsed_ms = started.untilNow(self.client.io).raw.toMilliseconds();
-                self.last_status = status;
-                self.last_dur_ms = if (elapsed_ms > 0) @intCast(elapsed_ms) else 0;
-                self.have_status = true;
+                // A parked segment records nothing, like a bare command
+                // put in the background.
+                _ = try self.runContinuation(line.segments, 0);
             },
         }
     }
@@ -2977,24 +3074,82 @@ pub const Prompt = struct {
         }
     }
 
-    /// Walks a parsed line's segments left to right, running each
-    /// pipeline whose `&&` / `||` / `;` link permits it given the running
-    /// exit status. Returns the status of the last pipeline actually run
-    /// (0 if a chain short-circuited before running anything). Interactive
-    /// path only -- `sh.run` / `sh.exec` drive `runPipeline` directly.
-    pub fn runLine(self: *Prompt, line: parse.Line) !u8 {
-        var status: u8 = 0;
-        for (line.segments) |seg| {
-            const run = switch (seg.sep) {
-                .first, .semi => true,
-                .and_then => status == 0,
-                .or_else => status != 0,
-            };
-            if (!run) continue;
-            status = try self.runPipeline(seg.pipeline, .interactive);
-            if (self.should_exit) return status;
+    /// The rest of a line held by a `ReadyChain`: what is left of it and
+    /// the exit status of the background job it was waiting on.
+    pub const ReadyChain = struct {
+        rest: parse.Line,
+        status: u8,
+    };
+
+    /// How `runChain` ended.
+    pub const ChainEnd = union(enum) {
+        /// Every segment that was going to run has. The last one's
+        /// status, or the starting status if none ran.
+        finished: u8,
+        /// A segment was put in the background (the context switcher)
+        /// and now holds the segments after it (`Job.rest`).
+        backgrounded,
+    };
+
+    /// Walks a chain's segments left to right, running each pipeline
+    /// whose `&&` / `||` / `;` link permits it given the running exit
+    /// status, which starts at `status` -- 0 for a fresh line, a parked
+    /// job's exit status for the rest of its line. A segment killed by
+    /// Ctrl-C ends the chain whatever the separators say
+    /// (`parse.interrupted_status`). Interactive path only -- `sh.run` /
+    /// `sh.exec` drive `runPipeline` directly.
+    pub fn runChain(self: *Prompt, segments: []const parse.Segment, status: u8) !ChainEnd {
+        var last = status;
+        for (segments, 0..) |seg, i| {
+            if (last == parse.interrupted_status) break;
+            if (!seg.sep.permits(last)) continue;
+            switch (try self.runSegment(seg.pipeline)) {
+                .status => |s| last = s,
+                .backgrounded => |job| {
+                    if (i + 1 < segments.len) {
+                        job.rest = try parse.Line.cloneSegments(self.client.alloc, segments[i + 1 ..]);
+                    }
+                    return .backgrounded;
+                },
+            }
+            if (self.should_exit) break;
         }
-        return status;
+        return .{ .finished = last };
+    }
+
+    /// `runChain`, then records its outcome for the next prompt's
+    /// `{exit}` / `{dur}` the way a typed line does. Returns that status;
+    /// 0 when a segment was parked, which records nothing. `anyerror`
+    /// breaks the inferred-error-set cycle through `fg` (`doFg` runs the
+    /// rest of a line it brings back to an end).
+    pub fn runContinuation(self: *Prompt, segments: []const parse.Segment, status: u8) anyerror!u8 {
+        const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
+        switch (try self.runChain(segments, status)) {
+            .finished => |s| {
+                const elapsed_ms = started.untilNow(self.client.io).raw.toMilliseconds();
+                self.last_status = s;
+                self.last_dur_ms = if (elapsed_ms > 0) @intCast(elapsed_ms) else 0;
+                self.have_status = true;
+                return s;
+            },
+            .backgrounded => return 0,
+        }
+    }
+
+    /// One segment of a chain. A single command with no redirects gets
+    /// the bare-command treatment -- its own pty, which is its
+    /// controlling terminal -- so `sudo a && sudo b` can ask for a
+    /// password, `ls; ls` stays coloured, and `vim x && make` gets a real
+    /// screen. A builtin runs in-process; anything with a `|` or a
+    /// redirect goes to the pipe-based `runPipeline`.
+    pub fn runSegment(self: *Prompt, pl: parse.Pipeline) !RunEnd {
+        if (!pl.isBare()) return .{ .status = try self.runPipeline(pl, .interactive) };
+
+        const argv = try self.resolveArgv(pl.commands[0]);
+        defer wordsplit.freeTokens(self.client.alloc, argv);
+        if (argv.len == 0) return .{ .status = 0 };
+        if (self.isBuiltinName(argv[0])) return .{ .status = try self.runBuiltin(argv) };
+        return self.runCommandOpts(argv, .{});
     }
 
     /// Where a running pipeline's output goes and where its stdin / Ctrl-C
@@ -3456,6 +3611,7 @@ pub const Prompt = struct {
     pub const runCommand = jobs.runCommand;
     pub const RunOptions = jobs.RunOptions;
     pub const runCommandOpts = jobs.runCommandOpts;
+    pub const RunEnd = jobs.RunEnd;
     pub const Job = jobs.Job;
     pub const startJob = jobs.startJob;
     pub const ForegroundEnd = jobs.ForegroundEnd;
@@ -3466,6 +3622,7 @@ pub const Prompt = struct {
     pub const parkJob = jobs.parkJob;
     pub const jobTitle = jobs.jobTitle;
     pub const reportFinishedJobs = jobs.reportFinishedJobs;
+    pub const chainReady = jobs.chainReady;
     pub const crash_report_lines = jobs.crash_report_lines;
     pub const reportCrash = jobs.reportCrash;
     pub const writeCrashLog = jobs.writeCrashLog;
@@ -3960,12 +4117,7 @@ fn hookRunLine(
             var status: u8 = 0;
             var fed = false;
             for (parsed.segments) |seg| {
-                const run = switch (seg.sep) {
-                    .first, .semi => true,
-                    .and_then => status == 0,
-                    .or_else => status != 0,
-                };
-                if (!run) continue;
+                if (!seg.sep.permits(status)) continue;
                 if (fed) cap.stdin = "";
                 const sink: Prompt.PipeSink = if (capture) .{ .capture = &cap } else .script_grid;
                 status = self.runPipeline(seg.pipeline, sink) catch return status;

@@ -91,6 +91,13 @@ pub const Command = struct {
 /// `cmd | cmd | ...` -- always at least one command.
 pub const Pipeline = struct {
     commands: []const Command,
+
+    /// True for a single command with no redirections: the shape that
+    /// can run on a pty of its own (and so get a controlling terminal)
+    /// rather than through the pipe-based executor.
+    pub fn isBare(self: Pipeline) bool {
+        return self.commands.len == 1 and self.commands[0].redirs.len == 0;
+    }
 };
 
 /// How a segment connects to the pipeline before it.
@@ -103,7 +110,22 @@ pub const Sep = enum {
     or_else,
     /// `;` -- always run.
     semi,
+
+    /// Whether a segment joined by this separator runs, given the exit
+    /// status of the last pipeline that did.
+    pub fn permits(self: Sep, status: u8) bool {
+        return switch (self) {
+            .first, .semi => true,
+            .and_then => status == 0,
+            .or_else => status != 0,
+        };
+    }
 };
+
+/// The status a command killed by SIGINT reports (`128 + 2`). A chain
+/// stops there whatever the separators say, the way bash abandons the
+/// rest of `sleep 10; make` when Ctrl-C ends the `sleep`.
+pub const interrupted_status: u8 = 130;
 
 pub const Segment = struct {
     sep: Sep,
@@ -128,9 +150,34 @@ pub const Line = struct {
     /// programs, the glyphwire handshake) and everything else through the
     /// pipe-based executor.
     pub fn isBareCommand(self: *const Line) bool {
-        return self.segments.len == 1 and
-            self.segments[0].pipeline.commands.len == 1 and
-            self.segments[0].pipeline.commands[0].redirs.len == 0;
+        return self.segments.len == 1 and self.segments[0].pipeline.isBare();
+    }
+
+    /// A deep copy of `segments` in a `Line` of its own, independent of
+    /// the one they came from. For the rest of a chain that has to
+    /// outlive its line: `make && ./run` with `make` put in the
+    /// background keeps `&& ./run` to run once `make` exits.
+    pub fn cloneSegments(alloc: std.mem.Allocator, segments: []const Segment) error{OutOfMemory}!Line {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+
+        const segs = try a.alloc(Segment, segments.len);
+        for (segments, segs) |src, *dst| {
+            const cmds = try a.alloc(Command, src.pipeline.commands.len);
+            for (src.pipeline.commands, cmds) |sc, *dc| {
+                const words = try a.alloc([]const u8, sc.words.len);
+                for (sc.words, words) |w, *dw| dw.* = try a.dupe(u8, w);
+                const redirs = try a.alloc(Redir, sc.redirs.len);
+                for (sc.redirs, redirs) |r, *dr| {
+                    dr.* = r;
+                    dr.path = try a.dupe(u8, r.path);
+                }
+                dc.* = .{ .words = words, .quoted = try a.dupe(bool, sc.quoted), .redirs = redirs };
+            }
+            dst.* = .{ .sep = src.sep, .pipeline = .{ .commands = cmds } };
+        }
+        return .{ .arena = arena, .segments = segs };
     }
 };
 

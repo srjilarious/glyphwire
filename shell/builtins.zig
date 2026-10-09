@@ -190,7 +190,16 @@ pub fn doFg(self: *Prompt, args: []const []const u8) !u8 {
 
     switch (self.foregroundJob(job)) {
         .exited => {
+            // Put in the background partway through a line: the rest of
+            // it runs now, against the job's status, and its outcome is
+            // what `fg` reports.
+            var rest = job.rest;
+            job.rest = null;
             self.finishForegroundJob(job);
+            if (rest) |*r| {
+                defer r.deinit();
+                return self.runContinuation(r.segments, self.last_status);
+            }
             return self.last_status;
         },
         .backgrounded => {

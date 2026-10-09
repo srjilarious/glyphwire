@@ -11,6 +11,7 @@ const glyphwire = @import("glyphwire");
 const hs = @import("shell_support").handshake;
 const crashlog = @import("shell_support").crashlog;
 const keyencode = @import("shell_support").keyencode;
+const parse = @import("shell_support").parse;
 
 const main = @import("main.zig");
 const Prompt = main.Prompt;
@@ -51,7 +52,7 @@ const result_fd_env = main.result_fd_env;
 /// already gives its target (see `expandTilde`) -- `runCommandOpts`
 /// is the same thing with that switchable.
 pub fn runCommand(self: *Prompt, argv: []const []const u8) !void {
-    return self.runCommandOpts(argv, .{});
+    _ = try self.runCommandOpts(argv, .{});
 }
 
 /// Knobs for `runCommandOpts`. Everything here defaults to what a
@@ -65,10 +66,21 @@ pub const RunOptions = struct {
     expand_tilde: bool = true,
 };
 
-/// `runCommand`'s body -- see its doc comment. Split out only so a
-/// caller that builds argv itself can turn off the tilde expansion
-/// meant for a *typed* path argument.
-pub fn runCommandOpts(self: *Prompt, argv: []const []const u8, opts: RunOptions) !void {
+/// How a `runCommandOpts` run ended.
+pub const RunEnd = union(enum) {
+    /// The child was reaped, or never started (then 127 / 1, the same
+    /// status recorded for `{exit}`).
+    status: u8,
+    /// The child is still running behind the shell, parked on `jobs`.
+    /// `runChain` hangs the rest of its line on it (`Job.rest`).
+    backgrounded: *Job,
+};
+
+/// `runCommand`'s body -- see its doc comment. Split out so a caller
+/// that builds argv itself can turn off the tilde expansion meant for a
+/// *typed* path argument, and so a chain (`runChain`) learns how the
+/// run ended.
+pub fn runCommandOpts(self: *Prompt, argv: []const []const u8, opts: RunOptions) !RunEnd {
     const alloc = self.client.alloc;
     var expanded: std.ArrayList([]const u8) = .empty;
     defer {
@@ -83,7 +95,7 @@ pub fn runCommandOpts(self: *Prompt, argv: []const []const u8, opts: RunOptions)
         const exp = if (opts.expand_tilde)
             self.expandTilde(arg) catch {
                 try self.drawText("~: HOME not set", err_color, null);
-                return;
+                return .{ .status = 1 };
             }
         else
             arg;
@@ -154,7 +166,7 @@ pub fn runCommandOpts(self: *Prompt, argv: []const []const u8, opts: RunOptions)
         self.last_status = if (err == error.CommandNotFound) 127 else 1;
         self.last_dur_ms = 0;
         self.have_status = true;
-        return;
+        return .{ .status = self.last_status };
     };
     // The child now holds its own copy of the write end (or, if it
     // never touches it, will simply exit and close it); this process
@@ -184,12 +196,18 @@ pub fn runCommandOpts(self: *Prompt, argv: []const []const u8, opts: RunOptions)
     if (self.listener == null) {
         job.pty.wait();
         self.finishForegroundJob(job);
-        return;
+        return .{ .status = self.last_status };
     }
 
     switch (self.foregroundJob(job)) {
-        .exited => self.finishForegroundJob(job),
-        .backgrounded => try self.parkJob(job),
+        .exited => {
+            self.finishForegroundJob(job);
+            return .{ .status = self.last_status };
+        },
+        .backgrounded => {
+            try self.parkJob(job);
+            return .{ .backgrounded = job };
+        },
     }
 }
 
@@ -217,6 +235,13 @@ pub const Job = struct {
     /// program, which draws on the shell's own layer and so can't be
     /// put behind it.
     context: ?glyphwire.ContextHandle = null,
+    /// What is left of the line this job was started from, when it was
+    /// put in the background partway through a chain: `&& ./run` of
+    /// `make && ./run`. Runs once the job exits, judged against its
+    /// status -- straight away when it exits under `fg`, else through
+    /// `ready_chains` (see `reportFinishedJobs`). Owned; null when the
+    /// job ended its line.
+    rest: ?parse.Line = null,
 };
 
 /// Wraps a just-spawned child as a `Job` and starts its output reader.
@@ -530,6 +555,7 @@ pub fn finishForegroundJob(self: *Prompt, job: *Job) void {
 /// already be joined.
 pub fn freeJob(self: *Prompt, job: *Job) void {
     const alloc = self.client.alloc;
+    if (job.rest) |*rest| rest.deinit();
     _ = c.close(job.result_fd);
     job.pty.deinit();
     alloc.free(job.name);
@@ -580,7 +606,10 @@ pub fn jobTitle(self: *Prompt, job: *const Job) []const u8 {
 /// Reaps every background job that has exited, printing a `[1] done`
 /// line for each (bash reports these just before the next prompt,
 /// which is where this runs). The exit status goes in the line, not in
-/// `{exit}` -- that belongs to whatever was run in the foreground.
+/// `{exit}` -- that belongs to whatever was run in the foreground. A
+/// job holding the rest of its line (`Job.rest`) hands it to
+/// `ready_chains`, for `runReadyChains` to run between lines rather
+/// than from inside whatever builtin called this.
 pub fn reportFinishedJobs(self: *Prompt) void {
     var fresh_row = false;
     var i: usize = 0;
@@ -606,8 +635,28 @@ pub fn reportFinishedJobs(self: *Prompt) void {
             std.fmt.bufPrint(&buf, "[{d}] exit {d}  {s}\n", .{ job.id, job.pty.exit_code, job.name }) catch "[?] done\n";
         self.drawText(msg, job_color, null) catch {};
         self.reportCrash(job);
+        if (job.rest) |rest| {
+            job.rest = null;
+            self.ready_chains.append(self.client.alloc, .{ .rest = rest, .status = job.pty.exit_code }) catch {
+                // Nowhere to queue it: the rest of the line is dropped,
+                // as if the job had been the end of it.
+                var dropped = rest;
+                dropped.deinit();
+            };
+        }
         self.freeJob(job);
     }
+}
+
+/// True when a background job still holding the rest of its line has
+/// exited, so the idle prompt has a chain to run (see
+/// `Prompt.runReadyChainsAtIdle`). Reaps as it checks, harmlessly:
+/// `Pty.reaped` remembers the result for `reportFinishedJobs`.
+pub fn chainReady(self: *Prompt) bool {
+    for (self.jobs.items) |job| {
+        if (job.rest != null and job.pty.reaped()) return true;
+    }
+    return false;
 }
 
 /// Lines of a crashed program's output shown in the scrollback; the
