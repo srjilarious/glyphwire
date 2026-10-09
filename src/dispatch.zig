@@ -3283,7 +3283,7 @@ pub const Dispatcher = struct {
 
     /// `table_set_rows`: replaces every row, re-sorts per the table's
     /// current sort state, and repaints (`Table.render`) -- see
-    /// core.zig's Table section on why this needs no host/main.zig
+    /// table.zig's header on why this needs no host/main.zig
     /// changes to actually show up.
     fn handleTableSetRows(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const parsed = try codec.parseParams(protocol.TableSetRowsParams, alloc, params_value);
@@ -3339,8 +3339,8 @@ pub const Dispatcher = struct {
     /// `table_get_state`: reads back a table's structured config (columns,
     /// sort, style, row count, revision) -- not its rendered cells, which
     /// are already readable through the owning layer's normal `get_cells`
-    /// (a table paints into ordinary cells, see core.zig's Table
-    /// section), so there's no separate "get rendered table" message.
+    /// (a table paints into ordinary cells, see table.zig's
+    /// header), so there's no separate "get rendered table" message.
     /// For a future client that needs to know e.g. which columns are
     /// sortable before deciding what a header click should do.
     fn handleTableGetState(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {

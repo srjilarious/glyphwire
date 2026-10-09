@@ -1070,7 +1070,7 @@ pub fn drawImageSourceRectSamplesSubRegionOfSheetTest(io: std.Io, alloc: std.mem
 }
 
 /// `create_rect` allocates a fresh handle and stores every field exactly
-/// as given -- see core.zig's Rect section.
+/// as given -- see rect.zig's header.
 pub fn createRectReturnsHandleAndStoresItTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 20, 10, 0);

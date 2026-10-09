@@ -1176,7 +1176,7 @@ pub const DrawIconParams = struct {
 
 // ─── Table messages ──────────────────────────────────────────────────────
 //
-// See core.zig's Table section for the object model. Every message here
+// See table.zig's header for the object model. Every message here
 // (`create_table`/`destroy_table`/`table_set_rows`/`table_set_sort`/
 // `table_set_style`/`table_get_state`) takes a required `table` handle
 // (except `create_table`, which returns one) alongside the usual optional
@@ -1226,7 +1226,7 @@ pub const TableGetStateParams = struct {
 
 // ─── Outline messages ────────────────────────────────────────────────────
 //
-// See core.zig's Outline section for the object model. Same handle
+// See outline.zig's header for the object model. Same handle
 // convention tables use: every message carries the optional `layer`
 // alongside a required `outline`, because an outline lives in that
 // layer's own `outlines` map rather than being globally addressable.
@@ -1285,7 +1285,7 @@ pub const OutlineGetStateParams = struct {
 
 // ─── Rect ────────────────────────────────────────────────────────────────
 //
-// See core.zig's Rect section for the object model. `create_rect` returns
+// See rect.zig's header for the object model. `create_rect` returns
 // a handle; `update_rect`/`destroy_rect` take a required `rect` handle
 // alongside the usual optional `layer`, same shape the Table messages use.
 
@@ -1336,7 +1336,7 @@ pub const SetDropTargetParams = struct {
 
 // ─── Nine-patch ──────────────────────────────────────────────────────────
 //
-// See core.zig's Nine-patch section. Same create/update/destroy shape as
+// See nine_patch.zig's header. Same create/update/destroy shape as
 // the Rect messages, placed by cell rect instead of pixels.
 
 pub const CreateNinePatchParams = struct {

@@ -24,7 +24,7 @@ fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
 }
 
 /// `create_table` + `table_set_rows` compiling structured data into
-/// ordinary cells -- see core.zig's Table section. A 2-column, borderless,
+/// ordinary cells -- see table.zig's header. A 2-column, borderless,
 /// unruled table with 2 body rows: header at row 0, body rows 1-2 (no
 /// header separator line), both columns start-aligned so padding math
 /// stays simple (right-alignment is covered by
