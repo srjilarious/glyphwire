@@ -131,18 +131,40 @@ pub const c = struct {
     pub extern "c" fn pipe2(fds: *[2]c_int, flags: c_int) c_int;
 };
 
-/// `signal(2)` for the one-shot SIGPIPE ignore in `main`, the SIGHUP
-/// guard in `dropControllingTty` and `restoreInterruptSignals`. Linux
-/// constants; the shell is Linux-only in practice (pty / pipeexec).
+/// `signal(2)` for the SIGHUP guard in `dropControllingTty` and
+/// `restoreInterruptSignals`. Linux constants; the shell is Linux-only
+/// in practice (pty / pipeexec).
 const csig = struct {
     extern "c" fn signal(sig: c_int, handler: usize) usize;
     const SIGHUP: c_int = 1;
     const SIGINT: c_int = 2;
     const SIGQUIT: c_int = 3;
-    const SIGPIPE: c_int = 13;
     const SIG_DFL: usize = 0;
     const SIG_IGN: usize = 1;
 };
+
+/// Keeps a write to a pipe whose reader is gone from killing the shell:
+/// the write fails with EPIPE instead, and nothing here streams to a
+/// pipe it must not outlive.
+///
+/// A no-op **handler** rather than `SIG_IGN`, for the same reason as
+/// `applib.interrupt`: an ignored signal stays ignored across `exec`, so
+/// every command run from here inherited it. `yes | head` then had `yes`
+/// print "Broken pipe" instead of quietly dying, and any pipeline
+/// producer kept going after its reader left. A caught signal goes back
+/// to the default on `exec`, so children start out normal whichever way
+/// they were spawned.
+fn survivePipeWrites() void {
+    if (std.posix.Sigaction == void) return;
+    const act: std.posix.Sigaction = .{
+        .handler = .{ .handler = ignorePipeSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.RESTART,
+    };
+    std.posix.sigaction(.PIPE, &act, null);
+}
+
+fn ignorePipeSignal(_: std.posix.SIG) callconv(.c) void {}
 
 /// Puts SIGINT and SIGQUIT back to their defaults, the way a terminal
 /// emulator does for the shell it starts. A process can inherit them
@@ -272,9 +294,8 @@ pub fn main(init: std.process.Init) !void {
 
     // A pipeline writes to a child's stdin fd (`pipeexec`); when that
     // child has already exited the write raises SIGPIPE, which would kill
-    // the shell. Ignore it process-wide and take the EPIPE return
-    // instead -- nothing here streams to a pipe it must not outlive.
-    _ = csig.signal(csig.SIGPIPE, csig.SIG_IGN);
+    // the shell. See `survivePipeWrites`.
+    survivePipeWrites();
 
     // Before anything is spawned, so no child inherits an ignored Ctrl-C
     // or the terminal glyphwire was started from -- see the doc comments.
