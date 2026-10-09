@@ -131,16 +131,37 @@ pub const c = struct {
     pub extern "c" fn pipe2(fds: *[2]c_int, flags: c_int) c_int;
 };
 
-/// `signal(2)` for the one-shot SIGPIPE ignore in `main` and the SIGHUP
-/// guard in `dropControllingTty`. Linux constants; the shell is
-/// Linux-only in practice (pty / pipeexec).
+/// `signal(2)` for the one-shot SIGPIPE ignore in `main`, the SIGHUP
+/// guard in `dropControllingTty` and `restoreInterruptSignals`. Linux
+/// constants; the shell is Linux-only in practice (pty / pipeexec).
 const csig = struct {
     extern "c" fn signal(sig: c_int, handler: usize) usize;
     const SIGHUP: c_int = 1;
+    const SIGINT: c_int = 2;
+    const SIGQUIT: c_int = 3;
     const SIGPIPE: c_int = 13;
     const SIG_DFL: usize = 0;
     const SIG_IGN: usize = 1;
 };
+
+/// Puts SIGINT and SIGQUIT back to their defaults, the way a terminal
+/// emulator does for the shell it starts. A process can inherit them
+/// ignored -- bash ignores both for anything it runs in the background
+/// (`glyphwire &` from a script, a desktop launcher wrapping a shell
+/// script) -- and an ignored signal stays ignored across `exec`, so
+/// every command typed here would shrug off Ctrl-C and `kill -INT`.
+/// Caught or default, it comes back as the default in a child, so this
+/// one reset covers everything the shell spawns: pty commands,
+/// pipelines, prompt command vars, a script's `os.execute`.
+///
+/// The default, not a no-op handler (`applib.interrupt.keep`): this
+/// shell's own Ctrl-C story is a terminal's, so a Ctrl-C in the terminal
+/// that ran `zig build gw-shell` should still end it. SIGHUP is left as
+/// inherited, so `nohup` keeps meaning what it says.
+fn restoreInterruptSignals() void {
+    _ = csig.signal(csig.SIGINT, csig.SIG_DFL);
+    _ = csig.signal(csig.SIGQUIT, csig.SIG_DFL);
+}
 
 /// Gives up whatever controlling terminal this process inherited, so
 /// nothing it spawns can open `/dev/tty` and reach it. The inherited one
@@ -158,18 +179,22 @@ const csig = struct {
 /// in the terminal that ran `zig build gw-shell` still ends the shell.
 /// A session leader (a gmux pane's shell, which `Pty.spawn` started)
 /// makes the kernel SIGHUP its own foreground group on the way out --
-/// this process -- so SIGHUP is ignored around the call; it is restored
-/// after, since the host's pane kill is a SIGHUP too. Best-effort: no
-/// `/dev/tty` means there was nothing to drop.
+/// this process -- so SIGHUP is ignored around the call. It goes back to
+/// whatever it was before, not the default: the host's pane kill is a
+/// SIGHUP and must still land, and a `nohup` must still hold.
+/// Best-effort: no `/dev/tty` means there was nothing to drop.
 fn dropControllingTty() void {
     if (builtin.os.tag != .linux) return;
     const fd = c.open("/dev/tty", O_RDWR | O_NOCTTY, 0);
     if (fd < 0) return;
     defer _ = c.close(fd);
-    const leader = getsid(0) == std.os.linux.getpid();
-    if (leader) _ = csig.signal(csig.SIGHUP, csig.SIG_IGN);
-    _ = std.c.ioctl(fd, TIOCNOTTY, @as(c_int, 0));
-    if (leader) _ = csig.signal(csig.SIGHUP, csig.SIG_DFL);
+    if (getsid(0) == std.os.linux.getpid()) {
+        const prev = csig.signal(csig.SIGHUP, csig.SIG_IGN);
+        _ = std.c.ioctl(fd, TIOCNOTTY, @as(c_int, 0));
+        _ = csig.signal(csig.SIGHUP, prev);
+    } else {
+        _ = std.c.ioctl(fd, TIOCNOTTY, @as(c_int, 0));
+    }
 }
 
 extern "c" fn getsid(pid: c_int) c_int;
@@ -251,8 +276,9 @@ pub fn main(init: std.process.Init) !void {
     // instead -- nothing here streams to a pipe it must not outlive.
     _ = csig.signal(csig.SIGPIPE, csig.SIG_IGN);
 
-    // Before anything is spawned, so no child inherits the terminal
-    // glyphwire was started from -- see the doc comment.
+    // Before anything is spawned, so no child inherits an ignored Ctrl-C
+    // or the terminal glyphwire was started from -- see the doc comments.
+    restoreInterruptSignals();
     dropControllingTty();
 
     // Must run before *any* std.process.spawn/replace call below (both
