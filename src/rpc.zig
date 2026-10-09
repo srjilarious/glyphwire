@@ -153,7 +153,7 @@ pub fn resizeNotification(alloc: std.mem.Allocator, cols: usize, rows: usize) ![
 
 /// `pane_layout` -- the panes whose window rects changed. The only
 /// message that exposes where panes sit; only a window manager
-/// subscribes to it (see core.zig's Panes section).
+/// subscribes to it (see session.zig's Panes section).
 pub fn paneLayoutNotification(alloc: std.mem.Allocator, panes: []const protocol.PaneBounds) ![]u8 {
     return notification(alloc, "pane_layout", protocol.PaneLayoutParams{ .panes = panes });
 }

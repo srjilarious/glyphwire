@@ -778,7 +778,7 @@ pub const SetKeyRepeatParams = struct {
 
 // ─── Pane params ───────────────────────────────────────────────────────
 //
-// The window-level mirror of the split params above. See core.zig's Panes
+// The window-level mirror of the split params above. See session.zig's Panes
 // section for what a pane is and why the two levels are separate types.
 
 /// `request_role`: asks for a privileged role. The only one today is
@@ -1663,7 +1663,7 @@ pub const TerminalReplyParams = struct { bytes: []const u8 };
 /// cells. The window's size for a client that has the window to itself;
 /// its pane's size for one running inside a pane -- deliberately
 /// indistinguishable, so a program needs no awareness of being
-/// multiplexed (see core.zig's Panes section).
+/// multiplexed (see session.zig's Panes section).
 pub const ResizeParams = struct { cols: usize, rows: usize };
 
 /// One pane's window rect inside a `pane_layout` notification.

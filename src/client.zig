@@ -1257,7 +1257,7 @@ pub const Client = struct {
     //
     // Everything from `requestRole` down is the window-manager side of the
     // protocol: a program that merely *runs inside* a pane never calls any
-    // of it, and doesn't need to know panes exist. See core.zig's Panes
+    // of it, and doesn't need to know panes exist. See session.zig's Panes
     // section.
 
     /// `set_window_prefix`: the chord after which one keystroke is a window
