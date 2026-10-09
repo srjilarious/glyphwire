@@ -1351,7 +1351,28 @@ const lookup_dict_json =
     \\  ["食べる","たべる","","v1",0,["to eat"],1,""],
     \\  ["分かる","わかる","","v5",0,["to understand"],2,""],
     \\  ["ある","ある","","exp",0,["there is (inanimate)"],3,""],
-    \\  ["猫","ねこ","","n",0,["cat"],4,""]
+    \\  ["猫","ねこ","","n",0,["cat"],4,""],
+    \\  ["高い","たかい","","adj-i",0,["high; tall"],5,""],
+    \\  ["書く","かく","","v5",0,["to write"],6,""],
+    \\  ["待つ","まつ","","v5",0,["to wait"],7,""]
+    \\]
+;
+
+/// The irregular classes, kept out of `lookup_dict_json` so the tests
+/// above keep their exact `hits.len` assertions: adding する to that
+/// fixture would make every form ending in した/して/しない find a second
+/// entry. `rules` values here are the ones a real Jitendex build uses --
+/// "vs" for する verbs, "vk" for 来る, "vz" for ずる verbs -- which is the
+/// whole point, since no rule in the table could produce them before.
+const irregular_dict_json =
+    \\[
+    \\  ["する","する","","vs",0,["to do"],1,""],
+    \\  ["察する","さっする","","vs",0,["to guess; to sense"],2,""],
+    \\  ["来る","くる","","vk",0,["to come"],3,""],
+    \\  ["帰って来る","かえってくる","","vk",0,["to come back"],4,""],
+    \\  ["信ずる","しんずる","","vz",0,["to believe"],5,""],
+    \\  ["行く","いく","","v5",0,["to go"],6,""],
+    \\  ["行う","おこなう","","v5",0,["to perform"],7,""]
     \\]
 ;
 
@@ -1490,6 +1511,264 @@ pub fn dictLookupReturnsNullWhenNothingMatchesTest(_: std.Io, alloc: std.mem.All
     defer d.deinit();
     const m = try dict.lookup(alloc, &d, "xyz123");
     try testz.expectTrue(m == null);
+}
+
+// ─── dict: the irregular classes (vs / vk / vz) and 行く ─────────────────
+//
+// Every rule in the table used to produce only "v1", "v5" or "adj-i", so
+// the index's "vs"/"vk"/"vz" rows were unreachable at any depth and a
+// click on した found the noun 下 instead. These pin the classes rather
+// than individual forms: one representative form per class plus the cases
+// where the class interacts with a chain.
+
+/// Finds the best hit whose term is `term`, so a test can assert that a
+/// headword is *reachable* without also asserting it outranks every
+/// depth-0 homograph -- ranking puts fewer rules first, which is Yomitan's
+/// order too and not what these tests are about.
+fn hitFor(m: dict.Match, term: []const u8) ?dict.Hit {
+    for (m.hits) |h| {
+        if (std.mem.eql(u8, h.entry.term, term)) return h;
+    }
+    return null;
+}
+
+pub fn dictLookupReachesSuruThroughItsIrregularStemTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{irregular_dict_json}, null);
+    defer d.deinit();
+    // した / して / しない / します all strip a whole surface ending back
+    // to する rather than swapping a final kana -- the stem is irregular,
+    // so there is nothing for the godan/ichidan rows to work with.
+    const cases = [_]struct { text: []const u8, reason: []const u8 }{
+        .{ .text = "した", .reason = "past" },
+        .{ .text = "して", .reason = "te-form" },
+        .{ .text = "しない", .reason = "negative" },
+        .{ .text = "します", .reason = "polite" },
+        .{ .text = "しろ", .reason = "imperative" },
+        .{ .text = "したい", .reason = "desiderative" },
+        .{ .text = "すれば", .reason = "provisional" },
+    };
+    for (cases) |c| {
+        const m = (try dict.lookup(alloc, &d, c.text)).?;
+        defer m.deinit(alloc);
+        const hit = hitFor(m, "する") orelse return error.SuruNotReached;
+        try testz.expectEqualStr(hit.entry.rules, "vs");
+        try testz.expectEqualStr(hit.reason.?, c.reason);
+        try testz.expectEqual(hit.depth, 1);
+    }
+}
+
+pub fn dictLookupReachesKanjiPlusSuruHeadwordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{irregular_dict_json}, null);
+    defer d.deinit();
+    // The bulk of the "vs" rows are kanji+する headwords (932 of 987 in a
+    // real Jitendex build), and suffix matching reaches all of them from
+    // one rule: 察した -> 察する.
+    const m = (try dict.lookup(alloc, &d, "察した")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "察する");
+    try testz.expectEqualStr(m.hits[0].reason.?, "past");
+}
+
+pub fn dictLookupChainsSuruThroughProgressiveAndNegativePastTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{irregular_dict_json}, null);
+    defer d.deinit();
+    // The する block deliberately has no している or しなかった row: the
+    // existing non-terminal progressive and the conditional reduce them to
+    // して / した, which the する rows then finish. Two rule applications.
+    const progressive = (try dict.lookup(alloc, &d, "している")).?;
+    defer progressive.deinit(alloc);
+    const p = hitFor(progressive, "する") orelse return error.SuruNotReached;
+    try testz.expectEqualStr(p.reason.?, "te-form, progressive");
+    try testz.expectEqual(p.depth, 2);
+
+    const conditional = (try dict.lookup(alloc, &d, "したら")).?;
+    defer conditional.deinit(alloc);
+    const c = hitFor(conditional, "する") orelse return error.SuruNotReached;
+    try testz.expectEqualStr(c.reason.?, "past, conditional");
+    try testz.expectEqual(c.depth, 2);
+}
+
+pub fn dictLookupReachesKuruInBothSpellingsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{irregular_dict_json}, null);
+    defer d.deinit();
+    // Written with the kanji, 来 stays put and only the kana after it
+    // change, so those rows look like ordinary suffix swaps. Written in
+    // kana the stem vowel really does change (き-/こ-/く-), so each form
+    // needs its own row -- both spellings land on the same headword.
+    const forms = [_][]const u8{ "来た", "来ない", "来い", "来られる", "きた", "こない", "こい", "こられる" };
+    for (forms) |f| {
+        const m = (try dict.lookup(alloc, &d, f)).?;
+        defer m.deinit(alloc);
+        const hit = hitFor(m, "来る") orelse return error.KuruNotReached;
+        try testz.expectEqualStr(hit.entry.rules, "vk");
+        try testz.expectEqual(hit.depth, 1);
+    }
+}
+
+pub fn dictLookupReachesKuruCompoundsBySuffixTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{irregular_dict_json}, null);
+    defer d.deinit();
+    // 帰って来ない ends with 来ない, so the compound headword comes along
+    // with no rows of its own -- and it must win over the bare 来る, being
+    // the longer source match.
+    const m = (try dict.lookup(alloc, &d, "帰って来ない")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "帰って来る");
+    try testz.expectEqualStr("帰って来ない"[0..m.len()], "帰って来ない");
+    try testz.expectEqualStr(m.hits[0].reason.?, "negative");
+}
+
+pub fn dictLookupReachesZuruVerbsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{irregular_dict_json}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "信じた")).?;
+    defer m.deinit(alloc);
+    const hit = hitFor(m, "信ずる") orelse return error.ZuruNotReached;
+    try testz.expectEqualStr(hit.entry.rules, "vz");
+    try testz.expectEqualStr(hit.reason.?, "past");
+}
+
+pub fn dictLookupReachesIkuDespiteItsIrregularPastTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{irregular_dict_json}, null);
+    defer d.deinit();
+    // 行った is 行く's past, not the 行いた its -く ending predicts. Both
+    // 行く and 行う(おこなう) are reachable and the generic った -> う route
+    // to 行う is the one that ranks first (same depth, same score, and う
+    // sorts before く) -- documented in the rule table as accepted, so
+    // this test asserts reachability, not order.
+    const m = (try dict.lookup(alloc, &d, "行った")).?;
+    defer m.deinit(alloc);
+    const iku = hitFor(m, "行く") orelse return error.IkuNotReached;
+    try testz.expectEqualStr(iku.reason.?, "past");
+    try testz.expectEqual(iku.depth, 1);
+    try testz.expectTrue(hitFor(m, "行う") != null);
+}
+
+// ─── dict: the everyday forms added alongside the irregulars ────────────
+
+pub fn dictLookupDeinflectsDesiderativeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    const m = (try dict.lookup(alloc, &d, "食べたい")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqualStr(m.hits[0].reason.?, "desiderative");
+}
+
+pub fn dictLookupChainsDesiderativeThroughItsAdjectiveNegativeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // "-tai" is itself an i-adjective, so 食べたくない needs no rows of its
+    // own: the existing adjective negative reduces it to 食べたい, which
+    // the desiderative row then takes to 食べる.
+    const m = (try dict.lookup(alloc, &d, "食べたくない")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqualStr(m.hits[0].reason.?, "desiderative, negative");
+    try testz.expectEqual(m.hits[0].depth, 2);
+}
+
+pub fn dictLookupTreatsConditionalAsThePastPlusRaTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // Two non-terminal rows (たら -> た, だら -> だ) rather than one row
+    // per conjugation class: "-tara" *is* the past form plus ら, so the
+    // past rules finish every one of these.
+    const cases = [_]struct { text: []const u8, term: []const u8 }{
+        .{ .text = "食べたら", .term = "食べる" },
+        .{ .text = "分かったら", .term = "分かる" },
+        .{ .text = "高かったら", .term = "高い" },
+    };
+    for (cases) |c| {
+        const m = (try dict.lookup(alloc, &d, c.text)).?;
+        defer m.deinit(alloc);
+        const hit = hitFor(m, c.term) orelse return error.ConditionalNotReached;
+        try testz.expectEqualStr(hit.reason.?, "past, conditional");
+        try testz.expectEqual(hit.depth, 2);
+    }
+}
+
+pub fn dictLookupDeinflectsProvisionalTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // 食べれば (ichidan) and 分かれば (godan -る) share the same "れば"
+    // suffix, which is why that row accepts either tag -- the same
+    // ambiguity "られる" already carries.
+    const cases = [_]struct { text: []const u8, term: []const u8 }{
+        .{ .text = "食べれば", .term = "食べる" },
+        .{ .text = "分かれば", .term = "分かる" },
+        .{ .text = "書けば", .term = "書く" },
+        .{ .text = "高ければ", .term = "高い" },
+    };
+    for (cases) |c| {
+        const m = (try dict.lookup(alloc, &d, c.text)).?;
+        defer m.deinit(alloc);
+        const hit = hitFor(m, c.term) orelse return error.ProvisionalNotReached;
+        try testz.expectEqualStr(hit.reason.?, "provisional");
+        try testz.expectEqual(hit.depth, 1);
+    }
+}
+
+pub fn dictLookupChainsNegativeProvisionalWithNoRowOfItsOwnTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // There is deliberately no "なければ" row: the adjective "ければ" row
+    // strips 食べなければ to 食べない, and the negative rows take it from
+    // there. The chain reads "negative, provisional", which is what
+    // 食べなければ is.
+    const m = (try dict.lookup(alloc, &d, "食べなければ")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqualStr(m.hits[0].reason.?, "negative, provisional");
+}
+
+pub fn dictLookupDeinflectsImperativeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // The only single-kana rules in the table. 待て also matches the
+    // existing te-form "て" -> "る", which finds nothing here -- each rule
+    // only ever resolves its own class.
+    const cases = [_]struct { text: []const u8, term: []const u8 }{
+        .{ .text = "食べろ", .term = "食べる" },
+        .{ .text = "書け", .term = "書く" },
+        .{ .text = "待て", .term = "待つ" },
+    };
+    for (cases) |c| {
+        const m = (try dict.lookup(alloc, &d, c.text)).?;
+        defer m.deinit(alloc);
+        const hit = hitFor(m, c.term) orelse return error.ImperativeNotReached;
+        try testz.expectEqualStr(hit.reason.?, "imperative");
+        try testz.expectEqual(hit.depth, 1);
+    }
+}
+
+pub fn dictLookupChainsPoliteVolitionalThroughMasuTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // One non-terminal row onto the polite non-past, which the -masu rules
+    // then take to the headword.
+    const m = (try dict.lookup(alloc, &d, "食べましょう")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqualStr(m.hits[0].reason.?, "polite, polite volitional");
+    try testz.expectEqual(m.hits[0].depth, 2);
+}
+
+pub fn dictLookupChainsFiveRulesAtTheRaisedDepthCapTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dict.openMemory(alloc, &.{lookup_dict_json}, null);
+    defer d.deinit();
+    // 食べさせられたくなかった -- causative, passive/potential,
+    // desiderative, negative, past: five rule applications, the deepest
+    // form the table can express and the reason `max_deinflect_depth` went
+    // from 4 to 5.
+    const m = (try dict.lookup(alloc, &d, "食べさせられたくなかった")).?;
+    defer m.deinit(alloc);
+    try testz.expectEqualStr(m.hits[0].entry.term, "食べる");
+    try testz.expectEqual(m.hits[0].depth, 5);
+    try testz.expectEqualStr(
+        m.hits[0].reason.?,
+        "causative, passive/potential, desiderative, negative, past",
+    );
 }
 
 // ─── dict: Yomitan parity (reading column, all lengths, ranking) ────────
