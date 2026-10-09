@@ -62,9 +62,8 @@ pub fn build(b: *std.Build) void {
     keybind_mod.addImport("glyphwire", glyphwire_mod);
     applib_mod.addImport("keybind", keybind_mod);
 
-    // Pure prompt helpers shared by gw-shell and its test runner
-    // (a Zig module can't be reached across directories via relative
-    // `@import`, so tests/ can't pull shell/ files in directly).
+    // Each program's `support.zig` is a named module so `tests/` can
+    // reach it; see CONTRIBUTING.md, "The `support.zig` modules".
     const shell_support_mod = b.addModule("shell_support", .{
         .root_source_file = b.path("shell/support.zig"),
     });
@@ -72,16 +71,10 @@ pub fn build(b: *std.Build) void {
     // The line editor, word splitting and history the prompt is built on.
     shell_support_mod.addImport("applib", applib_mod);
 
-    // gw-ls's own `ls.conf.lua` parser, for gw-ls and its test runner --
-    // same cross-directory-module reason as `shell_support` above. The
-    // scanner, formatting, grid packing and icons it shares with
-    // salacommander and zoe are in `applib`.
     const ls_support_mod = b.addModule("ls_support", .{
         .root_source_file = b.path("ls/support.zig"),
     });
 
-    // gw-grep's pure halves (the `rg --json` parser and the node builder)
-    // so `tests/grep_tests.zig` can drive them without a subprocess.
     const grep_support_mod = b.addModule("grep_support", .{
         .root_source_file = b.path("grep/support.zig"),
     });
@@ -116,14 +109,7 @@ pub fn build(b: *std.Build) void {
     });
     dividerconf_mod.addImport("glyphwire", glyphwire_mod);
 
-    // Windowless pieces of glyphwire-host (pixel/cell geometry, scrollbar
-    // math, `host.conf.lua` value clamps, the key-repeat policy) so the
-    // test runner can exercise them without standing up a window or a GL
-    // context. Same cross-directory-module reason as `shell_support` /
-    // `ls_support`; imports `glyphwire` for `CellPos` in
-    // `geometry.cellFromPixel` and `host_eng` for the `Key` enum
-    // `key_repeat.repeatsKey` classifies (added below, once the engine
-    // module exists).
+    // `host_eng` is added below, once the engine module exists.
     const host_support_mod = b.addModule("host_support", .{
         .root_source_file = b.path("host/support.zig"),
     });
@@ -131,16 +117,9 @@ pub fn build(b: *std.Build) void {
     host_support_mod.addImport("listcursor", listcursor_mod);
     host_support_mod.addImport("keybind", keybind_mod);
 
-    // zoe's editor core (gap buffer, motions, the modal state machine)
-    // shared by the `zoe` binary and its test runner -- same
-    // cross-directory-module reason as `shell_support` / `ls_support`.
-    // Pure: no glyphwire client, no engine, no IO.
     const zoe_support_mod = b.addModule("zoe_support", .{
         .root_source_file = b.path("zoe/support.zig"),
     });
-    // `zoe/ui.zig` is the glyphwire client half of the editor, and
-    // `zoe/tree.zig` uses `stringWidth` for its column maths; the editor
-    // core itself still pulls in nothing.
     zoe_support_mod.addImport("glyphwire", glyphwire_mod);
     // The Ctrl+P finder, `.gitignore` rule, text sniff, `:` line field,
     // keymap and shell panel it shares with salacommander.
@@ -148,24 +127,15 @@ pub fn build(b: *std.Build) void {
     zoe_support_mod.addImport("themeconf", themeconf_mod);
     zoe_support_mod.addImport("dividerconf", dividerconf_mod);
 
-    // gmux's split-tree structure (pure) and its tiny Lua config, shared
-    // by the `gmux` binary and its test runner -- same cross-directory-
-    // module reason as the three above.
     const gmux_support_mod = b.addModule("gmux_support", .{
         .root_source_file = b.path("gmux/support.zig"),
     });
-    // `gmux/ui.zig` is the window-manager client; `layout.zig` stays pure.
     gmux_support_mod.addImport("glyphwire", glyphwire_mod);
     gmux_support_mod.addImport("applib", applib_mod);
 
-    // gw-read's page ordering, fit maths, image-handle LRU and resume
-    // state, shared by the `gw-read` binary and its test runner -- same
-    // cross-directory-module reason as the four above.
     const read_support_mod = b.addModule("read_support", .{
         .root_source_file = b.path("read/support.zig"),
     });
-    // `read/ui.zig` is the reader's client half; `pages` / `zoom` /
-    // `cache` stay pure.
     read_support_mod.addImport("glyphwire", glyphwire_mod);
     read_support_mod.addImport("applib", applib_mod);
 
@@ -200,11 +170,8 @@ pub fn build(b: *std.Build) void {
     });
     read_support_mod.addIncludePath(read_stb_dep.path("libs/stbi"));
 
-    // gwmd's layout, link handling and client UI, shared by the `gwmd`
-    // binary and its test runner -- same cross-directory-module reason as
-    // the ones above. The Markdown parser is the vendored zmd fork under
-    // `md/libs/zmd/` (MIT, third-party; see its README for what glyphwire
-    // added to it).
+    // The Markdown parser is the vendored zmd fork under `md/libs/zmd/`
+    // (MIT, third-party; see its README for what glyphwire added to it).
     const zmd_mod = b.addModule("zmd", .{
         .root_source_file = b.path("md/libs/zmd/zmd.zig"),
     });
@@ -215,11 +182,6 @@ pub fn build(b: *std.Build) void {
     md_support_mod.addImport("zmd", zmd_mod);
     md_support_mod.addImport("applib", applib_mod);
 
-    // salacommander's panes, file operations, dialogs, action table and
-    // client UI, shared by the `salacommander` binary and its test runner
-    // -- same cross-directory-module reason as the ones above. It lists
-    // directories with gw-ls's scanner (`ls_support.entries`) rather than
-    // a copy of it.
     const salacommander_support_mod = b.addModule("salacommander_support", .{
         .root_source_file = b.path("salacommander/support.zig"),
     });

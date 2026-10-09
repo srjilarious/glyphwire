@@ -1,17 +1,7 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! zoe's engine-free core, gathered as the `zoe_support` build module so
-//! `tests/zoe_tests.zig` can reach it -- a Zig module can't cross
-//! directories with a relative `@import`, the same reason `ls_support`
-//! and `host_support` exist.
-//!
-//! `buffer` / `motion` / `editor` / `keys` / `display` / `filetype` are
-//! pure -- no client, no engine, no filesystem -- which is what lets the
-//! whole editing state machine be tested with nothing but an allocator.
-//! `tree` and `finder` read directories and `ui` speaks the wire
-//! protocol; they live here too so the test runner can reach their pure
-//! parts, the same arrangement `ls_support` has with `ls/config.zig`.
+//! `zoe_support`: editor core, tree, tabs, UI. See CONTRIBUTING.md.
 
 pub const buffer = @import("buffer.zig");
 pub const motion = @import("motion.zig");

@@ -190,7 +190,7 @@ pub const FontAtlas = struct {
     /// block is packed in full the first time any codepoint in it is used.
     loaded_blocks: std.AutoHashMap(u32, void),
     /// Ordered faces: index 0 is the primary, the rest are fallbacks tried
-    /// in order for codepoints the primary lacks. Empty for a bitmap font.
+    /// in order for codepoints the primary lacks. Never empty.
     faces: std.ArrayListUnmanaged(FontFace),
     /// The "tofu" box drawn for any codepoint no face provides. Always
     /// present for a TTF atlas (part of the base glyph set).
@@ -199,7 +199,7 @@ pub const FontAtlas = struct {
     /// CPU-side copy of the single-channel atlas bitmap. Kept so the whole
     /// texture can be re-uploaded after new glyphs are packed, and so a
     /// grow can copy existing rows into the wider buffer without
-    /// re-rasterizing. Empty for a bitmap font.
+    /// re-rasterizing.
     pixels: []u8,
     /// Current square edge length of `pixels` / the GL texture, in pixels.
     dim: i32,
@@ -224,10 +224,8 @@ pub const FontAtlas = struct {
     /// is handed) down to the baseline: the primary face's scaled vmetrics
     /// ascent. A fixed font metric, not a running max over packed glyphs,
     /// so loading a tall on-demand block (CJK, Nerd Font) never shifts
-    /// where already-drawn ASCII text sits. Equals `maxY` for a bitmap
-    /// font atlas, which has no scalable face to measure.
+    /// where already-drawn ASCII text sits.
     ascent: i32,
-    isAlpha: bool,
 
     font_size: f32,
     alloc: std.mem.Allocator,
@@ -240,13 +238,12 @@ pub const FontAtlas = struct {
 
     pub fn getChar(self: *FontAtlas, char: u32) ?Character {
         if (self.chars.get(char)) |c| return c;
-        if (self.faces.items.len == 0) return self.notdefOrNull();
         self.ensureBlock(char >> 8) catch {};
         return self.chars.get(char) orelse self.notdefOrNull();
     }
 
     fn notdefOrNull(self: *FontAtlas) ?Character {
-        // A TTF atlas always has a real notdef; a bitmap font may not.
+        // A face whose glyph 0 is empty and has no advance draws nothing.
         return if (self.notdef.advance != 0 or self.notdef.size.x != 0) self.notdef else null;
     }
 
@@ -258,8 +255,6 @@ pub const FontAtlas = struct {
     /// the CPU atlas. Pure CPU work: no GL calls, no texture upload. Call
     /// `commitTexture` afterwards (or use `ensureBlocksForText`).
     pub fn loadBlocksForText(self: *FontAtlas, text: []const u8) void {
-        if (self.faces.items.len == 0) return;
-
         var i: usize = 0;
         while (i < text.len) {
             const seq_len = std.unicode.utf8ByteSequenceLength(text[i]) catch {
@@ -467,11 +462,8 @@ pub const FontAtlas = struct {
     /// texture region -- see decisions.md's Text scale section and
     /// `host/render.zig`'s scaled-atlas cache. Each borrowed face keeps
     /// its own `face_index` (recorded on `FontFace` for exactly this),
-    /// so a `.ttc` fallback clones correctly too. `error.NotAScalableFont`
-    /// for a bitmap-font atlas, matching `setFontSize`.
+    /// so a `.ttc` fallback clones correctly too.
     pub fn cloneAtSize(self: *FontAtlas, fontSize: f32, alloc: std.mem.Allocator) !FontAtlas {
-        if (self.faces.items.len == 0) return error.NotAScalableFont;
-
         var faces: std.ArrayListUnmanaged(FontFace) = .empty;
         errdefer faces.deinit(alloc);
         for (self.faces.items) |*f| {
@@ -529,7 +521,6 @@ pub const FontAtlas = struct {
             },
             .maxY = 0,
             .ascent = scaled_ascent,
-            .isAlpha = true,
             .font_size = fontSize,
             .alloc = alloc,
         };
@@ -606,13 +597,10 @@ pub const FontAtlas = struct {
     /// `&atlas.texture` stays valid -- but call this outside a renderer
     /// `begin`/`end` pair so no quads are queued against the old contents.
     ///
-    /// Returns `error.NotAScalableFont` for a bitmap-font atlas (it has no
-    /// TrueType faces to rescale). On an allocation failure partway through
+    /// On an allocation failure partway through
     /// the repack, `font_size` is already updated and the base set may be
     /// only partly packed; `getChar` finishes it lazily on next use.
     pub fn setFontSize(self: *FontAtlas, size_px: f32) !void {
-        if (self.faces.items.len == 0) return error.NotAScalableFont;
-
         for (self.faces.items) |*f| {
             f.scale = stb_tt.c.stbtt_ScaleForPixelHeight(&f.info, size_px);
         }
@@ -756,117 +744,12 @@ pub const FontAtlas = struct {
         self.texture.src = .{ .l = 0, .t = 0, .r = 1, .b = 1 };
     }
 
-    pub fn initFromBitmap(
-        fontImagePath: []const u8,
-        charWidth: i32,
-        charHeight: i32,
-        charsPerRow: i32,
-        chars: []const u8,
-        alloc: std.mem.Allocator,
-    ) !FontAtlas {
-        const fipz = try std.mem.concatWithSentinel(alloc, u8, &.{fontImagePath}, 0);
-        defer alloc.free(fipz);
-
-        var image = try stbi.Image.loadFromFile(fipz, 0);
-        defer image.deinit();
-        if (image.width == 0 or image.height == 0) {
-            return error.ImageLoadFailed;
-        }
-
-        // Generate OpenGL texture
-        var charTex: c_uint = undefined;
-        gl.genTextures(1, &charTex);
-        errdefer gl.deleteTextures(1, &charTex);
-
-        gl.bindTexture(gl.TEXTURE_2D, charTex);
-
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, @intCast(image.width), @intCast(image.height), 0, gl.RGBA, gl.UNSIGNED_BYTE, image.data.ptr);
-
-        // Set texture parameters for crisp text rendering
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-
-        var charsMap = std.AutoHashMap(u32, Character).init(alloc);
-        errdefer charsMap.deinit();
-        var maxY: i32 = 0;
-
-        for (0..chars.len) |i| {
-            const char_code = chars[i];
-            const chW = @as(u32, @intCast(charWidth));
-            const chH = @as(u32, @intCast(charHeight));
-
-            const col = i % @as(u32, @intCast(charsPerRow));
-            const row = i / @as(u32, @intCast(charsPerRow));
-
-            const x0 = col * chW;
-            const y0 = row * chH;
-
-            // Skip characters that would be out of bounds
-            if (x0 + chW > image.width or y0 + chH > image.height) {
-                continue;
-            }
-
-            const coords = RectF.fromCoords(
-                @intCast(x0),
-                @intCast(y0),
-                @intCast(charWidth),
-                @intCast(charHeight),
-                @intCast(image.width),
-                @intCast(image.height),
-            );
-
-            try charsMap.put(char_code, Character{
-                .coords = coords,
-                .size = .{ .x = @intCast(charWidth), .y = @intCast(charHeight) },
-                .bearing = .{ .x = 0, .y = @intCast(charHeight) }, // Assume top-left origin
-                .advance = charWidth, // Fixed width
-            });
-            maxY = @max(maxY, @as(i32, @intCast(charHeight)));
-        }
-
-        return .{
-            .chars = charsMap,
-            .loaded_blocks = std.AutoHashMap(u32, void).init(alloc),
-            .faces = .empty,
-            // No faces -> no real notdef; advance 0 + size 0 makes
-            // `getChar` return null for a missing codepoint, exactly as the
-            // bitmap-font path did before it went through `notdefOrNull`.
-            .notdef = .{
-                .coords = .{ .l = 0, .t = 0, .r = 0, .b = 0 },
-                .size = .{ .x = 0, .y = 0 },
-                .bearing = .{ .x = 0, .y = 0 },
-                .advance = 0,
-            },
-            .pixels = &[_]u8{},
-            .dim = 0,
-            .pack_x = 0,
-            .pack_y = 0,
-            .shelf_h = 0,
-            .dirty = false,
-            .grew_since_upload = false,
-            .texture = Texture{
-                .texture = charTex,
-                .size = Vec2U{ .x = @as(u32, image.width), .y = @as(u32, image.height) },
-                .src = RectF{ .l = 0, .t = 0, .r = 1, .b = 1 },
-            },
-            .maxY = maxY,
-            // No scalable face to measure; the bitmap path top-aligns the
-            // tallest cell exactly as before, so the baseline is `maxY`.
-            .ascent = maxY,
-            .isAlpha = false,
-            .font_size = 0,
-            .alloc = alloc,
-        };
-    }
-
     pub fn deinit(self: *FontAtlas) void {
         gl.deleteTextures(1, &self.texture.texture);
         self.chars.deinit();
         self.loaded_blocks.deinit();
         for (self.faces.items) |*f| f.deinit(self.alloc);
         self.faces.deinit(self.alloc);
-        if (self.pixels.len > 0) self.alloc.free(self.pixels);
+        self.alloc.free(self.pixels);
     }
 };

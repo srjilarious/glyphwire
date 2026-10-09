@@ -2,23 +2,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! The resource manager: ref-counted textures, shaders, atlases and
-//! fonts, keyed by name. Two engine features glyphwire doesn't use are
-//! stripped or disabled here:
-//!
-//!   * Tilemap support (`ManagedTileMap`, `loadTileMap`, `acquireTileMap`)
-//!     is removed outright. It was the only reason this file pulled in
-//!     `tile/tilemap.zig` + `tile/tiled_loader.zig`, and through them the
-//!     `xml` module -- none of which a terminal front end needs.
-//!   * Asset hot-reload (`FileWatcher` / `HotReload` / `checkHotReload`) is
-//!     commented out rather than deleted, in case it's wanted again later.
-//!     glyphwire has no use for watching *engine assets* (fonts, icons, the
-//!     shipped atlases don't change while it runs); if file watching comes
-//!     back it should live over the user's config files and scripts in
-//!     `~/.config/glyphwire/`, not over the resource manager.
+//! fonts, keyed by name. pixzig's tilemaps and asset hot-reload are not
+//! carried; `file_watcher.zig` is kept on its own for watching the user's
+//! config files rather than engine assets.
 
 const std = @import("std");
-// Only the commented-out hot-reload paths below need `builtin.mode`.
-// const builtin = @import("builtin");
 const stbi = @import("zstbi");
 const gl = @import("zopengl").bindings;
 const common = @import("./common.zig");
@@ -26,7 +14,6 @@ const utils = @import("./utils.zig");
 const shaders = @import("./renderer/shaders.zig");
 const textures = @import("./renderer/textures.zig");
 const font_atlas_mod = @import("./renderer/font_atlas.zig");
-// const file_watcher_mod = @import("./file_watcher.zig");
 
 const TextureImage = textures.TextureImage;
 const Texture = textures.Texture;
@@ -34,8 +21,6 @@ const Shader = shaders.Shader;
 const FontAtlas = font_atlas_mod.FontAtlas;
 const CharToColor = textures.CharToColor;
 const SpackFile = textures.SpackFile;
-// const FileWatcher = file_watcher_mod.FileWatcher;
-// const WatchId = file_watcher_mod.WatchId;
 
 const Vec2U = common.Vec2U;
 const Vec2I = common.Vec2I;
@@ -56,7 +41,7 @@ const RectI = common.RectI;
 /// Each `Handle` carries a back-pointer to its parent `ManagedResource` so
 /// callers only need to store one pointer. Call `handle.release()` to
 /// decrement the refcount, and `handle.reacquire()` to atomically upgrade to
-/// the latest generation after a hot-reload.
+/// the latest generation after a reload.
 pub fn ManagedResource(comptime ResourceName: []const u8, comptime T: type) type {
     return struct {
         res: std.ArrayList(?*Handle),
@@ -266,121 +251,6 @@ fn freeFontAtlas(fa: FontAtlas) void {
     copy.deinit();
 }
 
-// // ---------------------------------------------------------------------------
-// // Hot-reload support (active in debug builds only)
-// // ---------------------------------------------------------------------------
-//
-// /// State needed to reload a specific resource from disk. All string fields
-// /// are owned by the enclosing `HotReload` instance.
-// const ReloadInfo = union(enum) {
-//     texture: struct { name: []const u8, path: []const u8 },
-//     atlas: struct { base_name: []const u8 },
-//     /// Atlas where the resource name differs from the file base name.
-//     atlas_named: struct { name: []const u8, base_path: []const u8 },
-//     font_ttf: struct { name: []const u8, path: []const u8, face_index: i32 = 0, font_size: f32 },
-//     tilemap: struct { name: []const u8, path: []const u8 },
-//
-//     /// Deep-copy all owned strings into `alloc`. The original slices are
-//     /// not freed; the caller decides when to release them.
-//     fn dupe(self: ReloadInfo, alloc: std.mem.Allocator) !ReloadInfo {
-//         return switch (self) {
-//             .texture => |t| .{ .texture = .{
-//                 .name = try alloc.dupe(u8, t.name),
-//                 .path = try alloc.dupe(u8, t.path),
-//             } },
-//             .atlas => |a| .{ .atlas = .{
-//                 .base_name = try alloc.dupe(u8, a.base_name),
-//             } },
-//             .atlas_named => |a| .{ .atlas_named = .{
-//                 .name = try alloc.dupe(u8, a.name),
-//                 .base_path = try alloc.dupe(u8, a.base_path),
-//             } },
-//             .font_ttf => |f| .{ .font_ttf = .{
-//                 .name = try alloc.dupe(u8, f.name),
-//                 .path = try alloc.dupe(u8, f.path),
-//                 .face_index = f.face_index,
-//                 .font_size = f.font_size,
-//             } },
-//             .tilemap => |t| .{ .tilemap = .{
-//                 .name = try alloc.dupe(u8, t.name),
-//                 .path = try alloc.dupe(u8, t.path),
-//             } },
-//         };
-//     }
-//
-//     fn deinit(self: ReloadInfo, alloc: std.mem.Allocator) void {
-//         switch (self) {
-//             .texture => |t| {
-//                 alloc.free(t.name);
-//                 alloc.free(t.path);
-//             },
-//             .atlas => |a| alloc.free(a.base_name),
-//             .atlas_named => |a| {
-//                 alloc.free(a.name);
-//                 alloc.free(a.base_path);
-//             },
-//             .font_ttf => |f| {
-//                 alloc.free(f.name);
-//                 alloc.free(f.path);
-//             },
-//             .tilemap => |t| {
-//                 alloc.free(t.name);
-//                 alloc.free(t.path);
-//             },
-//         }
-//     }
-// };
-//
-// /// Groups the `FileWatcher` with its per-file reload info tables.
-// const HotReload = struct {
-//     watcher: FileWatcher,
-//     watches: std.AutoHashMap(WatchId, ReloadInfo),
-//     path_to_id: std.StringHashMap(WatchId),
-//     alloc: std.mem.Allocator,
-//
-//     fn init(alloc: std.mem.Allocator) !HotReload {
-//         return .{
-//             .watcher = try FileWatcher.init(alloc),
-//             .watches = std.AutoHashMap(WatchId, ReloadInfo).init(alloc),
-//             .path_to_id = std.StringHashMap(WatchId).init(alloc),
-//             .alloc = alloc,
-//         };
-//     }
-//
-//     fn deinit(self: *HotReload) void {
-//         var vit = self.watches.valueIterator();
-//         while (vit.next()) |info| info.deinit(self.alloc);
-//         self.watches.deinit();
-//
-//         var kit = self.path_to_id.keyIterator();
-//         while (kit.next()) |key| self.alloc.free(key.*);
-//         self.path_to_id.deinit();
-//
-//         self.watcher.deinit();
-//     }
-//
-//     /// Register `file_path` as a watched file. `info` slices are borrowed —
-//     /// this function deep-copies everything it needs to keep. Duplicate
-//     /// registrations for the same path are silently ignored (the first one
-//     /// wins), so calling a public load function during hot-reload is safe.
-//     fn registerWatch(self: *HotReload, file_path: []const u8, info: ReloadInfo) !void {
-//         if (self.path_to_id.contains(file_path)) return;
-//
-//         const id = try self.watcher.watch(file_path);
-//
-//         const owned_fp = try self.alloc.dupe(u8, file_path);
-//         errdefer self.alloc.free(owned_fp);
-//
-//         const owned_info = try info.dupe(self.alloc);
-//         errdefer owned_info.deinit(self.alloc);
-//
-//         try self.path_to_id.put(owned_fp, id);
-//         errdefer _ = self.path_to_id.remove(owned_fp);
-//
-//         try self.watches.put(id, owned_info);
-//     }
-// };
-
 // ---------------------------------------------------------------------------
 // ResourceManager
 // ---------------------------------------------------------------------------
@@ -389,14 +259,12 @@ fn freeFontAtlas(fa: FontAtlas) void {
 /// Each resource type is stored in a `ManagedResource` pool that supports multiple
 /// generations and ref-counting.  Callers interact via handles (`*TextureHandle`, etc.)
 /// obtained from `acquire*` methods; call `handle.release()` when done.
-///
-/// Hot-reload is compiled out in this vendored copy -- see the file header.
 pub const ResourceManager = struct {
     textures: std.StringHashMap(*ManagedTextureImage),
     shaders: std.StringHashMap(*ManagedShader),
     atlas: std.StringHashMap(*ManagedTexture),
     /// Tracks which frame names each atlas registered so stale frames can be
-    /// removed when the atlas JSON changes during hot-reload.
+    /// removed when an atlas is reloaded with a changed JSON.
     atlas_manifests: std.StringHashMap(std.ArrayListUnmanaged([]const u8)),
     fonts: std.StringHashMap(*ManagedFont),
     alloc: std.mem.Allocator,
@@ -404,10 +272,6 @@ pub const ResourceManager = struct {
     /// Lookups inside a managed resource use generations; this id distinguishes
     /// each managed resource.
     gid: u32,
-    // /// File-change watcher used in debug builds for hot-reload. Always null
-    // /// in release builds (never initialised). The field type is always
-    // /// `?HotReload` so the struct layout is uniform across build modes.
-    // hot_reload: ?HotReload,
 
     const Self = @This();
 
@@ -421,7 +285,6 @@ pub const ResourceManager = struct {
             .fonts = std.StringHashMap(*ManagedFont).init(alloc),
             .alloc = alloc,
             .gid = 0,
-            // .hot_reload = null,
         };
     }
 
@@ -467,89 +330,7 @@ pub const ResourceManager = struct {
             self.alloc.free(entry.key_ptr.*);
         }
         self.fonts.deinit();
-
-        // if (self.hot_reload) |*hr| hr.deinit();
     }
-
-    // // -----------------------------------------------------------------------
-    // // Hot-reload: internal helpers
-    // // -----------------------------------------------------------------------
-    //
-    // /// Lazily initialise the HotReload state on first use. No-op in release
-    // /// builds. Logs an error and leaves `hot_reload` null if initialisation
-    // /// fails (watcher remains disabled for the session).
-    // fn ensureHotReload(self: *Self) void {
-    //     if (comptime builtin.mode != .Debug) return;
-    //     if (self.hot_reload != null) return;
-    //     self.hot_reload = HotReload.init(self.alloc) catch |err| {
-    //         std.log.err("Failed to init file watcher for hot reload: {}", .{err});
-    //         return;
-    //     };
-    // }
-    //
-    // fn reloadResource(self: *Self, info: ReloadInfo) !void {
-    //     switch (info) {
-    //         .texture => |t| _ = try self.loadTextureImpl(t.name, t.path),
-    //         .atlas => |a| _ = try self.loadAtlasImpl(a.base_name),
-    //         .atlas_named => |a| _ = try self.loadAtlasNamedImpl(a.name, a.base_path),
-    //         .font_ttf => |f| {
-    //             const fa = try FontAtlas.initFromTtfFileIndexed(f.path, f.face_index, f.font_size, self.alloc);
-    //             const managed = try self.getOrCreateFont(f.name);
-    //             try managed.add(fa);
-    //         },
-    //         .tilemap => |t| {
-    //             std.log.info("Hot reload: reloading tilemap '{s}' from '{s}'", .{ t.name, t.path });
-    //             const map = try TiledMapXmlLoader.initFromFile(t.path, self.alloc);
-    //             const managed = try self.getOrCreateTileMap(t.name);
-    //             try managed.add(map);
-    //             std.log.info("Hot reload: tilemap '{s}' reloaded, {} live handles marked dirty", .{
-    //                 t.name,
-    //                 blk: {
-    //                     var n: usize = 0;
-    //                     for (managed.res.items) |h| if (h != null and h.?.dirty) { n += 1; };
-    //                     break :blk n;
-    //                 },
-    //             });
-    //         },
-    //     }
-    // }
-    //
-    // /// Poll the file watcher and reload any resources whose source files have
-    // /// changed since the last call. This is a no-op in release builds.
-    // /// Called automatically by `AppRunner` each frame.
-    // pub fn checkHotReload(self: *Self) void {
-    //     if (comptime builtin.mode != .Debug) return;
-    //     const hr = if (self.hot_reload) |*h| h else return;
-    //
-    //     var changed: std.ArrayList(WatchId) = .empty;
-    //     defer changed.deinit(self.alloc);
-    //
-    //     hr.watcher.poll(self.alloc, &changed) catch |err| {
-    //         std.log.err("File watcher poll error: {}", .{err});
-    //         return;
-    //     };
-    //
-    //     if (changed.items.len > 0) {
-    //         std.log.info("File watcher: {} file change(s) detected", .{changed.items.len});
-    //     }
-    //     for (changed.items) |id| {
-    //         if (hr.watches.get(id)) |info| {
-    //             const type_name = switch (info) {
-    //                 .texture => "texture",
-    //                 .atlas => "atlas",
-    //                 .atlas_named => "atlas",
-    //                 .font_ttf => "font",
-    //                 .tilemap => "tilemap",
-    //             };
-    //             std.log.info("Hot reloading {s} (watch id {})", .{ type_name, id });
-    //             self.reloadResource(info) catch |err| {
-    //                 std.log.warn("Hot reload failed for watch id {}: {}", .{ id, err });
-    //             };
-    //         } else {
-    //             std.log.warn("File watcher fired for unknown watch id {}", .{id});
-    //         }
-    //     }
-    // }
 
     // -----------------------------------------------------------------------
     // Internal managed resource helpers
@@ -742,10 +523,14 @@ pub const ResourceManager = struct {
         return managed;
     }
 
-    /// Internal: loads a texture from a file without registering a hot-reload
-    /// watch. Called from `loadTexture` (which adds the watch) and from
-    /// `loadAtlasImpl` (which registers atlas-level watches instead).
-    fn loadTextureImpl(
+    /// Loads a texture from a file path. The name is the base name of the
+    /// file, without the extension, so "player" would match "player.png".
+    /// The texture is stored in the atlas with the base name, so it can be
+    /// accessed with `getTexture` using that name.  The file type is
+    /// determined from the file extension, and should be a type supported
+    /// by the `stbi` library, such as png or jpg. Loading the same name
+    /// again marks any live handles dirty.
+    pub fn loadTexture(
         self: *Self,
         name: []const u8,
         file_path: []const u8,
@@ -762,44 +547,16 @@ pub const ResourceManager = struct {
         return try self.loadTextureFromBuffer(name, image.width, image.height, image.data);
     }
 
-    /// Loads a texture from a file path. The name is the base name of the
-    /// file, without the extension, so "player" would match "player.png".
-    /// The texture is stored in the atlas with the base name, so it can be
-    /// accessed with `getTexture` using that name.  The file type is
-    /// determined from the file extension, and should be a type supported
-    /// by the `stbi` library, such as png or jpg.
-    ///
-    /// In debug builds, the file is automatically watched and the texture
-    /// is reloaded (with any live handles marked dirty) when the file changes.
-    pub fn loadTexture(
-        self: *Self,
-        name: []const u8,
-        file_path: []const u8,
-    ) !*ManagedTexture {
-        const result = try self.loadTextureImpl(name, file_path);
-
-        // if (comptime builtin.mode == .Debug) {
-        //     self.ensureHotReload();
-        //     if (self.hot_reload) |*hr| {
-        //         hr.registerWatch(file_path, .{
-        //             .texture = .{ .name = name, .path = file_path },
-        //         }) catch |err| {
-        //             std.log.warn("Could not register texture watch for '{s}': {}", .{ file_path, err });
-        //         };
-        //     }
-        // }
-
-        return result;
-    }
-
     // -----------------------------------------------------------------------
     // Atlas loading
     // -----------------------------------------------------------------------
 
-    /// Internal: loads a texture atlas without registering hot-reload watches.
-    /// `name` is the resource key; `base_path` is the file path base (without
-    /// extension). When both are equal this is an ordinary loadAtlas call.
-    fn loadAtlasNamedImpl(self: *Self, name: []const u8, base_path: []const u8) !usize {
+    /// Like `loadAtlas` but stores the resource under `name` instead of the
+    /// base name of `base_path`. Use this when the manifest asset id should
+    /// differ from the file name on disk (e.g. id="main_sprites", path="pac-tiles").
+    /// After loading, `acquireTexture(name)` returns a handle to the full atlas
+    /// image; individual frames remain accessible by their frame names.
+    pub fn loadAtlasNamed(self: *Self, name: []const u8, base_path: []const u8) !usize {
         // Read and validate the JSON before touching the base texture: if the
         // atlas fails to load, the previous texture (if any, from an earlier
         // load of this same name) must be left untouched and still valid.
@@ -829,7 +586,7 @@ pub const ResourceManager = struct {
 
         const imageName = try utils.addExtension(self.alloc, base_path, ".png");
         defer self.alloc.free(imageName);
-        _ = try self.loadTextureImpl(name, imageName);
+        _ = try self.loadTexture(name, imageName);
 
         const texImageManaged = self.textures.get(utils.baseNameFromPath(name)) orelse return error.NoTextureWithThatName;
         const texImage = texImageManaged.get() orelse return error.NoTextureWithThatName;
@@ -888,10 +645,6 @@ pub const ResourceManager = struct {
         return num;
     }
 
-    fn loadAtlasImpl(self: *Self, baseName: []const u8) !usize {
-        return self.loadAtlasNamedImpl(baseName, baseName);
-    }
-
     fn ownedByFrameList(frames: ?[]const []const u8, frame_name: []const u8) bool {
         const list = frames orelse return false;
         for (list) |n| {
@@ -908,58 +661,8 @@ pub const ResourceManager = struct {
     ///
     /// The subtextures are stored in the atlas with their names from the json
     /// file, so they can be accessed with `getTexture` using those names.
-    ///
-    /// In debug builds, both the .png and .json files are watched; any change
-    /// to either triggers a full atlas reload.
     pub fn loadAtlas(self: *Self, baseName: []const u8) !usize {
-        const num = try self.loadAtlasImpl(baseName);
-
-        // if (comptime builtin.mode == .Debug) {
-        //     self.ensureHotReload();
-        //     if (self.hot_reload) |*hr| {
-        //         const imageName = try utils.addExtension(self.alloc, baseName, ".png");
-        //         defer self.alloc.free(imageName);
-        //         const jsonName = try utils.addExtension(self.alloc, baseName, ".json");
-        //         defer self.alloc.free(jsonName);
-        //
-        //         hr.registerWatch(imageName, .{ .atlas = .{ .base_name = baseName } }) catch |err| {
-        //             std.log.warn("Could not register atlas PNG watch for '{s}': {}", .{ imageName, err });
-        //         };
-        //         hr.registerWatch(jsonName, .{ .atlas = .{ .base_name = baseName } }) catch |err| {
-        //             std.log.warn("Could not register atlas JSON watch for '{s}': {}", .{ jsonName, err });
-        //         };
-        //     }
-        // }
-
-        return num;
-    }
-
-    /// Like `loadAtlas` but stores the resource under `name` instead of the
-    /// base name of `base_path`. Use this when the manifest asset id should
-    /// differ from the file name on disk (e.g. id="main_sprites", path="pac-tiles").
-    /// After loading, `acquireTexture(name)` returns a handle to the full atlas
-    /// image; individual frames remain accessible by their frame names.
-    pub fn loadAtlasNamed(self: *Self, name: []const u8, base_path: []const u8) !usize {
-        const num = try self.loadAtlasNamedImpl(name, base_path);
-
-        // if (comptime builtin.mode == .Debug) {
-        //     self.ensureHotReload();
-        //     if (self.hot_reload) |*hr| {
-        //         const imageName = try utils.addExtension(self.alloc, base_path, ".png");
-        //         defer self.alloc.free(imageName);
-        //         const jsonName = try utils.addExtension(self.alloc, base_path, ".json");
-        //         defer self.alloc.free(jsonName);
-        //
-        //         hr.registerWatch(imageName, .{ .atlas_named = .{ .name = name, .base_path = base_path } }) catch |err| {
-        //             std.log.warn("Could not register atlas PNG watch for '{s}': {}", .{ imageName, err });
-        //         };
-        //         hr.registerWatch(jsonName, .{ .atlas_named = .{ .name = name, .base_path = base_path } }) catch |err| {
-        //             std.log.warn("Could not register atlas JSON watch for '{s}': {}", .{ jsonName, err });
-        //         };
-        //     }
-        // }
-
-        return num;
+        return self.loadAtlasNamed(baseName, baseName);
     }
 
     /// Adds a named subtexture from a region of an existing managed texture.
@@ -1043,9 +746,6 @@ pub const ResourceManager = struct {
     /// Loads a TTF font from disk and registers it under `name`. A second
     /// call with the same name marks the prior generation dirty and adds a
     /// fresh one (auto-reload semantics matching other load* methods).
-    ///
-    /// In debug builds, the file is watched and the font is reloaded (with
-    /// live handles marked dirty) when the file changes.
     pub fn loadFontFromTtfFile(
         self: *Self,
         name: []const u8,
@@ -1067,17 +767,6 @@ pub const ResourceManager = struct {
         const fa = try FontAtlas.initFromTtfFileIndexed(fontPath, faceIndex, fontSize, self.alloc);
         const managed = try self.getOrCreateFont(name);
         try managed.add(fa);
-
-        // if (comptime builtin.mode == .Debug) {
-        //     self.ensureHotReload();
-        //     if (self.hot_reload) |*hr| {
-        //         hr.registerWatch(fontPath, .{
-        //             .font_ttf = .{ .name = name, .path = fontPath, .face_index = faceIndex, .font_size = fontSize },
-        //         }) catch |err| {
-        //             std.log.warn("Could not register font watch for '{s}': {}", .{ fontPath, err });
-        //         };
-        //     }
-        // }
     }
 
     /// Loads a TTF font embedded at comptime into the binary and registers
@@ -1093,21 +782,6 @@ pub const ResourceManager = struct {
         try managed.add(fa);
     }
 
-    /// Loads a fixed-cell bitmap font and registers it under `name`.
-    pub fn loadFontFromBitmap(
-        self: *Self,
-        name: []const u8,
-        fontImagePath: []const u8,
-        charWidth: i32,
-        charHeight: i32,
-        charsPerRow: i32,
-        chars: []const u8,
-    ) !void {
-        const fa = try FontAtlas.initFromBitmap(fontImagePath, charWidth, charHeight, charsPerRow, chars, self.alloc);
-        const managed = try self.getOrCreateFont(name);
-        try managed.add(fa);
-    }
-
     /// Acquires a refcounted handle to a font atlas by name.
     pub fn acquireFontAtlas(self: *Self, name: []const u8) !*FontAtlasHandle {
         const managed = self.fonts.get(name) orelse return error.NoFontWithThatName;
@@ -1117,11 +791,8 @@ pub const ResourceManager = struct {
     /// Appends a fallback face to an already-loaded TTF font. Codepoints the
     /// primary face (and any earlier fallback) lacks are then filled from
     /// this face. `faceIndex` selects a face inside a `.ttc` collection; use
-    /// 0 for a plain font file.
-    ///
-    /// Note: a hot-reload of the primary font file rebuilds the atlas from
-    /// that file alone and drops fallbacks; re-add them after a reload if it
-    /// matters for the build.
+    /// 0 for a plain font file. Reloading the primary font under the same
+    /// name rebuilds the atlas from that file alone and drops fallbacks.
     pub fn addFontFallback(self: *Self, name: []const u8, fontPath: []const u8, faceIndex: i32) !void {
         const managed = self.fonts.get(name) orelse return error.NoFontWithThatName;
         const handle = managed.get() orelse return error.NoFontWithThatName;

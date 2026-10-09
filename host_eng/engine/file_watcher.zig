@@ -1,13 +1,8 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: MPL-2.0
 
-//! Currently unreferenced: `resources.zig`'s
-//! hot-reload paths that used it are commented out (see that file's
-//! header). Kept in the tree so re-enabling asset hot-reload is an
-//! uncomment rather than a re-port. If glyphwire ever wants file
-//! watching, the thing worth watching is the user's config files and
-//! scripts under `~/.config/glyphwire/`, not the engine's own assets --
-//! this type works for that too.
+//! Not referenced yet: kept for upcoming file watching (the user's
+//! config files and scripts under `~/.config/glyphwire/`, loaded atlases).
 
 const std = @import("std");
 const builtin = @import("builtin");

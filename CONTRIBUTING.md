@@ -73,14 +73,40 @@ testz.Group{ .name = "Core Tests", .tag = "core", .mod = @import("./core_tests.z
 A test is a `pub fn somethingTest() !void`. Adding a new group means a new
 file plus one row in that table.
 
-Pure logic belongs in a `*_support` module (`shell/support.zig`,
-`ls/support.zig`, `host/support.zig`, `zoe/support.zig`,
-`gmux/support.zig`) so the test runner can exercise it without linking SDL
-or opening a socket. If you find yourself unable to test something because
-it needs a window, that is usually a sign the logic wants extracting.
-
 CI runs `zig build package -Doptimize=ReleaseSafe` on every push and pull
 request via [`.github/workflows/linux-package.yml`](.github/workflows/linux-package.yml).
+
+### The `support.zig` modules
+
+Every program directory (`shell/`, `ls/`, `grep/`, `host/`, `zoe/`,
+`gmux/`, `read/`, `md/`, `salacommander/`) has a `support.zig`. The reason
+is the same everywhere: the test runner is its own module rooted at
+`tests/main.zig`, and Zig will not let a relative `@import` climb out of a
+module's directory, so `tests/zoe_tests.zig` cannot reach
+`../zoe/buffer.zig`. Instead each `support.zig` re-exports the program's
+testable files, `build.zig` registers it as a named `<program>_support`
+module, and `tests_mod` imports it by that name.
+
+- **What goes in.** Anything a test needs to reach. Pure logic is the main
+  tenant, but a file that speaks the wire protocol or embeds Lua can go in
+  too so tests can reach its pure parts; give the module the matching
+  `addImport` in `build.zig`. `main.zig` (process setup, the event loop)
+  stays out.
+- **What stays windowless.** Nothing in a support module may need SDL, a
+  GL context or a live socket to load. If you can't test something because
+  it needs a window, the logic usually wants extracting.
+- **Shared code is not support code.** Something two programs use belongs
+  in `applib/` (or `src/`); a `support.zig` re-exports it from there rather
+  than keeping a copy.
+- **The binary.** Most programs import their own support module by name
+  too. `host/` and `grep/` import their files relatively instead; either
+  works, but a single compilation may not mix both, since Zig refuses a
+  file that belongs to two modules.
+
+A new program follows the same pattern: `<program>/support.zig`, a
+`b.addModule("<program>_support", ...)` in `build.zig`, and a
+`tests_mod.addImport` for it. Its header is one line saying what it
+gathers; this section carries the why.
 
 ## Licensing rules for new code
 

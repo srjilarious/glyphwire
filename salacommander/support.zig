@@ -1,12 +1,7 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! salacommander's pieces, gathered as the `salacommander_support` build
-//! module so the `salacommander` binary and the test runner share them --
-//! the same cross-directory reason `ls_support` and `read_support` exist.
-//! `pane`, `fileops`, `dialog` and `actions` are windowless and tested
-//! directly; `ui` is the glyphwire client half; `config` pulls in `ziglua`
-//! for `salacommander.conf.lua`.
+//! `salacommander_support`: panes, fileops, UI. See CONTRIBUTING.md.
 
 pub const pane = @import("pane.zig");
 pub const fileops = @import("fileops.zig");

@@ -1,20 +1,7 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Helpers for glyphwire-shell's prompt, gathered here as one module so
-//! both `shell/main.zig` and the test runner (`tests/shell_tests.zig`)
-//! can import them -- a Zig module can't reach across directories with a
-//! relative `@import`.
-//!
-//! `envassign` / `complete` / `glob` / `handshake` / `prompt_template` /
-//! `logicalpath` are pure (no libc, no IO). What the shell shares with
-//! another program -- the line editor, word splitting, the history file
-//! gw-hist reads -- lives in `applib` instead, and the shell imports it
-//! from there.
-//! `config` and `script_engine` are the exceptions: they embed a Lua
-//! state (via ziglua) -- `config` for a one-shot `shell.conf.lua` parse,
-//! `script_engine` for the shell's session-long interpreter -- so this
-//! module pulls in ziglua and the test runner links the Lua C library.
+//! `shell_support`: parser, prompt helpers, config. See CONTRIBUTING.md.
 
 pub const parse = @import("parse.zig");
 pub const envassign = @import("envassign.zig");

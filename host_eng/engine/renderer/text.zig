@@ -70,14 +70,9 @@ pub const TextRenderer = struct {
     /// see `ColorBatch`'s doc comment for why it isn't folded into
     /// `spriteBatch`.
     colorBatch: ColorBatch,
-    /// Pool refs (not pre-acquired handles) so setFont can swap the active
-    /// shader on the underlying batch via swapShader. The batch itself owns
-    /// whichever handle is currently in use.
-    alphaShader: *resources.ManagedShader,
-    texShader: *resources.ManagedShader,
     alloc: std.mem.Allocator,
     /// Active font handle. Released in deinit. The parent back-pointer is
-    /// used to reacquire after a hot-reload without re-doing the name lookup.
+    /// used to reacquire after a reload without re-doing the name lookup.
     font: ?*resources.FontAtlasHandle,
 
     /// Initializes the text renderer with the default `C.MaxSprites` glyph
@@ -89,10 +84,9 @@ pub const TextRenderer = struct {
     /// Like `init`, but each of the two glyph batches (plain and tinted)
     /// holds up to `maxQuads` glyphs before it auto-flushes.
     pub fn initCapacity(alloc: std.mem.Allocator, resMgr: *ResourceManager, maxQuads: usize) !TextRenderer {
-        const texShader = try resMgr.getShader(shaders.TextureShader);
         const alphaShader = try resMgr.getShader(shaders.FontShader);
         const colorShader = try resMgr.getShader(shaders.TextColorShader);
-        var spriteBatch = try SpriteBatchQueue.initCapacity(alloc, texShader, maxQuads);
+        var spriteBatch = try SpriteBatchQueue.initCapacity(alloc, alphaShader, maxQuads);
         errdefer spriteBatch.deinit();
         var colorBatch = try ColorBatch.init(alloc, colorShader, maxQuads);
         errdefer colorBatch.deinit();
@@ -101,8 +95,6 @@ pub const TextRenderer = struct {
             .alloc = alloc,
             .spriteBatch = spriteBatch,
             .colorBatch = colorBatch,
-            .alphaShader = alphaShader,
-            .texShader = texShader,
             .font = null,
         };
     }
@@ -150,19 +142,14 @@ pub const TextRenderer = struct {
         fa.commitTexture();
     }
 
-    /// Adopt a new font for rendering. Releases any previously held handle,
-    /// acquires ownership of a new handle, and swaps the underlying batch's
-    /// shader to the alpha-channel program when the atlas was packed as
-    /// alpha, or the regular texture program otherwise.
+    /// Adopt a new font for rendering. Releases any previously held handle
+    /// and acquires ownership of a new handle.
     pub fn setFont(
         self: *TextRenderer,
         font: *resources.ManagedFont,
     ) !void {
         if (self.font) |h| h.release();
         self.font = font.acquire();
-
-        const shader = if (self.font.?.val.isAlpha) self.alphaShader else self.texShader;
-        try self.spriteBatch.swapShader(shader);
     }
 
     pub fn drawString(self: *TextRenderer, text: []const u8, pos: Vec2I) Vec2I {
@@ -197,8 +184,7 @@ pub const TextRenderer = struct {
 
     /// Like `drawString`, but tints every glyph by `color` instead of
     /// rendering plain white. Uses a separate shader/batch (see
-    /// `ColorBatch`), so it expects an alpha-mask (TTF-packed) font atlas --
-    /// a bitmap font's RGBA texture would only have its red channel sampled.
+    /// `ColorBatch`).
     pub fn drawStringColored(self: *TextRenderer, text: []const u8, pos: Vec2I, color: Color) Vec2I {
         var currX: i32 = pos.x;
 
