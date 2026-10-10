@@ -129,6 +129,7 @@ fn resolveFontFile(
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     io: std.Io,
+    environ_map: *const std.process.Environ.Map,
     asset_dir: []const u8,
     value: [:0]const u8,
     default_rel_path: []const u8,
@@ -153,7 +154,7 @@ fn resolveFontFile(
     }
 
     // 4. The value as a system font family name, via fc-match.
-    if (system_font.resolve(arena, gpa, io, value)) |m| {
+    if (system_font.resolve(arena, gpa, io, environ_map, value)) |m| {
         std.log.info("glyphwire-host: font '{s}' -> system font {s} (face {d})", .{ value, m.path, m.index });
         return .{ .path = m.path, .fc_index = m.index };
     }
@@ -173,6 +174,7 @@ fn setUpColorEmoji(
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     io: std.Io,
+    environ_map: *const std.process.Environ.Map,
     atlas: *host_eng.renderer.FontAtlas,
     enabled: bool,
 ) void {
@@ -183,7 +185,7 @@ fn setUpColorEmoji(
     }
     if (atlas.color != null) return;
 
-    const found = system_font.resolve(arena, gpa, io, "emoji") orelse return;
+    const found = system_font.resolve(arena, gpa, io, environ_map, "emoji") orelse return;
     const data = std.Io.Dir.cwd().readFileAlloc(io, found.path, gpa, .unlimited) catch |err| {
         std.log.warn("glyphwire-host: emoji font '{s}' could not be read: {t}", .{ found.path, err });
         return;
@@ -232,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
     // an absolute/cwd-relative path, or a system font by family name (see
     // `resolveFontFile`). An unresolvable value warns and falls back to the
     // bundled default for that slot rather than aborting startup.
-    const face_resolved = resolveFontFile(arena, alloc, io, asset_dir, font_cfg.face, config.font_path_default) orelse
+    const face_resolved = resolveFontFile(arena, alloc, io, init.environ_map, asset_dir, font_cfg.face, config.font_path_default) orelse
         ResolvedFont{ .path = try bundledAssetPath(arena, asset_dir, config.font_path_default) };
     font_cfg.face = face_resolved.path;
     // Each fallback on its own: one that doesn't resolve is dropped with
@@ -240,7 +242,7 @@ pub fn main(init: std.process.Init) !void {
     // bundled default used, so the primary is never left alone.
     var fallbacks: std.ArrayList(ResolvedFont) = .empty;
     for (font_cfg.fallbacks) |f| {
-        if (resolveFontFile(arena, alloc, io, asset_dir, f, config.font_fallback_default)) |r| try fallbacks.append(arena, r);
+        if (resolveFontFile(arena, alloc, io, init.environ_map, asset_dir, f, config.font_fallback_default)) |r| try fallbacks.append(arena, r);
     }
     if (fallbacks.items.len == 0) try fallbacks.append(arena, .{ .path = try bundledAssetPath(arena, asset_dir, config.font_fallback_default) });
     if (host_cfg.grid.cols) |v| geometry.grid_cols = v;
@@ -477,7 +479,7 @@ pub fn main(init: std.process.Init) !void {
         std.log.warn("could not add powerline symbols font '{s}': {t}", .{ powerline_symbols_path, err });
     };
 
-    if (appRunner.engine.defaultFontAtlas()) |atlas| setUpColorEmoji(arena, alloc, io, atlas, font_cfg.emoji);
+    if (appRunner.engine.defaultFontAtlas()) |atlas| setUpColorEmoji(arena, alloc, io, init.environ_map, atlas, font_cfg.emoji);
 
     // `GLYPHWIRE_KEY_DEBUG=1`: log every raw SDL key event, mapped or
     // not. For working out what a keyboard actually reports -- an Insert

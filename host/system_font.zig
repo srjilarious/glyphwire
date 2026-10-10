@@ -122,10 +122,20 @@ fn normalizeName(buf: []u8, name: []const u8) ?[]const u8 {
 /// error: a system-font lookup that can't be made is just "not found", and
 /// `host/main.zig` falls back to the bundled default face for the slot.
 /// `arena` owns the returned path (process-lifetime); `gpa` is transient
-/// (the `fc-match` output buffers).
-pub fn resolve(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, request: []const u8) ?Match {
+/// (the `fc-match` output buffers). `environ_map` is passed to the child
+/// explicitly: once SDL has a Wayland window it `unsetenv`s
+/// `XDG_ACTIVATION_TOKEN`, which leaves std's startup copy of the process
+/// environment ending in a NULL that a default spawn would read.
+pub fn resolve(
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+    request: []const u8,
+) ?Match {
     const res = std.process.run(gpa, io, .{
         .argv = &.{ "fc-match", "-f", output_format, request },
+        .environ_map = environ_map,
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
     }) catch |err| {
