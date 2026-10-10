@@ -96,6 +96,7 @@ const Apply = struct {
         if (strField(lua, arena, "font_face")) |v| cfg.font.face = v;
         if (strField(lua, arena, "font_face_name")) |v| cfg.font.face_name = v;
         if (readFallbacks(lua, arena)) |v| cfg.font.fallbacks = v;
+        if (conf.boolean(lua, "font_emoji")) |v| cfg.font.emoji = v;
         if (conf.number(lua, f32, "font_size", .{ .min = config.min_font_size, .max = config.max_font_size })) |v| cfg.font.size = v;
 
         if (strField(lua, arena, "icon_theme")) |v| cfg.icon_theme = v;

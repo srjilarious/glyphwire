@@ -36,6 +36,8 @@ pub const FontMetrics = textMod.FontMetrics;
 pub const measureFontFile = textMod.measureFontFile;
 pub const measureFontFileIndexed = textMod.measureFontFileIndexed;
 pub const findFaceIndexByName = textMod.findFaceIndexByName;
+pub const ColorAtlas = @import("./renderer/color_atlas.zig").ColorAtlas;
+pub const color_font = @import("./renderer/color_font.zig");
 
 pub const QuadBatch = quad_batch.QuadBatch;
 pub const StaticQuadBatch = quad_batch.StaticQuadBatch;

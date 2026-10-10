@@ -129,19 +129,19 @@ pub fn resolve(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, req
         .stdout_limit = .limited(64 * 1024),
         .stderr_limit = .limited(64 * 1024),
     }) catch |err| {
-        std.log.warn("glyphwire-host: fc-match for font '{s}' could not run ({t}); using the bundled default", .{ request, err });
+        std.log.warn("glyphwire-host: fc-match for font '{s}' could not run ({t})", .{ request, err });
         return null;
     };
     defer gpa.free(res.stdout);
     defer gpa.free(res.stderr);
 
     if (!res.term.success()) {
-        std.log.warn("glyphwire-host: fc-match for font '{s}' {f}; using the bundled default", .{ request, res.term });
+        std.log.warn("glyphwire-host: fc-match for font '{s}' {f}", .{ request, res.term });
         return null;
     }
 
     const raw = parseFcMatchOutput(res.stdout) orelse {
-        std.log.warn("glyphwire-host: couldn't parse fc-match output for font '{s}'; using the bundled default", .{request});
+        std.log.warn("glyphwire-host: couldn't parse fc-match output for font '{s}'", .{request});
         return null;
     };
 

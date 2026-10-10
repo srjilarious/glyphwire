@@ -9,6 +9,8 @@ pub const stb_tt = @import("stb_truetype");
 
 const common = @import("../common.zig");
 const textures = @import("./textures.zig");
+const color_font = @import("./color_font.zig");
+const ColorAtlas = @import("./color_atlas.zig").ColorAtlas;
 
 const Vec2I = common.Vec2I;
 const Vec2U = common.Vec2U;
@@ -229,6 +231,12 @@ pub const FontAtlas = struct {
 
     font_size: f32,
     alloc: std.mem.Allocator,
+    /// The colour emoji companion, when a colour bitmap font was added as
+    /// a fallback (`addFallbackFaceFromData`). Its own RGBA texture, drawn
+    /// untinted; which glyphs come from it is the caller's call (the host
+    /// follows Unicode emoji presentation). Follows `setFontSize` and
+    /// `cloneAtSize`.
+    color: ?ColorAtlas = null,
 
     const initial_dim: i32 = 1024;
     const max_dim: i32 = 8192;
@@ -240,6 +248,14 @@ pub const FontAtlas = struct {
         if (self.chars.get(char)) |c| return c;
         self.ensureBlock(char >> 8) catch {};
         return self.chars.get(char) orelse self.notdefOrNull();
+    }
+
+    /// Whether some text face really has `cp` -- as opposed to `getChar`
+    /// answering with the tofu box. Packs `cp`'s block if it wasn't yet.
+    pub fn hasGlyph(self: *FontAtlas, cp: u32) bool {
+        if (self.chars.contains(cp)) return true;
+        self.ensureBlock(cp >> 8) catch {};
+        return self.chars.contains(cp);
     }
 
     fn notdefOrNull(self: *FontAtlas) ?Character {
@@ -470,7 +486,10 @@ pub const FontAtlas = struct {
             try faces.append(alloc, try FontFace.init(f.data, false, f.face_index, fontSize));
         }
 
-        return finishInit(faces, fontSize, alloc);
+        var clone = try finishInit(faces, fontSize, alloc);
+        errdefer clone.deinit();
+        if (self.color) |*c| clone.color = try c.cloneAtSize(fontSize, alloc);
+        return clone;
     }
 
     /// Shared tail of `initFromOwnedData`/`cloneAtSize`: given an already
@@ -570,7 +589,17 @@ pub const FontAtlas = struct {
     /// (and any earlier fallback) lacks are then filled from this face on
     /// their next use. Already-packed glyphs are kept; only previously
     /// missing codepoints get re-tried.
+    ///
+    /// A colour bitmap font (CBDT/CBLC, `color_font.isColorFont`) becomes
+    /// `color` instead -- stb_truetype can't open one -- and only one is
+    /// kept: a second is `error.ColorFontAlreadySet`.
     pub fn addFallbackFaceFromData(self: *FontAtlas, fontData: []const u8, faceIndex: i32) !void {
+        if (faceIndex >= 0 and color_font.isColorFont(fontData, @intCast(faceIndex))) {
+            if (self.color != null) return error.ColorFontAlreadySet;
+            const data = try self.alloc.dupe(u8, fontData);
+            self.color = try ColorAtlas.init(data, true, @intCast(faceIndex), self.font_size, self.alloc);
+            return;
+        }
         const owned = try self.alloc.dupe(u8, fontData);
         errdefer self.alloc.free(owned);
         const face = try FontFace.init(owned, true, faceIndex, self.font_size);
@@ -605,6 +634,7 @@ pub const FontAtlas = struct {
             f.scale = stb_tt.c.stbtt_ScaleForPixelHeight(&f.info, size_px);
         }
         self.font_size = size_px;
+        if (self.color) |*c| c.setFontSize(size_px);
 
         // Re-measure the baseline for the new pixel size before any glyph
         // is packed -- it comes from the face's vmetrics, not from glyphs.
@@ -751,5 +781,6 @@ pub const FontAtlas = struct {
         for (self.faces.items) |*f| f.deinit(self.alloc);
         self.faces.deinit(self.alloc);
         self.alloc.free(self.pixels);
+        if (self.color) |*c| c.deinit();
     }
 };

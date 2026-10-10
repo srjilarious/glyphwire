@@ -10,6 +10,7 @@ pub const config_load = @import("config_load.zig");
 pub const dividers = @import("dividers.zig");
 pub const window_title = @import("window_title.zig");
 pub const system_font = @import("system_font.zig");
+pub const emoji = @import("emoji.zig");
 pub const key_repeat = @import("key_repeat.zig");
 pub const redraw = @import("redraw.zig");
 pub const profiler = @import("profiler.zig");

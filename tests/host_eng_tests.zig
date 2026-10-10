@@ -480,3 +480,81 @@ pub fn keyRepeatClearDropsPendingRepeatTest(_: std.Io, _: std.mem.Allocator) !vo
     kb.tickRepeats(1000);
     try testz.expectFalse(kb.repeated(.up));
 }
+
+// ─── colour emoji font (CBDT/CBLC) ────────────────────────────────────
+//
+// `tests/data/emoji-subset.ttf` is Noto Color Emoji (OFL) cut down with
+// pyftsubset to U+0031, U+274C, U+2764 and U+1F600: the same index format
+// (1), image format (17), cmap (format 12) and single 109 ppem strike as
+// the full font, in 7 KB.
+
+const color_font = host_eng.renderer.color_font;
+const emoji_subset = @embedFile("data/emoji-subset.ttf");
+
+pub fn colorFontMapsItsCodepointsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const f = try color_font.ColorFont.init(emoji_subset, 0);
+    try testz.expectTrue(f.glyphIndex(0x1F600) != 0);
+    try testz.expectTrue(f.glyphIndex(0x274C) != 0);
+    // A keycap base: the colour font has digits too, which is why the
+    // host needs a presentation rule rather than "colour font first".
+    try testz.expectTrue(f.glyphIndex('1') != 0);
+    try testz.expectEqual(f.glyphIndex('A'), 0);
+    try testz.expectEqual(f.glyphIndex(0x1F680), 0);
+}
+
+pub fn colorFontReadsTheGlyphPngAndMetricsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const f = try color_font.ColorFont.init(emoji_subset, 0);
+    try testz.expectEqual(f.pickStrike(22).?.ppem, 109);
+    // The only strike is used even when it is smaller than asked for.
+    try testz.expectEqual(f.pickStrike(400).?.ppem, 109);
+
+    const g = f.glyphFor(0x1F600, 22).?;
+    try testz.expectEqual(g.ppem, 109);
+    try testz.expectEqual(g.metrics.width, 136);
+    try testz.expectEqual(g.metrics.height, 128);
+    try testz.expectEqual(g.metrics.advance, 136);
+    try testz.expectTrue(std.mem.startsWith(u8, g.png, "\x89PNG\r\n\x1a\n"));
+    try testz.expectTrue(f.glyphFor('A', 22) == null);
+}
+
+pub fn colorFontRejectsOtherDataTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectTrue(color_font.isColorFont(emoji_subset, 0));
+    try testz.expectFalse(color_font.isColorFont("not a font at all", 0));
+    try testz.expectFalse(color_font.isColorFont("", 0));
+}
+
+/// Every prefix of the font is cut-off data: reading it must answer "no
+/// glyph" or refuse the font, never read past the end.
+pub fn colorFontSurvivesTruncatedDataTest(_: std.Io, _: std.mem.Allocator) !void {
+    var len: usize = 0;
+    while (len < emoji_subset.len) : (len += 97) {
+        const f = color_font.ColorFont.init(emoji_subset[0..len], 0) catch continue;
+        _ = f.glyphFor(0x1F600, 22);
+        _ = f.glyphFor('1', 22);
+    }
+}
+
+pub fn downscaleAveragesPremultipliedTest(_: std.Io, _: std.mem.Allocator) !void {
+    // One opaque red pixel among three transparent black ones: a plain
+    // per-channel average would give a dark red; premultiplied, it stays
+    // pure red at a quarter coverage.
+    const src = [_]u8{
+        255, 0, 0, 255, 0, 0, 0, 0,
+        0,   0, 0, 0,   0, 0, 0, 0,
+    };
+    var dst: [4]u8 = undefined;
+    color_font.downscaleRgba(&src, 2, 2, &dst, 1, 1);
+    try testz.expectTrue(std.mem.eql(u8, &dst, &.{ 255, 0, 0, 64 }));
+
+    // A flat colour stays that colour at any size.
+    var flat: [6 * 4 * 4]u8 = undefined;
+    for (0..24) |i| flat[i * 4 ..][0..4].* = .{ 10, 200, 30, 255 };
+    var small: [4 * 2 * 4]u8 = undefined;
+    color_font.downscaleRgba(&flat, 6, 4, &small, 4, 2);
+    for (0..8) |i| try testz.expectTrue(std.mem.eql(u8, small[i * 4 ..][0..4], &.{ 10, 200, 30, 255 }));
+
+    // Fully transparent in, fully transparent out.
+    const clear: [16]u8 = @splat(0);
+    color_font.downscaleRgba(&clear, 2, 2, &dst, 1, 1);
+    try testz.expectTrue(std.mem.eql(u8, &dst, &.{ 0, 0, 0, 0 }));
+}

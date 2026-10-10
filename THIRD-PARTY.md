@@ -49,6 +49,12 @@ terms wherever the package goes.
 | `NotoSansCJK-Regular.ttc` | [Noto CJK](https://github.com/notofonts/noto-cjk) | SIL OFL 1.1 (`NotoSansCJK-LICENSE.txt`) |
 | `PowerlineSymbols-subset.ttf` | [powerline/powerline](https://github.com/powerline/powerline) | MIT — **no license file is currently bundled; see Open items** |
 
+Not installed, test data only: `tests/data/emoji-subset.ttf`, four glyphs
+of [Noto Color Emoji](https://github.com/googlefonts/noto-emoji) cut out
+with `pyftsubset` for the colour emoji font reader's tests. SIL OFL 1.1
+(`tests/data/emoji-subset-LICENSE.txt`). The host reads the full font from
+the system at runtime; glyphwire doesn't bundle it.
+
 ### Icons
 
 | Directory | Source | License |

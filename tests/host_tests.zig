@@ -332,6 +332,43 @@ pub fn fontFallbackTakesOneFontOrAListTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqualStr(empty.font.fallbacks[0], config.font_fallback_default);
 }
 
+pub fn fontEmojiDefaultsOnTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testz.expectTrue(hs.config_load.parseSource(arena, alloc, "config = {}").font.emoji);
+    try testz.expectFalse(hs.config_load.parseSource(arena, alloc, "config = { font_emoji = false }").font.emoji);
+}
+
+// ─── emoji presentation ──────────────────────────────────────────────
+
+pub fn emojiPresentationDefaultsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const p = hs.emoji.prefersColor;
+    // Emoji by default: the two-cell ones.
+    try testz.expectTrue(p(0x1F600, null)); // 😀
+    try testz.expectTrue(p(0x274C, null)); // ❌
+    try testz.expectTrue(p(0x1F680, null)); // 🚀
+    // Text by default, though emoji fonts have them.
+    try testz.expectFalse(p('1', null));
+    try testz.expectFalse(p('#', null));
+    try testz.expectFalse(p(0x00A9, null)); // ©
+    try testz.expectFalse(p(0x2764, null)); // ❤
+    // Wide, in emoji fonts, and still text by default.
+    try testz.expectFalse(p(0x3030, null)); // 〰
+    try testz.expectFalse(p(0x1F202, null)); // 🈂
+}
+
+pub fn emojiVariationSelectorsOverrideTest(_: std.Io, _: std.mem.Allocator) !void {
+    const p = hs.emoji.prefersColor;
+    try testz.expectTrue(p(0x2764, hs.emoji.vs16)); // ❤️
+    try testz.expectTrue(p('1', hs.emoji.vs16)); // the keycap base
+    try testz.expectFalse(p(0x1F600, hs.emoji.vs15)); // 😀︎
+    // Anything else after it changes nothing.
+    try testz.expectTrue(p(0x1F600, 0x1F3FB)); // a skin tone
+    try testz.expectTrue(hs.emoji.isVariationSelector(0xFE0F));
+    try testz.expectFalse(hs.emoji.isVariationSelector(0x200D));
+}
+
 // ─── system_font (fc-match parsing / match judging) ──────────────────
 
 pub fn fcMatchOutputParsesFourFieldsTest(_: std.Io, _: std.mem.Allocator) !void {

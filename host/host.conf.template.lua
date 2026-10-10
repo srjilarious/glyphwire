@@ -54,9 +54,19 @@
 --     -- name, path, or system family name). One that can't be found is
 --     -- skipped with a warning.
 --     font_fallback = "JetBrainsMono-Regular.ttf",
---     -- A CJK face, then one with symbols such as ❌ (outline fonts
---     -- only; colour emoji fonts like Noto Color Emoji can't be drawn):
+--     -- A CJK face, then one with extra symbols:
 --     -- font_fallback = { "assets/NotoSansCJK-Regular.ttc", "Adwaita Mono" },
+--     -- A colour emoji font (CBDT/CBLC PNG bitmaps, like Noto Color
+--     -- Emoji) may be in the list too; it draws emoji only, see below.
+--
+--     -- Colour emoji. Characters that are emoji by default (😀 ❌ 🚀)
+--     -- and any followed by U+FE0F (❤️) are drawn from a colour emoji
+--     -- font: the one in `font_fallback`, or else the system's own
+--     -- (fontconfig's "emoji"). Digits, © and the like stay text. Only
+--     -- CBDT/CBLC fonts are read, and a sequence (a flag, a skin tone, a
+--     -- ZWJ family) shows its first emoji. false keeps emoji in the
+--     -- text fonts.
+--     font_emoji = true,
 --
 --     -- Starting cell size in pixels. Clamped to 8..72. At runtime,
 --     -- Ctrl+- / Ctrl++ step it by 2 and Ctrl+0 returns to this value.

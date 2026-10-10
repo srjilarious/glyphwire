@@ -68,6 +68,10 @@ pub const FontConfig = struct {
     /// `font_fallback = {}` keeps the default rather than leaving the
     /// primary on its own.
     fallbacks: []const [:0]const u8 = &.{font_fallback_default},
+    /// `font_emoji`: colour emoji, from a colour bitmap font in
+    /// `fallbacks` or else the system's (see `host/main.zig`'s
+    /// `setUpColorEmoji`). False draws emoji from the text fonts only.
+    emoji: bool = true,
     size: f32 = font_size_default,
 };
 

@@ -13,6 +13,7 @@ const shadow_mod = @import("shadow.zig");
 const scroll = @import("scroll.zig");
 const selection = @import("selection.zig");
 const preedit_mod = @import("preedit.zig");
+const emoji = @import("emoji.zig");
 const modal_list = @import("modal_list.zig");
 
 const App = app_mod.App;
@@ -179,6 +180,11 @@ pub const LayerBatches = struct {
     icon_fallback: std.ArrayList(TexBatch) = .empty,
     /// `text_scale != .x1` glyphs -- see `ScaledTextBatch`.
     scaled_text: std.ArrayList(ScaledTextBatch) = .empty,
+    /// Colour emoji (`FontAtlas.color`), untinted like the icons. One
+    /// batch per text scale in use, keyed by `@intFromEnum(TextScale)`:
+    /// each scale's atlas has its own colour texture. Created on a
+    /// layer's first emoji, so a layer without one has none.
+    emoji: std.ArrayList(TexBatch) = .empty,
 
     fn init(
         alloc: std.mem.Allocator,
@@ -228,6 +234,8 @@ pub const LayerBatches = struct {
         self.icon_fallback.deinit(alloc);
         for (self.scaled_text.items) |*t| t.batch.deinit();
         self.scaled_text.deinit(alloc);
+        for (self.emoji.items) |*t| t.batch.deinit();
+        self.emoji.deinit(alloc);
     }
 };
 
@@ -1014,6 +1022,8 @@ pub const Renderer = struct {
         lb.icon_fallback.clearRetainingCapacity();
         for (lb.scaled_text.items) |*t| t.batch.deinit();
         lb.scaled_text.clearRetainingCapacity();
+        for (lb.emoji.items) |*t| t.batch.deinit();
+        lb.emoji.clearRetainingCapacity();
 
         lb.base.beginBuild({});
         lb.color_bg.beginBuild({});
@@ -1052,31 +1062,23 @@ pub const Renderer = struct {
                     const g = c.grapheme();
                     if (g.len == 0) continue;
                     if (c.text_scale == .x1) {
-                        f.loadBlocksForText(g);
+                        loadCellGlyphs(f, g);
                     } else if (self.atlasForScale(f, c.text_scale)) |sa| {
                         // A different, dedicated atlas (`atlasForScale`)
                         // -- see `DeferredScaledGlyph`'s doc comment.
-                        sa.loadBlocksForText(g);
+                        loadCellGlyphs(sa, g);
                     }
                 }
             }
-            const grew = f.grew_since_upload;
-            f.commitTexture();
-            if (grew) self.text_epoch +%= 1;
+            if (commitAtlas(f)) self.text_epoch +%= 1;
             if (self.scaled_atlas_1_5x) |*a| {
-                const grew_s = a.grew_since_upload;
-                a.commitTexture();
-                if (grew_s) self.text_epoch +%= 1;
+                if (commitAtlas(a)) self.text_epoch +%= 1;
             }
             if (self.scaled_atlas_2x) |*a| {
-                const grew_s = a.grew_since_upload;
-                a.commitTexture();
-                if (grew_s) self.text_epoch +%= 1;
+                if (commitAtlas(a)) self.text_epoch +%= 1;
             }
             if (self.scaled_atlas_3x) |*a| {
-                const grew_s = a.grew_since_upload;
-                a.commitTexture();
-                if (grew_s) self.text_epoch +%= 1;
+                if (commitAtlas(a)) self.text_epoch +%= 1;
             }
         }
 
@@ -1178,7 +1180,7 @@ pub const Renderer = struct {
                         const fg = th.resolve(c.style.fg);
                         const color = fade(host_eng.Color.from(fg.r, fg.g, fg.b, fg.a), alpha);
                         if (c.text_scale == .x1) {
-                            emitGlyphs(&lb.text, f, g, px, py, color);
+                            if (!self.emitEmoji(lb, f, .x1, g, px, py)) emitGlyphs(&lb.text, f, g, px, py, color);
                         } else {
                             var dg: DeferredScaledGlyph = .{
                                 .grapheme_bytes = undefined,
@@ -1212,6 +1214,7 @@ pub const Renderer = struct {
         if (fa) |f| {
             for (self.deferred_scaled_text.items) |d| {
                 const sa = self.atlasForScale(f, d.scale) orelse continue;
+                if (self.emitEmoji(lb, sa, d.scale, d.grapheme(), d.pos.x, d.pos.y)) continue;
                 const batch = self.scaledTextBatchFor(lb, d.scale, &sa.texture) orelse continue;
                 emitGlyphs(batch, sa, d.grapheme(), d.pos.x, d.pos.y, d.color);
             }
@@ -1342,6 +1345,7 @@ pub const Renderer = struct {
         for (lb.shadow.items) |*t| t.batch.endBuild();
         for (lb.icon_fallback.items) |*t| t.batch.endBuild();
         for (lb.scaled_text.items) |*t| t.batch.endBuild();
+        for (lb.emoji.items) |*t| t.batch.endBuild();
     }
 
     /// Emits a layer's drop shadow around its `w x h` pixel rect at
@@ -1620,6 +1624,9 @@ pub const Renderer = struct {
         var curr_x = px;
         var it = (std.unicode.Utf8View.initUnchecked(text)).iterator();
         while (it.nextCodepoint()) |cp| {
+            // A presentation choice, not a glyph: a text font without one
+            // would draw its tofu box.
+            if (emoji.isVariationSelector(cp)) continue;
             const cd = atlas.getChar(@intCast(cp)) orelse continue;
             if (cd.size.x > 0 and cd.size.y > 0) {
                 const dest = host_eng.RectF.fromPosSize(curr_x + cd.bearing.x, pos_y - cd.bearing.y, cd.size.x, cd.size.y);
@@ -1627,6 +1634,83 @@ pub const Renderer = struct {
             }
             curr_x += cd.advance;
         }
+    }
+
+    /// The codepoint to draw from `atlas`'s colour emoji font for a cell
+    /// holding grapheme `g`, or null to draw it as text. The grapheme's
+    /// first codepoint decides, with the one after it as its variation
+    /// selector (`emoji.prefersColor`); a colour glyph also stands in for
+    /// a codepoint no text font has, rather than the tofu box.
+    fn colorGlyphFor(atlas: *host_eng.renderer.FontAtlas, g: []const u8) ?u21 {
+        const color = &(atlas.color orelse return null);
+        var it = (std.unicode.Utf8View.initUnchecked(g)).iterator();
+        const cp = it.nextCodepoint() orelse return null;
+        if (!color.has(cp)) return null;
+        if (emoji.prefersColor(cp, it.nextCodepoint())) return cp;
+        return if (atlas.hasGlyph(cp)) null else cp;
+    }
+
+    /// Phase 1's packing for one cell: its colour glyph when it is drawn
+    /// as one (`colorGlyphFor`), else -- or when the colour glyph can't be
+    /// packed -- the text blocks it touches.
+    fn loadCellGlyphs(atlas: *host_eng.renderer.FontAtlas, g: []const u8) void {
+        if (colorGlyphFor(atlas, g)) |cp| {
+            if (atlas.color.?.getChar(cp) != null) return;
+        }
+        atlas.loadBlocksForText(g);
+    }
+
+    /// Uploads what phase 1 packed into `atlas` and its colour companion.
+    /// True when either texture grew, which moves every UV into it.
+    fn commitAtlas(atlas: *host_eng.renderer.FontAtlas) bool {
+        var grew = atlas.grew_since_upload;
+        atlas.commitTexture();
+        if (atlas.color) |*c| {
+            grew = grew or c.grew_since_upload;
+            c.commitTexture();
+        }
+        return grew;
+    }
+
+    /// Draws grapheme `g` as a colour emoji at cell `(px, py)` when it is
+    /// one (`colorGlyphFor`), into the layer's emoji batch for `scale`.
+    /// False leaves the cell to `emitGlyphs`.
+    ///
+    /// Only the first codepoint is drawn: a ZWJ family, a flag or a skin
+    /// tone shows its base emoji, since the ligature glyphs for whole
+    /// sequences need GSUB shaping. The glyph is fitted, aspect kept and
+    /// never enlarged, into the cells the grapheme spans (`scale` times
+    /// over for scaled text) and centred there, rather than placed by its
+    /// bitmap bearings: a strike's metrics are for a proportional line,
+    /// and a cell grid wants every emoji in the same box.
+    fn emitEmoji(
+        self: *Renderer,
+        lb: *LayerBatches,
+        atlas: *host_eng.renderer.FontAtlas,
+        scale: glyphwire.TextScale,
+        g: []const u8,
+        px: i32,
+        py: i32,
+    ) bool {
+        const cp = colorGlyphFor(atlas, g) orelse return false;
+        const color = &atlas.color.?;
+        const cd = color.getChar(cp) orelse return false;
+        if (cd.size.x <= 0 or cd.size.y <= 0) return false;
+        const batch = self.texBatchFor(&lb.emoji, @intFromEnum(scale), &color.texture) orelse return true;
+
+        const factor = textScaleFactor(scale);
+        const cols: f32 = @floatFromInt(std.math.clamp(glyphwire.stringWidth(g), 1, 2));
+        const box_w = cols * @as(f32, @floatFromInt(geometry.cell_w)) * factor;
+        const box_h = @as(f32, @floatFromInt(geometry.cell_h)) * factor;
+        const w: f32 = @floatFromInt(cd.size.x);
+        const h: f32 = @floatFromInt(cd.size.y);
+        const fit = @min(1.0, @min(box_w / w, box_h / h));
+        const dw = w * fit;
+        const dh = h * fit;
+        const x = @as(f32, @floatFromInt(px)) + (box_w - dw) / 2;
+        const y = @as(f32, @floatFromInt(py)) + (box_h - dh) / 2;
+        addSprite(batch, .{ .l = x, .t = y, .r = x + dw, .b = y + dh }, cd.coords);
+        return true;
     }
 
     /// `Cell.text_scale`'s pixel multiplier against the default atlas's
@@ -1712,6 +1796,9 @@ pub const Renderer = struct {
         // Already-`fade`d per-vertex, same as `lb.text` -- plain, not
         // tinted.
         for (lb.scaled_text.items) |*t| self.drawBatch(&t.batch, mvp);
+        // No colour channel to fade, so the opacity goes in as the tint,
+        // as for the icons.
+        for (lb.emoji.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
         // Underlines over the glyphs they belong to -- see the field's doc
         // comment -- but under `create_rect`'s overlay rects, which are
         // the layer's topmost thing by contract.

@@ -162,6 +162,44 @@ fn resolveFontFile(
     return null;
 }
 
+/// Colour emoji (`FontAtlas.color`, drawn per `host/emoji.zig`). A colour
+/// bitmap font named in `font_fallback` is already in place by now; with
+/// none there, the system's own emoji font is asked of fontconfig
+/// (`emoji`, Noto Color Emoji on most Linux desktops) and added if it is
+/// one the host can draw. A non-colour answer (Symbola, say) is left out:
+/// nobody asked for it as a fallback. `font_emoji = false` turns it all
+/// off, a colour font in the fallback list included.
+fn setUpColorEmoji(
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    atlas: *host_eng.renderer.FontAtlas,
+    enabled: bool,
+) void {
+    if (!enabled) {
+        if (atlas.color) |*c| c.deinit();
+        atlas.color = null;
+        return;
+    }
+    if (atlas.color != null) return;
+
+    const found = system_font.resolve(arena, gpa, io, "emoji") orelse return;
+    const data = std.Io.Dir.cwd().readFileAlloc(io, found.path, gpa, .unlimited) catch |err| {
+        std.log.warn("glyphwire-host: emoji font '{s}' could not be read: {t}", .{ found.path, err });
+        return;
+    };
+    defer gpa.free(data);
+    if (!host_eng.renderer.color_font.isColorFont(data, @intCast(found.index))) {
+        std.log.info("glyphwire-host: system emoji font '{s}' isn't a colour bitmap font; no colour emoji", .{found.path});
+        return;
+    }
+    atlas.addFallbackFaceFromData(data, found.index) catch |err| {
+        std.log.warn("glyphwire-host: emoji font '{s}' could not be loaded: {t}", .{ found.path, err });
+        return;
+    };
+    std.log.info("glyphwire-host: colour emoji from {s}", .{found.path});
+}
+
 /// True when `path` names an existing file reachable from the cwd (an
 /// absolute path included).
 fn fileExists(io: std.Io, path: []const u8) bool {
@@ -438,6 +476,8 @@ pub fn main(init: std.process.Init) !void {
     appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, powerline_symbols_path, 0) catch |err| {
         std.log.warn("could not add powerline symbols font '{s}': {t}", .{ powerline_symbols_path, err });
     };
+
+    if (appRunner.engine.defaultFontAtlas()) |atlas| setUpColorEmoji(arena, alloc, io, atlas, font_cfg.emoji);
 
     // `GLYPHWIRE_KEY_DEBUG=1`: log every raw SDL key event, mapped or
     // not. For working out what a keyboard actually reports -- an Insert
