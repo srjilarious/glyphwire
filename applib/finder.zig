@@ -204,9 +204,11 @@ pub const Finder = struct {
     }
 
     /// Collects `root`'s listing through `walk`, which skips dotfiles and
-    /// `.gitignore`d paths the same way the tree pane does -- what keeps
-    /// `.git/` and `zig-out/` out without the finder knowing what git or
-    /// zig is. Sets `truncated` when `max_files` cut it short.
+    /// `.gitignore`d paths -- what keeps `.git/` and `zig-out/` out
+    /// without the finder knowing what git or zig is. Showing hidden files
+    /// brings the dotfiles back but not the ignored paths, apart from
+    /// linked worktrees and `unignore` globs (`gitignore.Rescue`). Sets
+    /// `truncated` when `max_files` cut it short.
     fn scan(self: *Finder, io: std.Io, root: []const u8) !void {
         const opts: walk.Options = .{ .visible = self.opts.visible, .max_depth = max_depth };
         if (try walk.walk(self.alloc, io, root, opts, self, collect)) self.truncated = true;

@@ -54,6 +54,7 @@ const ls_icons = @import("applib").icons;
 const editor = @import("editor.zig");
 const motion = @import("motion.zig");
 const diskwatch = @import("diskwatch.zig");
+const inotify_mod = @import("inotify.zig");
 const display = @import("display.zig");
 const softwrap = @import("wrap.zig");
 const search = @import("search.zig");
@@ -639,6 +640,10 @@ pub const Slot = struct {
     /// for a modified buffer, so it is reported once, not every poll.
     disk: ?diskwatch.Stamp = null,
     disk_warned: ?diskwatch.Stamp = null,
+    /// The file was on disk and the last check found it gone
+    /// (`diskwatch.gone`): its tab carries `tabs.gone_mark`. Cleared when
+    /// it comes back or a `:w` writes it again.
+    gone: bool = false,
 
     pub fn deinit(self: *Slot, alloc: std.mem.Allocator) void {
         if (self.hl) |*h| h.deinit();
@@ -883,9 +888,18 @@ pub const Ui = struct {
     tab_tip_group: ?*Group = null,
     tab_tip_due: ?std.Io.Clock.Timestamp = null,
     /// When the open files are next stat'ed for outside changes (see
-    /// `checkDisk`). Always armed: it is the one timer that runs with
-    /// nothing else going on.
+    /// `checkDisk`). Under `file_watch = "poll"` always armed, the one
+    /// timer that runs with nothing else going on; under `"inotify"`
+    /// armed `settle_ms` out when the watcher reports a change; under
+    /// `"off"` never.
     disk_check_due: ?std.Io.Clock.Timestamp = null,
+    /// `config.file_watch`, after any fallback (`startFileWatch`).
+    file_watch: diskwatch.Mode = .poll,
+    /// The inotify watcher, under `file_watch = .inotify` only.
+    inotify: ?*inotify_mod.Watcher = null,
+    /// The last check had to skip the tree (`checkTreeDisk`), so under
+    /// inotify the next one is armed without waiting for an event.
+    disk_check_retry: bool = false,
     tab_tip_shown: bool = false,
     /// The context title last sent (`syncTitle`): `zoe` and the focused
     /// buffer's file, which glyphwire-host shows in the window title.
@@ -1237,7 +1251,12 @@ pub const Ui = struct {
         // which builds its own highlighter against what this leaves.
         self.loadConfig(cfg_owned.?, environ);
         cfg_owned = null;
-        if (self.hl_config) |*cfg| self.shell.setPosition(cfg.shell_position, cfg.shell_float_percent, self.winSize());
+        if (self.hl_config) |*cfg| {
+            self.shell.setPosition(cfg.shell_position, cfg.shell_float_percent, self.winSize());
+            // Borrowed from the config's arena, which outlives the tree.
+            self.tree.visible.unignore = cfg.unignore;
+            self.file_watch = cfg.file_watch;
+        }
         self.shell.setFrameStyle(self.th.panelStyle());
         // Best-effort too: a history that can't be read is an empty one.
         self.loadHistories();
@@ -1690,6 +1709,8 @@ pub const Ui = struct {
         // a kill -- bounded, so quitting zoe never waits on a language
         // server that has stopped listening. See `lsp.Server.deinit`.
         if (self.lsp_pool) |*p| p.deinit();
+        // Joined before the listener it wakes goes away.
+        if (self.inotify) |w| w.stop();
         self.diags.deinit();
         if (self.hover) |*h| h.deinit();
         if (self.hover_hl) |*h| h.deinit();
@@ -2356,6 +2377,7 @@ pub const Ui = struct {
     // ── Loop ────────────────────────────────────────────────────────────
 
     pub fn run(self: *Ui) !void {
+        self.startFileWatch();
         while (!self.quit) {
             // The window closed (SIGHUP) or zoe was told to stop: leave
             // the way `:q` would, minus the dirty-buffer guard -- there's
@@ -2402,14 +2424,13 @@ pub const Ui = struct {
             // longer than it has left, so a server that never answers is
             // reported without needing a keystroke to notice.
             //
-            // And the disk check: once a second the open files are
-            // stat'ed for changes made outside zoe (see `checkDisk`), so
-            // an idle zoe wakes on that beat too.
+            // And the disk check: the open files are stat'ed for changes
+            // made outside zoe (see `checkDisk`) once a second when
+            // polling, so an idle zoe wakes on that beat too; or shortly
+            // after inotify reports something, its thread having already
+            // woken this wait (`armDiskCheck`).
             self.armLspChange();
-            if (self.disk_check_due == null) self.disk_check_due = std.Io.Clock.Timestamp.fromNow(self.io, .{
-                .raw = .fromMilliseconds(diskwatch.poll_ms),
-                .clock = .awake,
-            });
+            self.armDiskCheck();
             const timeout: std.Io.Timeout = if (self.nextLspDeadline()) |due|
                 .{ .deadline = due }
             else
@@ -4025,6 +4046,7 @@ pub const Ui = struct {
         try self.buf.ed.loadText(bytes, path);
         self.buf.disk = self.diskStamp(self.buf.ed.path.?);
         self.buf.disk_warned = null;
+        self.buf.gone = false;
         self.selectHighlightLanguage(self.buf, self.buf.ed.path);
         // Wholly different contents: the servers' copy is stale in a way the
         // edit watermark can't express, so force the next flush to send.
@@ -4047,8 +4069,69 @@ pub const Ui = struct {
         return .{ .size = st.size, .mtime_ns = st.mtime.nanoseconds };
     }
 
-    /// Whether the once-a-second disk check has come due. Disarms it, so
-    /// the next loop turn arms the next one.
+    /// Starts the inotify watcher when `file_watch` asks for one. One
+    /// that can't start (not Linux, out of instances) falls back to
+    /// polling and says so, rather than leaving zoe blind to the disk.
+    pub fn startFileWatch(self: *Ui) void {
+        if (self.file_watch != .inotify) return;
+        self.inotify = inotify_mod.Watcher.start(self.alloc, self.listener) catch |err| {
+            self.file_watch = .poll;
+            self.buf.ed.setStatus("file_watch: inotify unavailable ({s}), polling", .{@errorName(err)});
+            self.status_dirty = true;
+            return;
+        };
+    }
+
+    /// Arms the disk check for whatever `file_watch` says wakes it. A
+    /// check already armed is left alone, which under inotify also leaves
+    /// the watcher's flag set: it stops waking the loop until this turn
+    /// comes round again after the check (see `Watcher.takeChanged`).
+    pub fn armDiskCheck(self: *Ui) void {
+        if (self.disk_check_due != null) return;
+        const ms: i64 = switch (self.file_watch) {
+            .off => return,
+            .poll => diskwatch.poll_ms,
+            .inotify => blk: {
+                const w = self.inotify orelse return;
+                self.syncWatches(w);
+                // A tree re-read skipped for an open search or name field
+                // retries on the poller's beat: no event may come to
+                // prompt it otherwise.
+                if (self.disk_check_retry) break :blk diskwatch.poll_ms;
+                if (!w.takeChanged()) return;
+                break :blk diskwatch.settle_ms;
+            },
+        };
+        self.disk_check_due = std.Io.Clock.Timestamp.fromNow(self.io, .{
+            .raw = .fromMilliseconds(ms),
+            .clock = .awake,
+        });
+    }
+
+    /// Points the inotify watches at the directories the disk check
+    /// stats: every open buffer's, and the tree's roots and expanded
+    /// folders. Run every loop turn, which costs a map lookup per
+    /// directory -- cheaper than hooking every place a buffer opens,
+    /// closes or is renamed. A watch that can't be added is skipped (see
+    /// `zoe/inotify.zig`).
+    fn syncWatches(self: *Ui, w: *inotify_mod.Watcher) void {
+        w.begin();
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                const abs = self.slotAbs(slot) orelse continue;
+                const dir = std.fs.path.dirname(abs) orelse continue;
+                w.want(dir) catch {};
+            }
+        }
+        for (self.tree.roots.items) |r| w.want(r.path) catch {};
+        for (self.tree.entries.items) |e| {
+            if (e.is_dir and e.expanded) w.want(e.path) catch {};
+        }
+        w.sweep() catch {};
+    }
+
+    /// Whether the disk check has come due. Disarms it, so the next loop
+    /// turn arms the next one.
     pub fn diskCheckDue(self: *Ui) bool {
         const due = self.disk_check_due orelse return false;
         if (due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() < 0) return false;
@@ -4058,13 +4141,19 @@ pub const Ui = struct {
 
     /// Stats every open buffer's file and follows the ones that changed
     /// outside zoe: a clean buffer reloads in place, a modified one gets
-    /// one W11 warning per change and is otherwise left alone. See
-    /// `zoe/diskwatch.zig` for the rules.
+    /// one W11 warning per change and is otherwise left alone, and one
+    /// whose file is gone marks its tab. See `zoe/diskwatch.zig` for the
+    /// rules.
     pub fn checkDisk(self: *Ui) void {
         for (self.group_list.items) |g| {
             for (g.buffers.items) |slot| {
                 const path = slot.ed.path orelse continue;
                 const current = self.diskStamp(path);
+                const gone = diskwatch.gone(slot.disk, current);
+                if (gone != slot.gone) {
+                    slot.gone = gone;
+                    g.tabs_dirty = true;
+                }
                 switch (diskwatch.decide(slot.disk, slot.disk_warned, current, slot.ed.buf.dirty)) {
                     .none => {},
                     .reload => self.reloadFromDisk(g, slot, current.?),
@@ -4087,9 +4176,10 @@ pub const Ui = struct {
     /// and the cursor's entry (`Tree.changedOnDisk`, `Tree.reload`).
     /// Skipped while a tree search or a name field is up -- both hold row
     /// indices a re-read would shift -- and caught on the next beat once
-    /// they close.
+    /// they close (`disk_check_retry` makes sure there is one).
     pub fn checkTreeDisk(self: *Ui) !void {
-        if (self.find != null or self.tree_edit != null) return;
+        self.disk_check_retry = self.find != null or self.tree_edit != null;
+        if (self.disk_check_retry) return;
         if (!self.tree.changedOnDisk(self.io)) return;
         try self.refreshTree(null);
     }
@@ -4288,8 +4378,11 @@ pub const Ui = struct {
         // now, not an outside change to react to.
         self.buf.disk = self.diskStamp(self.buf.ed.path orelse dest);
         self.buf.disk_warned = null;
+        // A deleted file just came back.
+        self.buf.gone = false;
         self.lspDidSave();
-        // The tab loses its `+`, and a `:w <name>` also renamed it.
+        // The tab loses its `+` (and any deleted mark), and a `:w <name>`
+        // also renamed it.
         self.grp.tabs_dirty = true;
         self.buf.ed.setStatus("\"{s}\" {d}L written", .{ dest, self.buf.ed.buf.lineCount() });
     }

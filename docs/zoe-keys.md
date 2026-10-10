@@ -35,7 +35,7 @@ Ctrl+W, and the completion popup's keys.
 | `save` | Ctrl+S | `:w`, leaving the mode and selection alone |
 | `findFile` | Ctrl+P | Fuzzy file finder |
 | `toggleTree` | Ctrl+N | Show / hide the file tree |
-| `toggleHidden` | Ctrl+H | Dotfiles and `.gitignore`d paths, in the tree and finder |
+| `toggleHidden` | Ctrl+H | Dotfiles and `.gitignore`d paths in the tree; dotfiles only in the finder and `/` search |
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
 | `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |
 | `windowPrefix` | Ctrl+W | Then `v` / `s` split, `q` / `c` close, `w` (or Ctrl+W) next group, `h` `j` `k` `l` / arrows focus, Shift+`H` `J` `K` `L` / Shift+arrows move the tab |
@@ -200,7 +200,19 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 Files changed outside zoe are noticed within about a second. A buffer with
 no unsaved edits reloads in place, keeping its cursor and scroll; one with
 edits is left alone and the status line shows `W11` once per change, so
-`:e!` (take the disk's) or `:w` (keep yours) is a deliberate choice.
+`:e!` (take the disk's) or `:w` (keep yours) is a deliberate choice. A
+file deleted (or moved away) puts ❌ in front of its tab's name and leaves
+the buffer as it was; `:w` writes it back and clears the mark.
+`file_watch` in `zoe.conf.lua` picks what notices: `"poll"` (the default,
+a stat a second), `"inotify"` (Linux, within about 50 ms, idle otherwise)
+or `"off"`.
+
+Ctrl+P and the tree's `/` search skip dotfiles and `.gitignore`d paths.
+Ctrl+H brings the dotfiles back but not the ignored paths, so `.zig-cache/`
+and `.venv/` never bury a search. Git worktrees that live inside the
+folder (say under an ignored `.claude/worktrees/`) are searched anyway,
+under their own `.gitignore`; `unignore = { "vendor/lib" }` in
+`zoe.conf.lua` does the same for any other path.
 
 ### File tree pane
 

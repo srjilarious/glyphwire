@@ -40,8 +40,12 @@ const workspace = zoe.workspace;
 //     \\start and end of the file). Ctrl+N toggles
 //     \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
 //     \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
-//     \\or hides dotfiles and anything .gitignore excludes, everywhere at once
-//     \\-- the tree, its searches and Ctrl+P.
+//     \\or hides dotfiles and anything .gitignore excludes in the tree; in
+//     \\its / search and Ctrl+P it reveals dotfiles only, so .zig-cache and
+//     \\.venv stay out. Git worktrees inside the folder are searched anyway,
+//     \\as are zoe.conf.lua's unignore globs. A tab shows ❌ when its file
+//     \\is deleted on disk; file_watch = "poll" | "inotify" | "off" in
+//     \\zoe.conf.lua picks how zoe notices.
 //     \\
 //     \\In the file tree, j/k/arrows and Page Up/Page Down move and Enter or
 //     \\Space opens. f jumps to the next name starting with what you type; /
@@ -91,8 +95,12 @@ pub fn main(init: std.process.Init) !void {
         \\start and end of the file). Ctrl+N toggles
         \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
         \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
-        \\or hides dotfiles and anything .gitignore excludes, everywhere at once
-        \\-- the tree, its searches and Ctrl+P.
+        \\or hides dotfiles and anything .gitignore excludes in the tree; in
+        \\its / search and Ctrl+P it reveals dotfiles only, so .zig-cache and
+        \\.venv stay out. Git worktrees inside the folder are searched anyway,
+        \\as are zoe.conf.lua's unignore globs. A tab shows ❌ when its file
+        \\is deleted on disk; file_watch = "poll" | "inotify" | "off" in
+        \\zoe.conf.lua picks how zoe notices.
         \\
         \\In the file tree, j/k/arrows and Page Up/Page Down move and Enter or
         \\Space opens. f jumps to the next name starting with what you type; /

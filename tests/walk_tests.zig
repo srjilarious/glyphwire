@@ -112,6 +112,82 @@ pub fn walkShowsHiddenWhenAskedTest(io: std.Io, alloc: std.mem.Allocator) !void 
     try testz.expectTrue(c.has(".hidden"));
 }
 
+/// Hidden shown brings dotfiles back but not ignored paths: a search
+/// buried under `.venv/` or `.zig-cache/` finds nothing.
+pub fn walkKeepsIgnoredPathsOutWithHiddenShownTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc);
+    defer s.deinit();
+    try s.file(".gitignore", ".venv/\nbuild/\n");
+    try s.file(".env", "");
+    try s.file(".venv/lib/x.py", "");
+    try s.file("build/out.bin", "");
+    try s.file("src/main.zig", "");
+
+    var c: Collector = .{ .alloc = alloc };
+    defer c.deinit();
+    _ = try walk.walk(alloc, io, s.path, .{ .visible = .{ .show_hidden = true } }, &c, Collector.add);
+    try testz.expectTrue(c.has(".env"));
+    try testz.expectTrue(c.has(".gitignore"));
+    try testz.expectTrue(c.has("src/main.zig"));
+    try testz.expectTrue(!c.has(".venv/"));
+    try testz.expectTrue(!c.has(".venv/lib/x.py"));
+    try testz.expectTrue(!c.has("build/out.bin"));
+}
+
+/// A linked worktree under an ignored `.claude/` is found, under its own
+/// `.gitignore` only; the rest of `.claude/` stays out.
+pub fn walkFindsLinkedWorktreesUnderAnIgnoredDirTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc);
+    defer s.deinit();
+    const abs = try std.Io.Dir.cwd().realPathFileAlloc(io, s.path, alloc);
+    defer alloc.free(abs);
+    const gitdir = try std.fmt.allocPrint(alloc, "{s}/.claude/worktrees/wt/.git\n", .{abs});
+    defer alloc.free(gitdir);
+
+    // Just enough of a repository for `linkedWorktrees`.
+    try s.file(".git/worktrees/wt/gitdir", gitdir);
+    try s.file(".gitignore", ".claude/\n*.log\n");
+    try s.file("main.zig", "");
+    try s.file(".claude/commands/c.md", "");
+    try s.file(".claude/worktrees/wt/.git", "gitdir: elsewhere\n");
+    try s.file(".claude/worktrees/wt/.gitignore", ".zig-cache/\n");
+    try s.file(".claude/worktrees/wt/src/a.zig", "");
+    try s.file(".claude/worktrees/wt/.zig-cache/o/x", "");
+    // The outer `*.log` doesn't reach into the worktree either.
+    try s.file(".claude/worktrees/wt/run.log", "");
+
+    var c: Collector = .{ .alloc = alloc };
+    defer c.deinit();
+    _ = try walk.walk(alloc, io, s.path, .{ .visible = .{ .show_hidden = true } }, &c, Collector.add);
+    try testz.expectTrue(c.has("main.zig"));
+    try testz.expectTrue(c.has(".claude/worktrees/wt/src/a.zig"));
+    try testz.expectTrue(c.has(".claude/worktrees/wt/run.log"));
+    try testz.expectTrue(!c.has(".claude/worktrees/wt/.zig-cache/o/x"));
+    try testz.expectTrue(!c.has(".claude/commands/c.md"));
+
+    // With hidden files off, `.claude/` is a dotfile like any other.
+    var off: Collector = .{ .alloc = alloc };
+    defer off.deinit();
+    _ = try walk.walk(alloc, io, s.path, .{}, &off, Collector.add);
+    try testz.expectTrue(!off.has(".claude/worktrees/wt/src/a.zig"));
+}
+
+/// `unignore` globs list an ignored directory, and only that one.
+pub fn walkListsUnignoredPathsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc);
+    defer s.deinit();
+    try s.file(".gitignore", "vendor/\n");
+    try s.file("vendor/lib/a.c", "");
+    try s.file("vendor/other/b.c", "");
+
+    var c: Collector = .{ .alloc = alloc };
+    defer c.deinit();
+    const visible: @import("applib").gitignore.Visibility = .{ .unignore = &.{"vendor/lib"} };
+    _ = try walk.walk(alloc, io, s.path, .{ .visible = visible }, &c, Collector.add);
+    try testz.expectTrue(c.has("vendor/lib/a.c"));
+    try testz.expectTrue(!c.has("vendor/other/b.c"));
+}
+
 /// A callback's `.stop` ends the whole walk and is reported back.
 pub fn walkStopsWhenTheCallbackSaysSoTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var s = try Scratch.init(io, alloc);

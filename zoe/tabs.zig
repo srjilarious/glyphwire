@@ -13,7 +13,8 @@
 //! A tab is laid out as
 //!
 //!     ` label × `           and, when the buffer is modified,
-//!     ` label + × `
+//!     ` label + × `         and, when its file was deleted on disk,
+//!     ` ❌ label × `
 //!
 //! with a `│` separator between neighbours. The strip is measured in
 //! *strip* columns, which are pane columns plus the scroll offset: a
@@ -31,12 +32,19 @@ pub const close_glyph = "×";
 pub const separator = "│";
 /// `+` in the tab, matching the statusline's `[+]`.
 pub const dirty_mark = "+";
+/// Leads the label of a buffer whose file is gone from disk
+/// (`diskwatch.gone`). An emoji, so it stands out from the text-only
+/// marks either side of it; drawn in the error colour as well, for a
+/// font that renders it as a plain glyph.
+pub const gone_mark = "❌";
 
 pub const Tab = struct {
     /// What the tab shows -- a path's basename, or `[No Name]`.
     label: []const u8,
     /// Whether the buffer has unsaved changes.
     dirty: bool,
+    /// Whether the buffer's file has been deleted on disk.
+    gone: bool = false,
 };
 
 /// Where one tab landed, in strip columns.
@@ -56,9 +64,12 @@ pub const Hit = struct {
 };
 
 /// The cells one tab occupies: a space either side of the label, the
-/// close box and its own leading space, plus ` +` when modified.
-pub fn tabWidth(label: []const u8, dirty: bool) usize {
-    return 1 + glyphwire.stringWidth(label) + (if (dirty) @as(usize, 2) else 0) + 1 + 1 + 1;
+/// close box and its own leading space, plus ` +` when modified and
+/// `❌ ` when deleted.
+pub fn tabWidth(t: Tab) usize {
+    const gone: usize = if (t.gone) glyphwire.stringWidth(gone_mark) + 1 else 0;
+    const dirty: usize = if (t.dirty) 2 else 0;
+    return 1 + gone + glyphwire.stringWidth(t.label) + dirty + 1 + 1 + 1;
 }
 
 /// Lays `tabs` out left to right into `out` (cleared first) and returns
@@ -71,7 +82,7 @@ pub fn layout(
     out.clearRetainingCapacity();
     var col: usize = 0;
     for (tabs, 0..) |t, i| {
-        const w = tabWidth(t.label, t.dirty);
+        const w = tabWidth(t);
         try out.append(alloc, .{
             .start = col,
             .end = col + w,

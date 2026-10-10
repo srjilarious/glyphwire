@@ -279,15 +279,13 @@ pub const Tree = struct {
     /// Whether a directory the tree is showing has changed on disk since
     /// it was read: the root or any expanded folder gained, lost or
     /// renamed an entry (each of which moves the directory's own mtime),
-    /// or has gone. `zoe/ui.zig` asks on the once-a-second disk check
-    /// and answers yes with a `reload`, which re-reads everything and
-    /// keeps what was open and where the cursor was.
+    /// or has gone. `zoe/ui.zig` asks on the disk check and answers yes
+    /// with a `reload`, which re-reads everything and keeps what was open
+    /// and where the cursor was.
     ///
-    /// Polling the directories already on screen rather than watching
-    /// with inotify, for the reasons `zoe/diskwatch.zig` gives for files:
-    /// a stat per open folder per second costs nothing and works the
-    /// same everywhere. A collapsed folder isn't polled -- opening it
-    /// reads it fresh anyway.
+    /// The same stat whatever wakes the check (`zoe/diskwatch.zig`'s
+    /// `Mode`): under inotify these are also the directories watched. A
+    /// collapsed folder isn't checked -- opening it reads it fresh anyway.
     pub fn changedOnDisk(self: *const Tree, io: std.Io) bool {
         // With headers, each root is an entry and the loop covers it.
         if (!self.multiRoot()) {

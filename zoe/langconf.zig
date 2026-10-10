@@ -10,7 +10,8 @@
 //! an `injections` on/off switch, and
 //! the editor's display options (`page_lines`, `line_numbers`,
 //! `tab_width`, `expand_tab`, `show_whitespace`, `wrap`,
-//! `tab_tooltip_delay_ms`), and `workspace_autosave`.
+//! `tab_tooltip_delay_ms`), `workspace_autosave`, `file_watch` and
+//! `unignore`.
 //! With no file present
 //! zoe runs on the built-in languages, the `default` theme, injection
 //! enabled, and a 4-cell expanding Tab.
@@ -31,6 +32,7 @@ const shellpanel = @import("applib").shellpanel;
 const actions = @import("actions.zig");
 const editor = @import("editor.zig");
 const lsp = @import("lsp.zig");
+const diskwatch = @import("diskwatch.zig");
 
 const Lua = luaconf.Lua;
 
@@ -177,6 +179,16 @@ pub const Config = struct {
     /// `config.shell_float_percent` -- how much of the window a floating
     /// panel takes, each way. Default 80; clamped to 10..100.
     shell_float_percent: u8 = shellpanel.default_float_percent,
+    /// `config.file_watch` -- what notices an open file changing or
+    /// vanishing on disk: `"poll"` (the default, a stat a second),
+    /// `"inotify"` (Linux; poll elsewhere) or `"off"`. See
+    /// `zoe/diskwatch.zig`.
+    file_watch: diskwatch.Mode = .poll,
+    /// `config.unignore` -- globs, relative to a workspace folder, that
+    /// Ctrl+P and the tree's `/` search list even though a `.gitignore`
+    /// excludes them. The repository's own linked worktrees need no entry
+    /// (`gitignore.Rescue`). In the arena.
+    unignore: []const []const u8 = &.{},
     /// `config.lsp.enabled` -- the master switch. False stops every
     /// language server from starting, whatever `lsp_servers` says.
     lsp_enabled: bool = true,
@@ -292,6 +304,8 @@ const Apply = struct {
         if (conf.boolean(lua, "workspace_autosave")) |v| cfg.workspace_autosave = v;
         if (conf.enumValue(lua, shellpanel.Position, "shell_position")) |v| cfg.shell_position = v;
         if (conf.uint(lua, u8, "shell_float_percent", float_percent)) |v| cfg.shell_float_percent = v;
+        if (conf.enumValue(lua, diskwatch.Mode, "file_watch")) |v| cfg.file_watch = v;
+        if (conf.stringList(lua, a, "unignore")) |v| cfg.unignore = v;
         readLsp(lua, a, cfg);
         // Per-mode tables (`global`, `normal`, `visual`, `insert`; see
         // `actions.zig`). `false` binds `.none`, which also hides the

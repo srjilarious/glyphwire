@@ -2894,11 +2894,156 @@ pub fn spanCacheFollowsEditsTest(_: std.Io, alloc: std.mem.Allocator) !void {
 pub fn tabWidthCountsPaddingAndCloseBoxTest(_: std.Io, _: std.mem.Allocator) !void {
     // ` main.zig × ` -- a space either side of the label, the close box
     // and its own leading space.
-    try testz.expectEqual(tabs.tabWidth("main.zig", false), 12);
+    try testz.expectEqual(tabs.tabWidth(.{ .label = "main.zig", .dirty = false }), 12);
     // ` main.zig + × ` -- the modified marker costs two more cells.
-    try testz.expectEqual(tabs.tabWidth("main.zig", true), 14);
+    try testz.expectEqual(tabs.tabWidth(.{ .label = "main.zig", .dirty = true }), 14);
     // Measured in display columns, so a double-width label is 2 a glyph.
-    try testz.expectEqual(tabs.tabWidth("\u{65e5}\u{672c}", false), 8);
+    try testz.expectEqual(tabs.tabWidth(.{ .label = "\u{65e5}\u{672c}", .dirty = false }), 8);
+}
+
+pub fn tabWidthCountsTheDeletedMarkTest(_: std.Io, _: std.mem.Allocator) !void {
+    // ` ❌ main.zig × ` -- the emoji is two cells, plus its own space.
+    try testz.expectEqual(tabs.tabWidth(.{ .label = "main.zig", .dirty = false, .gone = true }), 15);
+    // ` ❌ main.zig + × ` -- and the two marks stack.
+    try testz.expectEqual(tabs.tabWidth(.{ .label = "main.zig", .dirty = true, .gone = true }), 17);
+}
+
+pub fn tabLayoutKeepsTheCloseBoxAfterTheDeletedMarkTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var spans: std.ArrayList(tabs.Span) = .empty;
+    defer spans.deinit(alloc);
+    _ = try tabs.layout(alloc, &.{
+        .{ .label = "a", .dirty = false, .gone = true },
+        .{ .label = "b", .dirty = false },
+    }, &spans);
+    // ` ❌ a × ` is 8 wide; the close box one in from its right edge.
+    try testz.expectEqual(spans.items[0].end, 8);
+    try testz.expectEqual(spans.items[0].close, 6);
+    try testz.expectEqual(tabs.hit(spans.items, 6).?.close, true);
+    // The mark itself is the tab body, not the close box.
+    try testz.expectEqual(tabs.hit(spans.items, 1).?.close, false);
+}
+
+// ─── Disk watch: deletion ──────────────────────────────────────────────
+
+pub fn diskwatchGoneNeedsAFileThatWasThereTest(_: std.Io, _: std.mem.Allocator) !void {
+    const s: zoe.diskwatch.Stamp = .{ .size = 1, .mtime_ns = 1 };
+    try testz.expectTrue(zoe.diskwatch.gone(s, null));
+    try testz.expectTrue(!zoe.diskwatch.gone(s, s));
+    // A `[New]` buffer was never on disk: nothing was deleted.
+    try testz.expectTrue(!zoe.diskwatch.gone(null, null));
+    // And a deleted file is otherwise left alone, not reloaded.
+    try testz.expectEqual(zoe.diskwatch.decide(s, null, null, false), .none);
+}
+
+pub fn fileWatchAndUnignoreConfigTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    {
+        var cfg = try parseConf(alloc, "config = {}");
+        defer cfg.deinit();
+        try testz.expectEqual(cfg.file_watch, .poll);
+        try testz.expectEqual(cfg.unignore.len, 0);
+    }
+    {
+        var cfg = try parseConf(alloc,
+            \\config = { file_watch = "inotify", unignore = { ".claude/worktrees", "vendor/*" } }
+        );
+        defer cfg.deinit();
+        try testz.expectEqual(cfg.file_watch, .inotify);
+        try testz.expectEqual(cfg.unignore.len, 2);
+        try testz.expectEqualStr(".claude/worktrees", cfg.unignore[0]);
+    }
+    {
+        var cfg = try parseConf(alloc, "config = { file_watch = \"off\" }");
+        defer cfg.deinit();
+        try testz.expectEqual(cfg.file_watch, .off);
+    }
+}
+
+/// The inotify watcher wakes on a deletion in a watched directory, and
+/// stops seeing one it has swept away.
+pub fn inotifyWatcherReportsADeletionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (@import("builtin").os.tag != .linux) return;
+    const dir = try std.fmt.allocPrint(alloc, "inotify-test-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(dir);
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const file = try std.fs.path.join(alloc, &.{ dir, "a.txt" });
+    defer alloc.free(file);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = "x" });
+
+    const w = try zoe.inotify.Watcher.start(alloc, null);
+    defer w.stop();
+    w.begin();
+    try w.want(dir);
+    try w.sweep();
+    try testz.expectEqual(w.dirs.count(), 1);
+    try testz.expectTrue(!w.takeChanged());
+
+    try std.Io.Dir.cwd().deleteFile(io, file);
+    var seen = false;
+    for (0..200) |_| {
+        if (w.takeChanged()) {
+            seen = true;
+            break;
+        }
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    try testz.expectTrue(seen);
+
+    // A sync that no longer wants it drops the watch.
+    w.begin();
+    try w.sweep();
+    try testz.expectEqual(w.dirs.count(), 0);
+}
+
+pub fn rescueMatchesWorktreesAndGlobsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const gi = zoe.gitignore;
+    var wts = try alloc.alloc([]u8, 1);
+    wts[0] = try alloc.dupe(u8, ".claude/worktrees/x");
+    var r: gi.Rescue = .{ .worktrees = wts, .globs = &.{ "/vendor/lib/", "gen/**/keep" } };
+    defer r.deinit(alloc);
+
+    try testz.expectTrue(r.rescues(".claude/worktrees/x"));
+    try testz.expectTrue(!r.rescues(".claude/worktrees"));
+    try testz.expectTrue(!r.rescues(".claude/worktrees/x/src"));
+    try testz.expectTrue(r.leadsTo(".claude"));
+    try testz.expectTrue(r.leadsTo(".claude/worktrees"));
+    try testz.expectTrue(!r.leadsTo(".claude/commands"));
+    try testz.expectTrue(!r.leadsTo(".claude/worktrees/x"));
+
+    // Globs: slashes either end are dropped, and match the whole path.
+    try testz.expectTrue(r.rescues("vendor/lib"));
+    try testz.expectTrue(!r.rescues("vendor"));
+    try testz.expectTrue(r.leadsTo("vendor"));
+    try testz.expectTrue(!r.leadsTo("other"));
+    // `**` stands for any depth, so everything under `gen` leads there.
+    try testz.expectTrue(r.leadsTo("gen"));
+    try testz.expectTrue(r.leadsTo("gen/a/b"));
+    try testz.expectTrue(r.rescues("gen/a/b/keep"));
+}
+
+/// Hidden shown: a search reveals a dotfile but not an ignored path; a
+/// rescued one is listed and walked under its own ignore files only.
+pub fn searchFindsSkipsIgnoredEvenWithHiddenShownTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const gi = zoe.gitignore;
+    var s = try ignoreStack(alloc, "", ".venv/\n.claude/\n");
+    defer s.deinit();
+    const r: gi.Rescue = .{ .globs = &.{".claude/keep"} };
+    const shown: gi.Visibility = .{ .show_hidden = true };
+    const hidden: gi.Visibility = .{};
+
+    try testz.expectEqual(shown.searchFinds(&s, &r, ".env", ".env", false), .list);
+    try testz.expectEqual(hidden.searchFinds(&s, &r, ".env", ".env", false), .skip);
+    try testz.expectEqual(shown.searchFinds(&s, &r, ".venv", ".venv", true), .skip);
+    try testz.expectEqual(shown.searchFinds(&s, &r, ".claude", ".claude", true), .list);
+    try testz.expectEqual(shown.searchFinds(&s, &r, "other", ".claude/other", true), .skip);
+    try testz.expectEqual(shown.searchFinds(&s, &r, "keep", ".claude/keep", true), .fresh);
+    // Showing hidden files is still what lets a dot-directory in at all.
+    try testz.expectEqual(hidden.searchFinds(&s, &r, ".claude", ".claude", true), .skip);
+
+    // Inside the rescued directory the outer `.claude/` no longer applies.
+    s.base = s.frames.items.len;
+    try testz.expectTrue(!s.isIgnored(".claude/keep/src/a.zig", false));
 }
 
 pub fn tabLayoutPlacesSpansAndSeparatorsTest(_: std.Io, alloc: std.mem.Allocator) !void {

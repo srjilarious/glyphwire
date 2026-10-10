@@ -10,9 +10,14 @@
 //! the way out, so a nested one is in scope for exactly its own subtree.
 //! A path the caller's `Visibility` hides is skipped, and a hidden
 //! directory is not walked either, which is most of what makes the walk
-//! cheap on a tree that has been built (`zig-out/`, `.git/`). A directory
-//! that can't be read is skipped rather than failing the walk: an
-//! unreadable folder reads as an empty one.
+//! cheap on a tree that has been built (`zig-out/`, `.git/`). An ignored
+//! path stays skipped with hidden files shown, too: this is a search, and
+//! `.zig-cache/` or `.venv/` would drown it
+//! (`gitignore.Visibility.searchFinds`). The exceptions are the
+//! repository's linked worktrees and the config's `unignore` globs
+//! (`gitignore.Rescue`), each walked under its own ignore files only. A
+//! directory that can't be read is skipped rather than failing the walk:
+//! an unreadable folder reads as an empty one.
 
 const std = @import("std");
 const gitignore = @import("gitignore.zig");
@@ -55,12 +60,18 @@ pub fn walk(
 ) !bool {
     var ignores: gitignore.Stack = .{ .alloc = alloc };
     defer ignores.deinit();
+    var rescue: gitignore.Rescue = .{
+        .worktrees = try gitignore.linkedWorktrees(alloc, io, root),
+        .globs = opts.visible.unignore,
+    };
+    defer rescue.deinit(alloc);
     var w: Walker(@TypeOf(ctx), onEntry) = .{
         .alloc = alloc,
         .io = io,
         .opts = opts,
         .ctx = ctx,
         .ignores = &ignores,
+        .rescue = &rescue,
     };
     defer w.dir.deinit(alloc);
     defer w.rel.deinit(alloc);
@@ -75,6 +86,7 @@ fn Walker(comptime Ctx: type, comptime onEntry: fn (Ctx, Entry) anyerror!Next) t
         opts: Options,
         ctx: Ctx,
         ignores: *gitignore.Stack,
+        rescue: *const gitignore.Rescue,
         /// The directory being read, as the walk opens it (`root` joined
         /// with the path below it), grown and shrunk in place.
         dir: std.ArrayList(u8) = .empty,
@@ -103,14 +115,19 @@ fn Walker(comptime Ctx: type, comptime onEntry: fn (Ctx, Entry) anyerror!Next) t
                 try self.rel.appendSlice(self.alloc, raw.name);
 
                 const is_dir = raw.kind == .directory;
-                const hidden = self.opts.visible.isHidden(self.ignores, raw.name, self.rel.items, is_dir);
-                if (self.opts.visible.skips(hidden)) continue;
+                const found = self.opts.visible.searchFinds(self.ignores, self.rescue, raw.name, self.rel.items, is_dir);
+                if (found == .skip) continue;
 
                 if (try onEntry(self.ctx, .{ .rel = self.rel.items, .kind = raw.kind }) == .stop) return .stop;
 
                 if (is_dir) {
                     if (dir_len > 0 and self.dir.items[dir_len - 1] != '/') try self.dir.append(self.alloc, '/');
                     try self.dir.appendSlice(self.alloc, raw.name);
+                    // A rescued directory answers to its own ignore files
+                    // only: the ones in scope now drop out until it's done.
+                    const base = self.ignores.base;
+                    defer self.ignores.base = base;
+                    if (found == .fresh) self.ignores.base = self.ignores.frames.items.len;
                     if (try self.scan(depth + 1) == .stop) return .stop;
                 }
             }

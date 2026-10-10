@@ -167,6 +167,20 @@
 --     -- and says why; :q! still quits.
 --     workspace_autosave = true,
 --
+--     -- What notices an open file changing or being deleted outside
+--     -- zoe (a deleted file gets ❌ on its tab):
+--     --   "poll"     stat the open files once a second (the default)
+--     --   "inotify"  Linux only: the kernel says when, checked ~50 ms
+--     --              later, and nothing runs while nothing changes
+--     --   "off"      never; :e picks up a change by hand
+--     file_watch = "poll",
+--
+--     -- Paths Ctrl+P and the tree's / search list even though a
+--     -- .gitignore excludes them, as globs from the folder's root. A
+--     -- matched directory is searched under its own .gitignore files
+--     -- only. Git worktrees inside the folder need no entry here.
+--     unignore = { "vendor/lib" },
+--
 --     ---- Language servers (LSP) ---------------------------------------
 --
 --     -- zoe talks to language servers for diagnostics, hover (K) and

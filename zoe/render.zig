@@ -1777,6 +1777,7 @@ pub fn renderTabs(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         try labels.append(self.alloc, .{
             .label = tabs.labelFor(slot.ed.path),
             .dirty = slot.ed.buf.dirty,
+            .gone = slot.gone,
         });
     }
 
@@ -1798,6 +1799,17 @@ pub fn renderTabs(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
 
     for (self.grp.tab_spans.items, labels.items, 0..) |span, tab, i| {
         const active = i == self.grp.active;
+        const bg = if (active) role(.bg) else role(.tab_bg);
+        // The deleted mark is a run of its own, in the error colour: red
+        // whether the font draws the emoji in colour or as a plain glyph.
+        var col = span.start;
+        if (tab.gone) {
+            text.clearRetainingCapacity();
+            try text.append(self.alloc, ' ');
+            try text.appendSlice(self.alloc, tabs.gone_mark);
+            try self.writeStripRun(batch, col, text.items, self.diagColor(.err), bg);
+            col += glyphwire.stringWidth(text.items);
+        }
         text.clearRetainingCapacity();
         try text.append(self.alloc, ' ');
         try text.appendSlice(self.alloc, tab.label);
@@ -1814,10 +1826,10 @@ pub fn renderTabs(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         // says which one the keyboard is in.
         try self.writeStripRun(
             batch,
-            span.start,
+            col,
             text.items,
             if (active and self.render_focused) role(.fg) else role(.fg_dim),
-            if (active) role(.bg) else role(.tab_bg),
+            bg,
         );
         if (i + 1 < self.grp.tab_spans.items.len) {
             try self.writeStripRun(batch, span.end, tabs.separator, role(.fg_dim), role(.tab_bar_bg));

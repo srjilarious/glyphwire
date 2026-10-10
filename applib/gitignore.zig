@@ -15,14 +15,22 @@
 //! followed by `!important.log` keeps the latter; the same two lines in the
 //! other order do not.
 //!
+//! A search walk (`walk.zig`) adds two things on top. Showing hidden
+//! files there reveals dotfiles but not ignored paths (see
+//! `Visibility.searchFinds`), and a `Rescue` lists some ignored paths
+//! anyway: the repository's own linked worktrees, and the config's
+//! `unignore` globs. A rescued directory starts afresh, the way a nested
+//! repository does in git: the ignore files outside it stop applying
+//! inside it (`Stack.base`), and its own take over.
+//!
 //! What it does not do: `.git/info/exclude` and the global
 //! `core.excludesFile`. Both are per-checkout or per-user settings that
 //! rarely change what a source tree looks like, and reading them would mean
 //! parsing git config. Everything a repository commits is covered.
 //!
-//! Pure apart from `Stack.pushDir`, which is the only part that reads a
-//! file, so `tests/zoe_tests.zig` exercises the matcher by building
-//! patterns directly.
+//! Pure apart from `Stack.pushDir` and `linkedWorktrees`, the only parts
+//! that read files, so `tests/zoe_tests.zig` exercises the matcher by
+//! building patterns directly.
 
 const std = @import("std");
 
@@ -67,6 +75,10 @@ pub const Verdict = enum { none, ignored, included };
 pub const Stack = struct {
     alloc: std.mem.Allocator,
     frames: std.ArrayList(Frame) = .empty,
+    /// Frames below this index are out of scope: the walk is inside a
+    /// rescued directory, which the ignore files above it no longer
+    /// govern. Set by the walk on the way in and restored on the way out.
+    base: usize = 0,
 
     pub fn deinit(self: *Stack) void {
         while (self.frames.items.len > 0) self.pop();
@@ -135,7 +147,7 @@ pub const Stack = struct {
     /// file its parent excluded.
     pub fn match(self: *const Stack, rel: []const u8, is_dir: bool) Verdict {
         var verdict: Verdict = .none;
-        for (self.frames.items) |frame| {
+        for (self.frames.items[self.base..]) |frame| {
             // Paths are matched relative to the directory the ignore file
             // sat in; one outside that subtree isn't its business.
             const scoped = relativeTo(rel, frame.dir) orelse continue;
@@ -333,15 +345,21 @@ fn classMatches(body: []const u8, c: u8) bool {
 }
 
 /// What a listing or a walk is allowed to show. Off, both dotfiles and
-/// anything `.gitignore` excludes are skipped; Ctrl+H turns it on and
-/// every path appears.
+/// anything `.gitignore` excludes are skipped; Ctrl+H turns it on.
 ///
-/// One flag for both, deliberately: "show me everything" is a single
-/// intention, and two toggles would mean remembering which of them is
-/// hiding the file you are looking for. `.git/` stays out either way
-/// until you ask, since it is a dotfile.
+/// One flag, deliberately: two toggles would mean remembering which of
+/// them is hiding the file you are looking for. What "on" reveals depends
+/// on the view, though. The tree pane lists every path, ignored ones
+/// dimmed, since expanding one folder is cheap and asked for. A search
+/// walks the whole tree, where ignored directories (`.zig-cache/`,
+/// `.venv/`) would bury everything else, so there it reveals dotfiles
+/// only (`searchFinds`). `.git/` stays out either way until you ask,
+/// since it is a dotfile.
 pub const Visibility = struct {
     show_hidden: bool = false,
+    /// The config's `unignore` globs, borrowed: paths a search lists even
+    /// though a `.gitignore` excludes them. See `Rescue`.
+    unignore: []const []const u8 = &.{},
 
     /// Whether an entry is one the tree hides by default -- a dotfile, or
     /// a path the `.gitignore` files in scope exclude.
@@ -365,4 +383,179 @@ pub const Visibility = struct {
     pub fn skips(self: Visibility, hidden: bool) bool {
         return hidden and !self.show_hidden;
     }
+
+    /// What a search walk does with one entry. Unlike the tree listing,
+    /// an ignored path stays out even with hidden files shown, unless
+    /// `rescue` lists it or it is a directory the walk has to pass
+    /// through to reach one that is.
+    ///
+    /// A rescued path is `.fresh` even when nothing ignores it: a
+    /// worktree is its own repository wherever it sits, and the ignore
+    /// files around it are never its business.
+    pub fn searchFinds(
+        self: Visibility,
+        ignores: *const Stack,
+        rescue: *const Rescue,
+        name: []const u8,
+        rel: []const u8,
+        is_dir: bool,
+    ) Found {
+        if (name.len > 0 and name[0] == '.' and !self.show_hidden) return .skip;
+        if (rescue.rescues(rel)) return .fresh;
+        if (!ignores.isIgnored(rel, is_dir)) return .list;
+        if (is_dir and rescue.leadsTo(rel)) return .list;
+        return .skip;
+    }
 };
+
+/// `Visibility.searchFinds`'s answer.
+pub const Found = enum {
+    skip,
+    list,
+    /// List it, and if it is a directory, walk it with the ignore files
+    /// outside it out of scope (`Stack.base`).
+    fresh,
+};
+
+/// The ignored paths a search lists anyway: the repository's linked git
+/// worktrees under the walk root, and the config's `unignore` globs.
+///
+/// The case it exists for is a worktree kept inside the checkout it
+/// belongs to (`.claude/worktrees/x`), under a directory the checkout
+/// ignores. A search should find its files but not its `.zig-cache/`,
+/// which its own `.gitignore` excludes.
+pub const Rescue = struct {
+    /// Root-relative paths of the linked worktrees inside the walk root,
+    /// owned (`linkedWorktrees`).
+    worktrees: [][]u8 = &.{},
+    /// Root-relative globs, borrowed. Matched against the whole path, as
+    /// a rooted `.gitignore` pattern is.
+    globs: []const []const u8 = &.{},
+
+    pub fn deinit(self: *Rescue, alloc: std.mem.Allocator) void {
+        for (self.worktrees) |w| alloc.free(w);
+        alloc.free(self.worktrees);
+        self.* = undefined;
+    }
+
+    /// Whether `rel` is itself a rescued path.
+    pub fn rescues(self: *const Rescue, rel: []const u8) bool {
+        for (self.worktrees) |w| {
+            if (std.mem.eql(u8, w, rel)) return true;
+        }
+        for (self.globs) |g| {
+            if (globMatch(trimSlashes(g), rel)) return true;
+        }
+        return false;
+    }
+
+    /// Whether directory `rel` has a rescued path somewhere below it, so
+    /// a walk must go through it even though it is ignored. Only the
+    /// directories on the way are walked: their other contents stay
+    /// ignored.
+    pub fn leadsTo(self: *const Rescue, rel: []const u8) bool {
+        for (self.worktrees) |w| {
+            if (w.len > rel.len and w[rel.len] == '/' and std.mem.startsWith(u8, w, rel)) return true;
+        }
+        for (self.globs) |g| {
+            if (globPrefixMatches(trimSlashes(g), rel)) return true;
+        }
+        return false;
+    }
+};
+
+/// A glob as written in the config, without a leading `/` (root-anchored
+/// is the only meaning it has here anyway) or a trailing one.
+fn trimSlashes(glob: []const u8) []const u8 {
+    return std.mem.trim(u8, glob, "/");
+}
+
+/// Whether directory `rel` could be an ancestor of something `glob`
+/// matches: each of its components matches the glob's component at the
+/// same depth, and the glob has more after them. A `**` component can
+/// stand for any depth, so reaching one answers yes.
+fn globPrefixMatches(glob: []const u8, rel: []const u8) bool {
+    var gs = std.mem.splitScalar(u8, glob, '/');
+    var rs = std.mem.splitScalar(u8, rel, '/');
+    while (rs.next()) |r| {
+        const g = gs.next() orelse return false;
+        if (std.mem.indexOf(u8, g, "**") != null) return true;
+        if (!globMatch(g, r)) return false;
+    }
+    return gs.next() != null;
+}
+
+/// The linked worktrees of the git repository `root` is in that sit
+/// inside `root`, as paths relative to it. Read straight from the
+/// repository's `worktrees/*/gitdir` files, which git keeps pointing at
+/// each worktree's `.git`, so no `git` process. Empty when `root` isn't
+/// in a repository or none of its worktrees are under it; anything that
+/// can't be read counts as absent.
+pub fn linkedWorktrees(alloc: std.mem.Allocator, io: std.Io, root: []const u8) ![][]u8 {
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |p| alloc.free(p);
+        out.deinit(alloc);
+    }
+
+    const root_abs = std.Io.Dir.cwd().realPathFileAlloc(io, root, alloc) catch return out.toOwnedSlice(alloc);
+    defer alloc.free(root_abs);
+    const git_dir = (try commonGitDir(alloc, io, root_abs)) orelse return out.toOwnedSlice(alloc);
+    defer alloc.free(git_dir);
+
+    const wt_path = try std.fs.path.join(alloc, &.{ git_dir, "worktrees" });
+    defer alloc.free(wt_path);
+    var wt_dir = std.Io.Dir.cwd().openDir(io, wt_path, .{ .iterate = true }) catch return out.toOwnedSlice(alloc);
+    defer wt_dir.close(io);
+
+    var it = wt_dir.iterate();
+    while (it.next(io) catch null) |e| {
+        if (e.kind != .directory) continue;
+        const gitdir_file = try std.fs.path.join(alloc, &.{ wt_path, e.name, "gitdir" });
+        defer alloc.free(gitdir_file);
+        const text = std.Io.Dir.cwd().readFileAlloc(io, gitdir_file, alloc, .limited(std.fs.max_path_bytes)) catch continue;
+        defer alloc.free(text);
+        // `<worktree>/.git`, newline-terminated.
+        const dot_git = std.mem.trim(u8, text, " \t\r\n");
+        const wt = std.fs.path.dirname(dot_git) orelse continue;
+        if (wt.len <= root_abs.len + 1) continue;
+        if (!std.mem.startsWith(u8, wt, root_abs) or wt[root_abs.len] != '/') continue;
+        try out.append(alloc, try alloc.dupe(u8, wt[root_abs.len + 1 ..]));
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// The shared git directory of the repository `dir` (absolute) is in:
+/// the first `.git` found walking up. A `.git` *file* means `dir` is in a
+/// linked worktree, whose own git dir names the shared one in its
+/// `commondir`. Null when there is no repository. Owned.
+fn commonGitDir(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]u8 {
+    var cur: []const u8 = dir;
+    while (true) {
+        const dot_git = try std.fs.path.join(alloc, &.{ cur, ".git" });
+        defer alloc.free(dot_git);
+        if (std.Io.Dir.cwd().statFile(io, dot_git, .{})) |st| {
+            if (st.kind == .directory) return try alloc.dupe(u8, dot_git);
+            return linkedCommonDir(alloc, io, cur, dot_git);
+        } else |_| {}
+        cur = std.fs.path.dirname(cur) orelse return null;
+    }
+}
+
+/// `commonGitDir` for a `.git` file: it reads `gitdir: <own git dir>`,
+/// and that directory's `commondir` (relative to it) is the shared one.
+fn linkedCommonDir(alloc: std.mem.Allocator, io: std.Io, holder: []const u8, dot_git: []const u8) !?[]u8 {
+    const text = std.Io.Dir.cwd().readFileAlloc(io, dot_git, alloc, .limited(std.fs.max_path_bytes)) catch return null;
+    defer alloc.free(text);
+    const prefix = "gitdir:";
+    const line = std.mem.trim(u8, text, " \t\r\n");
+    if (!std.mem.startsWith(u8, line, prefix)) return null;
+    const own = try std.fs.path.resolve(alloc, &.{ holder, std.mem.trim(u8, line[prefix.len..], " \t") });
+    defer alloc.free(own);
+
+    const common_file = try std.fs.path.join(alloc, &.{ own, "commondir" });
+    defer alloc.free(common_file);
+    const common = std.Io.Dir.cwd().readFileAlloc(io, common_file, alloc, .limited(std.fs.max_path_bytes)) catch return null;
+    defer alloc.free(common);
+    return try std.fs.path.resolve(alloc, &.{ own, std.mem.trim(u8, common, " \t\r\n") });
+}
