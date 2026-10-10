@@ -1800,8 +1800,7 @@ pub fn renderTabs(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     for (self.grp.tab_spans.items, labels.items, 0..) |span, tab, i| {
         const active = i == self.grp.active;
         const bg = if (active) role(.bg) else role(.tab_bg);
-        // The deleted mark is a run of its own, in the error colour: red
-        // whether the font draws the emoji in colour or as a plain glyph.
+        // The deleted mark is a run of its own, in the error colour.
         var col = span.start;
         if (tab.gone) {
             text.clearRetainingCapacity();

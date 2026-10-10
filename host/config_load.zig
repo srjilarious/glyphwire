@@ -28,6 +28,24 @@ fn strField(lua: *Lua, arena: std.mem.Allocator, key: [:0]const u8) ?[:0]const u
     return arena.dupeSentinel(u8, s, 0) catch null;
 }
 
+/// `font_fallback`: one font (`"Noto Sans CJK JP"`) or a list tried in
+/// order (`{ "Noto Sans CJK JP", "Adwaita Mono" }`). Null when absent,
+/// empty, or neither shape, so the default stands.
+fn readFallbacks(lua: *Lua, arena: std.mem.Allocator) ?[]const [:0]const u8 {
+    const key = "font_fallback";
+    const t = lua.getField(-1, key);
+    lua.pop(1);
+    if (t == .string) {
+        const one = strField(lua, arena, key) orelse return null;
+        return arena.dupe([:0]const u8, &.{one}) catch null;
+    }
+    const list = conf.stringList(lua, arena, key) orelse return null;
+    if (list.len == 0) return null;
+    const out = arena.alloc([:0]const u8, list.len) catch return null;
+    for (list, out) |s, *o| o.* = arena.dupeSentinel(u8, s, 0) catch return null;
+    return out;
+}
+
 /// Resolves everything `host.conf.lua` controls for this run: starts from
 /// the `*_default` constants and overlays whatever the global `config`
 /// table in `~/.config/glyphwire/host.conf.lua` (see
@@ -53,9 +71,15 @@ pub fn loadConfig(
     io: std.Io,
     environ_map: *const std.process.Environ.Map,
 ) HostConfig {
-    var cfg: HostConfig = .{};
-    const src = conf.read(gpa, io, environ_map) orelse return cfg;
+    const src = conf.read(gpa, io, environ_map) orelse return .{};
     defer gpa.free(src);
+    return parseSource(arena, gpa, src);
+}
+
+/// The parse half of `loadConfig`, over config text already in hand, so
+/// `tests/host_tests.zig` can run it against a string.
+pub fn parseSource(arena: std.mem.Allocator, gpa: std.mem.Allocator, src: [:0]const u8) HostConfig {
+    var cfg: HostConfig = .{};
     var ctx: Apply = .{ .arena = arena, .cfg = &cfg };
     conf.runLogged(gpa, src, &ctx, Apply.apply);
     return cfg;
@@ -71,7 +95,7 @@ const Apply = struct {
 
         if (strField(lua, arena, "font_face")) |v| cfg.font.face = v;
         if (strField(lua, arena, "font_face_name")) |v| cfg.font.face_name = v;
-        if (strField(lua, arena, "font_fallback")) |v| cfg.font.fallback = v;
+        if (readFallbacks(lua, arena)) |v| cfg.font.fallbacks = v;
         if (conf.number(lua, f32, "font_size", .{ .min = config.min_font_size, .max = config.max_font_size })) |v| cfg.font.size = v;
 
         if (strField(lua, arena, "icon_theme")) |v| cfg.icon_theme = v;

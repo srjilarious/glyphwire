@@ -168,7 +168,7 @@
 --     workspace_autosave = true,
 --
 --     -- What notices an open file changing or being deleted outside
---     -- zoe (a deleted file gets ❌ on its tab):
+--     -- zoe (a deleted file gets a red ✘ on its tab):
 --     --   "poll"     stat the open files once a second (the default)
 --     --   "inotify"  Linux only: the kernel says when, checked ~50 ms
 --     --              later, and nothing runs while nothing changes

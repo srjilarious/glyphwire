@@ -201,7 +201,7 @@ Files changed outside zoe are noticed within about a second. A buffer with
 no unsaved edits reloads in place, keeping its cursor and scroll; one with
 edits is left alone and the status line shows `W11` once per change, so
 `:e!` (take the disk's) or `:w` (keep yours) is a deliberate choice. A
-file deleted (or moved away) puts ❌ in front of its tab's name and leaves
+file deleted (or moved away) puts a red ✘ in front of its tab's name and leaves
 the buffer as it was; `:w` writes it back and clears the mark.
 `file_watch` in `zoe.conf.lua` picks what notices: `"poll"` (the default,
 a stat a second), `"inotify"` (Linux, within about 50 ms, idle otherwise)

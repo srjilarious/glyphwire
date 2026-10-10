@@ -43,7 +43,7 @@ const workspace = zoe.workspace;
 //     \\or hides dotfiles and anything .gitignore excludes in the tree; in
 //     \\its / search and Ctrl+P it reveals dotfiles only, so .zig-cache and
 //     \\.venv stay out. Git worktrees inside the folder are searched anyway,
-//     \\as are zoe.conf.lua's unignore globs. A tab shows ❌ when its file
+//     \\as are zoe.conf.lua's unignore globs. A tab shows a red ✘ when its file
 //     \\is deleted on disk; file_watch = "poll" | "inotify" | "off" in
 //     \\zoe.conf.lua picks how zoe notices.
 //     \\
@@ -98,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
         \\or hides dotfiles and anything .gitignore excludes in the tree; in
         \\its / search and Ctrl+P it reveals dotfiles only, so .zig-cache and
         \\.venv stay out. Git worktrees inside the folder are searched anyway,
-        \\as are zoe.conf.lua's unignore globs. A tab shows ❌ when its file
+        \\as are zoe.conf.lua's unignore globs. A tab shows a red ✘ when its file
         \\is deleted on disk; file_watch = "poll" | "inotify" | "off" in
         \\zoe.conf.lua picks how zoe notices.
         \\

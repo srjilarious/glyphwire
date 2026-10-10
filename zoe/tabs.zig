@@ -14,7 +14,7 @@
 //!
 //!     ` label × `           and, when the buffer is modified,
 //!     ` label + × `         and, when its file was deleted on disk,
-//!     ` ❌ label × `
+//!     ` ✘ label × `
 //!
 //! with a `│` separator between neighbours. The strip is measured in
 //! *strip* columns, which are pane columns plus the scroll offset: a
@@ -33,10 +33,11 @@ pub const separator = "│";
 /// `+` in the tab, matching the statusline's `[+]`.
 pub const dirty_mark = "+";
 /// Leads the label of a buffer whose file is gone from disk
-/// (`diskwatch.gone`). An emoji, so it stands out from the text-only
-/// marks either side of it; drawn in the error colour as well, for a
-/// font that renders it as a plain glyph.
-pub const gone_mark = "❌";
+/// (`diskwatch.gone`), drawn in the error colour. `✘` (U+2718) rather
+/// than the ❌ emoji: it is in the usual monospace and Nerd fonts, where
+/// the emoji needs a fallback font with symbols, and it is one cell wide
+/// like the other marks.
+pub const gone_mark = "✘";
 
 pub const Tab = struct {
     /// What the tab shows -- a path's basename, or `[No Name]`.
@@ -65,7 +66,7 @@ pub const Hit = struct {
 
 /// The cells one tab occupies: a space either side of the label, the
 /// close box and its own leading space, plus ` +` when modified and
-/// `❌ ` when deleted.
+/// `✘ ` when deleted.
 pub fn tabWidth(t: Tab) usize {
     const gone: usize = if (t.gone) glyphwire.stringWidth(gone_mark) + 1 else 0;
     const dirty: usize = if (t.dirty) 2 else 0;

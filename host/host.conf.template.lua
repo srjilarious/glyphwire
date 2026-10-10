@@ -48,10 +48,15 @@
 --     -- face 0 if no name matches.
 --     font_face_name = "Mono CJK JP",
 --
---     -- Face tried for any codepoint the primary font lacks, before the
---     -- atlas falls back to its .notdef (tofu) box. Same accepted forms
---     -- as `font_face` (bundled name, path, or system family name).
+--     -- Faces tried for any codepoint the primary font lacks, before the
+--     -- atlas falls back to its .notdef (tofu) box. One font, or a list
+--     -- tried in order. Same accepted forms as `font_face` (bundled
+--     -- name, path, or system family name). One that can't be found is
+--     -- skipped with a warning.
 --     font_fallback = "JetBrainsMono-Regular.ttf",
+--     -- A CJK face, then one with symbols such as ❌ (outline fonts
+--     -- only; colour emoji fonts like Noto Color Emoji can't be drawn):
+--     -- font_fallback = { "assets/NotoSansCJK-Regular.ttc", "Adwaita Mono" },
 --
 --     -- Starting cell size in pixels. Clamped to 8..72. At runtime,
 --     -- Ctrl+- / Ctrl++ step it by 2 and Ctrl+0 returns to this value.

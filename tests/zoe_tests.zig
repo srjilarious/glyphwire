@@ -2902,10 +2902,10 @@ pub fn tabWidthCountsPaddingAndCloseBoxTest(_: std.Io, _: std.mem.Allocator) !vo
 }
 
 pub fn tabWidthCountsTheDeletedMarkTest(_: std.Io, _: std.mem.Allocator) !void {
-    // ` ❌ main.zig × ` -- the emoji is two cells, plus its own space.
-    try testz.expectEqual(tabs.tabWidth(.{ .label = "main.zig", .dirty = false, .gone = true }), 15);
-    // ` ❌ main.zig + × ` -- and the two marks stack.
-    try testz.expectEqual(tabs.tabWidth(.{ .label = "main.zig", .dirty = true, .gone = true }), 17);
+    // ` ✘ main.zig × ` -- one cell for the mark, plus its own space.
+    try testz.expectEqual(tabs.tabWidth(.{ .label = "main.zig", .dirty = false, .gone = true }), 14);
+    // ` ✘ main.zig + × ` -- and the two marks stack.
+    try testz.expectEqual(tabs.tabWidth(.{ .label = "main.zig", .dirty = true, .gone = true }), 16);
 }
 
 pub fn tabLayoutKeepsTheCloseBoxAfterTheDeletedMarkTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -2915,10 +2915,10 @@ pub fn tabLayoutKeepsTheCloseBoxAfterTheDeletedMarkTest(_: std.Io, alloc: std.me
         .{ .label = "a", .dirty = false, .gone = true },
         .{ .label = "b", .dirty = false },
     }, &spans);
-    // ` ❌ a × ` is 8 wide; the close box one in from its right edge.
-    try testz.expectEqual(spans.items[0].end, 8);
-    try testz.expectEqual(spans.items[0].close, 6);
-    try testz.expectEqual(tabs.hit(spans.items, 6).?.close, true);
+    // ` ✘ a × ` is 7 wide; the close box one in from its right edge.
+    try testz.expectEqual(spans.items[0].end, 7);
+    try testz.expectEqual(spans.items[0].close, 5);
+    try testz.expectEqual(tabs.hit(spans.items, 5).?.close, true);
     // The mark itself is the tab body, not the close box.
     try testz.expectEqual(tabs.hit(spans.items, 1).?.close, false);
 }

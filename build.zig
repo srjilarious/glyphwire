@@ -272,6 +272,7 @@ pub fn build(b: *std.Build) void {
     gmux_support_mod.addImport("luaconf", luaconf_mod);
     read_support_mod.addImport("luaconf", luaconf_mod);
     salacommander_support_mod.addImport("luaconf", luaconf_mod);
+    host_support_mod.addImport("luaconf", luaconf_mod);
     // The programs whose own config can override the window's theme.
     shell_support_mod.addImport("themeconf", themeconf_mod);
     read_support_mod.addImport("themeconf", themeconf_mod);

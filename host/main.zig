@@ -196,10 +196,15 @@ pub fn main(init: std.process.Init) !void {
     // bundled default for that slot rather than aborting startup.
     const face_resolved = resolveFontFile(arena, alloc, io, asset_dir, font_cfg.face, config.font_path_default) orelse
         ResolvedFont{ .path = try bundledAssetPath(arena, asset_dir, config.font_path_default) };
-    const fallback_resolved = resolveFontFile(arena, alloc, io, asset_dir, font_cfg.fallback, config.font_fallback_default) orelse
-        ResolvedFont{ .path = try bundledAssetPath(arena, asset_dir, config.font_fallback_default) };
     font_cfg.face = face_resolved.path;
-    font_cfg.fallback = fallback_resolved.path;
+    // Each fallback on its own: one that doesn't resolve is dropped with
+    // a warning and the rest still load. Only when none does is the
+    // bundled default used, so the primary is never left alone.
+    var fallbacks: std.ArrayList(ResolvedFont) = .empty;
+    for (font_cfg.fallbacks) |f| {
+        if (resolveFontFile(arena, alloc, io, asset_dir, f, config.font_fallback_default)) |r| try fallbacks.append(arena, r);
+    }
+    if (fallbacks.items.len == 0) try fallbacks.append(arena, .{ .path = try bundledAssetPath(arena, asset_dir, config.font_fallback_default) });
     if (host_cfg.grid.cols) |v| geometry.grid_cols = v;
     if (host_cfg.grid.rows) |v| geometry.grid_rows = v;
     if (host_cfg.grid.scrollback) |v| config.scrollback_rows = v;
@@ -414,14 +419,16 @@ pub fn main(init: std.process.Init) !void {
         .renderInitOpts = .{ .font = .{ .path = .{ .face = font_cfg.face, .size = font_cfg.size, .face_index = font_face_index } } },
     });
 
-    // Register the fallback face: codepoints the primary lacks are drawn
-    // from it, and anything neither face has renders as the atlas's tofu
-    // box. Non-fatal -- text still works from the primary alone. Uses the
-    // face `fc-match` picked when the fallback is a system `.ttc`, else
-    // face 0.
-    appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, font_cfg.fallback, fallback_resolved.fc_index orelse 0) catch |err| {
-        std.log.warn("could not add fallback font '{s}': {t}", .{ font_cfg.fallback, err });
-    };
+    // Register the fallback faces, in order: codepoints the primary lacks
+    // are drawn from the first that has them, and anything none has
+    // renders as the atlas's tofu box. Non-fatal -- text still works from
+    // the primary alone. Each uses the face `fc-match` picked when it is a
+    // system `.ttc`, else face 0.
+    for (fallbacks.items) |f| {
+        appRunner.engine.renderer.addDefaultFontFallback(&appRunner.engine.resources, f.path, f.fc_index orelse 0) catch |err| {
+            std.log.warn("could not add fallback font '{s}': {t}", .{ f.path, err });
+        };
+    }
 
     // And a bundled Powerline-symbols subset (U+E0A0-E0D7) as a further
     // fallback, so a configured powerline shell prompt's separator /

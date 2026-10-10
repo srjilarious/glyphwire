@@ -16,8 +16,10 @@ const dividers = @import("dividers.zig");
 // Cyrillic and CJK, so `ls` of files with Greek/Russian/Japanese names
 // renders without tofu. It's a `.ttc` collection, so `font_face_name` picks
 // the Japanese monospaced face out of it (a plain `.ttf` ignores the name
-// and uses face 0). The fallback face is tried for any codepoint the
-// primary lacks before the atlas falls back to its `.notdef` (tofu) box.
+// and uses face 0). The fallback faces are tried in order for any
+// codepoint the primary lacks before the atlas falls back to its
+// `.notdef` (tofu) box. `font_fallback` is one font or a list of them:
+// a CJK face and a symbol/emoji face rarely come in one file.
 //
 // `font_face` / `font_fallback` need not be bundled assets: `host/main.zig`
 // (`resolveFontFile`) also accepts an absolute or cwd-relative path, and a
@@ -62,7 +64,10 @@ pub const FontConfig = struct {
     /// bundled default collection is scanned for `font_face_name_default`,
     /// and a system `.ttc` uses the face `fc-match` resolved.
     face_name: ?[]const u8 = null,
-    fallback: [:0]const u8 = font_fallback_default,
+    /// Tried in order after the primary. Never empty: an empty
+    /// `font_fallback = {}` keeps the default rather than leaving the
+    /// primary on its own.
+    fallbacks: []const [:0]const u8 = &.{font_fallback_default},
     size: f32 = font_size_default,
 };
 

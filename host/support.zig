@@ -6,6 +6,7 @@
 
 pub const geometry = @import("geometry.zig");
 pub const config = @import("config.zig");
+pub const config_load = @import("config_load.zig");
 pub const dividers = @import("dividers.zig");
 pub const window_title = @import("window_title.zig");
 pub const system_font = @import("system_font.zig");

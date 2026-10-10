@@ -307,6 +307,31 @@ pub fn bundledFontRelPathAcceptsLegacyAssetsPrefixForAnySlotTest(_: std.Io, _: s
     try testz.expectTrue(config.bundledFontRelPath("Noto Sans Mono", config.font_fallback_default) == null);
 }
 
+/// `font_fallback` takes one font or a list; neither (or an empty list)
+/// keeps the default, so the primary never stands alone.
+pub fn fontFallbackTakesOneFontOrAListTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parse = hs.config_load.parseSource;
+
+    const none = parse(arena, alloc, "config = {}");
+    try testz.expectEqual(none.font.fallbacks.len, 1);
+    try testz.expectEqualStr(none.font.fallbacks[0], config.font_fallback_default);
+
+    const one = parse(arena, alloc, "config = { font_fallback = \"Noto Sans CJK JP\" }");
+    try testz.expectEqual(one.font.fallbacks.len, 1);
+    try testz.expectEqualStr(one.font.fallbacks[0], "Noto Sans CJK JP");
+
+    const list = parse(arena, alloc, "config = { font_fallback = { \"a.ttc\", \"Adwaita Mono\" } }");
+    try testz.expectEqual(list.font.fallbacks.len, 2);
+    try testz.expectEqualStr(list.font.fallbacks[0], "a.ttc");
+    try testz.expectEqualStr(list.font.fallbacks[1], "Adwaita Mono");
+
+    const empty = parse(arena, alloc, "config = { font_fallback = {} }");
+    try testz.expectEqualStr(empty.font.fallbacks[0], config.font_fallback_default);
+}
+
 // ─── system_font (fc-match parsing / match judging) ──────────────────
 
 pub fn fcMatchOutputParsesFourFieldsTest(_: std.Io, _: std.mem.Allocator) !void {
