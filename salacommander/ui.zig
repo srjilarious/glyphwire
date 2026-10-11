@@ -818,11 +818,11 @@ pub const Ui = struct {
                 self.active = 1 - i;
                 self.pane_dirty = .{ .full, .full };
             },
-            .otherPaneToSameDir => {
-                const other = &self.panes[1 - i];
-                other.load(p.path) catch |err| try self.setMessage("{s}: {t}", .{ p.path, err });
-                self.markDirty(1 - i, .full);
-            },
+            .otherPaneToSameDir => try self.otherPaneToSameDir(),
+            // `panes[0]` is always the left side (Ctrl+U swaps contents,
+            // not positions), so the arrow only reaches across from 0 or 1.
+            .rightPaneToSameDir => if (i == 0) try self.otherPaneToSameDir(),
+            .leftPaneToSameDir => if (i == 1) try self.otherPaneToSameDir(),
             .swapPanes => {
                 std.mem.swap(Pane, &self.panes[0], &self.panes[1]);
                 self.pane_dirty = .{ .full, .full };
@@ -908,6 +908,15 @@ pub const Ui = struct {
             .find => .none,
             else => .full,
         };
+    }
+
+    /// Alt+O, and Ctrl+Left/Right toward the other side: the other pane
+    /// lists the active pane's directory.
+    fn otherPaneToSameDir(self: *Ui) !void {
+        const i = self.active;
+        const path = self.panes[i].path;
+        self.panes[1 - i].load(path) catch |err| try self.setMessage("{s}: {t}", .{ path, err });
+        self.markDirty(1 - i, .full);
     }
 
     /// Ctrl+`: show the shell panel (starting it the first time) or hide

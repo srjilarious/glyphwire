@@ -125,6 +125,8 @@
 --     --   editPath            alt+d   (edits the pane's path in place)
 --     --   switchPane          tab
 --     --   otherPaneToSameDir  alt+o
+--     --   rightPaneToSameDir  ctrl+right (from the left pane only)
+--     --   leftPaneToSameDir   ctrl+left  (from the right pane only)
 --     --   swapPanes           ctrl+u
 --     --   toggleMark          space
 --     --   toggleMarkAndDown   insert

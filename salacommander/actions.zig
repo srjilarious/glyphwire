@@ -34,6 +34,11 @@ pub const Action = enum {
     switchPane,
     /// Point the other pane at this pane's directory.
     otherPaneToSameDir,
+    /// The same, but only toward the side the arrow points: Ctrl+Right
+    /// from the left pane, Ctrl+Left from the right one. From the pane
+    /// on that side already there is nothing further, so it does nothing.
+    rightPaneToSameDir,
+    leftPaneToSameDir,
     swapPanes,
 
     toggleMark,
@@ -122,6 +127,8 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "alt+d", .action = .editPath },
     .{ .chord = "tab", .action = .switchPane },
     .{ .chord = "alt+o", .action = .otherPaneToSameDir },
+    .{ .chord = "ctrl+right", .action = .rightPaneToSameDir },
+    .{ .chord = "ctrl+left", .action = .leftPaneToSameDir },
     .{ .chord = "ctrl+u", .action = .swapPanes },
 
     .{ .chord = "space", .action = .toggleMark },
@@ -204,6 +211,8 @@ pub fn barLabel(action: Action) []const u8 {
         .editPath => "Path",
         .switchPane => "Other",
         .otherPaneToSameDir => "Same",
+        .rightPaneToSameDir => "Same>",
+        .leftPaneToSameDir => "<Same",
         .swapPanes => "Swap",
         .markAll => "All",
         .unmarkAll => "None",

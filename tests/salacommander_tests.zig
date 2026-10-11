@@ -1800,6 +1800,15 @@ pub fn fileOpsMenuPicksByHeldModifiersTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectTrue(menu.handleKey("escape", .{}).? == .cancel);
 }
 
+/// Ctrl+arrow toward the other side points that pane at this one's
+/// directory.
+pub fn ctrlArrowsSendTheDirectoryAcrossTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
+    defer km.deinit(alloc);
+    try testz.expectEqual(km.lookup("right", .{ .ctrl = true }).?, actions.Action.rightPaneToSameDir);
+    try testz.expectEqual(km.lookup("left", .{ .ctrl = true }).?, actions.Action.leftPaneToSameDir);
+}
+
 /// With Ctrl held the bar lists Ctrl+H as `H Hidden`, Ctrl+1 as `1`, and
 /// so on: the modifiers are said once in front.
 pub fn modifiedBarKeyTextTest(_: std.Io, _: std.mem.Allocator) !void {
