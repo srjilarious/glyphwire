@@ -1236,3 +1236,119 @@ pub fn fileLooksBinaryReadsOnlyTheHeadTest(io: std.Io, alloc: std.mem.Allocator)
         return error.ExpectedAnError;
     } else |err| try testz.expectEqual(err, error.FileNotFound);
 }
+
+// ─── Drag and drop between the panes ────────────────────────────────────
+
+const drag = sala.drag;
+
+pub fn dragCarriesTheMarkedSetOrTheRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "drag-carry");
+    defer s.deinit();
+    try s.file("a", "");
+    try s.file("b", "");
+    try s.file("c", "");
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    p.toggleMark(1);
+    p.toggleMark(3);
+
+    // On a marked row: the whole marked set.
+    const set = try drag.carried(alloc, &p, 3);
+    defer alloc.free(set);
+    try testz.expectEqual(set.len, 2);
+    try testz.expectEqualStr(std.fs.path.basename(set[0]), "a");
+    try testz.expectEqualStr(std.fs.path.basename(set[1]), "c");
+
+    // On an unmarked one: that row alone, marks or not.
+    const one = try drag.carried(alloc, &p, 2);
+    defer alloc.free(one);
+    try testz.expectEqual(one.len, 1);
+    try testz.expectEqualStr(std.fs.path.basename(one[0]), "b");
+
+    // `..` carries nothing.
+    const none = try drag.carried(alloc, &p, 0);
+    defer alloc.free(none);
+    try testz.expectEqual(none.len, 0);
+}
+
+pub fn dropOnAFolderOrTheOtherPaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "drag-drop");
+    defer s.deinit();
+    try s.mkdir("left/sub");
+    try s.file("left/f", "");
+    try s.mkdir("right/inbox");
+    try s.file("right/g", "");
+
+    const left_path = try s.abs("left");
+    defer alloc.free(left_path);
+    const right_path = try s.abs("right");
+    defer alloc.free(right_path);
+    var panes = [2]Pane{
+        try Pane.init(alloc, io, left_path, .{}),
+        try Pane.init(alloc, io, right_path, .{}),
+    };
+    defer for (&panes) |*p| p.deinit();
+
+    const f_row = panes[0].rowOf("f").?;
+    const sources = try drag.carried(alloc, &panes[0], f_row);
+    defer alloc.free(sources);
+
+    // A folder in the same pane.
+    const sub_row = panes[0].rowOf("sub").?;
+    const sub = drag.resolve(&panes, 0, sources, .{ .pane = 0, .row = sub_row }).?;
+    try testz.expectEqual(sub.pane, 0);
+    try testz.expectEqual(sub.row.?, sub_row);
+    try testz.expectEqualStr(std.fs.path.basename(sub.dest), "sub");
+
+    // `..` is the parent folder.
+    const up = drag.resolve(&panes, 0, sources, .{ .pane = 0, .row = 0 }).?;
+    try testz.expectEqualStr(up.dest, s.path);
+
+    // The rest of the source pane drops nothing: the file is already there.
+    try testz.expectTrue(drag.resolve(&panes, 0, sources, .{ .pane = 0, .row = f_row }) == null);
+    try testz.expectTrue(drag.resolve(&panes, 0, sources, .{ .pane = 0 }) == null);
+
+    // A folder in the other pane, and anywhere else there is its directory.
+    const inbox = drag.resolve(&panes, 0, sources, .{ .pane = 1, .row = panes[1].rowOf("inbox").? }).?;
+    try testz.expectEqualStr(std.fs.path.basename(inbox.dest), "inbox");
+    const other = drag.resolve(&panes, 0, sources, .{ .pane = 1, .row = panes[1].rowOf("g").? }).?;
+    try testz.expectTrue(other.row == null);
+    try testz.expectEqualStr(other.dest, right_path);
+    const empty = drag.resolve(&panes, 0, sources, .{ .pane = 1 }).?;
+    try testz.expectEqualStr(empty.dest, right_path);
+}
+
+pub fn dropNeverLandsADirInItselfOrWhereItIsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "drag-noop");
+    defer s.deinit();
+    try s.mkdir("sub/inner");
+
+    // Both panes on the same directory.
+    var panes = [2]Pane{
+        try Pane.init(alloc, io, s.path, .{}),
+        try Pane.init(alloc, io, s.path, .{}),
+    };
+    defer for (&panes) |*p| p.deinit();
+
+    const sub_row = panes[0].rowOf("sub").?;
+    const sources = try drag.carried(alloc, &panes[0], sub_row);
+    defer alloc.free(sources);
+
+    // Onto itself, in either pane.
+    try testz.expectTrue(drag.resolve(&panes, 0, sources, .{ .pane = 0, .row = sub_row }) == null);
+    try testz.expectTrue(drag.resolve(&panes, 0, sources, .{ .pane = 1, .row = sub_row }) == null);
+    // The other pane's directory is the one it's already in.
+    try testz.expectTrue(drag.resolve(&panes, 0, sources, .{ .pane = 1 }) == null);
+
+    // Into its own child, from the other pane browsed inside it.
+    try panes[1].load(sources[0]);
+    const inner_row = panes[1].rowOf("inner").?;
+    try testz.expectTrue(drag.resolve(&panes, 0, sources, .{ .pane = 1, .row = inner_row }) == null);
+}
+
+pub fn dragStartsPastTheSlopTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectFalse(drag.pastThreshold(10, 10, 15, 14));
+    try testz.expectTrue(drag.pastThreshold(10, 10, 16, 10));
+    try testz.expectTrue(drag.pastThreshold(10, 10, 10, 4));
+}

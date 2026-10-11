@@ -40,8 +40,11 @@
 //! `Action` handled in `perform`. Typed text isn't a binding: with no
 //! field open it's type-to-find, moving the cursor to the first entry
 //! starting with what's been typed. A Ctrl+click marks a row the way
-//! Space does, and never activates it. An Alt+drag carries the row, or
-//! the marked set it belongs to, out of the window (`startDrag`). The dialogs run their own nested event
+//! Space does, and never activates it. A plain drag carries the row, or
+//! the marked set it belongs to, onto a folder or into the other pane
+//! and moves it there on release -- copies, with Ctrl down at that
+//! moment (`dragMove`, `drag.zig`); an Alt+drag carries the same out of
+//! the window instead (`startDrag`). The dialogs run their own nested event
 //! loop (`runDialog`), which is also what the file operations' conflict
 //! and error hooks call -- so an operation is synchronous, and a question
 //! halfway through a copy is just a dialog opened from inside it.
@@ -54,6 +57,7 @@ const fileops = @import("fileops.zig");
 const dialog_mod = @import("dialog.zig");
 const config_mod = @import("config.zig");
 const openaction = @import("openaction.zig");
+const drag_mod = @import("drag.zig");
 const shellpanel = @import("applib").shellpanel;
 const wordsplit = @import("applib").wordsplit;
 const filetype = @import("applib").filetype;
@@ -208,6 +212,37 @@ fn headerLabel(buf: []u8, text: []const u8, sort: pane_mod.Sort, key: pane_mod.S
 /// A layer's rect as the split tree laid it out, in context cells.
 const Bounds = struct { row: usize = 0, col: usize = 0, cols: usize = 0, rows: usize = 0 };
 
+/// See `Ui.press`.
+const Press = struct {
+    pane: usize,
+    row: usize,
+    px: glyphwire.PxPos,
+    /// A Ctrl+click marks its row, but only once the button is released
+    /// without a drag: Ctrl+drag is a copy, and must not mark on the way.
+    ctrl_mark: bool,
+};
+
+/// See `Ui.drag`.
+const Drag = struct {
+    src_pane: usize,
+    /// Borrowed from the source pane, which nothing reloads while a drag
+    /// is live: keys and typing are swallowed until it ends. The slice
+    /// is owned.
+    sources: [][]const u8,
+    /// The icon of the row the drag started on, for the card.
+    icon: []const u8,
+    /// Ctrl is down: the drop copies instead of moving.
+    copy: bool,
+    /// The pointer's cell, from the latest `mouse_move`.
+    cell: glyphwire.CellPos,
+    /// Where a drop right now would land, kept current by `updateDrag`.
+    target: ?drag_mod.Target = null,
+};
+
+/// How often a drag held over a pane's header or footer row scrolls it
+/// a row.
+const autoscroll_ms = 60;
+
 pub const Ui = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -288,6 +323,15 @@ pub const Ui = struct {
     /// The host counts the clicks (`MouseButtonEvent.clicks`); this only
     /// makes sure both halves of a double were plain clicks on one row.
     last_click: ?struct { pane: usize, row: usize } = null,
+    /// A left press on a listing row with the button still down. It
+    /// turns into `drag` once the pointer travels `drag_mod.threshold_px`,
+    /// or is just a click when the button comes back up first.
+    press: ?Press = null,
+    /// Files being dragged between the panes. See `drag.zig`.
+    drag: ?Drag = null,
+    /// The card under the pointer while `drag` is live: what's being
+    /// carried, `+` in front when the drop would copy.
+    drag_layer: glyphwire.LayerHandle,
     /// `GLYPHWIRE_SALA_PROFILE=1`: print what each pane repaint cost on
     /// the wire -- rows drawn and body bytes -- to stderr. Off by
     /// default and read once at startup. It exists because "the remote
@@ -366,6 +410,8 @@ pub const Ui = struct {
         // underneath). Placed per frame by `Popup.render`.
         var finder = try finderpopup.Popup.init(alloc, client, popup_style);
         errdefer finder.deinit();
+        // The drag card rides over the panes; sized and filled per drag.
+        const drag_layer = try client.createLayer(10, 1, 0);
         // Created last so it composites over everything else, the panel
         // included: a modal question belongs on top of a shell.
         const dialog_layer = try client.createLayer(10, 5, 0);
@@ -396,6 +442,9 @@ pub const Ui = struct {
         // question and hides with it.
         try client.setLayerShadow(dialog_layer, glyphwire.Shadow.dialog);
         try client.setLayerVisible(dialog_layer, false);
+        try client.setLayerBackground(drag_layer, bg_dialog);
+        try client.setLayerShadow(drag_layer, glyphwire.Shadow.dialog);
+        try client.setLayerVisible(drag_layer, false);
 
         self.* = .{
             .th = th,
@@ -409,6 +458,7 @@ pub const Ui = struct {
             .pane_layers = .{ left_layer, right_layer },
             .bar_layer = bar_layer,
             .dialog_layer = dialog_layer,
+            .drag_layer = drag_layer,
             .finder = finder,
             .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layers),
             .win = .{ .cols = size.cols, .rows = size.rows },
@@ -451,6 +501,7 @@ pub const Ui = struct {
         self.shell.deinit();
         self.endPathEdit();
         self.endNameEdit();
+        if (self.drag) |d| alloc.free(d.sources);
         self.finder.deinit();
         for (&self.panes) |*p| p.deinit();
         self.keymap.deinit(alloc);
@@ -465,7 +516,17 @@ pub const Ui = struct {
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
             try self.flush();
-            const first = try self.listener.next(.none) orelse continue;
+            // A drag parked on a header or footer row scrolls that pane
+            // for as long as it stays there, so the loop wakes on a timer
+            // then rather than waiting for the pointer to move.
+            const timeout: std.Io.Timeout = if (self.autoScrollStep() != null)
+                .{ .duration = .{ .raw = .fromMilliseconds(autoscroll_ms), .clock = .awake } }
+            else
+                .none;
+            const first = try self.listener.next(timeout) orelse {
+                try self.autoScroll();
+                continue;
+            };
             try self.handleEvent(first);
             while (!self.quit) {
                 const ev = self.listener.pollNext() orelse break;
@@ -497,14 +558,21 @@ pub const Ui = struct {
                     p.scrollTo(so.row / p.view.rowHeight(), self.visibleRows(i));
                     self.pushed_scroll[i][1] = so.row;
                     self.markDirty(i, .full);
+                    // The wheel mid-drag: a different row is under the
+                    // pointer now.
+                    if (self.drag != null) try self.updateDrag();
                 }
             },
             .mouse_button => |m| try self.handleMouseButton(m),
+            .mouse_move => |mv| try self.dragMove(mv),
             .copy_request => try self.copySelectionPaths(),
-            .key => |k| if (k.pressed) try self.handleKey(k),
+            // A drag takes the keyboard: Esc cancels and Ctrl flips copy
+            // and move, and nothing else may reload the listing the drag
+            // is carrying paths out of.
+            .key => |k| if (self.drag != null) try self.dragKey(k) else if (k.pressed) try self.handleKey(k),
             // Typed text is the shell's while its panel is up -- it has
             // a line editor, and this one has type-to-find.
-            .text, .paste => |t| if (self.shell.isOpen()) {} else if (self.finder.isOpen()) {
+            .text, .paste => |t| if (self.drag != null or self.shell.isOpen()) {} else if (self.finder.isOpen()) {
                 try self.finder.text(t.text);
             } else if (self.path_edit) |*e| {
                 _ = try e.line.insert(self.alloc, t.text);
@@ -1128,6 +1196,10 @@ pub const Ui = struct {
         // clicks are its business (its own prompt handles them), not a
         // cursor move in a pane nobody is looking at.
         if (self.shell.isOpen()) return;
+        // A press held on a row, or a drag under way, gets the next
+        // button event whatever it is: the release that ends it, or
+        // another button that cancels it.
+        if (self.press != null or self.drag != null) return self.dragButton(m);
         if (!m.pressed) return;
         // The popup owns the pointer while it's up: a click picks a row
         // or dismisses it, and never reaches a pane behind it.
@@ -1187,13 +1259,20 @@ pub const Ui = struct {
             try self.startDrag(i, row);
             return;
         }
-        if (right or (left and m.mods.ctrl)) {
-            // Total Commander's right-click select, and Ctrl+click as the
-            // mouse's Space. Neither opens anything: a Ctrl+click is
-            // picking files out of a list, and two of them in a row must
-            // not turn into an activation.
+        if (right) {
+            // Total Commander's right-click select. It opens nothing, and
+            // two in a row must not turn into an activation.
             p.toggleMark(row);
             self.last_click = null;
+            return;
+        }
+        if (m.mods.ctrl) {
+            // Ctrl+click is the mouse's Space, but it marks on the
+            // release (`dragButton`): held and dragged instead, it's a
+            // copy. Never half of a double click, for the same reason as
+            // the right button.
+            self.last_click = null;
+            self.press = .{ .pane = i, .row = row, .px = m.px, .ctrl_mark = true };
             return;
         }
 
@@ -1204,9 +1283,223 @@ pub const Ui = struct {
                 if (prev.pane == i and prev.row == row) {
                     self.last_click = null;
                     try self.activate(i);
+                    return;
                 }
             }
         }
+        // Held and moved, this press is a drag (`dragMove`).
+        self.press = .{ .pane = i, .row = row, .px = m.px, .ctrl_mark = false };
+    }
+
+    // ── Drag and drop between the panes ─────────────────────────────────
+
+    /// A button event while `press` or `drag` is live.
+    fn dragButton(self: *Ui, m: glyphwire.MouseButtonEvent) !void {
+        const left = std.mem.eql(u8, m.button, "left");
+        if (self.drag != null) {
+            // Letting go drops; any other button pressed meanwhile
+            // (the right one, say) calls the whole thing off.
+            if (left and !m.pressed) return self.finishDrag();
+            if (m.pressed) self.endDrag();
+            return;
+        }
+        const pr = self.press.?;
+        self.press = null;
+        // Released where it was pressed: a plain click already did its
+        // work on the press, a Ctrl+click marks now.
+        if (left and !m.pressed and pr.ctrl_mark) {
+            self.panes[pr.pane].toggleMark(pr.row);
+            self.markDirty(pr.pane, .full);
+        }
+    }
+
+    /// The pointer moved: a held press past the threshold becomes a drag,
+    /// and a drag follows the pointer.
+    fn dragMove(self: *Ui, mv: glyphwire.MouseMoveEvent) !void {
+        if (self.drag) |*d| {
+            d.cell = mv.cell;
+            d.copy = mv.mods.ctrl;
+            return self.updateDrag();
+        }
+        const pr = self.press orelse return;
+        if (!drag_mod.pastThreshold(pr.px.x, pr.px.y, mv.px.x, mv.px.y)) return;
+        self.press = null;
+
+        const p = &self.panes[pr.pane];
+        const sources = try drag_mod.carried(self.alloc, p, pr.row);
+        // `..` carries nothing, so there's nothing to drag.
+        if (sources.len == 0) {
+            self.alloc.free(sources);
+            return;
+        }
+        const entry = p.entryAt(pr.row).?;
+        self.drag = .{
+            .src_pane = pr.pane,
+            .sources = sources,
+            .icon = lsentries.iconForEntry(entry.*),
+            .copy = mv.mods.ctrl,
+            .cell = mv.cell,
+        };
+        try self.updateDrag();
+    }
+
+    /// A key while a drag is live. Esc calls it off; Ctrl going down or
+    /// up flips the drop between copy and move. Everything else waits.
+    fn dragKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        const d = &self.drag.?;
+        if (std.mem.eql(u8, k.key, "left_control") or std.mem.eql(u8, k.key, "right_control")) {
+            if (d.copy == k.pressed) return;
+            d.copy = k.pressed;
+            return self.updateDrag();
+        }
+        if (k.pressed and std.mem.eql(u8, k.key, "escape")) self.endDrag();
+    }
+
+    /// What's under window cell `cell` for a drop: a pane, and the
+    /// listing row there if the pointer is over one.
+    fn dropHitAt(self: *const Ui, cell: glyphwire.CellPos) ?drag_mod.Hit {
+        if (cell.row >= self.paneHeight()) return null;
+        const i = self.paneAtCol(cell.col) orelse return null;
+        var hit: drag_mod.Hit = .{ .pane = i };
+        if (cell.row >= list_top) {
+            const p = &self.panes[i];
+            const slot = (cell.row - list_top) / p.view.rowHeight();
+            const row = p.list.top + slot;
+            if (slot < self.visibleRows(i) and row < p.rowCount()) hit.row = row;
+        }
+        return hit;
+    }
+
+    /// Re-resolves the drop target under the pointer, and redraws the
+    /// highlight and the card to match.
+    fn updateDrag(self: *Ui) !void {
+        const d = &self.drag.?;
+        d.target = if (self.dropHitAt(d.cell)) |hit| drag_mod.resolve(&self.panes, d.src_pane, d.sources, hit) else null;
+
+        var b = self.client.batch();
+        defer b.deinit();
+
+        // The target folder's row, or the whole listing when it's the
+        // pane's own directory. Re-sending an unchanged target is free.
+        for (self.pane_layers, 0..) |layer, i| {
+            const t = d.target orelse {
+                try b.setDropTarget(layer, null);
+                continue;
+            };
+            if (t.pane != i) {
+                try b.setDropTarget(layer, null);
+                continue;
+            }
+            const p = &self.panes[i];
+            const rh = p.view.rowHeight();
+            const w = self.paneWidth(i);
+            if (t.row) |row| {
+                try b.setDropTarget(layer, .{ .cells = .{ .row = list_top + (row - p.list.top) * rh, .col = 0, .rows = rh, .cols = w } });
+            } else {
+                try b.setDropTarget(layer, .{ .cells = .{ .row = list_top, .col = 0, .rows = self.visibleRows(i) * rh, .cols = w } });
+            }
+        }
+
+        // The card: `+` when it would copy, the row's icon, then the
+        // name or how many there are -- just off the pointer's corner,
+        // pulled back inside the window near the edges.
+        var label_buf: [32]u8 = undefined;
+        const label = if (d.sources.len == 1)
+            std.fs.path.basename(d.sources[0])
+        else
+            try std.fmt.bufPrint(&label_buf, "{d} files", .{d.sources.len});
+        const label_cols = @min(glyphwire.stringWidth(label), 40);
+        // ` + ` (or three blanks), the icon's two cells, a space, the
+        // label, a space.
+        const card_cols = 3 + 2 + 1 + label_cols + 1;
+        const row = if (d.cell.row + 1 < self.win.rows) d.cell.row + 1 else d.cell.row -| 1;
+        const col = @min(d.cell.col + 2, self.win.cols -| card_cols);
+
+        const layer = self.drag_layer;
+        try b.setLayerSize(layer, card_cols, 1);
+        try b.setLayerCellPosition(layer, row, col);
+        try b.clearArea(.{ .layer = layer, .bg = bg_dialog });
+        if (d.copy) try b.writeText("+", .{ .layer = layer, .row = 0, .col = 1, .fg = fg_marked, .bg = bg_dialog });
+        try b.writeText(label, .{ .layer = layer, .row = 0, .col = 6, .fg = fg_dialog, .bg = bg_dialog, .max_cols = label_cols });
+        try b.drawIconOnStyled(layer, 0, 3, d.icon, .{
+            .scale = .natural,
+            .h_align = .start,
+            .v_align = .center,
+            .max_h = self.cell.h,
+            .foreground = true,
+        });
+        try b.setLayerVisible(layer, true);
+
+        var sent = try b.send();
+        sent.deinit();
+    }
+
+    /// The button came up with a drag live: move or copy the files to
+    /// where the pointer is, if that's anywhere. No confirmation -- the
+    /// highlight already said where they'd go, and a clash with a file
+    /// already there still asks (`hookConflict`).
+    fn finishDrag(self: *Ui) !void {
+        const d = self.drag.?;
+        const target = d.target orelse return self.endDrag();
+        const kind: fileops.Kind = if (d.copy) .copy else .move;
+        // The target borrows from a pane; the operation outlives nothing
+        // that reloads one, but the copy costs nothing and says so.
+        const dest = try self.alloc.dupe(u8, target.dest);
+        defer self.alloc.free(dest);
+        const sources = d.sources;
+        self.drag = null;
+        defer self.alloc.free(sources);
+        try self.hideDrag();
+
+        const result = self.runOperation(.{ .kind = kind, .sources = sources, .dest = dest });
+        if (!result.cancelled and result.failed == 0) self.panes[d.src_pane].unmarkAll();
+        try self.reloadBoth();
+        try self.reportResult(kind, result);
+    }
+
+    /// Calls a drag off: nothing moves.
+    fn endDrag(self: *Ui) void {
+        self.press = null;
+        const d = self.drag orelse return;
+        self.drag = null;
+        self.alloc.free(d.sources);
+        self.hideDrag() catch {};
+    }
+
+    /// Takes the card and both highlights down.
+    fn hideDrag(self: *Ui) !void {
+        var b = self.client.batch();
+        defer b.deinit();
+        for (self.pane_layers) |layer| try b.setDropTarget(layer, null);
+        try b.setLayerVisible(self.drag_layer, false);
+        var sent = try b.send();
+        sent.deinit();
+    }
+
+    /// Which way, and which pane, a live drag should scroll: up while the
+    /// pointer sits on a pane's column headers, down on its footer, when
+    /// there's more listing that way. Null otherwise -- including over
+    /// the first and last listing rows, which are drop targets like any
+    /// other.
+    fn autoScrollStep(self: *const Ui) ?struct { pane: usize, up: bool } {
+        const d = self.drag orelse return null;
+        if (d.cell.row >= self.paneHeight()) return null;
+        const i = self.paneAtCol(d.cell.col) orelse return null;
+        const p = &self.panes[i];
+        if (d.cell.row == header_row and p.list.top > 0) return .{ .pane = i, .up = true };
+        if (d.cell.row == self.paneHeight() -| 1 and p.list.top + self.visibleRows(i) < p.rowCount()) return .{ .pane = i, .up = false };
+        return null;
+    }
+
+    /// One row of `autoScrollStep`'s scroll, when the loop's timer fired
+    /// with the pointer still there.
+    fn autoScroll(self: *Ui) !void {
+        const step = self.autoScrollStep() orelse return;
+        const p = &self.panes[step.pane];
+        const top = if (step.up) p.list.top - 1 else p.list.top + 1;
+        p.scrollTo(top, self.visibleRows(step.pane));
+        self.markDirty(step.pane, .full);
+        try self.updateDrag();
     }
 
     /// Hands glyphwire-host the files an Alt+drag from `row` carries: the

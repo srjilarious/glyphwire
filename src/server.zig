@@ -373,6 +373,16 @@ pub const Server = struct {
                     defer alloc.free(b.body);
                     const scope: ?core.ContextHandle = if (isContextScopedEvent(b.event)) d.active_ctx else null;
                     self.broadcastIn(&conn, scope, b.event, b.body);
+                    // A `destroy_context` / `activate_context` put another
+                    // context on screen. One backgrounded through a window
+                    // resize had its tree re-laid-out silently on the way
+                    // up (`Session.republish`), so it's owed a `layout` --
+                    // the same follow-up the disconnect-cull path sends.
+                    if (std.mem.eql(u8, b.event, "context")) {
+                        self.reportLayout(alloc) catch |err| {
+                            std.log.err("glyphwire: layout after context switch failed: {t}", .{err});
+                        };
+                    }
                 }
                 // A pane-tree edit reshaped the window: re-lay-out, tell
                 // the manager the new rects, and tell every *other* client
@@ -860,6 +870,9 @@ pub const Server = struct {
             try self.reportContext(alloc);
             try self.reportPaneFocusIfChanged(alloc);
             try self.syncConnectionFocus(alloc);
+            // The context brought forward may have missed a resize while
+            // it was backgrounded.
+            try self.reportLayout(alloc);
         }
         return changed;
     }

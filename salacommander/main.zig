@@ -9,7 +9,8 @@
 //! searches everything below the pane's directory, F4 opens the file in
 //! the configured editor (zoe unless told otherwise), F5 copies,
 //! F6 moves or renames, F7 makes a directory, F8 deletes, Space/Insert
-//! mark, Alt+Up goes to the parent directory, Alt+D edits the pane's
+//! mark, dragging files onto a folder or the other pane moves them
+//! there (copies with Ctrl held), Alt+Up goes to the parent directory, Alt+D edits the pane's
 //! path where it's shown, Tab switches sides, Ctrl+F3..F6 (or a click
 //! on a column header) re-orders a pane, Ctrl+Shift+C copies the
 //! selected paths as a shell-quoted argument list, and Ctrl+` opens a
@@ -94,6 +95,8 @@ pub fn main(init: std.process.Init) !void {
         "layout",
         "scroll_offset",
         "mouse_button",
+        // Dragging files from one pane onto a folder or the other pane.
+        "mouse_move",
         "context",
         // The window theme changed and this follows it: the F3 popup's
         // frame is the one thing the host can't recolour itself.

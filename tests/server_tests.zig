@@ -1589,3 +1589,84 @@ pub fn clickToFocusTellsTheManagerTest(io: std.Io, alloc: std.mem.Allocator) !vo
     try testz.expectEqualStr("pane_focus", parsed.value.method);
     try testz.expectEqual(parsed.value.params.pane, other);
 }
+
+/// A context backgrounded through a window resize is owed a `layout` when
+/// it comes back. salacommander opening gwmd, the window resized, gwmd
+/// quit: gwmd's own `destroy_context` popped the stack, the silent
+/// re-layout on the way up (`Session.republish`) applied the new rects,
+/// and nobody told salacommander, whose panes kept their old size.
+pub fn destroyContextSendsTheRevealedContextItsOwedLayoutTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-owed-layout-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const layer = try ctx.createLayer(null, null, 0);
+    const root = try ctx.createSplit(.row);
+    try ctx.setSplitChildren(root, &.{.{ .target = .{ .layer = layer } }});
+    try ctx.setRootSplit(root);
+
+    // The file manager: draws on the root context, listens for `layout`.
+    var a_dec: wire.FrameDecoder = .{};
+    defer a_dec.deinit(alloc);
+    var a = try connectToPane(io, alloc, &srv, socket_path, glyphwire.root_pane_handle, "[\"layout\"]", &a_dec);
+    defer a.thread.join();
+    defer a.stream.close(io);
+
+    const Notification = struct {
+        method: []const u8,
+        params: struct { layers: []const struct { layer: u32, cols: usize } },
+    };
+
+    try srv.reportLayout(alloc);
+    {
+        const got = try readOneFrame(io, alloc, &a.stream, &a_dec);
+        defer alloc.free(got);
+        const parsed = try std.json.parseFromSlice(Notification, alloc, got, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        try testz.expectEqual(parsed.value.params.layers[0].cols, ctx.root.width);
+    }
+    const before = ctx.root.width;
+
+    // The viewer it opened: a context of its own on top.
+    const b_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer b_thread.join();
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+    var b = try addr.connect(io);
+    defer b.close(io);
+    var b_dec: wire.FrameDecoder = .{};
+    defer b_dec.deinit(alloc);
+    var b_buf: [4096]u8 = undefined;
+    var bw = b.writer(io, &b_buf);
+    try wire.writeFrame(&bw.interface,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"title":"viewer"}}
+    );
+    try bw.interface.flush();
+    const created = try readOneFrame(io, alloc, &b, &b_dec);
+    defer alloc.free(created);
+    const Created = struct { result: struct { context: u32 } };
+    const c_parsed = try std.json.parseFromSlice(Created, alloc, created, .{ .ignore_unknown_fields = true });
+    defer c_parsed.deinit();
+
+    // The window grows while the viewer is on screen...
+    try srv.reportResize(alloc, 60, 10);
+    try testz.expectTrue(ctx.root.width != before);
+
+    // ...and the viewer quits the polite way.
+    const destroy = try std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"destroy_context\",\"params\":{{\"context\":{d}}}}}", .{c_parsed.value.result.context});
+    defer alloc.free(destroy);
+    try wire.writeFrame(&bw.interface, destroy);
+    try bw.interface.flush();
+
+    const got = try readOneFrame(io, alloc, &a.stream, &a_dec);
+    defer alloc.free(got);
+    const parsed = try std.json.parseFromSlice(Notification, alloc, got, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testz.expectEqualStr("layout", parsed.value.method);
+    try testz.expectEqual(parsed.value.params.layers[0].cols, ctx.root.width);
+}
