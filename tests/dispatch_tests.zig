@@ -277,6 +277,49 @@ pub fn getCellsRequestReturnsGridSnapshotTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectEqualStr("", blank.g);
 }
 
+/// `write_text`'s `masked: true` draws its ●s, but `get_cells` reports
+/// those cells exactly as it reports a never-written one: no grapheme
+/// and the default (transparent) background, even with a `bg` given.
+/// Unmasked text either side is untouched.
+pub fn getCellsBlanksMaskedCellsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    try testz.expectTrue((try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"pw:"}}
+    )).response == null);
+    try testz.expectTrue((try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"\u25cf\u25cf\u25cf","bg":{"r":40,"g":40,"b":90},"masked":true}}
+    )).response == null);
+    try testz.expectTrue((try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"!"}}
+    )).response == null);
+
+    const response_body = (try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"get_cells","params":{}}
+    )).response.?;
+    defer alloc.free(response_body);
+
+    const CellJson = struct { g: []const u8, bg: ?struct { r: u8, g: u8, b: u8, a: u8 } };
+    const Response = struct {
+        result: struct { cells: []CellJson },
+    };
+    const parsed = try std.json.parseFromSlice(Response, alloc, response_body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    const cells = parsed.value.result.cells;
+    const untouched = cells[9];
+    try testz.expectEqualStr(":", cells[2].g);
+    for (cells[3..6]) |c| {
+        try testz.expectEqualStr("", c.g);
+        try testz.expectEqual(c.bg.?.r, untouched.bg.?.r);
+        try testz.expectEqual(c.bg.?.a, untouched.bg.?.a);
+    }
+    try testz.expectEqualStr("!", cells[6].g);
+}
+
 /// `get_cells` tags the two halves of a wide character: `"lead"` on the
 /// cell holding the grapheme, `"spacer"` on its blank right neighbour;
 /// an ordinary cell has no `wide` field.

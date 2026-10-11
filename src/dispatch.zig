@@ -1304,6 +1304,7 @@ pub const Dispatcher = struct {
             .pad_bg = bg,
             .pad_metadata_id = metadata_id,
             .selectable = p.selectable orelse true,
+            .masked = p.masked orelse false,
             .copy_text = p.copy_text,
         });
 
@@ -2403,12 +2404,17 @@ pub const Dispatcher = struct {
         const cells = try alloc.alloc(protocol.WireCell, layer.width * layer.height);
         defer alloc.free(cells);
 
+        const blank_cell: core.Cell = .{};
         var row: usize = 0;
         while (row < layer.height) : (row += 1) {
             const view_row: ?[]const core.Cell = if (view_offset > 0) layer.viewRow(view_offset, row) else null;
             var col: usize = 0;
             while (col < layer.width) : (col += 1) {
-                const cell: *const core.Cell = if (view_row) |vr| &vr[col] else layer.cell(row, col);
+                const stored: *const core.Cell = if (view_row) |vr| &vr[col] else layer.cell(row, col);
+                // A masked cell reads back exactly as a never-written one,
+                // so a scan can't find a password field or count its ●s.
+                // See `core.Cell.masked`.
+                const cell: *const core.Cell = if (stored.masked) &blank_cell else stored;
                 const bg: ?protocol.Color = switch (cell.style.bg) {
                     .color => |bgc| colorToJsonResolved(bgc, &self.ctx.theme),
                     .image, .icon => null,

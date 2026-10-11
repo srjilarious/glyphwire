@@ -66,6 +66,7 @@ pub fn setCellText(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg
     c.wide = .narrow;
     c.under_scaled = 0;
     c.selectable = true;
+    c.masked = false;
     c.copy_alt = 0;
 }
 
@@ -85,6 +86,7 @@ pub fn setCellWide(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg
     lead.wide = .wide_lead;
     lead.under_scaled = 0;
     lead.selectable = true;
+    lead.masked = false;
     lead.copy_alt = 0;
     cells[col + 1] = .{ .style = lead.style, .metadata_id = metadata_id, .wide = .wide_spacer };
 }

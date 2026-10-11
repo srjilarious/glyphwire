@@ -2955,6 +2955,37 @@ pub fn selectionSkipsUnselectableChromeTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectEqualStr("hi\nyo", text);
 }
 
+/// A `masked` write -- a password field's ●s -- marks its cells masked
+/// and unselectable, padding included: a selection across the field
+/// copies the text either side and nothing of the mask, and a later
+/// plain write over a cell clears the flag.
+pub fn maskedWriteIsNeverSelectedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 12, 2, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+    const bg = glyphwire.default_style.bg;
+
+    try layer.writeTextOpts("pw ", fg, bg, .{});
+    try layer.writeTextOpts("\u{25cf}\u{25cf}\u{25cf}", fg, bg, .{ .masked = true, .max_cols = 5, .pad = true });
+    try layer.writeTextOpts(" ok", fg, bg, .{});
+    for (3..8) |col| {
+        try testz.expectTrue(layer.cell(0, col).masked);
+        try testz.expectFalse(layer.cell(0, col).selectable);
+    }
+    try testz.expectFalse(layer.cell(0, 8).masked);
+
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 10 });
+    const text = (try layer.sel.text(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("pw  ok", text);
+
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 3 } });
+    try layer.writeTextOpts("x", fg, bg, .{});
+    try testz.expectFalse(layer.cell(0, 3).masked);
+    try testz.expectTrue(layer.cell(0, 3).selectable);
+}
+
 /// A layer of vertical text for the `selection_flow` tests: one border
 /// cell each side, three two-cell columns between them, read right to
 /// left -- あいう in the rightmost column, えおか in the middle, and a

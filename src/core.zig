@@ -715,6 +715,14 @@ pub const Cell = struct {
     /// the tint on a row starts after any leading unselectable cells and
     /// ends at the last selectable non-blank one.
     selectable: bool = true,
+    /// A secret's stand-in -- `write_text`'s `masked`: a password field
+    /// draws one ● per typed character and marks those cells so the mask
+    /// never reads back out. A masked cell is never selected or copied
+    /// (the write also clears `selectable`), and `get_cells` reports it
+    /// as an empty cell, so nothing reading the grid learns where a
+    /// password field is or how long its contents are. The secret itself
+    /// never reaches the server; this keeps its length off the wire too.
+    masked: bool = false,
     /// What a selection copies for this cell instead of its grapheme:
     /// `write_text`'s `copy_text`, as a 1-based index into the owning
     /// layer's `Layer.copy_texts` (0 = copy the grapheme). For a glyph
@@ -1220,6 +1228,10 @@ pub const Layer = struct {
     /// `Layer` for the same reason `pen` does: `putAtCursor` is reached
     /// from deep inside the escape machine too.
     write_selectable: bool = true,
+    /// `Cell.masked` for every cell the `write_text` in progress touches
+    /// -- `RunsOpts.masked`, scoped to the call exactly like
+    /// `write_selectable`.
+    write_masked: bool = false,
     /// `Cell.copy_alt` for every glyph the `write_text` in progress
     /// draws -- `RunsOpts.copy_text` interned, set by `writeRuns` for the
     /// length of the call and back to 0 after it, exactly like
@@ -1485,8 +1497,10 @@ pub const Layer = struct {
     }
 
     /// The text a selection copies for `c`: its `copy_text` when it has
-    /// one, else its grapheme.
+    /// one, else its grapheme. Nothing for a masked cell, which is already
+    /// unselectable; this is the backstop.
     pub fn copyTextOf(self: *const Layer, c: *const Cell) []const u8 {
+        if (c.masked) return "";
         if (c.copy_alt != 0 and c.copy_alt <= self.copy_texts.items.len) return self.copy_texts.items[c.copy_alt - 1];
         return c.grapheme();
     }
@@ -2343,6 +2357,9 @@ pub const Layer = struct {
         /// `Cell.selectable` for every cell the write touches, padding
         /// and a scaled glyph's fill included.
         selectable: bool = true,
+        /// `Cell.masked` for every cell the write touches, padding
+        /// included. Implies `selectable = false`.
+        masked: bool = false,
         /// What a selection copies for each glyph this write draws, in
         /// place of the glyph itself (`Cell.copy_alt`). Meant for a
         /// one-glyph write drawing a stand-in for some other text; a
@@ -2359,7 +2376,7 @@ pub const Layer = struct {
     /// `writeTextTaggedScaled` with `WriteOpts` -- a single styled run.
     pub fn writeTextOpts(self: *Layer, text: []const u8, fg: Color, bg: ?Background, opts: WriteOpts) !void {
         const runs = [_]TextRun{.{ .text = text, .fg = fg, .bg = bg, .metadata_id = opts.metadata_id, .scale = opts.scale, .underline = opts.underline }};
-        return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id, .selectable = opts.selectable, .copy_text = opts.copy_text });
+        return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id, .selectable = opts.selectable, .masked = opts.masked, .copy_text = opts.copy_text });
     }
 
     /// One styled piece of a `write_text`: its text and everything that
@@ -2391,6 +2408,8 @@ pub const Layer = struct {
         pad_metadata_id: ?MetadataHandle = null,
         /// See `WriteOpts.selectable` -- covers every run and the padding.
         selectable: bool = true,
+        /// See `WriteOpts.masked` -- covers every run and the padding.
+        masked: bool = false,
         /// See `WriteOpts.copy_text` -- every glyph of every run.
         copy_text: ?[]const u8 = null,
     };
@@ -2405,8 +2424,10 @@ pub const Layer = struct {
         for (runs) |r| _ = try std.unicode.Utf8View.init(r.text);
         self.write_copy_alt = if (opts.copy_text) |t| try self.internCopyText(t) else 0;
         defer self.write_copy_alt = 0;
-        self.write_selectable = opts.selectable;
+        self.write_selectable = opts.selectable and !opts.masked;
         defer self.write_selectable = true;
+        self.write_masked = opts.masked;
+        defer self.write_masked = false;
         // The clip limit is an absolute column on the starting row.
         const clip_end: ?usize = if (opts.max_cols) |n| @min(self.cursor.col + n, self.width) else null;
 
@@ -2697,6 +2718,7 @@ pub const Layer = struct {
         c.text_scale = .x1;
         c.under_scaled = below;
         c.selectable = self.write_selectable;
+        c.masked = self.write_masked;
         c.copy_alt = 0;
     }
 
@@ -2752,6 +2774,7 @@ pub const Layer = struct {
         c.text_scale = scale;
         c.under_scaled = 0;
         c.selectable = self.write_selectable;
+        c.masked = self.write_masked;
         c.copy_alt = self.write_copy_alt;
 
         if (w == 2) {
@@ -2760,7 +2783,7 @@ pub const Layer = struct {
             // the lead's `metadata_id` so a hit-test on either half maps
             // to the same entry.
             const s = self.cell(row, col + 1);
-            s.* = .{ .style = c.style, .metadata_id = metadata_id, .wide = .wide_spacer, .selectable = c.selectable };
+            s.* = .{ .style = c.style, .metadata_id = metadata_id, .wide = .wide_spacer, .selectable = c.selectable, .masked = c.masked };
         }
 
         self.cursor.col += w;

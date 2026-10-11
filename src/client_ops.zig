@@ -938,6 +938,7 @@ fn textParams(text: ?[]const u8, spans: ?[]const protocol.SpanParams, opts: Text
         .max_cols = opts.max_cols,
         .pad = if (opts.pad) true else null,
         .selectable = if (opts.selectable) null else false,
+        .masked = if (opts.masked) true else null,
         .copy_text = opts.copy_text,
         // Omitted entirely for the overwhelmingly common no-underline
         // write, so nothing grows on the wire for every existing

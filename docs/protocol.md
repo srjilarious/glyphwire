@@ -820,7 +820,7 @@ default style); any explicit colour, black included, is opaque.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `write_text` | notification | `layer?`, `row?`, `col?`, `text` \| `spans`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false, `selectable?` = true | — |
+| `write_text` | notification | `layer?`, `row?`, `col?`, `text` \| `spans`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false, `selectable?` = true, `masked?` = false | — |
 | `insert_cells` | notification | `layer?`, `count` | — |
 | `delete_cells` | notification | `layer?`, `count` | — |
 | `move_content` | notification | `layer?`, `top?`, `bot?`, `count?` = 1, `direction?` | — |
@@ -836,7 +836,12 @@ many display columns from its start (never splitting a wide character,
 never wrapping), and `pad` fills the rest of that span with blank `bg`
 cells. `fg`/`bg` omitted means the server default style. `selectable:
 false` keeps every cell the write touches out of any selection's tint and
-copied text (a panel's border and pad).
+copied text (a panel's border and pad). `masked: true` marks the cells as
+a secret's stand-in (a password field's mask glyphs): they draw normally
+but are never selected or copied, and `get_cells` reports each one exactly
+as it reports a never-written cell. The client draws the mask, never the
+secret; the flag keeps even the mask's position and length from reading
+back out.
 
 `spans` replaces `text` with an array of `{text, fg?, bg?, metadata_id?,
 transparent_bg?, scale?}` written back to back; each omitted field takes
@@ -1300,7 +1305,8 @@ character; what the selection *covers* (the tint and
 the rows a scaled glyph draws down into belongs to the glyph's own row,
 and the tint covers every row the selected glyphs draw into. Each row's
 tint and text stop at its last non-blank cell, and cells written with
-`write_text`'s `selectable: false` are never tinted or copied.
+`write_text`'s `selectable: false` or `masked: true` are never tinted or
+copied.
 
 **Selection state** is `{active, anchor?, active_end?}`; `anchor` and
 `active_end` are absent when `active` is false.

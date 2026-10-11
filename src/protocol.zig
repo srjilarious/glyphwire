@@ -516,6 +516,11 @@ pub const WriteTextParams = struct {
     /// selection -- see `core.Cell.selectable`. Whole-write, like `pad`.
     /// Omitted: true.
     selectable: ?bool = null,
+    /// `true` marks every cell this write touches as a secret's stand-in
+    /// (a password field's ●s) -- see `core.Cell.masked`: never selected
+    /// or copied, and blank in `get_cells`. Whole-write, like `pad`.
+    /// Omitted: false.
+    masked: ?bool = null,
     /// What a selection copies for each glyph this write draws, instead
     /// of the glyph -- see `core.Cell.copy_alt`. Whole-write, like `pad`.
     copy_text: ?[]const u8 = null,

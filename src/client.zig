@@ -438,6 +438,11 @@ pub const Client = struct {
         /// and copied text -- a panel's border and pad. See
         /// `core.Cell.selectable`.
         selectable: bool = true,
+        /// A password field's ●s: the cells are never selected or
+        /// copied and read back blank from `get_cells`. Draw the mask
+        /// glyphs here, never the secret -- this hides the field, it
+        /// doesn't hide what's written into it. See `core.Cell.masked`.
+        masked: bool = false,
         /// What a selection copies for each glyph this write draws, in
         /// place of the glyph: a vertical presentation form (︒) drawn
         /// for the punctuation it stands for (。). See
