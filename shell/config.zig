@@ -157,6 +157,14 @@ pub const PromptConfig = struct {
     /// once before it scrolls (Up/Down/Tab to move, Enter to accept).
     /// `null` -> the built-in default (5). Must be >= 1.
     completion_max_items: ?u32 = null,
+    /// Whether Tab asks fish (`fish -c 'complete -C ...'`) for a
+    /// command's arguments -- subcommands, flags, branches -- when fish is
+    /// installed and no `defcomplete` covers the command. `null` -> on.
+    fish_completions: ?bool = null,
+    /// Whether an idle prompt shows the newest history line extending
+    /// what is typed as dim text after the caret (fish's autosuggestion).
+    /// `null` -> on.
+    autosuggest: ?bool = null,
 };
 
 /// What a `zj{ ... }` call declared -- config for the `zj` directory-jump
@@ -460,6 +468,20 @@ fn luaPrompt(lua: *Lua) !i32 {
         const n = lua.checkNumber(-1);
         if (n < 1) lua.raiseErrorStr("prompt: completion_max_items must be >= 1", .{});
         cfg.prompt.completion_max_items = @as(u32, @intFromFloat(@min(n, 1_000_000)));
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "fish_completions");
+    if (!lua.isNoneOrNil(-1)) {
+        lua.checkType(-1, .boolean);
+        cfg.prompt.fish_completions = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "autosuggest");
+    if (!lua.isNoneOrNil(-1)) {
+        lua.checkType(-1, .boolean);
+        cfg.prompt.autosuggest = lua.toBoolean(-1);
     }
     lua.pop(1);
 

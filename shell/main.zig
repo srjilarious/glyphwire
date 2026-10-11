@@ -1044,8 +1044,11 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         try prompt.moveCursorTo(lineedit.lineStartFrom(prompt.line.text(), prompt.line.caret));
     } else if ((ctrl and std.mem.eql(u8, ev.key, "e")) or std.mem.eql(u8, ev.key, "end")) {
         // End mirrors ctrl+e on the live line; the browse-mode form is
-        // handled above.
-        try prompt.moveCursorTo(lineedit.lineEndFrom(prompt.line.text(), prompt.line.caret));
+        // handled above. Already at the end with a dim suggestion
+        // showing, it takes the suggestion instead (fish).
+        if (!prompt.acceptCompletionHint()) {
+            try prompt.moveCursorTo(lineedit.lineEndFrom(prompt.line.text(), prompt.line.caret));
+        }
     } else if (ctrl and std.mem.eql(u8, ev.key, "u")) {
         try prompt.killToStart();
     } else if (ctrl and std.mem.eql(u8, ev.key, "k")) {
@@ -1080,9 +1083,11 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
             try prompt.moveCursorTo(prompt.wordLeft());
         }
     } else if (ctrl and std.mem.eql(u8, ev.key, "right")) {
+        // At the end of the line with a suggestion showing it takes the
+        // suggestion's next word, fish's partial accept.
         if (prompt.browse_pos != null) {
             try prompt.browseRight(prompt.scrollbackJumpRows());
-        } else {
+        } else if (!try prompt.acceptCompletionHintWord()) {
             try prompt.moveCursorTo(prompt.wordRight());
         }
     } else if (ctrl and std.mem.eql(u8, ev.key, "up")) {
@@ -1339,6 +1344,14 @@ pub const Prompt = struct {
     /// screen -- see `CompletionPickerState` and
     /// `Prompt.recomputeAndDrawPicker`.
     completion_picker: ?CompletionPickerState = null,
+    /// Tab completion's `$PATH` executable list (and where `fish` is),
+    /// rebuilt lazily -- see `completion.PathCommands`.
+    path_commands: completion.PathCommands = .{},
+    /// The `fish` found while building `path_commands`, owned; empty
+    /// when there is none.
+    fish_path: []u8 = "",
+    /// fish's last completion answer -- see `completion.FishCache`.
+    fish_cache: completion.FishCache = .{},
     /// `null` means the line on screen is the one actually being typed
     /// (not a recalled history entry). Otherwise, an index into `history`
     /// for whichever entry `historyUp`/`historyDown` last loaded.
@@ -1586,6 +1599,9 @@ pub const Prompt = struct {
         for (self.history.items) |line| alloc.free(line);
         self.history.deinit(alloc);
         self.clearHistoryPending();
+        self.path_commands.deinit(alloc);
+        alloc.free(self.fish_path);
+        self.fish_cache.clear(alloc);
         self.history_pending.deinit(alloc);
         self.scratch.deinit(alloc);
         self.line.deinit(alloc);
@@ -1674,10 +1690,18 @@ pub const Prompt = struct {
     pub const hideCompletionHint = completion.hideCompletionHint;
     pub const doComplete = completion.doComplete;
     pub const appendCommandNameCandidates = completion.appendCommandNameCandidates;
-    pub const collectCompletionCandidates = completion.collectCompletionCandidates;
+    pub const gatherCandidates = completion.gatherCandidates;
+    pub const insertCandidate = completion.insertCandidate;
     pub const sortCompletionCandidates = completion.sortCompletionCandidates;
     pub const maybeShowCompletionHint = completion.maybeShowCompletionHint;
+    pub const historySuggestion = completion.historySuggestion;
+    pub const autosuggestEnabled = completion.autosuggestEnabled;
+    pub const fishCompletionsEnabled = completion.fishCompletionsEnabled;
+    pub const pathCommands = completion.pathCommands;
+    pub const invalidateCompletionCaches = completion.invalidateCompletionCaches;
     pub const acceptCompletionHintOrComplete = completion.acceptCompletionHintOrComplete;
+    pub const acceptCompletionHint = completion.acceptCompletionHint;
+    pub const acceptCompletionHintWord = completion.acceptCompletionHintWord;
     pub const completionDir = completion.completionDir;
     pub const recomputeAndDrawPicker = completion.recomputeAndDrawPicker;
     pub const reservePickerRows = completion.reservePickerRows;
@@ -2844,6 +2868,7 @@ pub const Prompt = struct {
         self.chdir_pending_list = null;
 
         try self.dispatchLine();
+        self.invalidateCompletionCaches();
         self.maybeFlushPersistentState();
         if (self.should_exit) return; // "exit" (typed or via an alias) -- see dispatchLine
 

@@ -18,7 +18,7 @@
 -- shell's session-long Lua state, so a `function` (or `defcmd`) it
 -- defines stays callable as a builtin afterwards. glyphwire adds:
 -- `alias(name, value)`, `prompt{ ... }`, `zj{ ... }`, `on{ ... }`,
--- `defcmd(name, fn)`,
+-- `defcmd(name, fn)`, `defcomplete(name, fn)`,
 -- and the `sh` table (`sh.setenv` / `sh.unsetenv` / `sh.getenv` /
 -- `sh.cwd` / `sh.chdir` / `sh.realpath`). See the Scripts section below.
 --
@@ -156,8 +156,22 @@
 -- Environment variables: `export NAME=VALUE` sets one, `unset NAME`
 -- clears it, `export` with no arguments lists them. A leading
 -- `NAME=VALUE` on a line sets it for the session (`FOO=bar`) or, before
--- a command, just for that command (`DEBUG=1 make -j`). `$NAME` /
--- `${NAME}` / a leading `~` expand inside the value.
+-- a command, just for that command (`DEBUG=1 make -j`).
+--
+-- Quoting and expansion follow bash: `$NAME`, `${NAME}` and `$?` expand
+-- unquoted and inside "double quotes", never inside 'single quotes' or
+-- after a backslash (`\$`); a leading `~` (or one right after `NAME=`)
+-- is $HOME unless quoted. An expanded value is never split into several
+-- arguments (zsh / fish behaviour), so `ls $DIR` is one argument even
+-- with a space in it. So `curl -H "Authorization: Bearer $TOKEN" -d
+-- '{"a": 1}' url` sends the token and the JSON exactly as written.
+--
+-- A command can span several lines. Enter on an unclosed quote, a
+-- trailing `\`, or a dangling `|` / `&&` / `||` starts another input
+-- line (Alt+Enter forces one); Up / Down move between the lines before
+-- they reach history. Pasting a multi-line `curl ... \` block or a
+-- quoted JSON body keeps its line breaks; other pasted newlines (a
+-- column of file names) become spaces.
 --
 -- A builtin receives its arguments as `...` and as the `arg` table
 -- (`arg[0]` is the command name); a numeric `return` is its exit status.
@@ -179,6 +193,22 @@
 --
 -- defcmd("hello", function(who)
 --   print("hi " .. (who or "there"))
+-- end)
+--
+-- Tab completion for a command's arguments: `defcomplete(name, fn)`
+-- (bash's `complete -F`). `fn(ctx)` gets `ctx.words` (the command's
+-- words before the one being completed; `ctx.words[1]` is the command),
+-- `ctx.current` (the partial word) and `ctx.line` (the text before the
+-- cursor). Return a list of strings or `{ text, desc }` pairs -- the
+-- description shows beside it in the picker -- or nil to fall back to
+-- fish's completions (when fish is installed) and then file names. It
+-- runs on every Tab and picker keystroke, with a 2s ceiling.
+--
+-- defcomplete("deploy", function(ctx)
+--   if #ctx.words == 1 then
+--     return { { "staging", "the test cluster" }, { "prod", "careful" } }
+--   end
+--   return nil
 -- end)
 --
 -- See assets/scripts/ for up / venv_activate / venv_deactivate /
@@ -384,6 +414,19 @@
 -- character while browsing returns to the prompt and inserts it; set
 -- false to make browse a strict navigation mode that only Escape ends.
 --
+-- Tab completes command names from builtins, aliases, scripts and every
+-- executable on $PATH; arguments from a `defcomplete`, else from fish
+-- (subcommands, flags, branches, with descriptions), else file names.
+-- Completing inside 'a quote' escapes for that quote and closes it.
+--
+-- fish_completions: ask fish (`fish -c 'complete -C ...'`, run without
+-- your config.fish) for arguments when it is installed. Default true.
+--
+-- autosuggest: after a pause in typing, show the newest history line
+-- that continues what you typed as dim text (fish's autosuggestion).
+-- Right / End take all of it, Ctrl+Right its next word. Default true;
+-- with it off, or no history match, the hint is Tab's first candidate.
+--
 -- These live under prompt{} because that's the shell's one table
 -- binding.
 --
@@ -391,4 +434,6 @@
 --     scrolloff = 8,
 --     scrollback_jump = 5,
 --     scrollback_type_exits = true,
+--     fish_completions = true,
+--     autosuggest = true,
 -- }

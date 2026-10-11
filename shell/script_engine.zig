@@ -20,6 +20,14 @@
 //!  - `defcmd(name, fn)` -- register `fn` as a builtin. Stored in a table
 //!    kept only in the Lua registry, never as a global, so a builtin
 //!    named `string` can't clobber the stdlib (see decisions.md).
+//!  - `defcomplete(name, fn)` -- register Tab completion for the command
+//!    `name` (bash's `complete -F`). `fn(ctx)` gets `ctx.words` (the
+//!    command's words before the one being completed, `words[1]` the
+//!    command name), `ctx.current` (the partial word) and `ctx.line`
+//!    (the text before the caret), and returns a list whose entries are a
+//!    string or `{ text, desc }` -- or nil to fall back to the next
+//!    source (fish, then file names). Kept in a registry table like
+//!    `defcmd`'s.
 //!  - a file `<scripts_dir>/<name>.lua` is also a builtin `name`, looked
 //!    up by filename and re-read on every call (so editing it takes
 //!    effect immediately). `require` finds shared helpers under
@@ -45,6 +53,11 @@ const script_ext = ".lua";
 /// `while true do end` is caught well under a second, large enough that
 /// the check is noise on a normal script.
 const hook_instruction_count: i32 = 100_000;
+
+/// The same ceiling for a `defcomplete` function, which runs while the
+/// user waits on a Tab: past this the completion is abandoned rather than
+/// freezing the prompt.
+const completer_deadline_ms: i64 = 2_000;
 
 /// Hard ceiling on one builtin's wall-clock run time, in milliseconds. A
 /// script still executing bytecode past this is force-aborted with a
@@ -117,6 +130,8 @@ pub const ScriptEngine = struct {
     scripts_dir: []const u8,
     /// Registry key for the `name -> function` table `defcmd` fills.
     cmds_ref: i32,
+    /// Registry key for the `name -> function` table `defcomplete` fills.
+    comps_ref: i32,
     /// `alias` / `prompt` declarations from the last `runConf`. Owned for
     /// the session; `shell/main.zig` reads it live on every prompt draw.
     cfg: config.ShellConfig,
@@ -128,6 +143,9 @@ pub const ScriptEngine = struct {
     /// runs at a time -- dispatch is synchronous.
     call_started: ?std.Io.Clock.Timestamp = null,
     interrupted: bool = false,
+    /// The wall-clock ceiling for the call in flight: `hook_deadline_ms`
+    /// for a builtin, `completer_deadline_ms` for a completer.
+    call_deadline_ms: i64 = hook_deadline_ms,
 
     /// Builds the persistent state: opens the stdlib, installs the config
     /// bindings and the script surface (`sh`, `defcmd`, grid-routed
@@ -154,6 +172,7 @@ pub const ScriptEngine = struct {
             .hooks = hooks,
             .scripts_dir = "",
             .cmds_ref = 0,
+            .comps_ref = 0,
             .cfg = .{ .alloc = alloc, .prompt_arena = std.heap.ArenaAllocator.init(alloc) },
         };
         errdefer self.cfg.deinit();
@@ -168,12 +187,16 @@ pub const ScriptEngine = struct {
         // or leak it.
         lua.newTable();
         self.cmds_ref = try lua.ref(ziglua.registry_index);
+        lua.newTable();
+        self.comps_ref = try lua.ref(ziglua.registry_index);
 
         config.installBindings(lua);
 
         installShTable(lua);
         lua.pushFunction(ziglua.wrap(luaDefcmd));
         lua.setGlobal("defcmd");
+        lua.pushFunction(ziglua.wrap(luaDefcomplete));
+        lua.setGlobal("defcomplete");
 
         lua.pushFunction(ziglua.wrap(luaPrint));
         lua.setGlobal("print");
@@ -351,6 +374,7 @@ pub const ScriptEngine = struct {
         for (args) |a| _ = lua.pushString(a);
 
         self.call_started = std.Io.Clock.Timestamp.now(self.io, .awake);
+        self.call_deadline_ms = hook_deadline_ms;
         self.interrupted = false;
         lua.setHook(ziglua.wrap(interruptHook), .{ .count = true }, hook_instruction_count);
         defer lua.setHook(ziglua.wrap(interruptHook), .{}, 0);
@@ -365,6 +389,92 @@ pub const ScriptEngine = struct {
             return std.math.lossyCast(u8, @max(0, n));
         }
         return 0;
+    }
+
+    /// Whether `defcomplete` registered a completer for `name`.
+    pub fn hasCompleter(self: *ScriptEngine, name: []const u8) bool {
+        if (!validName(name)) return false;
+        const lua = self.lua;
+        const base = lua.getTop();
+        defer lua.setTop(base);
+
+        var name_buf: [160]u8 = undefined;
+        const name_z = toZ(&name_buf, name) orelse return false;
+        _ = lua.rawGetIndex(ziglua.registry_index, self.comps_ref);
+        return lua.getField(-1, name_z) == .function;
+    }
+
+    /// One candidate a `defcomplete` function returned. Both fields owned
+    /// by the allocator handed to `runCompleter`.
+    pub const Completion = struct { text: []const u8, desc: []const u8 };
+
+    /// Calls the `defcomplete` function for `words[0]` and appends what it
+    /// returned to `out`. False when there is no completer, it returned
+    /// nil (or something that isn't a list), or it failed -- the error is
+    /// written to the grid like a builtin's, and completion falls back to
+    /// the next source either way.
+    pub fn runCompleter(
+        self: *ScriptEngine,
+        alloc: std.mem.Allocator,
+        words: []const []const u8,
+        current: []const u8,
+        line: []const u8,
+        out: *std.ArrayList(Completion),
+    ) std.mem.Allocator.Error!bool {
+        if (words.len == 0 or !validName(words[0])) return false;
+        const lua = self.lua;
+        const base = lua.getTop();
+        defer lua.setTop(base);
+
+        var name_buf: [160]u8 = undefined;
+        const name_z = toZ(&name_buf, words[0]) orelse return false;
+        _ = lua.rawGetIndex(ziglua.registry_index, self.comps_ref);
+        if (lua.getField(-1, name_z) != .function) return false;
+
+        lua.newTable();
+        lua.newTable();
+        for (words, 0..) |w, i| {
+            _ = lua.pushString(w);
+            lua.rawSetIndex(-2, @intCast(i + 1));
+        }
+        lua.setField(-2, "words");
+        _ = lua.pushString(current);
+        lua.setField(-2, "current");
+        _ = lua.pushString(line);
+        lua.setField(-2, "line");
+
+        self.call_started = std.Io.Clock.Timestamp.now(self.io, .awake);
+        self.call_deadline_ms = completer_deadline_ms;
+        self.interrupted = false;
+        lua.setHook(ziglua.wrap(interruptHook), .{ .count = true }, hook_instruction_count);
+        defer lua.setHook(ziglua.wrap(interruptHook), .{}, 0);
+
+        lua.protectedCall(.{ .args = 1, .results = 1 }) catch {
+            self.writeErr(words[0], lua.toStringEx(-1));
+            return false;
+        };
+        if (lua.typeOf(-1) != .table) return false;
+
+        var i: i32 = 1;
+        while (true) : (i += 1) {
+            const t = lua.rawGetIndex(-1, i);
+            defer lua.pop(1);
+            switch (t) {
+                .nil => break,
+                .string => {
+                    const text = lua.toString(-1) catch continue;
+                    try appendCompletion(alloc, out, text, "");
+                },
+                .table => {
+                    // `{ text, desc }` or `{ text = ..., desc = ... }`.
+                    const text = tableString(lua, 1, "text") orelse continue;
+                    const desc = tableString(lua, 2, "desc") orelse "";
+                    try appendCompletion(alloc, out, text, desc);
+                },
+                else => {},
+            }
+        }
+        return true;
     }
 
     /// Pushes the function to run for `name`: a `defcmd` registration if
@@ -418,6 +528,32 @@ pub const ScriptEngine = struct {
 };
 
 // ─── name vetting / small helpers ─────────────────────────────────────
+
+fn appendCompletion(alloc: std.mem.Allocator, out: *std.ArrayList(ScriptEngine.Completion), text: []const u8, desc: []const u8) !void {
+    try out.ensureUnusedCapacity(alloc, 1);
+    const text_owned = try alloc.dupe(u8, text);
+    errdefer alloc.free(text_owned);
+    out.appendAssumeCapacity(.{ .text = text_owned, .desc = try alloc.dupe(u8, desc) });
+}
+
+/// A string field of the table on top of the stack, by position `idx`
+/// or else by `key`; null when neither is a string. The slice lives as
+/// long as the table does.
+fn tableString(lua: *Lua, idx: i32, key: [:0]const u8) ?[]const u8 {
+    if (lua.rawGetIndex(-1, idx) == .string) {
+        const s = lua.toString(-1) catch null;
+        lua.pop(1);
+        return s;
+    }
+    lua.pop(1);
+    if (lua.getField(-1, key) == .string) {
+        const s = lua.toString(-1) catch null;
+        lua.pop(1);
+        return s;
+    }
+    lua.pop(1);
+    return null;
+}
 
 fn validName(name: []const u8) bool {
     if (name.len == 0 or name.len > 128) return false;
@@ -634,6 +770,20 @@ fn luaDefcmd(lua: *Lua) i32 {
     return 0;
 }
 
+fn luaDefcomplete(lua: *Lua) i32 {
+    const e = g_engine orelse return 0;
+    const name = lua.checkString(1);
+    lua.checkType(2, .function);
+    if (!validName(name) or std.mem.indexOfAny(u8, name, " \t") != null)
+        lua.raiseErrorStr("defcomplete: invalid command name", .{});
+
+    _ = lua.rawGetIndex(ziglua.registry_index, e.comps_ref);
+    lua.pushValue(2);
+    lua.setField(-2, name);
+    lua.pop(1);
+    return 0;
+}
+
 fn luaPrint(lua: *Lua) i32 {
     const e = g_engine orelse return 0;
     const n = lua.getTop();
@@ -677,7 +827,7 @@ fn interruptHook(lua: *Lua, event: ziglua.Event, info: *ziglua.DebugInfo) void {
         lua.raiseErrorStr("interrupted", .{});
     }
     if (e.call_started) |started| {
-        if (started.untilNow(e.io).raw.toMilliseconds() > hook_deadline_ms)
-            lua.raiseErrorStr("script exceeded its 30s time limit", .{});
+        if (started.untilNow(e.io).raw.toMilliseconds() > e.call_deadline_ms)
+            lua.raiseErrorStr("script exceeded its time limit", .{});
     }
 }

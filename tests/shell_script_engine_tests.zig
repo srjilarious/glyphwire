@@ -240,6 +240,69 @@ pub fn defcmdRegistersABuiltinTest(io: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqualStr("hi there\n", host.output());
 }
 
+fn freeCompletions(alloc: std.mem.Allocator, list: *std.ArrayList(script_engine.ScriptEngine.Completion)) void {
+    for (list.items) |c| {
+        alloc.free(c.text);
+        alloc.free(c.desc);
+    }
+    list.deinit(alloc);
+}
+
+pub fn defcompleteReturnsStringsAndPairsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf(
+        \\defcomplete('deploy', function(ctx)
+        \\  if #ctx.words == 1 then
+        \\    return { 'staging', { 'prod', 'the real one' }, { text = 'dev', desc = 'local' } }
+        \\  end
+        \\  return { ctx.words[2] .. ':' .. ctx.current .. ':' .. ctx.line }
+        \\end)
+    );
+    try testz.expectEqual(eng.conf_err, null);
+    try testz.expectTrue(eng.hasCompleter("deploy"));
+    try testz.expectFalse(eng.hasCompleter("other"));
+
+    var got: std.ArrayList(script_engine.ScriptEngine.Completion) = .empty;
+    defer freeCompletions(alloc, &got);
+    try testz.expectTrue(try eng.runCompleter(alloc, &.{"deploy"}, "", "deploy ", &got));
+    try testz.expectEqual(@as(usize, 3), got.items.len);
+    try testz.expectEqualStr("staging", got.items[0].text);
+    try testz.expectEqualStr("", got.items[0].desc);
+    try testz.expectEqualStr("prod", got.items[1].text);
+    try testz.expectEqualStr("the real one", got.items[1].desc);
+    try testz.expectEqualStr("dev", got.items[2].text);
+    try testz.expectEqualStr("local", got.items[2].desc);
+
+    var second: std.ArrayList(script_engine.ScriptEngine.Completion) = .empty;
+    defer freeCompletions(alloc, &second);
+    try testz.expectTrue(try eng.runCompleter(alloc, &.{ "deploy", "prod" }, "x", "deploy prod x", &second));
+    try testz.expectEqualStr("prod:x:deploy prod x", second.items[0].text);
+}
+
+pub fn defcompleteNilOrErrorFallsThroughTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf(
+        \\defcomplete('quiet', function(ctx) return nil end)
+        \\defcomplete('broken', function(ctx) error('nope') end)
+    );
+    var got: std.ArrayList(script_engine.ScriptEngine.Completion) = .empty;
+    defer freeCompletions(alloc, &got);
+    try testz.expectFalse(try eng.runCompleter(alloc, &.{"quiet"}, "", "quiet ", &got));
+    try testz.expectFalse(try eng.runCompleter(alloc, &.{"broken"}, "", "broken ", &got));
+    try testz.expectFalse(try eng.runCompleter(alloc, &.{"unknown"}, "", "unknown ", &got));
+    try testz.expectEqual(@as(usize, 0), got.items.len);
+    // The failing completer's error is reported like a builtin's.
+    try testz.expectTrue(std.mem.indexOf(u8, host.output(), "nope") != null);
+}
+
 pub fn builtinNumericReturnIsTheExitCodeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var host = TestHost{ .alloc = alloc };
     defer host.deinit();

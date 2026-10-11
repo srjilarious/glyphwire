@@ -185,6 +185,19 @@ pub fn configPromptDefaultsToAllNullTest(_: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(res.config.prompt.dur_min_ms, null);
 }
 
+pub fn configReadsCompletionSwitchesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "prompt { fish_completions = false, autosuggest = false }");
+    defer res.deinit();
+    try testz.expectEqual(res.err, null);
+    try testz.expectEqual(res.config.prompt.fish_completions, false);
+    try testz.expectEqual(res.config.prompt.autosuggest, false);
+
+    var unset = try config.load(alloc, "prompt { left = '> ' }");
+    defer unset.deinit();
+    try testz.expectEqual(unset.config.prompt.fish_completions, null);
+    try testz.expectEqual(unset.config.prompt.autosuggest, null);
+}
+
 pub fn configPromptMergesAcrossCallsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     const src =
         \\prompt { left = "one", right = "R" }
