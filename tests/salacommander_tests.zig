@@ -1800,6 +1800,16 @@ pub fn fileOpsMenuPicksByHeldModifiersTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectTrue(menu.handleKey("escape", .{}).? == .cancel);
 }
 
+/// With Ctrl held the bar lists Ctrl+H as `H Hidden`, Ctrl+1 as `1`, and
+/// so on: the modifiers are said once in front.
+pub fn modifiedBarKeyTextTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [24]u8 = undefined;
+    try testz.expectEqualStr(sala.ui.barKeyText(&buf, "h"), "H");
+    try testz.expectEqualStr(sala.ui.barKeyText(&buf, "one"), "1");
+    try testz.expectEqualStr(sala.ui.barKeyText(&buf, "grave_accent"), "`");
+    try testz.expectEqualStr(sala.ui.barKeyText(&buf, "page_down"), "Page down");
+}
+
 /// `menu_keys` rebinds the menu the way `keys` rebinds the panes: here
 /// root moves from Super to Alt+Shift.
 pub fn configReadsMenuKeysTest(_: std.Io, alloc: std.mem.Allocator) !void {

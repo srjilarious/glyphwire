@@ -941,9 +941,29 @@ pub const Ui = struct {
             .file => |path| {
                 const owned = try self.alloc.dupe(u8, path);
                 defer self.alloc.free(owned);
+                // Checked first: an opener handed a file it can't read
+                // takes the screen, or detaches, before failing where
+                // the bar can't say why.
+                std.Io.Dir.cwd().access(self.io, owned, .{ .read = true }) catch |err| {
+                    return self.refuseUnreadable(owned, err);
+                };
                 try self.openFile(owned);
             },
         }
+    }
+
+    /// Says in the bar why `path` can't be opened, pointing at Super+F4
+    /// (whatever `sudoEdit` is bound to) when the reason is permission.
+    fn refuseUnreadable(self: *Ui, path: []const u8, err: anyerror) !void {
+        const name = std.fs.path.basename(path);
+        const denied = err == error.AccessDenied or err == error.PermissionDenied;
+        if (denied) {
+            if (self.keymap.chordFor(.sudoEdit)) |chord| {
+                var kbuf: [48]u8 = undefined;
+                return self.setMessage("{s}: {s} ({s} edits it as root)", .{ name, errorText(err), chord.format(&kbuf) });
+            }
+        }
+        try self.setMessage("{s}: {s}", .{ name, errorText(err) });
     }
 
     /// Opens a file with whatever `open_actions` says (see
@@ -959,7 +979,7 @@ pub const Ui = struct {
             try self.setMessage("open_actions \"{s}\": {t}", .{ template, err });
             return;
         };
-        try self.runInSession(argv);
+        try self.runInSession(argv, self.startDir(path));
     }
 
     /// Runs a glyphwire client and waits for it. The child inherits
@@ -967,16 +987,31 @@ pub const Ui = struct {
     /// stacks over ours and hands the keyboard to; we're just blocked
     /// until it exits. Its stdio is dropped -- this pane's stdout is the
     /// shell's screen, sitting under our context, and writing there would
-    /// show up as damage once we're gone.
-    fn runInSession(self: *Ui, argv: []const []const u8) !void {
-        return self.runInSessionAs(argv, argv[0], null);
+    /// show up as damage once we're gone. It starts in `cwd` (see
+    /// `startDir`), not wherever salacommander was started.
+    fn runInSession(self: *Ui, argv: []const []const u8, cwd: []const u8) !void {
+        return self.runInSessionAs(argv, argv[0], null, cwd);
+    }
+
+    /// Where a program opened on `path` starts: the file's own directory,
+    /// so zoe's sidebar, its Ctrl+P and a `:e` there are about the file.
+    /// For a new file under a directory that isn't there yet, the active
+    /// pane's. Borrows from `path` or the pane.
+    fn startDir(self: *const Ui, path: []const u8) []const u8 {
+        if (std.fs.path.dirname(path)) |dir| {
+            if (std.Io.Dir.cwd().statFile(self.io, dir, .{})) |st| {
+                if (st.kind == .directory) return dir;
+            } else |_| {}
+        }
+        return self.panes[self.active].path;
     }
 
     /// `runInSession`, named `name` in the bar, with stderr kept in
     /// `complaint` (when given) so a failure can say why.
-    fn runInSessionAs(self: *Ui, argv: []const []const u8, name: []const u8, complaint: ?sudo.Complaint) !void {
+    fn runInSessionAs(self: *Ui, argv: []const []const u8, name: []const u8, complaint: ?sudo.Complaint, cwd: []const u8) !void {
         var child = std.process.spawn(self.io, .{
             .argv = argv,
+            .cwd = .{ .path = cwd },
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = if (complaint) |c| c.stdio() else .ignore,
@@ -1057,9 +1092,9 @@ pub const Ui = struct {
             // A file only root can read is what Super+F4 is for: sudo
             // reads it, and the editor judges what it gets.
             error.AccessDenied, error.PermissionDenied => if (as_root) false else {
-                return self.setMessage("{s}: {t}", .{ name, err });
+                return self.refuseUnreadable(path, err);
             },
-            else => return self.setMessage("{s}: {t}", .{ name, err }),
+            else => return self.refuseUnreadable(path, err),
         };
         if (binary) return self.setMessage("{s} is not a text file", .{name});
         try self.openInEditor(path, as_root);
@@ -1101,7 +1136,7 @@ pub const Ui = struct {
         const argv = openaction.buildArgv(&argv_buf, template, path) catch |err| {
             return self.setMessage("editor \"{s}\": {t}", .{ template, err });
         };
-        try self.runInSession(argv);
+        try self.runInSession(argv, self.startDir(path));
     }
 
     /// sudoedit: sudo copies `path` somewhere you can write, runs the
@@ -1118,7 +1153,7 @@ pub const Ui = struct {
         };
         const complaint = sudo.Complaint.open();
         defer complaint.close(self.io);
-        try self.runInSessionAs(argv, "sudoedit", complaint);
+        try self.runInSessionAs(argv, "sudoedit", complaint, self.startDir(path));
     }
 
     // ── F3: find ────────────────────────────────────────────────────────
@@ -2939,9 +2974,11 @@ pub const Ui = struct {
         sent.deinit();
     }
 
-    /// `renderBar` with modifiers held: `Super+` (whatever is down), then
+    /// `renderBar` with modifiers held: `Ctrl+` (whatever is down), then
     /// `F1`..`F12` each with the action the keymap gives it under those
-    /// modifiers, skipping keys that have none.
+    /// modifiers, skipping keys that have none, then every other key
+    /// bound with exactly those modifiers (`H Hidden`, `R Reread`), in
+    /// binding order, each action once.
     fn writeModifiedBar(self: *Ui, b: *Batch) !void {
         const layer = self.bar_layer;
         const m = self.held;
@@ -2954,21 +2991,37 @@ pub const Ui = struct {
         }) catch "";
         try b.writeText(prefix, .{ .layer = layer, .row = 0, .col = 0, .fg = fg_bar_key, .bg = bg_bar });
         var col: usize = prefix.len + 1;
+        var shown: std.EnumSet(Action) = .empty;
         for (1..13) |n| {
             var kbuf: [4]u8 = undefined;
             const key = std.fmt.bufPrint(&kbuf, "F{d}", .{n}) catch unreachable;
             const action = self.keymap.lookup(key, m) orelse continue;
-            const label = actions.barLabel(action);
-            const need = key.len + label.len + 2;
-            if (col + need > self.win.cols) break;
-            try b.writeText(key, .{ .layer = layer, .row = 0, .col = col, .fg = fg_bar_key, .bg = bg_bar });
-            col += key.len;
-            var lbuf: [32]u8 = undefined;
-            const padded = std.fmt.bufPrint(&lbuf, "{s} ", .{label}) catch label;
-            const bg = if (actions.isRoot(action)) bg_dialog_danger else bg_bar_label;
-            try b.writeText(padded, .{ .layer = layer, .row = 0, .col = col, .fg = fg_bar_label, .bg = bg });
-            col += padded.len + 1;
+            if (!try self.writeBarEntry(b, &col, key, action)) return;
+            shown.insert(action);
         }
+        for (self.keymap.bindings.items) |bnd| {
+            if (bnd.chord.text or !std.meta.eql(bnd.chord.mods, m) or shown.contains(bnd.action)) continue;
+            var kbuf: [24]u8 = undefined;
+            if (!try self.writeBarEntry(b, &col, barKeyText(&kbuf, bnd.chord.key()), bnd.action)) return;
+            shown.insert(bnd.action);
+        }
+    }
+
+    /// One `key label` pair of the modified bar at `col`, moving it on.
+    /// False when it doesn't fit, which ends the bar.
+    fn writeBarEntry(self: *Ui, b: *Batch, col: *usize, key: []const u8, action: Action) !bool {
+        const layer = self.bar_layer;
+        const label = actions.barLabel(action);
+        const need = key.len + label.len + 2;
+        if (col.* + need > self.win.cols) return false;
+        try b.writeText(key, .{ .layer = layer, .row = 0, .col = col.*, .fg = fg_bar_key, .bg = bg_bar });
+        col.* += key.len;
+        var lbuf: [32]u8 = undefined;
+        const padded = std.fmt.bufPrint(&lbuf, "{s} ", .{label}) catch label;
+        const bg = if (actions.isRoot(action)) bg_dialog_danger else bg_bar_label;
+        try b.writeText(padded, .{ .layer = layer, .row = 0, .col = col.*, .fg = fg_bar_label, .bg = bg });
+        col.* += padded.len + 1;
+        return true;
     }
 
     /// Names this context after the active pane's directory. Navigating
@@ -3092,6 +3145,23 @@ fn FormModal(comptime T: type) type {
             try self.ui.renderForm(&self.form.form);
         }
     };
+}
+
+/// A key name as the modified bar shows it, the modifiers already said
+/// once in front: `one` is `1`, `grave_accent` is the backtick, and
+/// anything else is spelled the way `Chord.format` does (`H`, `Up`,
+/// `Page down`). Borrows `buf`.
+pub fn barKeyText(buf: []u8, key: []const u8) []const u8 {
+    const digits = [_][]const u8{ "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine" };
+    for (digits, 0..) |d, i| {
+        if (std.mem.eql(u8, key, d)) return std.fmt.bufPrint(buf, "{d}", .{i}) catch key;
+    }
+    if (std.mem.eql(u8, key, "grave_accent")) return "`";
+    const n = @min(key.len, buf.len);
+    for (key[0..n], buf[0..n], 0..) |c, *out, i| {
+        out.* = if (c == '_') ' ' else if (i == 0) std.ascii.toUpper(c) else c;
+    }
+    return buf[0..n];
 }
 
 const modifier_keys = [_][]const u8{ "left_shift", "right_shift", "left_control", "right_control", "left_alt", "right_alt", "left_super", "right_super" };
