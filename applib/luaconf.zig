@@ -233,14 +233,20 @@ pub const Conf = struct {
     /// names. One that doesn't parse or names no action is warned about
     /// and skipped. Owned by `alloc`; empty when the key is absent.
     pub fn keys(self: Conf, lua: *Lua, alloc: std.mem.Allocator, comptime Action: type) []keybind.Override(Action) {
-        const t = lua.getField(-1, "keys");
+        return self.keysNamed(lua, alloc, "keys", Action);
+    }
+
+    /// `keys` for a table under another name, for a program with a
+    /// second keymap (salacommander's F1 menu reads `menu_keys`).
+    pub fn keysNamed(self: Conf, lua: *Lua, alloc: std.mem.Allocator, comptime field: [:0]const u8, comptime Action: type) []keybind.Override(Action) {
+        const t = lua.getField(-1, field);
         defer lua.pop(1);
         if (t != .table) {
-            if (t != .nil) self.warn("`keys` is not a table; ignored", .{});
+            if (t != .nil) self.warn("`" ++ field ++ "` is not a table; ignored", .{});
             return &.{};
         }
         var out: std.ArrayList(keybind.Override(Action)) = .empty;
-        self.readKeyTable(lua, alloc, Action, "keys", &out, {});
+        self.readKeyTable(lua, alloc, Action, field, &out, {});
         sortOverrides(keybind.Override(Action), out.items);
         return out.toOwnedSlice(alloc) catch &.{};
     }

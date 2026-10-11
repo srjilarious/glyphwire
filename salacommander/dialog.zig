@@ -23,6 +23,10 @@ pub const Button = enum {
     skip_all,
     @"continue",
     abort,
+    set,
+    /// An error dialog's offer to start a permission-denied chmod/chown
+    /// over through sudo.
+    retry_as_root,
 
     pub fn label(self: Button) []const u8 {
         return switch (self) {
@@ -36,6 +40,8 @@ pub const Button = enum {
             .skip_all => "None",
             .@"continue" => "Continue",
             .abort => "Abort",
+            .set => "Set",
+            .retry_as_root => "Retry as root",
         };
     }
 
@@ -58,6 +64,8 @@ pub const ok_cancel = [_]Button{ .ok, .cancel };
 pub const yes_no = [_]Button{ .yes, .no };
 pub const conflict_buttons = [_]Button{ .overwrite, .skip, .overwrite_all, .skip_all, .cancel };
 pub const error_buttons = [_]Button{ .@"continue", .abort };
+pub const error_root_buttons = [_]Button{ .@"continue", .abort, .retry_as_root };
+pub const set_cancel = [_]Button{ .set, .cancel };
 pub const ok_only = [_]Button{.ok};
 
 /// The one-line text field a dialog (and the Alt+D path row) is typed

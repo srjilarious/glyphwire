@@ -11,6 +11,9 @@ pub const openaction = @import("openaction.zig");
 pub const config = @import("config.zig");
 pub const drag = @import("drag.zig");
 pub const sudo = @import("sudo.zig");
+pub const attrs = @import("attrs.zig");
+pub const form = @import("form.zig");
+pub const attrdialog = @import("attrdialog.zig");
 pub const ui = @import("ui.zig");
 
 pub const Pane = pane.Pane;

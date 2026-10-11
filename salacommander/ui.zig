@@ -47,13 +47,22 @@
 //! the window instead (`startDrag`). The dialogs run their own nested event
 //! loop (`runDialog`), which is also what the file operations' conflict
 //! and error hooks call -- so an operation is synchronous, and a question
-//! halfway through a copy is just a dialog opened from inside it.
+//! halfway through a copy is just a dialog opened from inside it. F1's
+//! menu and its chmod/chown forms (`attrdialog.zig`) run the same way,
+//! in `runModal`.
+//!
+//! Held modifiers are tracked (`held`) from the key and mouse events, so
+//! the key bar can show what each F-key does under them and the F1 menu
+//! can say what a pick would run before it's made.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const pane_mod = @import("pane.zig");
 const actions = @import("actions.zig");
 const fileops = @import("fileops.zig");
+const attrs = @import("attrs.zig");
+const attrdialog = @import("attrdialog.zig");
+const form_mod = @import("form.zig");
 const dialog_mod = @import("dialog.zig");
 const config_mod = @import("config.zig");
 const openaction = @import("openaction.zig");
@@ -276,6 +285,16 @@ pub const Ui = struct {
 
     cfg: config_mod.Config,
     keymap: actions.Keymap,
+    /// F1's menu: `actions.menu_defaults` under `menu_keys`.
+    menu_keymap: actions.Keymap,
+    /// The modifiers down right now, as the last key or mouse event
+    /// carried them. Changing it redraws the key bar (and an open F1
+    /// menu): both show what a key would do under them.
+    held: glyphwire.Mods = .{},
+    /// A chmod/chown that isn't already root offers "Retry as root" on
+    /// a permission error (`hookError`); `chosen` once it's been taken,
+    /// which stops the run so `runAttrs` can start it over through sudo.
+    root_retry: enum { off, offered, chosen } = .off,
     panes: [2]Pane,
     active: usize = 0,
 
@@ -375,6 +394,9 @@ pub const Ui = struct {
         var keymap = try actions.Keymap.initDefaults(alloc, &actions.defaults);
         errdefer keymap.deinit(alloc);
         try keymap.apply(alloc, cfg.keys);
+        var menu_keymap = try actions.Keymap.initDefaults(alloc, &actions.menu_defaults);
+        errdefer menu_keymap.deinit(alloc);
+        try menu_keymap.apply(alloc, cfg.menu_keys);
 
         const pane_opts: pane_mod.Options = .{ .show_hidden = cfg.show_hidden, .view = cfg.view };
         var left = try Pane.init(alloc, io, opts.left, pane_opts);
@@ -474,6 +496,7 @@ pub const Ui = struct {
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .cfg = cfg,
             .keymap = keymap,
+            .menu_keymap = menu_keymap,
             .panes = .{ left, right },
         };
 
@@ -514,6 +537,7 @@ pub const Ui = struct {
         self.finder.deinit();
         for (&self.panes) |*p| p.deinit();
         self.keymap.deinit(alloc);
+        self.menu_keymap.deinit(alloc);
         self.cfg.deinit(alloc);
         if (self.message) |m| alloc.free(m);
         self.client.destroyContext(self.context) catch {};
@@ -572,13 +596,30 @@ pub const Ui = struct {
                     if (self.drag != null) try self.updateDrag();
                 }
             },
-            .mouse_button => |m| try self.handleMouseButton(m),
-            .mouse_move => |mv| try self.dragMove(mv),
+            .mouse_button => |m| {
+                _ = self.noteMods(m.mods);
+                try self.handleMouseButton(m);
+            },
+            .mouse_move => |mv| {
+                _ = self.noteMods(mv.mods);
+                try self.dragMove(mv);
+            },
+            .focus => |f| if (!f.focused) {
+                _ = self.noteMods(.{});
+            },
             .copy_request => try self.copySelectionPaths(),
             // A drag takes the keyboard: Esc cancels and Ctrl flips copy
             // and move, and nothing else may reload the listing the drag
-            // is carrying paths out of.
-            .key => |k| if (self.drag != null) try self.dragKey(k) else if (k.pressed) try self.handleKey(k),
+            // is carrying paths out of. A modifier on its own does
+            // nothing but change the bar (`noteKey`).
+            .key => |k| {
+                _ = self.noteKey(k);
+                if (self.drag != null) {
+                    try self.dragKey(k);
+                } else if (!isModifierKey(k.key) and k.pressed) {
+                    try self.handleKey(k);
+                }
+            },
             // Typed text is the shell's while its panel is up -- it has
             // a line editor, and this one has type-to-find.
             .text, .paste => |t| if (self.drag != null or self.shell.isOpen()) {} else if (self.finder.isOpen()) {
@@ -643,6 +684,28 @@ pub const Ui = struct {
         self.pane_dirty = .{ .full, .full };
         self.bar_dirty = true;
         if (self.finder.isOpen()) self.finder.dirty = true;
+    }
+
+    /// Follows the held modifiers from a key event. A modifier key's own
+    /// event is trusted for its bit over the event's `mods`, which the
+    /// server captures as it routes the event and so may or may not
+    /// count the key itself yet. True when `held` changed.
+    fn noteKey(self: *Ui, k: glyphwire.KeyEvent) bool {
+        var m = k.mods;
+        const eq = std.mem.eql;
+        if (eq(u8, k.key, "left_shift") or eq(u8, k.key, "right_shift")) m.shift = k.pressed;
+        if (eq(u8, k.key, "left_control") or eq(u8, k.key, "right_control")) m.ctrl = k.pressed;
+        if (eq(u8, k.key, "left_alt") or eq(u8, k.key, "right_alt")) m.alt = k.pressed;
+        if (eq(u8, k.key, "left_super") or eq(u8, k.key, "right_super")) m.super = k.pressed;
+        return self.noteMods(m);
+    }
+
+    /// Sets `held`, redrawing the bar if that changes what it shows.
+    fn noteMods(self: *Ui, m: glyphwire.Mods) bool {
+        if (std.meta.eql(m, self.held)) return false;
+        self.held = m;
+        self.bar_dirty = true;
+        return true;
     }
 
     fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
@@ -782,6 +845,9 @@ pub const Ui = struct {
             .makeDir => try self.makeDir(false),
             .delete => try self.deleteSelection(false),
             .newFile => try self.newFile(false),
+            .fileOpsMenu => try self.fileOpsMenu(),
+            .chmod => try self.changeMode(false),
+            .chown => try self.changeOwner(false),
 
             .sudoRename => try self.beginNameEdit(true),
             .sudoEdit => try self.editCurrent(true),
@@ -790,6 +856,8 @@ pub const Ui = struct {
             .sudoMove => try self.transfer(.move, true),
             .sudoMakeDir => try self.makeDir(true),
             .sudoDelete => try self.deleteSelection(true),
+            .sudoChmod => try self.changeMode(true),
+            .sudoChown => try self.changeOwner(true),
 
             .toggleShell => try self.toggleShell(),
 
@@ -1743,6 +1811,102 @@ pub const Ui = struct {
         try self.setMessage("created {s}", .{typed});
     }
 
+    // ── F1: the file operations menu, chmod and chown ───────────────────
+
+    /// F1: the menu of `menu_keys`' unmodified chords. What it picks goes
+    /// through `perform` like a key would, so a binding in `menu_keys` to
+    /// any action works from here. `anyerror` because it and `perform`
+    /// call each other, which an inferred error set can't resolve.
+    fn fileOpsMenu(self: *Ui) anyerror!void {
+        var menu = attrdialog.Menu.init(&self.menu_keymap);
+        menu.load();
+        if (menu.entries.len == 0) {
+            try self.setMessage("menu_keys binds nothing without modifiers", .{});
+            return;
+        }
+        const pick = try self.runModal(MenuModal{ .ui = self, .menu = &menu });
+        switch (pick) {
+            .cancel => {},
+            // Not itself again: a menu inside the menu is no help.
+            .run => |a| if (a != .fileOpsMenu) try self.perform(a),
+        }
+    }
+
+    /// chmod: the twelve-toggle dialog, starting from the first selected
+    /// entry's mode, then the same mode on everything selected.
+    fn changeMode(self: *Ui, as_root: bool) !void {
+        const p = &self.panes[self.active];
+        const sel = try p.selection(self.alloc);
+        defer self.alloc.free(sel);
+        const first = p.firstSelected() orelse return;
+        if (sel.len == 0) return;
+
+        const what = try describeSelection(self.alloc, sel);
+        defer self.alloc.free(what);
+        var f = try attrdialog.ModeForm.init(self.alloc, what, @truncate(first.mode & 0o7777), p.selectionHasDir(), as_root);
+        defer f.deinit(self.alloc);
+        if (try self.runModal(FormModal(attrdialog.ModeForm){ .ui = self, .form = &f }) != .set) return;
+
+        try self.runAttrs(.{ .change = .{ .mode = f.mode }, .sources = sel, .recursive = f.recursive(), .filter = f.filter() }, as_root);
+    }
+
+    /// chown: owner and group fields, starting from the first selected
+    /// entry's names.
+    fn changeOwner(self: *Ui, as_root: bool) !void {
+        const p = &self.panes[self.active];
+        const sel = try p.selection(self.alloc);
+        defer self.alloc.free(sel);
+        const first = p.firstSelected() orelse return;
+        if (sel.len == 0) return;
+
+        const what = try describeSelection(self.alloc, sel);
+        defer self.alloc.free(what);
+        var ubuf: [16]u8 = undefined;
+        var gbuf: [16]u8 = undefined;
+        // Copied out: `userName`'s answer points into libc's own buffer,
+        // which `groupName` may reuse.
+        var user_buf: [256]u8 = undefined;
+        const user_name = lsentries.userName(first.uid, &ubuf);
+        const user = user_buf[0..@min(user_name.len, user_buf.len)];
+        @memcpy(user, user_name[0..user.len]);
+        const group = lsentries.groupName(first.gid, &gbuf);
+
+        var f = try attrdialog.OwnerForm.init(self.alloc, what, user, group, p.selectionHasDir(), as_root);
+        defer f.deinit(self.alloc);
+        if (try self.runModal(FormModal(attrdialog.OwnerForm){ .ui = self, .form = &f }) != .set) return;
+
+        try self.runAttrs(.{ .change = .{ .owner = f.owner }, .sources = sel, .recursive = f.recursive(), .filter = f.filter() }, as_root);
+    }
+
+    /// Runs a chmod/chown, in-process or through the sudo helper. An
+    /// in-process run offers "Retry as root" on a permission error; taken,
+    /// it stops there and the whole change starts over as root -- it sets
+    /// absolute values, so what the first run already did is harmless to
+    /// do again.
+    fn runAttrs(self: *Ui, op: attrs.Operation, as_root: bool) !void {
+        const p = &self.panes[self.active];
+        const result = if (as_root) (try self.runAttrsAsRoot(op)) orelse return else blk: {
+            self.root_retry = .offered;
+            const r = op.run(self.io, self.alloc, self.fileHooks());
+            const chosen = self.root_retry == .chosen;
+            self.root_retry = .off;
+            if (!chosen) break :blk r;
+            break :blk (try self.runAttrsAsRoot(op)) orelse {
+                try self.reloadBoth();
+                return;
+            };
+        };
+        if (!result.cancelled and result.failed == 0) p.unmarkAll();
+        try self.reloadBoth();
+        try self.reportResult(op.change.kind(), result);
+    }
+
+    fn runAttrsAsRoot(self: *Ui, op: attrs.Operation) !?fileops.Result {
+        var arena: std.heap.ArenaAllocator = .init(self.alloc);
+        defer arena.deinit();
+        return self.runSudo(try attrs.helperArgs(arena.allocator(), op));
+    }
+
     fn runOperation(self: *Ui, op: fileops.Operation) fileops.Result {
         return op.run(self.io, self.alloc, self.fileHooks());
     }
@@ -1859,9 +2023,17 @@ pub const Ui = struct {
         const self: *Ui = @ptrCast(@alignCast(ctx));
         const msg = std.fmt.allocPrint(self.alloc, "{s}\n\n{s}", .{ path, errorText(err) }) catch return false;
         defer self.alloc.free(msg);
-        var d = Dialog.init(self.alloc, "Error", msg, &dialog_mod.error_buttons, .{ .danger = true }) catch return false;
+        // See `runAttrs`: a chmod/chown refused for want of permission
+        // can be started over as root.
+        const offer_root = self.root_retry == .offered and (err == error.AccessDenied or err == error.PermissionDenied);
+        const buttons: []const Button = if (offer_root) &dialog_mod.error_root_buttons else &dialog_mod.error_buttons;
+        var d = Dialog.init(self.alloc, "Error", msg, buttons, .{ .danger = true }) catch return false;
         defer d.deinit(self.alloc);
         const b = self.runDialog(&d) catch return false;
+        if (b == .retry_as_root) {
+            self.root_retry = .chosen;
+            return false;
+        }
         return b == .@"continue";
     }
 
@@ -1870,6 +2042,8 @@ pub const Ui = struct {
             .copy => "copied",
             .move => "moved",
             .delete => "deleted",
+            .chmod => "changed the mode of",
+            .chown => "changed the owner of",
         };
         var buf: [256]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
@@ -2033,6 +2207,208 @@ pub const Ui = struct {
             }
             if (i < self.button_spans.len) self.button_spans[i] = .{ .row = row, .col = col, .w = bw };
             col += bw + 1;
+        }
+
+        try b.setLayerVisible(layer, true);
+        var sent = try b.send();
+        sent.deinit();
+    }
+
+    /// `runDialog` for F1's menu and forms: `modal` is a `MenuModal` or a
+    /// `FormModal`, and this loops on the dialog layer until it answers.
+    /// A modifier going down or up redraws it as well as the bar -- the
+    /// menu's lines say what a pick would run under them.
+    fn runModal(self: *Ui, modal: anytype) !@TypeOf(modal).Result {
+        defer self.client.setLayerVisible(self.dialog_layer, false) catch {};
+        try self.flush();
+        try modal.render();
+
+        // Typing sends a key press before its text, so text that comes
+        // before any press here belongs to the key that opened this --
+        // the `m` that picked chmod in the F1 menu -- and would otherwise
+        // land in the form's first field.
+        var pressed_here = false;
+        while (true) {
+            const ev = try self.listener.next(.none) orelse continue;
+            defer ev.deinit(self.alloc);
+            switch (ev) {
+                .key => |k| {
+                    const mods_changed = self.noteKey(k);
+                    if (!isModifierKey(k.key) and k.pressed) {
+                        pressed_here = true;
+                        if (try modal.key(k)) |r| return r;
+                    } else if (!mods_changed) continue;
+                    try self.flush();
+                    try modal.render();
+                },
+                .text => |t| if (pressed_here) {
+                    if (try modal.text(t.text)) |r| return r;
+                    try modal.render();
+                },
+                .paste => |t| {
+                    if (try modal.text(t.text)) |r| return r;
+                    try modal.render();
+                },
+                .mouse_move => |mv| if (self.noteMods(mv.mods)) {
+                    try self.flush();
+                    try modal.render();
+                },
+                .mouse_button => |m| {
+                    _ = self.noteMods(m.mods);
+                    if (m.pressed and std.mem.eql(u8, m.button, "left")) {
+                        if (self.dialogCell(m.cell)) |c| {
+                            if (try modal.click(c, m.mods)) |r| return r;
+                        }
+                    }
+                    try self.flush();
+                    try modal.render();
+                },
+                .focus => |f| if (!f.focused and self.noteMods(.{})) {
+                    try self.flush();
+                    try modal.render();
+                },
+                .resize => |r| {
+                    try self.handleResize(r);
+                    try self.flush();
+                    try modal.render();
+                },
+                .layout => |l| {
+                    try self.handleLayout(l);
+                    try self.flush();
+                    try modal.render();
+                },
+                .shutdown => {
+                    self.quit = true;
+                    return modal.cancelled();
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// `cell` in dialog-layer cells, or null left of or above it.
+    fn dialogCell(self: *const Ui, cell: glyphwire.CellPos) ?glyphwire.CellPos {
+        if (cell.row < self.dialog_pos.row or cell.col < self.dialog_pos.col) return null;
+        return .{ .row = cell.row - self.dialog_pos.row, .col = cell.col - self.dialog_pos.col };
+    }
+
+    /// Sizes the dialog layer to `w` x `h` (clamped to the window),
+    /// centres it, clears it and draws the title bar. Returns the size
+    /// used.
+    fn beginDialogFrame(self: *Ui, b: *Batch, title: []const u8, w_want: usize, h_want: usize, danger: bool) !struct { w: usize, h: usize } {
+        const layer = self.dialog_layer;
+        const w = @min(w_want, @max(self.win.cols, 10));
+        const h = @min(h_want, @max(self.win.rows, 4));
+        const row0 = (self.win.rows -| h) / 2;
+        const col0 = (self.win.cols -| w) / 2;
+        self.dialog_pos = .{ .row = row0, .col = col0 };
+        try b.setLayerSize(layer, w, h);
+        try b.setLayerCellPosition(layer, row0, col0);
+        try b.clearArea(.{ .layer = layer, .bg = bg_dialog });
+
+        const title_bg = if (danger) bg_dialog_danger else bg_dialog_title;
+        var title_buf: [256]u8 = undefined;
+        const shown = std.fmt.bufPrint(&title_buf, " {s} ", .{title}) catch title;
+        try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = title_bg });
+        try b.writeText(shown, .{ .layer = layer, .row = 0, .col = (w -| glyphwire.stringWidth(shown)) / 2, .fg = fg_title_active, .bg = title_bg, .max_cols = w });
+        return .{ .w = w, .h = h };
+    }
+
+    /// The F1 menu: one line per entry, worded for what a pick does with
+    /// the modifiers held right now, its hotkey picked out, and a hint
+    /// under them naming the focused entry's modified chord. The title
+    /// turns the warning colour while a pick would run as root.
+    fn renderMenu(self: *Ui, menu: *const attrdialog.Menu) !void {
+        const layer = self.dialog_layer;
+        const held = self.held;
+
+        var hint_buf: [128]u8 = undefined;
+        const hint = menuHint(&hint_buf, menu);
+        // Wide enough for every wording a line can take, so holding a
+        // modifier doesn't resize the dialog under the pointer.
+        var widest: usize = @max("File operations".len + 4, glyphwire.stringWidth(hint));
+        for (self.menu_keymap.bindings.items) |bnd| widest = @max(widest, 5 + glyphwire.stringWidth(actions.menuLabel(bnd.action)));
+        const n = menu.entries.len;
+
+        var b = self.client.batch();
+        defer b.deinit();
+        const size = try self.beginDialogFrame(&b, "File operations", widest + 4, n + 5, menu.asRoot(held));
+
+        for (menu.entries, 0..) |entry, i| {
+            const row = 2 + i;
+            const bg = if (i == menu.focus) bg_button_focus else bg_dialog;
+            try b.clearArea(.{ .layer = layer, .row = row, .rows = 1, .col = 1, .cols = size.w -| 2, .bg = bg });
+            if (self.menu_keymap.chordFor(entry)) |chord| {
+                var kbuf: [48]u8 = undefined;
+                try b.writeText(chord.format(&kbuf), .{ .layer = layer, .row = row, .col = 2, .fg = fg_marked, .bg = bg });
+            }
+            const action = menu.shown(i, held);
+            const fg = if (actions.isRoot(action)) fg_message else fg_dialog;
+            try b.writeText(actions.menuLabel(action), .{ .layer = layer, .row = row, .col = 5, .fg = fg, .bg = bg, .max_cols = size.w -| 6 });
+        }
+        try b.writeText(hint, .{ .layer = layer, .row = 3 + n, .col = 2, .fg = fg_detail, .bg = bg_dialog, .max_cols = size.w -| 4 });
+
+        try b.setLayerVisible(layer, true);
+        var sent = try b.send();
+        sent.deinit();
+    }
+
+    /// A `form.Form`: its widgets where it laid them out, the focused
+    /// one highlighted, and its complaint (if any) in the message colour.
+    fn renderForm(self: *Ui, f: *const form_mod.Form) !void {
+        const layer = self.dialog_layer;
+        var b = self.client.batch();
+        defer b.deinit();
+        const size = try self.beginDialogFrame(&b, f.title, f.w, f.h, f.danger);
+
+        for (f.widgets.items, 0..) |*wd, i| {
+            if (wd.row >= size.h or wd.col >= size.w) continue;
+            const focused = i == f.focus;
+            const room = size.w - wd.col;
+            const at: glyphwire.Client.TextOpts = .{ .layer = layer, .row = wd.row, .col = wd.col, .fg = fg_dialog, .bg = bg_dialog, .max_cols = room };
+            switch (wd.kind) {
+                .text => |t| try b.writeText(t, at),
+                .field => |fl| {
+                    const width = @min(fl.width, room);
+                    const text = fl.edit.text();
+                    const view = fieldView(text, fl.edit.caret, width);
+                    var o = at;
+                    o.bg = bg_input;
+                    o.max_cols = width;
+                    o.pad = true;
+                    try b.writeText(text[view.start..], o);
+                    if (focused and view.caret_col < width) {
+                        const under = if (fl.edit.caret < text.len) text[fl.edit.caret..nextCodepoint(text, fl.edit.caret)] else " ";
+                        try b.writeText(under, .{ .layer = layer, .row = wd.row, .col = wd.col + view.caret_col, .fg = bg_input, .bg = fg_dialog });
+                    }
+                },
+                .check, .radio => |t| {
+                    const box = switch (wd.kind) {
+                        .check => if (t.on) "[x]" else "[ ]",
+                        else => if (t.on) "(\u{2022})" else "( )",
+                    };
+                    var o = at;
+                    if (focused) o.bg = bg_button_focus;
+                    if (t.on) o.fg = fg_marked;
+                    try b.writeText(box, o);
+                    if (t.label.len > 0 and room > 4) {
+                        var lo = at;
+                        lo.col = wd.col + 4;
+                        lo.max_cols = room - 4;
+                        if (focused) lo.bg = bg_button_focus;
+                        try b.writeText(t.label, lo);
+                    }
+                },
+                .button => |btn| {
+                    var lbuf: [32]u8 = undefined;
+                    var o = at;
+                    o.bg = if (focused) bg_button_focus else bg_button;
+                    try b.writeText(std.fmt.bufPrint(&lbuf, "[ {s} ]", .{btn.label()}) catch btn.label(), o);
+                },
+            }
+        }
+        if (f.err) |e| {
+            try b.writeText(e, .{ .layer = layer, .row = f.error_row, .col = 2, .fg = fg_message, .bg = bg_dialog, .max_cols = size.w -| 4 });
         }
 
         try b.setLayerVisible(layer, true);
@@ -2528,7 +2904,9 @@ pub const Ui = struct {
 
     /// The bottom bar: a message if there is one, else the function keys
     /// with their current bindings (`F5 Copy`, ...), so a rebinding in the
-    /// config shows up here too.
+    /// config shows up here too. While modifiers are held it shows what
+    /// each F-key does under them instead, message or not (Far Manager's
+    /// and Total Commander's bar), root ones in the warning colour.
     fn renderBar(self: *Ui) !void {
         self.bar_dirty = false;
         const layer = self.bar_layer;
@@ -2536,7 +2914,9 @@ pub const Ui = struct {
         defer b.deinit();
         try b.clearArea(.{ .layer = layer, .bg = bg_bar });
 
-        if (self.message) |m| {
+        if (!std.meta.eql(self.held, glyphwire.Mods{})) {
+            try self.writeModifiedBar(&b);
+        } else if (self.message) |m| {
             try b.writeText(m, .{ .layer = layer, .row = 0, .col = 1, .fg = fg_message, .bg = bg_bar, .max_cols = self.win.cols -| 2 });
         } else {
             var col: usize = 0;
@@ -2557,6 +2937,38 @@ pub const Ui = struct {
         }
         var sent = try b.send();
         sent.deinit();
+    }
+
+    /// `renderBar` with modifiers held: `Super+` (whatever is down), then
+    /// `F1`..`F12` each with the action the keymap gives it under those
+    /// modifiers, skipping keys that have none.
+    fn writeModifiedBar(self: *Ui, b: *Batch) !void {
+        const layer = self.bar_layer;
+        const m = self.held;
+        var pbuf: [32]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&pbuf, "{s}{s}{s}{s}", .{
+            if (m.ctrl) "Ctrl+" else "",
+            if (m.alt) "Alt+" else "",
+            if (m.shift) "Shift+" else "",
+            if (m.super) "Super+" else "",
+        }) catch "";
+        try b.writeText(prefix, .{ .layer = layer, .row = 0, .col = 0, .fg = fg_bar_key, .bg = bg_bar });
+        var col: usize = prefix.len + 1;
+        for (1..13) |n| {
+            var kbuf: [4]u8 = undefined;
+            const key = std.fmt.bufPrint(&kbuf, "F{d}", .{n}) catch unreachable;
+            const action = self.keymap.lookup(key, m) orelse continue;
+            const label = actions.barLabel(action);
+            const need = key.len + label.len + 2;
+            if (col + need > self.win.cols) break;
+            try b.writeText(key, .{ .layer = layer, .row = 0, .col = col, .fg = fg_bar_key, .bg = bg_bar });
+            col += key.len;
+            var lbuf: [32]u8 = undefined;
+            const padded = std.fmt.bufPrint(&lbuf, "{s} ", .{label}) catch label;
+            const bg = if (actions.isRoot(action)) bg_dialog_danger else bg_bar_label;
+            try b.writeText(padded, .{ .layer = layer, .row = 0, .col = col, .fg = fg_bar_label, .bg = bg });
+            col += padded.len + 1;
+        }
     }
 
     /// Names this context after the active pane's directory. Navigating
@@ -2619,6 +3031,93 @@ fn entryColor(e: FileEntry) Color {
         .other => fg_other,
         .file => if (e.mode & 0o111 != 0) fg_exec else fg_file,
     };
+}
+
+/// The F1 menu under `Ui.runModal`.
+const MenuModal = struct {
+    ui: *Ui,
+    menu: *attrdialog.Menu,
+
+    pub const Result = attrdialog.Menu.Pick;
+
+    fn key(self: MenuModal, k: glyphwire.KeyEvent) !?Result {
+        return self.menu.handleKey(k.key, k.mods);
+    }
+
+    fn text(_: MenuModal, _: []const u8) !?Result {
+        return null;
+    }
+
+    /// The entries start on the dialog's third row.
+    fn click(self: MenuModal, cell: glyphwire.CellPos, mods: glyphwire.Mods) !?Result {
+        if (cell.row < 2) return null;
+        return self.menu.click(cell.row - 2, mods);
+    }
+
+    fn cancelled(_: MenuModal) Result {
+        return .cancel;
+    }
+
+    fn render(self: MenuModal) !void {
+        try self.ui.renderMenu(self.menu);
+    }
+};
+
+/// `attrdialog.ModeForm` or `.OwnerForm` under `Ui.runModal`.
+fn FormModal(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        ui: *Ui,
+        form: *T,
+
+        pub const Result = attrdialog.Answer;
+
+        fn key(self: Self, k: glyphwire.KeyEvent) !?Result {
+            return self.form.handleKey(self.ui.alloc, k.key, k.mods);
+        }
+
+        fn text(self: Self, s: []const u8) !?Result {
+            return self.form.handleText(self.ui.alloc, s);
+        }
+
+        fn click(self: Self, cell: glyphwire.CellPos, _: glyphwire.Mods) !?Result {
+            return self.form.click(self.ui.alloc, cell.row, cell.col);
+        }
+
+        fn cancelled(_: Self) Result {
+            return .cancel;
+        }
+
+        fn render(self: Self) !void {
+            try self.ui.renderForm(&self.form.form);
+        }
+    };
+}
+
+const modifier_keys = [_][]const u8{ "left_shift", "right_shift", "left_control", "right_control", "left_alt", "right_alt", "left_super", "right_super" };
+
+/// Whether `key` is a modifier on its own: it changes what the bar and
+/// the F1 menu show, and is never a command.
+fn isModifierKey(key: []const u8) bool {
+    for (modifier_keys) |m| {
+        if (std.mem.eql(u8, key, m)) return true;
+    }
+    return false;
+}
+
+/// The line under the F1 menu's entries: the focused entry's first
+/// modified chord and what it runs (`Super+M  Change mode as root...`),
+/// so the way to the root form is on screen. Borrows `buf`.
+fn menuHint(buf: []u8, menu: *const attrdialog.Menu) []const u8 {
+    if (menu.entries.len == 0) return "";
+    const plain = menu.keymap.chordFor(menu.entries[menu.focus]) orelse return "";
+    for (menu.keymap.bindings.items) |bnd| {
+        if (std.meta.eql(bnd.chord.mods, glyphwire.Mods{})) continue;
+        if (!std.ascii.eqlIgnoreCase(bnd.chord.key(), plain.key())) continue;
+        var kbuf: [48]u8 = undefined;
+        return std.fmt.bufPrint(buf, "{s}  {s}", .{ bnd.chord.format(&kbuf), actions.menuLabel(bnd.action) }) catch "";
+    }
+    return "";
 }
 
 /// `"foo.txt"` for one path, `"3 files"` for several.

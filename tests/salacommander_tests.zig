@@ -737,8 +737,8 @@ pub fn navigationKeysTakeTheCheapRepaintTest(_: std.Io, _: std.mem.Allocator) !v
     // text at all -- the cheapest level there is, and the lag comes back
     // if one of these slips off it.
     const bg_only = [_]sala.ui.Action{
-        .cursorUp,   .cursorDown, .pageUp,
-        .pageDown,   .cursorHome, .cursorEnd,
+        .cursorUp, .cursorDown, .pageUp,
+        .pageDown, .cursorHome, .cursorEnd,
     };
     for (bg_only) |a| try testz.expectEqual(sala.ui.Ui.dirtyFor(a), .bg);
 
@@ -790,7 +790,7 @@ pub fn configReadsSettingsAndKeysTest(_: std.Io, alloc: std.mem.Allocator) !void
         \\  keys = {
         \\    ["ctrl+up"] = "upToParentDir",
         \\    ["F10"] = false,
-        \\    ["F1"] = "noSuchAction",
+        \\    ["F11"] = "noSuchAction",
         \\  },
         \\}
     );
@@ -808,7 +808,7 @@ pub fn configReadsSettingsAndKeysTest(_: std.Io, alloc: std.mem.Allocator) !void
     // The default Alt+Up binding is still there alongside it.
     try testz.expectEqual(km.lookup("up", .{ .alt = true }).?, actions.Action.upToParentDir);
     try testz.expectTrue(km.lookup("F10", .{}) == null);
-    try testz.expectTrue(km.lookup("F1", .{}) == null);
+    try testz.expectTrue(km.lookup("F11", .{}) == null);
 }
 
 /// `page_lines` is how far PageUp/PageDown move, defaulting to 6. A
@@ -1552,4 +1552,265 @@ pub fn sudoActionsHaveSuperChordsTest(_: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectEqual(km.lookup("F4", .{ .shift = true }).?, actions.Action.newFile);
     try testz.expectEqual(km.lookup("F4", .{ .super = true, .shift = true }).?, actions.Action.sudoNewFile);
     try testz.expectEqual(km.lookup("F5", .{}).?, actions.Action.copy);
+}
+
+// ─── F1: chmod / chown ──────────────────────────────────────────────────
+
+const attrs = sala.attrs;
+const attrdialog = sala.attrdialog;
+
+fn modeOf(s: *Scratch, name: []const u8) !u12 {
+    const st = try s.dir.statFile(s.io, name, .{ .follow_symlinks = false });
+    return @truncate(st.permissions.toMode() & 0o7777);
+}
+
+pub fn attrsParseOctalTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(attrs.parseOctal("755").?, 0o755);
+    try testz.expectEqual(attrs.parseOctal("0644").?, 0o644);
+    try testz.expectEqual(attrs.parseOctal("4755").?, 0o4755);
+    try testz.expectEqual(attrs.parseOctal(" 7 ").?, 0o7);
+    try testz.expectTrue(attrs.parseOctal("") == null);
+    try testz.expectTrue(attrs.parseOctal("8") == null);
+    try testz.expectTrue(attrs.parseOctal("12345") == null);
+    var buf: [4]u8 = undefined;
+    try testz.expectEqualStr(attrs.formatOctal(&buf, 0o755), "0755");
+}
+
+/// "Every file under here, but not the directories": the case the files
+/// only filter is for. Directories below keep their mode, and the walk
+/// still gets into them.
+pub fn chmodRecursiveFilesOnlyLeavesDirectoriesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "chmod-files");
+    defer s.deinit();
+    try s.mkdir("top/sub");
+    try s.file("top/a.txt", "a");
+    try s.file("top/sub/b.txt", "b");
+    const top_mode = try modeOf(&s, "top");
+    const sub_mode = try modeOf(&s, "top/sub");
+    const top = try s.abs("top");
+    defer alloc.free(top);
+
+    const r = (attrs.Operation{ .change = .{ .mode = 0o600 }, .sources = &.{top}, .recursive = true, .filter = .files }).run(io, alloc, fileops.quiet_hooks);
+    try testz.expectEqual(r.done, 2);
+    try testz.expectEqual(r.failed, 0);
+    try testz.expectEqual(try modeOf(&s, "top/a.txt"), 0o600);
+    try testz.expectEqual(try modeOf(&s, "top/sub/b.txt"), 0o600);
+    try testz.expectEqual(try modeOf(&s, "top"), top_mode);
+    try testz.expectEqual(try modeOf(&s, "top/sub"), sub_mode);
+}
+
+/// Directories only, and not recursive: the selected file is left alone
+/// and the selected directory changes, but nothing inside it does.
+pub fn chmodDirsOnlyTopLevelTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "chmod-dirs");
+    defer s.deinit();
+    try s.mkdir("d/inner");
+    try s.file("f.txt", "f");
+    const f_mode = try modeOf(&s, "f.txt");
+    const inner_mode = try modeOf(&s, "d/inner");
+    const d = try s.abs("d");
+    defer alloc.free(d);
+    const f = try s.abs("f.txt");
+    defer alloc.free(f);
+
+    const r = (attrs.Operation{ .change = .{ .mode = 0o711 }, .sources = &.{ d, f }, .filter = .dirs }).run(io, alloc, fileops.quiet_hooks);
+    try testz.expectEqual(r.done, 1);
+    try testz.expectEqual(try modeOf(&s, "d"), 0o711);
+    try testz.expectEqual(try modeOf(&s, "d/inner"), inner_mode);
+    try testz.expectEqual(try modeOf(&s, "f.txt"), f_mode);
+}
+
+/// A link in the tree is never followed: its target outside keeps its
+/// mode.
+pub fn chmodSkipsSymlinksTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "chmod-link");
+    defer s.deinit();
+    try s.mkdir("tree");
+    try s.file("outside.txt", "o");
+    const outside = try s.abs("outside.txt");
+    defer alloc.free(outside);
+    try s.dir.symLink(io, outside, "tree/link", .{});
+    const before = try modeOf(&s, "outside.txt");
+    const tree = try s.abs("tree");
+    defer alloc.free(tree);
+
+    const r = (attrs.Operation{ .change = .{ .mode = 0o600 }, .sources = &.{tree}, .recursive = true, .filter = .files }).run(io, alloc, fileops.quiet_hooks);
+    try testz.expectEqual(r.failed, 0);
+    try testz.expectEqual(r.done, 0);
+    try testz.expectEqual(try modeOf(&s, "outside.txt"), before);
+}
+
+/// chown to the ids a file already has needs no privilege, so the walk
+/// can be exercised as an ordinary user.
+pub fn chownToOwnIdsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "chown-self");
+    defer s.deinit();
+    try s.mkdir("d");
+    try s.file("d/a.txt", "a");
+    const d = try s.abs("d");
+    defer alloc.free(d);
+    const uid: u32 = std.os.linux.getuid();
+
+    const r = (attrs.Operation{ .change = .{ .owner = .{ .uid = uid } }, .sources = &.{d}, .recursive = true }).run(io, alloc, fileops.quiet_hooks);
+    try testz.expectEqual(r.failed, 0);
+    try testz.expectEqual(r.done, 2);
+}
+
+pub fn attrsHelperArgsRoundTripTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const chmod: attrs.Operation = .{ .change = .{ .mode = 0o4755 }, .sources = &.{ "/x", "/y" }, .recursive = true, .filter = .dirs };
+    const cargs = try attrs.helperArgs(a, chmod);
+    try testz.expectEqualStr(cargs[0], "chmod");
+    const cback = attrs.parseHelperArgs(.chmod, cargs[1..]).?;
+    try testz.expectEqual(cback.change.mode, 0o4755);
+    try testz.expectTrue(cback.recursive);
+    try testz.expectEqual(cback.filter, attrs.Filter.dirs);
+    try testz.expectEqual(cback.sources.len, 2);
+
+    const chown: attrs.Operation = .{ .change = .{ .owner = .{ .gid = 100 } }, .sources = &.{"/z"} };
+    const oargs = try attrs.helperArgs(a, chown);
+    const oback = attrs.parseHelperArgs(.chown, oargs[1..]).?;
+    try testz.expectTrue(oback.change.owner.uid == null);
+    try testz.expectEqual(oback.change.owner.gid.?, 100);
+    try testz.expectFalse(oback.recursive);
+
+    try testz.expectTrue(attrs.parseHelperArgs(.chmod, &.{ "999", "0", "all", "/x" }) == null);
+    try testz.expectTrue(attrs.parseHelperArgs(.chmod, &.{ "755", "0", "all" }) == null);
+    try testz.expectTrue(attrs.parseHelperArgs(.chown, &.{ "", "", "2", "all", "/x" }) == null);
+}
+
+/// The root helper runs a chmod and the commander reads its result, as
+/// for a copy.
+pub fn sudoHelperRunsChmodTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "sudo-chmod");
+    defer s.deinit();
+    try s.file("a.txt", "a");
+    const a = try s.abs("a.txt");
+    defer alloc.free(a);
+
+    var helper_in: std.Io.Reader = .fixed("");
+    var helper_out: std.Io.Writer.Allocating = .init(alloc);
+    defer helper_out.deinit();
+    try testz.expectEqual(sala.sudo.serve(io, alloc, &.{ "chmod", "640", "0", "all", a }, &helper_in, &helper_out.writer), 0);
+    try testz.expectEqual(try modeOf(&s, "a.txt"), 0o640);
+
+    var ui_in: std.Io.Reader = .fixed(helper_out.written());
+    var ui_out: std.Io.Writer.Allocating = .init(alloc);
+    defer ui_out.deinit();
+    var asked: Asked = .{};
+    const result = (try sala.sudo.drive(alloc, &ui_in, &ui_out.writer, asked.hooks())).?;
+    try testz.expectEqual(asked.progress, 1);
+    try testz.expectEqual(result.done, 1);
+}
+
+/// The toggles and the octal field follow each other both ways, and Set
+/// won't take a field that isn't octal.
+pub fn modeFormKeepsTogglesAndOctalInStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var f = try attrdialog.ModeForm.init(alloc, "\"a.txt\"", 0o644, false, false);
+    defer f.deinit(alloc);
+    try testz.expectEqualStr(f.form.field(f.octal).text(), "0644");
+    try testz.expectTrue(f.form.isOn(f.bits[0]));
+    try testz.expectFalse(f.form.isOn(f.bits[2]));
+
+    // Owner exec on: the field follows.
+    f.form.focus = f.bits[2];
+    try testz.expectTrue((try f.handleKey(alloc, "space", .{})) == null);
+    try testz.expectEqual(f.mode, 0o744);
+    try testz.expectEqualStr(f.form.field(f.octal).text(), "0744");
+
+    // Typed octal: the toggles follow, setuid included.
+    f.form.focus = f.octal;
+    try f.form.field(f.octal).setText(alloc, "");
+    _ = try f.handleText(alloc, "4755");
+    try testz.expectEqual(f.mode, 0o4755);
+    try testz.expectTrue(f.form.isOn(f.bits[9]));
+    try testz.expectTrue(f.form.isOn(f.bits[8]));
+
+    // Not octal: complained about, toggles kept, Set refused.
+    _ = try f.handleText(alloc, "9");
+    try testz.expectTrue(f.form.err != null);
+    try testz.expectEqual(f.mode, 0o4755);
+    try testz.expectTrue((try f.handleKey(alloc, "enter", .{})) == null);
+
+    try testz.expectEqual((try f.handleKey(alloc, "escape", .{})).?, attrdialog.Answer.cancel);
+}
+
+/// The arrows walk the toggle grid as a grid.
+pub fn modeFormArrowsWalkTheGridTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var f = try attrdialog.ModeForm.init(alloc, "x", 0o644, true, false);
+    defer f.deinit(alloc);
+    f.form.focus = f.bits[0];
+    _ = try f.handleKey(alloc, "right", .{});
+    try testz.expectEqual(f.form.focus, f.bits[1]);
+    _ = try f.handleKey(alloc, "down", .{});
+    try testz.expectEqual(f.form.focus, f.bits[4]);
+    _ = try f.handleKey(alloc, "left", .{});
+    try testz.expectEqual(f.form.focus, f.bits[3]);
+
+    // The filter's radio buttons: picking one turns the others off.
+    try testz.expectEqual(f.filter(), attrs.Filter.all);
+    const files_radio = f.form.widgets.items[f.scope.?.radios[1]];
+    _ = try f.click(alloc, files_radio.row, files_radio.col);
+    try testz.expectEqual(f.filter(), attrs.Filter.files);
+    try testz.expectFalse(f.form.isOn(f.scope.?.radios[0]));
+}
+
+pub fn ownerFormValidatesNamesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var f = try attrdialog.OwnerForm.init(alloc, "x", "no-such-user-here", "", false, false);
+    defer f.deinit(alloc);
+    try testz.expectTrue((try f.handleKey(alloc, "enter", .{})) == null);
+    try testz.expectTrue(f.form.err != null);
+
+    try f.form.field(f.user).setText(alloc, "");
+    try testz.expectTrue((try f.handleKey(alloc, "enter", .{})) == null);
+    try testz.expectTrue(f.form.err != null);
+
+    try f.form.field(f.user).setText(alloc, "root");
+    try f.form.field(f.group).setText(alloc, "0");
+    try testz.expectEqual((try f.handleKey(alloc, "enter", .{})).?, attrdialog.Answer.set);
+    try testz.expectEqual(f.owner.uid.?, 0);
+    try testz.expectEqual(f.owner.gid.?, 0);
+}
+
+/// The menu is a keymap: its lines are the unmodified chords, and a pick
+/// with modifiers held is the same key looked up with them.
+pub fn fileOpsMenuPicksByHeldModifiersTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymap.initDefaults(alloc, &actions.menu_defaults);
+    defer km.deinit(alloc);
+    var menu = attrdialog.Menu.init(&km);
+    menu.load();
+    try testz.expectEqual(menu.entries.len, 2);
+    try testz.expectEqual(menu.entries[0], actions.Action.chmod);
+    try testz.expectEqual(menu.entries[1], actions.Action.chown);
+
+    try testz.expectEqual(menu.shown(0, .{}), actions.Action.chmod);
+    try testz.expectEqual(menu.shown(0, .{ .super = true }), actions.Action.sudoChmod);
+    // A modifier with nothing bound under it picks the plain entry.
+    try testz.expectEqual(menu.shown(1, .{ .shift = true }), actions.Action.chown);
+    try testz.expectTrue(menu.asRoot(.{ .super = true }));
+    try testz.expectFalse(menu.asRoot(.{}));
+
+    try testz.expectEqual(menu.handleKey("o", .{}).?.run, actions.Action.chown);
+    try testz.expectTrue(menu.handleKey("down", .{}) == null);
+    try testz.expectEqual(menu.handleKey("enter", .{ .super = true }).?.run, actions.Action.sudoChown);
+    try testz.expectEqual(menu.click(0, .{ .super = true }).?.run, actions.Action.sudoChmod);
+    try testz.expectTrue(menu.handleKey("escape", .{}).? == .cancel);
+}
+
+/// `menu_keys` rebinds the menu the way `keys` rebinds the panes: here
+/// root moves from Super to Alt+Shift.
+pub fn configReadsMenuKeysTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var r = config.load(alloc,
+        \\config = { menu_keys = { ["alt+shift+m"] = "sudoChmod", ["super+m"] = false } }
+    );
+    defer r.deinit(alloc);
+    try testz.expectTrue(r.err == null);
+    var km = try actions.Keymap.initDefaults(alloc, &actions.menu_defaults);
+    defer km.deinit(alloc);
+    try km.apply(alloc, r.config.menu_keys);
+    try testz.expectEqual(actions.menuPick(&km, .chmod, .{ .alt = true, .shift = true }), actions.Action.sudoChmod);
+    try testz.expectEqual(actions.menuPick(&km, .chmod, .{ .super = true }), actions.Action.chmod);
 }

@@ -115,6 +115,9 @@ pub fn main(init: std.process.Init) !void {
         // Ctrl+Shift+C with no host selection -- answered with the active
         // pane's paths. See `Ui.copySelectionPaths`.
         "copy_request",
+        // Losing the window drops the held modifiers the key bar shows:
+        // their releases go wherever the keyboard went.
+        "focus",
     });
     defer conn.deinit();
 

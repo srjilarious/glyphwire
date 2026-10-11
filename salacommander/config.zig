@@ -54,6 +54,9 @@ pub const Config = struct {
     /// a predictable jump rather than one that changes with the layout.
     page_lines: usize = 6,
     keys: []KeyOverride = &.{},
+    /// `menu_keys`: the F1 menu's own keymap over `actions.menu_defaults`,
+    /// in the same shape as `keys`.
+    menu_keys: []KeyOverride = &.{},
     /// Applied over `openaction.defaults`; a later entry for the same
     /// extension wins, as `openaction.resolve` scans last-match.
     open_actions: []OpenAction = &.{},
@@ -76,6 +79,8 @@ pub const Config = struct {
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
         alloc.free(self.keys);
         self.keys = &.{};
+        alloc.free(self.menu_keys);
+        self.menu_keys = &.{};
         for (self.open_actions) |o| {
             alloc.free(o.ext);
             if (o.command) |c| alloc.free(c);
@@ -143,6 +148,7 @@ const Apply = struct {
         // rule zoe's `page_lines` follows too.
         if (conf.uint(lua, usize, "page_lines", .{ .min = 1 })) |v| cfg.page_lines = v;
         cfg.keys = conf.keys(lua, self.alloc, actions.Action);
+        cfg.menu_keys = conf.keysNamed(lua, self.alloc, "menu_keys", actions.Action);
         cfg.open_actions = readOpenActions(self.alloc, lua) catch &.{};
         cfg.divider_style = dividerconf.read(lua, conf_name);
         if (conf.enumValue(lua, shellpanel.Position, "shell_position")) |v| cfg.shell_position = v;
@@ -206,16 +212,16 @@ fn readOpenActions(alloc: std.mem.Allocator, lua: *Lua) ![]OpenAction {
         const command: ?[]const u8 = switch (lua.typeOf(-1)) {
             .string => lua.toString(-1) catch continue,
             .boolean => if (lua.toBoolean(-1)) {
-                conf.warn("open_actions[\"{s}\"] = true means nothing; use a command or false", .{ raw });
+                conf.warn("open_actions[\"{s}\"] = true means nothing; use a command or false", .{raw});
                 continue;
             } else null,
             else => {
-                conf.warn("open_actions[\"{s}\"] must be a command or false; ignored", .{ raw });
+                conf.warn("open_actions[\"{s}\"] must be a command or false; ignored", .{raw});
                 continue;
             },
         };
         const ext = (normalizeExt(alloc, raw) catch continue) orelse {
-            conf.warn("open_actions[\"{s}\"] is not a file extension; ignored", .{ raw });
+            conf.warn("open_actions[\"{s}\"] is not a file extension; ignored", .{raw});
             continue;
         };
         errdefer alloc.free(ext);

@@ -61,6 +61,16 @@ pub const Action = enum {
     /// (Midnight Commander's Shift+F4). Nothing is created until the
     /// editor saves it.
     newFile,
+    /// F1: the file operations menu. Its entries are the `menu_defaults`
+    /// keymap's unmodified chords (`menu_keys` in the config); a pick
+    /// with modifiers held runs whatever that chord is bound to instead,
+    /// so `super+m` is chmod as root.
+    fileOpsMenu,
+    /// Set the selection's permission bits: twelve toggles and the octal
+    /// value they make, kept in step. Starts from the first entry's.
+    chmod,
+    /// Set the selection's owner and group by name or id.
+    chown,
 
     /// The same operations as root, through sudo (see `sudo.zig`): a
     /// masked dialog asks for the password when sudo doesn't remember
@@ -73,6 +83,8 @@ pub const Action = enum {
     sudoMove,
     sudoMakeDir,
     sudoDelete,
+    sudoChmod,
+    sudoChown,
 
     /// Open or close the shell panel across the bottom (see
     /// `applib/shellpanel.zig`). Closing it leaves the shell running.
@@ -120,6 +132,7 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "ctrl+d", .action = .unmarkAll },
     .{ .chord = "kp_multiply", .action = .invertMarks },
 
+    .{ .chord = "F1", .action = .fileOpsMenu },
     .{ .chord = "F2", .action = .rename },
     .{ .chord = "F3", .action = .find },
     .{ .chord = "F4", .action = .edit },
@@ -157,16 +170,36 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "ctrl+q", .action = .quit },
 };
 
+/// The F1 menu's own keymap (`menu_keys` in the config), over the same
+/// actions. Each unmodified chord is a line of the menu, in this order;
+/// the modified ones are what a pick turns into while their modifiers
+/// are held. Kept apart from `defaults` so a bare letter here doesn't
+/// take that letter from type-to-find in the panes.
+pub const menu_defaults = [_]keybind.Default(Action){
+    .{ .chord = "m", .action = .chmod },
+    .{ .chord = "super+m", .action = .sudoChmod },
+    .{ .chord = "o", .action = .chown },
+    .{ .chord = "super+o", .action = .sudoChown },
+};
+
 /// A short label for the function-key bar along the bottom.
 pub fn barLabel(action: Action) []const u8 {
     return switch (action) {
-        .rename => "Rename",
+        .fileOpsMenu => "FileOp",
+        .rename, .sudoRename => "Rename",
         .find => "Find",
-        .edit => "Edit",
-        .copy => "Copy",
-        .move => "RenMov",
-        .makeDir => "Mkdir",
-        .delete => "Delete",
+        .edit, .sudoEdit => "Edit",
+        .newFile, .sudoNewFile => "New",
+        .copy, .sudoCopy => "Copy",
+        .move, .sudoMove => "RenMov",
+        .makeDir, .sudoMakeDir => "Mkdir",
+        .delete, .sudoDelete => "Delete",
+        .chmod, .sudoChmod => "Chmod",
+        .chown, .sudoChown => "Chown",
+        .sortByName => "Name",
+        .sortByExt => "Ext",
+        .sortBySize => "Size",
+        .sortByTime => "Time",
         .toggleView => "View",
         .refresh => "Reread",
         .quit => "Quit",
@@ -175,5 +208,53 @@ pub fn barLabel(action: Action) []const u8 {
     };
 }
 
-/// The actions the function-key bar shows, in order.
-pub const bar_actions = [_]Action{ .rename, .find, .edit, .copy, .move, .makeDir, .delete, .toggleView, .toggleHidden, .refresh, .quit };
+/// A line of the F1 menu.
+pub fn menuLabel(action: Action) []const u8 {
+    return switch (action) {
+        .chmod => "Change mode...",
+        .sudoChmod => "Change mode as root...",
+        .chown => "Change owner/group...",
+        .sudoChown => "Change owner/group as root...",
+        else => barLabel(action),
+    };
+}
+
+/// Whether `action` runs through sudo, so the bar and the F1 menu can
+/// say so.
+pub fn isRoot(action: Action) bool {
+    return switch (action) {
+        .sudoRename, .sudoEdit, .sudoNewFile, .sudoCopy, .sudoMove, .sudoMakeDir, .sudoDelete, .sudoChmod, .sudoChown => true,
+        else => false,
+    };
+}
+
+/// The actions the function-key bar shows, in order, when no modifier
+/// is held. With one held it shows whatever each F-key is bound to
+/// under it instead (`Ui.renderBar`).
+pub const bar_actions = [_]Action{ .fileOpsMenu, .rename, .find, .edit, .copy, .move, .makeDir, .delete, .toggleView, .toggleHidden, .refresh, .quit };
+
+/// What a pick in the F1 menu means: an entry's unmodified chord key
+/// pressed again with `held`, looked up in the menu keymap, else the
+/// entry itself. So holding the modifiers `sudoChmod` is bound with
+/// while pressing Enter on "Change mode" is chmod as root.
+pub fn menuPick(menu: *const Keymap, entry: Action, held: keybind.Mods) Action {
+    const chord = menu.chordFor(entry) orelse return entry;
+    return menu.lookup(chord.key(), held) orelse entry;
+}
+
+/// The F1 menu's entries: the actions the menu keymap binds to a chord
+/// without modifiers, in binding order, each once. Fills `buf` and
+/// returns the used part.
+pub fn menuEntries(menu: *const Keymap, buf: []Action) []Action {
+    var n: usize = 0;
+    outer: for (menu.bindings.items) |b| {
+        if (n == buf.len) break;
+        if (!std.meta.eql(b.chord.mods, keybind.Mods{}) or b.chord.text) continue;
+        for (buf[0..n]) |a| {
+            if (a == b.action) continue :outer;
+        }
+        buf[n] = b.action;
+        n += 1;
+    }
+    return buf[0..n];
+}

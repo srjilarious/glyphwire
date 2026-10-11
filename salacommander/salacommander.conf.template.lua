@@ -139,6 +139,9 @@
 --     --   makeDir             F7
 --     --   delete              F8, delete
 --     --   newFile             shift+F4 (edits a file not created yet)
+--     --   fileOpsMenu         F1      (the menu below: chmod, chown)
+--     --   chmod               (none; in the F1 menu)
+--     --   chown               (none; in the F1 menu)
 --     --   sudoRename          super+F2 (the same, as root via sudo)
 --     --   sudoEdit            super+F4 (sudoedit: the editor runs as you)
 --     --   sudoNewFile         super+shift+F4
@@ -146,6 +149,8 @@
 --     --   sudoMove            super+F6
 --     --   sudoMakeDir         super+F7
 --     --   sudoDelete          super+F8, super+delete
+--     --   sudoChmod           (none; in the F1 menu)
+--     --   sudoChown           (none; in the F1 menu)
 --     --   sortByName          ctrl+F3
 --     --   sortByExt           ctrl+F4
 --     --   sortBySize          ctrl+F5
@@ -160,6 +165,22 @@
 --     keys = {
 --         -- ["ctrl+up"] = "upToParentDir",
 --         -- ["delete"] = false,
+--     },
+--
+--     -- The F1 menu's own bindings, in the same shape as keys. Every
+--     -- chord without a modifier is a line of the menu, in this order.
+--     -- A chord with modifiers is what that line turns into while they
+--     -- are held: Super+M, or Super held over Enter or a click on
+--     -- "Change mode", is chmod as root. The line reads what a pick
+--     -- would do right now, so holding the modifiers shows it.
+--     --   m        chmod
+--     --   super+m  sudoChmod
+--     --   o        chown
+--     --   super+o  sudoChown
+--     -- If KWin (or anything else) takes Super, move root elsewhere:
+--     menu_keys = {
+--         -- ["alt+shift+m"] = "sudoChmod", ["super+m"] = false,
+--         -- ["alt+shift+o"] = "sudoChown", ["super+o"] = false,
 --     },
 --
 --     -- salacommander's own theme, overriding the window's (theme.lua) for this

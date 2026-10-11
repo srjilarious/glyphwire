@@ -375,6 +375,29 @@ pub const Pane = struct {
         return out.toOwnedSlice(alloc);
     }
 
+    /// The first entry `selection` would return: the first marked one,
+    /// else the cursor's. What F1's chmod and chown dialogs start from.
+    pub fn firstSelected(self: *const Pane) ?*const FileEntry {
+        for (self.entries, self.marked) |*e, m| {
+            if (m) return e;
+        }
+        return self.current();
+    }
+
+    /// Whether `selection` holds a directory (not a link to one: the
+    /// attribute walk doesn't follow links).
+    pub fn selectionHasDir(self: *const Pane) bool {
+        var any_marked = false;
+        for (self.entries, self.marked) |e, m| {
+            if (!m) continue;
+            any_marked = true;
+            if (e.kind == .directory) return true;
+        }
+        if (any_marked) return false;
+        const e = self.current() orelse return false;
+        return e.kind == .directory;
+    }
+
     // ── Navigation ──────────────────────────────────────────────────────
 
     /// Activates the cursor row: `..` goes up, a directory (or a link to

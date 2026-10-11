@@ -29,14 +29,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const fileops = @import("fileops.zig");
+const attrs = @import("attrs.zig");
 
 /// The first argument that turns salacommander into the helper.
 pub const helper_flag = "--fileop";
 
 /// What the helper can be asked to do. `copy`/`move` take a destination
 /// then sources, `delete` takes sources, `mkdir` a path, and `rename` a
-/// directory, the old name and the new one.
-pub const Op = enum { copy, move, delete, mkdir, rename };
+/// directory, the old name and the new one. `chmod`/`chown` take what
+/// `attrs.helperArgs` writes.
+pub const Op = enum { copy, move, delete, mkdir, rename, chmod, chown };
 
 // ── The helper (root side) ──────────────────────────────────────────────
 
@@ -81,6 +83,11 @@ pub fn serve(io: std.Io, alloc: std.mem.Allocator, args: []const []const u8, in:
         .rename => blk: {
             if (rest.len != 3) return 2;
             break :blk single(fileops.renameInDir(io, alloc, rest[0], rest[1], rest[2]));
+        },
+        .chmod, .chown => blk: {
+            const kind: fileops.Kind = if (op == .chmod) .chmod else .chown;
+            const attr_op = attrs.parseHelperArgs(kind, rest) orelse return 2;
+            break :blk attr_op.run(io, alloc, remote.hooks());
         },
     };
 
@@ -221,6 +228,8 @@ fn parseCount(s: []const u8) !usize {
 /// comes back as the same error here.
 const KnownError = std.Io.Dir.DeleteTreeError || std.Io.Dir.RenameError ||
     std.Io.Dir.CopyFileError || std.Io.Dir.CreateDirPathError ||
+    std.Io.Dir.SetFilePermissionsError || std.Io.Dir.SetFileOwnerError ||
+    std.Io.Dir.OpenError || std.Io.Dir.StatFileError ||
     fileops.Error || error{ EmptyName, InvalidName, PathAlreadyExists, OutOfMemory };
 
 /// `name` as an error, or `error.Unexpected` for one this side doesn't

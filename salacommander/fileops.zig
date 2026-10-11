@@ -23,6 +23,10 @@ pub const Kind = enum {
     copy,
     move,
     delete,
+    /// F1's attribute changes. They report through the same `Hooks`, but
+    /// run as an `attrs.Operation`, never an `Operation` here.
+    chmod,
+    chown,
 
     /// The verb for dialogs and progress lines: "Copy", "Move", "Delete".
     pub fn label(self: Kind) []const u8 {
@@ -30,6 +34,8 @@ pub const Kind = enum {
             .copy => "Copy",
             .move => "Move",
             .delete => "Delete",
+            .chmod => "Change mode",
+            .chown => "Change owner",
         };
     }
 };
@@ -162,6 +168,7 @@ const Runner = struct {
             const outcome = switch (op.kind) {
                 .delete => self.deleteOne(src),
                 .copy, .move => self.transferOne(op, src),
+                .chmod, .chown => unreachable,
             };
             outcome catch {
                 self.result.cancelled = true;
@@ -192,7 +199,7 @@ const Runner = struct {
         switch (op.kind) {
             .copy => try self.copyTree(src, dest),
             .move => try self.moveTree(src, dest),
-            .delete => unreachable,
+            .delete, .chmod, .chown => unreachable,
         }
     }
 
