@@ -28,6 +28,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const wordsplit = @import("wordsplit.zig");
 
 /// What a key meant, for a caller deciding whether to repaint and what
 /// else to do. `.moved` and `.edited` are split because they differ for
@@ -48,9 +49,9 @@ pub const Outcome = enum {
 };
 
 /// What `insert` does with control characters in the text handed to it.
-/// Both policies drop the C0 controls and DEL outright -- there is no
-/// offset in a single-line field where a `\t` or a `\x07` would mean
-/// anything -- and differ only over newlines.
+/// Every policy drops the C0 controls and DEL outright -- there is no
+/// offset in a field where a `\t` or a `\x07` would mean anything --
+/// and they differ only over newlines.
 pub const ControlPolicy = enum {
     /// Drop newlines with the rest. For a field holding one value: a
     /// pasted newline in a path or a filename is a mistake, not a space.
@@ -61,6 +62,14 @@ pub const ControlPolicy = enum {
     /// arrive as space-separated words the word-splitter turns into
     /// arguments.
     flatten_newlines,
+    /// gw-shell's command line now that it can hold more than one line:
+    /// `flatten_newlines`, except that a newline landing where the shell
+    /// splitter has something open -- inside a quote, or straight after
+    /// a `\` -- is kept as a real `\n` (one per line break, `\r\n`
+    /// included). A pasted `curl -X POST \` block or a quoted JSON body
+    /// arrives intact; a pasted column of paths still flattens into
+    /// arguments.
+    shell_newlines,
 };
 
 pub const LineEdit = struct {
@@ -214,10 +223,21 @@ pub const LineEdit = struct {
             if (i >= s.len) break;
 
             if (isNewline(s[i])) {
+                if (self.controls == .shell_newlines and
+                    wordsplit.openStateAt(self.buf.items[0..self.caret]) != .none)
+                {
+                    // Kept: one `\n` per line break, so blank lines inside
+                    // a quoted body survive.
+                    if (s[i] == '\r' and i + 1 < s.len and s[i + 1] == '\n') i += 1;
+                    i += 1;
+                    try self.buf.insert(alloc, self.caret, '\n');
+                    self.caret += 1;
+                    continue;
+                }
                 // A whole run at once, so `\r\n\r\n` between two copied
                 // paths is one separator rather than four.
                 while (i < s.len and isNewline(s[i])) : (i += 1) {}
-                if (self.controls == .flatten_newlines) {
+                if (self.controls != .drop) {
                     try self.buf.insert(alloc, self.caret, ' ');
                     self.caret += 1;
                 }
@@ -226,6 +246,14 @@ pub const LineEdit = struct {
             }
         }
         return self.buf.items.len != before;
+    }
+
+    /// A literal `\n` at the caret, whatever `controls` says -- the
+    /// shell's Enter on an unfinished command. `insert` would flatten a
+    /// newline typed after a dangling `|`, where nothing is open.
+    pub fn insertLineBreak(self: *LineEdit, alloc: std.mem.Allocator) !void {
+        try self.buf.insert(alloc, self.caret, '\n');
+        self.caret += 1;
     }
 
     /// Backspace: deletes the codepoint before the caret.
@@ -446,6 +474,45 @@ pub fn wordLeftFrom(buf: []const u8, cursor: usize) usize {
     const class = wordClass(buf[i - 1]);
     while (i > 0 and wordClass(buf[i - 1]) == class) : (i -= 1) {}
     return i;
+}
+
+/// The offset where the logical line holding `offset` starts: just past
+/// the `\n` before it, or 0. A one-line buffer's line is the whole buffer.
+pub fn lineStartFrom(buf: []const u8, offset: usize) usize {
+    const at = @min(offset, buf.len);
+    const nl = std.mem.lastIndexOfScalar(u8, buf[0..at], '\n') orelse return 0;
+    return nl + 1;
+}
+
+/// The offset where the logical line holding `offset` ends: its `\n`, or
+/// `buf.len`.
+pub fn lineEndFrom(buf: []const u8, offset: usize) usize {
+    const at = @min(offset, buf.len);
+    return std.mem.indexOfScalarPos(u8, buf, at, '\n') orelse buf.len;
+}
+
+/// Which logical line (0-based) `offset` is on: the `\n`s before it.
+pub fn lineIndexAt(buf: []const u8, offset: usize) usize {
+    return std.mem.count(u8, buf[0..@min(offset, buf.len)], "\n");
+}
+
+/// Up/Down inside a multi-line buffer: the offset one logical line above
+/// (`delta < 0`) or below (`delta > 0`) `offset`, at the same display
+/// column or the end of that line if it is shorter. Null when there is no
+/// such line -- the shell then falls back to history recall.
+pub fn verticalMove(buf: []const u8, offset: usize, delta: i2) ?usize {
+    const start = lineStartFrom(buf, offset);
+    const col = displayCol(buf[start..], offset - start);
+    const target_start = if (delta < 0) blk: {
+        if (start == 0) return null;
+        break :blk lineStartFrom(buf, start - 1);
+    } else blk: {
+        const end = lineEndFrom(buf, offset);
+        if (end >= buf.len) return null;
+        break :blk end + 1;
+    };
+    const target_end = lineEndFrom(buf, target_start);
+    return offsetAtCol(buf[0..target_end], target_start, col);
 }
 
 /// Every maximal run of `\n` / `\r` in `text` replaced by a single space,

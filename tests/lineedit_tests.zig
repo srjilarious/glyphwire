@@ -164,6 +164,60 @@ pub fn flattenNewlinesLeavesNewlineFreeTextAloneTest(_: std.Io, alloc: std.mem.A
     try testz.expectEqual(empty.len, 0);
 }
 
+// ─── multi-line buffers: line bounds, Up/Down, the shell paste policy ──
+
+pub fn lineBoundsFollowNewlinesTest(_: std.Io, _: std.mem.Allocator) !void {
+    const buf = "curl \\\n  -d x\nurl";
+    // "curl \" = 0..6, "\n" at 6, "  -d x" = 7..13, "\n" at 13, "url" = 14..17.
+    try testz.expectEqual(@as(usize, 0), lineedit.lineStartFrom(buf, 3));
+    try testz.expectEqual(@as(usize, 6), lineedit.lineEndFrom(buf, 3));
+    try testz.expectEqual(@as(usize, 7), lineedit.lineStartFrom(buf, 7));
+    try testz.expectEqual(@as(usize, 13), lineedit.lineEndFrom(buf, 9));
+    try testz.expectEqual(@as(usize, 14), lineedit.lineStartFrom(buf, buf.len));
+    try testz.expectEqual(buf.len, lineedit.lineEndFrom(buf, 15));
+    try testz.expectEqual(@as(usize, 0), lineedit.lineIndexAt(buf, 6));
+    try testz.expectEqual(@as(usize, 1), lineedit.lineIndexAt(buf, 7));
+    try testz.expectEqual(@as(usize, 2), lineedit.lineIndexAt(buf, buf.len));
+}
+
+pub fn verticalMoveKeepsTheColumnTest(_: std.Io, _: std.mem.Allocator) !void {
+    const buf = "abcdef\nxy\n日本語x";
+    // From column 4 of line 0 down onto the short line: clamped to its end.
+    try testz.expectEqual(@as(?usize, 9), lineedit.verticalMove(buf, 4, 1));
+    // From column 1 of line 1 down: "日" is two columns wide, so column 1
+    // falls inside it and the caret stays before it.
+    try testz.expectEqual(@as(?usize, 10), lineedit.verticalMove(buf, 8, 1));
+    // Up from the end of the CJK line (column 7) lands at the end of "xy".
+    try testz.expectEqual(@as(?usize, 9), lineedit.verticalMove(buf, buf.len, -1));
+    // No line above the first or below the last.
+    try testz.expectEqual(@as(?usize, null), lineedit.verticalMove(buf, 2, -1));
+    try testz.expectEqual(@as(?usize, null), lineedit.verticalMove(buf, buf.len, 1));
+    try testz.expectEqual(@as(?usize, null), lineedit.verticalMove("one line", 3, 1));
+}
+
+pub fn shellNewlinesKeepsOnlyOpenNewlinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var e: LineEdit = .{ .controls = .shell_newlines };
+    defer e.deinit(alloc);
+    // A pasted curl: the `\`-continued and in-quote newlines stay, the
+    // unquoted trailing one flattens like a pasted file list's would.
+    _ = try e.insert(alloc, "curl -X POST \\\r\n  -d '{\n\n  \"a\": 1\n}' url\n");
+    try testz.expectEqualStr("curl -X POST \\\n  -d '{\n\n  \"a\": 1\n}' url ", e.text());
+
+    var f: LineEdit = .{ .controls = .shell_newlines };
+    defer f.deinit(alloc);
+    _ = try f.insert(alloc, "src\ndocs\r\n\r\nbuild.zig");
+    try testz.expectEqualStr("src docs build.zig", f.text());
+}
+
+pub fn insertLineBreakIgnoresThePolicyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var e: LineEdit = .{ .controls = .shell_newlines };
+    defer e.deinit(alloc);
+    _ = try e.insert(alloc, "ls |");
+    try e.insertLineBreak(alloc);
+    _ = try e.insert(alloc, "wc -l");
+    try testz.expectEqualStr("ls |\nwc -l", e.text());
+}
+
 // ─── LineEdit: movement ────────────────────────────────────────────────
 
 pub fn lineEditStartsWithTheCaretAtTheEndTest(_: std.Io, alloc: std.mem.Allocator) !void {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 const std = @import("std");
+const wordsplit = @import("applib").wordsplit;
 
 /// Pipeline / redirection / `&&` `||` `;` parser for glyphwire-shell.
 ///
@@ -44,7 +45,6 @@ const std = @import("std");
 /// call. A parse error returns `.{ .err = msg }` with `msg` duped into
 /// the caller's allocator (the arena is already gone) and ready to print
 /// straight onto the grid.
-
 /// How a redirect rewires one fd of a command.
 pub const RedirMode = enum {
     /// `< path`  -- open `path` read-only as fd 0.
@@ -206,95 +206,40 @@ const Tok = struct {
 
 const LexError = error{ OutOfMemory, Background, Heredoc, HerestringOrDup, BadDup };
 
-/// Splits `line` into word / operator tokens. Mirrors `wordsplit`'s
-/// quote and escape handling byte for byte; the only addition is that an
-/// unquoted operator lexeme ends the current word and becomes its own
-/// token.
-fn lex(arena: std.mem.Allocator, line: []const u8) LexError![]const Tok {
+/// Splits `line` into word / operator tokens. Words go through
+/// `wordsplit.readWord` (stopping at operator bytes as well as
+/// whitespace), so quoting, line continuations and `$` / `~` expansion
+/// follow exactly the rules `splitArgs` documents; this function only
+/// adds the operator lexemes between them.
+fn lex(arena: std.mem.Allocator, line: []const u8, exp: wordsplit.Expansion) LexError![]const Tok {
     var toks: std.ArrayList(Tok) = .empty;
     var cur: std.ArrayList(u8) = .empty;
-    var in_word = false;
-    var cur_quoted = false;
 
-    // Flushes the pending word (if any) as a token.
-    const flush = struct {
-        fn f(
-            a: std.mem.Allocator,
-            ts: *std.ArrayList(Tok),
-            c: *std.ArrayList(u8),
-            iw: *bool,
-            q: *bool,
-        ) !void {
-            if (!iw.*) return;
-            try ts.append(a, .{ .kind = .word, .text = try a.dupe(u8, c.items), .quoted = q.* });
-            c.clearRetainingCapacity();
-            iw.* = false;
-            q.* = false;
-        }
-    }.f;
-
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        const ch = line[i];
-        switch (ch) {
-            ' ', '\t', '\n', '\r' => {
-                try flush(arena, &toks, &cur, &in_word, &cur_quoted);
-            },
-            '\'' => {
-                in_word = true;
-                cur_quoted = true;
-                i += 1;
-                while (i < line.len and line[i] != '\'') : (i += 1) {
-                    try cur.append(arena, line[i]);
-                }
-            },
-            '"' => {
-                in_word = true;
-                cur_quoted = true;
-                i += 1;
-                while (i < line.len and line[i] != '"') : (i += 1) {
-                    if (line[i] == '\\' and i + 1 < line.len and
-                        (line[i + 1] == '"' or line[i + 1] == '\\'))
-                    {
-                        i += 1;
-                    }
-                    try cur.append(arena, line[i]);
-                }
-            },
-            '\\' => {
-                in_word = true;
-                if (i + 1 < line.len) {
-                    i += 1;
-                    cur_quoted = true;
-                    try cur.append(arena, line[i]);
-                } else {
-                    try cur.append(arena, '\\');
-                }
-            },
+    var i = wordsplit.skipBlanks(line, 0);
+    while (i < line.len) : (i = wordsplit.skipBlanks(line, i)) {
+        switch (line[i]) {
             '|' => {
-                try flush(arena, &toks, &cur, &in_word, &cur_quoted);
                 if (i + 1 < line.len and line[i + 1] == '|') {
                     try toks.append(arena, .{ .kind = .or_or });
-                    i += 1;
+                    i += 2;
                 } else {
                     try toks.append(arena, .{ .kind = .pipe });
+                    i += 1;
                 }
             },
             ';' => {
-                try flush(arena, &toks, &cur, &in_word, &cur_quoted);
                 try toks.append(arena, .{ .kind = .semi });
+                i += 1;
             },
             '&' => {
                 if (i + 1 < line.len and line[i + 1] == '&') {
-                    try flush(arena, &toks, &cur, &in_word, &cur_quoted);
                     try toks.append(arena, .{ .kind = .and_and });
-                    i += 1;
+                    i += 2;
                 } else if (i + 1 < line.len and line[i + 1] == '>') {
                     // `&>` / `&>>` -- stdout+stderr to one file.
-                    try flush(arena, &toks, &cur, &in_word, &cur_quoted);
                     var mode: RedirMode = .write;
-                    i += 1; // now on '>'
-                    if (i + 1 < line.len and line[i + 1] == '>') {
+                    i += 2;
+                    if (i < line.len and line[i] == '>') {
                         mode = .append;
                         i += 1;
                     }
@@ -311,63 +256,69 @@ fn lex(arena: std.mem.Allocator, line: []const u8) LexError![]const Tok {
             '<' => {
                 if (i + 1 < line.len and line[i + 1] == '<') return error.Heredoc;
                 if (i + 1 < line.len and line[i + 1] == '&') return error.HerestringOrDup;
-                try flush(arena, &toks, &cur, &in_word, &cur_quoted);
                 try toks.append(arena, .{ .kind = .redir, .fd = 0, .rmode = .read });
+                i += 1;
             },
-            '>' => {
-                // A pending word that is exactly one digit and unquoted is
-                // the source-fd designator (`2>err`); consume it instead
-                // of flushing it as a word.
-                var fd: u8 = 1;
-                if (in_word and !cur_quoted and cur.items.len == 1 and
-                    cur.items[0] >= '0' and cur.items[0] <= '9')
-                {
-                    fd = cur.items[0] - '0';
-                    cur.clearRetainingCapacity();
-                    in_word = false;
-                } else {
-                    try flush(arena, &toks, &cur, &in_word, &cur_quoted);
-                }
-
-                if (i + 1 < line.len and line[i + 1] == '&') {
-                    // `N>&M` -- dup.
-                    i += 1; // on '&'
-                    if (i + 1 >= line.len or line[i + 1] < '0' or line[i + 1] > '9')
-                        return error.BadDup;
-                    i += 1; // on the digit
-                    try toks.append(arena, .{
-                        .kind = .redir,
-                        .fd = fd,
-                        .rmode = .dup,
-                        .dup_fd = line[i] - '0',
-                    });
-                } else if (i + 1 < line.len and line[i + 1] == '>') {
-                    i += 1;
-                    try toks.append(arena, .{ .kind = .redir, .fd = fd, .rmode = .append });
-                } else {
-                    try toks.append(arena, .{ .kind = .redir, .fd = fd, .rmode = .write });
-                }
-            },
+            '>' => i = try lexRedirOut(arena, &toks, line, i, 1),
             else => {
-                in_word = true;
-                try cur.append(arena, ch);
+                const start = i;
+                cur.clearRetainingCapacity();
+                const w = try wordsplit.readWord(arena, &cur, line, start, .blanks_and_operators, exp);
+                i = w.end;
+                // A word that is exactly one unquoted digit, written
+                // right up against `>`, is the source-fd designator
+                // (`2>err`), not an argument.
+                if (i < line.len and line[i] == '>' and w.end - start == 1 and
+                    cur.items.len == 1 and std.ascii.isDigit(cur.items[0]))
+                {
+                    i = try lexRedirOut(arena, &toks, line, i, cur.items[0] - '0');
+                } else if (w.present) {
+                    try toks.append(arena, .{ .kind = .word, .text = try arena.dupe(u8, cur.items), .quoted = w.quoted });
+                }
             },
         }
     }
-    try flush(arena, &toks, &cur, &in_word, &cur_quoted);
 
     return toks.toOwnedSlice(arena);
 }
 
+/// Lexes the `>` at `line[i]` as a redirect of `fd` -- `>`, `>>` or
+/// `>&M` -- and returns the offset just past it.
+fn lexRedirOut(arena: std.mem.Allocator, toks: *std.ArrayList(Tok), line: []const u8, start: usize, fd: u8) LexError!usize {
+    var i = start + 1;
+    if (i < line.len and line[i] == '&') {
+        // `N>&M` -- dup.
+        i += 1;
+        if (i >= line.len or !std.ascii.isDigit(line[i])) return error.BadDup;
+        try toks.append(arena, .{ .kind = .redir, .fd = fd, .rmode = .dup, .dup_fd = line[i] - '0' });
+        return i + 1;
+    }
+    if (i < line.len and line[i] == '>') {
+        try toks.append(arena, .{ .kind = .redir, .fd = fd, .rmode = .append });
+        return i + 1;
+    }
+    try toks.append(arena, .{ .kind = .redir, .fd = fd, .rmode = .write });
+    return i;
+}
+
 // --- parser --------------------------------------------------------------
 
-/// Parses `line`. Never returns a Zig error other than `OutOfMemory`; a
-/// syntax problem comes back as `.{ .err = <message> }`.
+/// Parses `line` with no `$` / `~` expansion (see `parseWith`). Never
+/// returns a Zig error other than `OutOfMemory`; a syntax problem comes
+/// back as `.{ .err = <message> }`.
 pub fn parse(alloc: std.mem.Allocator, line: []const u8) error{OutOfMemory}!Parsed {
+    return parseWith(alloc, line, .{});
+}
+
+/// `parse`, expanding `$NAME` / `${NAME}` / `$?` and a leading `~` in
+/// each word against `exp` (see `wordsplit.splitArgs`). The shell parses
+/// every line it runs this way; expansion has to happen here, while the
+/// quoting that decides it is still visible.
+pub fn parseWith(alloc: std.mem.Allocator, line: []const u8, exp: wordsplit.Expansion) error{OutOfMemory}!Parsed {
     var arena = std.heap.ArenaAllocator.init(alloc);
     const a = arena.allocator();
 
-    const toks = lex(a, line) catch |e| {
+    const toks = lex(a, line, exp) catch |e| {
         arena.deinit();
         const msg = switch (e) {
             error.OutOfMemory => return error.OutOfMemory,

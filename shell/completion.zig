@@ -336,7 +336,8 @@ pub fn recomputeAndDrawPicker(self: *Prompt, move_delta: isize) anyerror!void {
 
     var b = self.client.batch();
     defer b.deinit();
-    try self.batchClear(&b, self.line_start_row + 1, 0, @max(st.drawn_rows, visible), self.grid_cols);
+    const top = self.inputBottomRow() + 1;
+    try self.batchClear(&b, top, 0, @max(st.drawn_rows, visible), self.grid_cols);
 
     var i: usize = 0;
     while (i < visible) : (i += 1) {
@@ -345,7 +346,7 @@ pub fn recomputeAndDrawPicker(self: *Prompt, move_delta: isize) anyerror!void {
         const selected = idx == st.list.selected;
         const dim: ?glyphwire.Color = if (selected) null else autocomplete_hint_color;
 
-        try self.batchSetCursor(&b, self.line_start_row + 1 + i, 0);
+        try self.batchSetCursor(&b, top + i, 0);
         try self.batchText(&b, if (selected) "> " else "  ", dim, null);
         try self.batchText(&b, cand.name, dim, null);
         if (cand.source == .dir) try self.batchText(&b, "/", dim, null);
@@ -368,7 +369,7 @@ pub fn recomputeAndDrawPicker(self: *Prompt, move_delta: isize) anyerror!void {
 /// enough to the bottom that they wouldn't otherwise fit.
 pub fn reservePickerRows(self: *Prompt, rows_needed: usize) !void {
     if (self.grid_rows == 0 or rows_needed == 0) return;
-    const need_bottom = self.line_start_row + rows_needed;
+    const need_bottom = self.inputBottomRow() + rows_needed;
     if (need_bottom < self.grid_rows) return;
 
     const overshoot = need_bottom - self.grid_rows + 1;
@@ -436,7 +437,7 @@ pub fn closeCompletionPicker(self: *Prompt) !void {
 
     var b = self.client.batch();
     defer b.deinit();
-    try self.batchClear(&b, self.line_start_row + 1, 0, st.drawn_rows, self.grid_cols);
+    try self.batchClear(&b, self.inputBottomRow() + 1, 0, st.drawn_rows, self.grid_cols);
     try self.appendInputLine(&b);
     var res = try b.send();
     res.deinit();

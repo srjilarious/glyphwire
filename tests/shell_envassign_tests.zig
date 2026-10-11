@@ -31,70 +31,78 @@ pub fn validNameRejectsNonIdentifiersTest(_: std.Io, _: std.mem.Allocator) !void
     try testz.expectFalse(envassign.validName("FOO=BAR"));
 }
 
-// ─── expandValue ───────────────────────────────────────────────────────
+// ─── value expansion (via scanLeading) ─────────────────────────────────
 
-pub fn expandValuePlainPassthroughTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var env = try envOf(alloc, .{});
-    defer env.deinit();
-    const out = try envassign.expandValue(alloc, "just text", &env);
-    defer alloc.free(out);
-    try testz.expectEqualStr("just text", out);
+// The one value of a line that is a single `NAME=VALUE` assignment.
+fn valueOf(alloc: std.mem.Allocator, env: *const std.process.Environ.Map, line: []const u8) ![]const u8 {
+    const r = try envassign.scanLeading(alloc, line, env);
+    defer envassign.freeLeading(alloc, r);
+    try testz.expectEqual(@as(usize, 1), r.assignments.len);
+    return alloc.dupe(u8, r.assignments[0].value);
 }
 
-pub fn expandValueDollarNameTest(_: std.Io, alloc: std.mem.Allocator) !void {
+pub fn valueDollarNameTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var env = try envOf(alloc, .{ .{ "HOME", "/home/j" }, .{ "PATH", "/bin:/usr/bin" } });
     defer env.deinit();
-    const out = try envassign.expandValue(alloc, "$PATH:/opt/bin", &env);
+    const out = try valueOf(alloc, &env, "P=$PATH:/opt/bin");
     defer alloc.free(out);
     try testz.expectEqualStr("/bin:/usr/bin:/opt/bin", out);
 }
 
-pub fn expandValueBracedNameTest(_: std.Io, alloc: std.mem.Allocator) !void {
+pub fn valueBracedAndUnsetNamesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var env = try envOf(alloc, .{.{ "X", "abc" }});
     defer env.deinit();
-    const out = try envassign.expandValue(alloc, "${X}def${X}", &env);
+    const out = try valueOf(alloc, &env, "V=${X}def${NOPE}$X$ALSO_NOPE!");
     defer alloc.free(out);
-    try testz.expectEqualStr("abcdefabc", out);
+    try testz.expectEqualStr("abcdefabc!", out);
 }
 
-pub fn expandValueUnsetNameIsEmptyTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var env = try envOf(alloc, .{});
-    defer env.deinit();
-    const out = try envassign.expandValue(alloc, "a${NOPE}b$ALSO_NOPE!", &env);
-    defer alloc.free(out);
-    try testz.expectEqualStr("ab!", out);
-}
-
-pub fn expandValueLiteralDollarTest(_: std.Io, alloc: std.mem.Allocator) !void {
+pub fn valueLiteralDollarTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var env = try envOf(alloc, .{});
     defer env.deinit();
     // `$` before a digit, a lone trailing `$`, and an unterminated `${`
     // are all copied through untouched.
-    const out = try envassign.expandValue(alloc, "$1 costs 5$ ${oops", &env);
+    const out = try valueOf(alloc, &env, "V='$1 costs 5'$ ${oops");
     defer alloc.free(out);
-    try testz.expectEqualStr("$1 costs 5$ ${oops", out);
+    try testz.expectEqualStr("$1 costs 5$", out);
 }
 
-pub fn expandValueLeadingTildeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+pub fn valueSingleQuotesStayLiteralTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var env = try envOf(alloc, .{.{ "X", "abc" }});
+    defer env.deinit();
+    const a = try valueOf(alloc, &env, "V='$X'");
+    defer alloc.free(a);
+    try testz.expectEqualStr("$X", a);
+    const c = try valueOf(alloc, &env, "V=\"<$X>\"");
+    defer alloc.free(c);
+    try testz.expectEqualStr("<abc>", c);
+}
+
+pub fn valueLeadingTildeTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var env = try envOf(alloc, .{.{ "HOME", "/home/j" }});
     defer env.deinit();
 
-    const a = try envassign.expandValue(alloc, "~/bin", &env);
+    const a = try valueOf(alloc, &env, "V=~/bin");
     defer alloc.free(a);
     try testz.expectEqualStr("/home/j/bin", a);
 
-    const b = try envassign.expandValue(alloc, "~", &env);
+    const b = try valueOf(alloc, &env, "V=~");
     defer alloc.free(b);
     try testz.expectEqualStr("/home/j", b);
 
-    // A `~` that isn't at the start, or isn't followed by `/`, is literal.
-    const c = try envassign.expandValue(alloc, "x~/y", &env);
+    // A `~` that isn't at the start, isn't followed by `/`, or is quoted
+    // is literal.
+    const c = try valueOf(alloc, &env, "V=x~/y");
     defer alloc.free(c);
     try testz.expectEqualStr("x~/y", c);
 
-    const d = try envassign.expandValue(alloc, "~user/x", &env);
+    const d = try valueOf(alloc, &env, "V=~user/x");
     defer alloc.free(d);
     try testz.expectEqualStr("~user/x", d);
+
+    const e = try valueOf(alloc, &env, "V='~/x'");
+    defer alloc.free(e);
+    try testz.expectEqualStr("~/x", e);
 }
 
 // ─── scanLeading ───────────────────────────────────────────────────────

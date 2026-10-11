@@ -314,3 +314,52 @@ pub fn parseCloneSegmentsOutlivesItsLineTest(_: std.Io, alloc: std.mem.Allocator
     try testz.expectEqualStr("*", echo.words[1]);
     try testz.expectFalse(echo.quoted[1]);
 }
+
+// ─── JSON payloads, continuations, expansion ───────────────────────────
+
+pub fn parseJsonWithOperatorBytesStaysOneWordTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var line = try ok(alloc,
+        \\curl -d '{"cmd": "a | b && c > d; e"}' http://h | jq .
+    );
+    defer line.deinit();
+    const cmds = line.segments[0].pipeline.commands;
+    try testz.expectEqual(@as(usize, 2), cmds.len);
+    try testz.expectEqual(@as(usize, 4), cmds[0].words.len);
+    try testz.expectEqualStr("{\"cmd\": \"a | b && c > d; e\"}", cmds[0].words[2]);
+    try testz.expectEqualStr("jq", cmds[1].words[0]);
+}
+
+pub fn parseContinuationAcrossPipeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var line = try ok(alloc, "curl -s \\\n  http://h |\n  jq .a \\\n  > out.json");
+    defer line.deinit();
+    const cmds = line.segments[0].pipeline.commands;
+    try testz.expectEqual(@as(usize, 2), cmds.len);
+    try testz.expectEqual(@as(usize, 3), cmds[0].words.len);
+    try testz.expectEqualStr("http://h", cmds[0].words[2]);
+    try testz.expectEqual(@as(usize, 2), cmds[1].words.len);
+    try testz.expectEqualStr("out.json", cmds[1].redirs[0].path);
+}
+
+pub fn parseWithExpandsWordsAndTargetsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var env = std.process.Environ.Map.init(alloc);
+    defer env.deinit();
+    try env.put("HOME", "/home/j");
+    try env.put("T", "tok");
+
+    const parsed = try parse.parseWith(alloc, "curl -H \"X: $T\" '$T' $NOPE 2>~/err.log", .{ .env = &env });
+    var line = switch (parsed) {
+        .ok => |l| l,
+        .err => |msg| {
+            alloc.free(msg);
+            return error.TestUnexpectedResult;
+        },
+    };
+    defer line.deinit();
+    const cmd = line.segments[0].pipeline.commands[0];
+    // `$NOPE` expanded to nothing and dropped out of argv.
+    try testz.expectEqual(@as(usize, 4), cmd.words.len);
+    try testz.expectEqualStr("X: tok", cmd.words[2]);
+    try testz.expectEqualStr("$T", cmd.words[3]);
+    try testz.expectEqual(@as(u8, 2), cmd.redirs[0].fd);
+    try testz.expectEqualStr("/home/j/err.log", cmd.redirs[0].path);
+}

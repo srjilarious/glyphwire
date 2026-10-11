@@ -119,6 +119,107 @@ pub fn splitArgsFlagsQuotedTokensTest(_: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectTrue(args[4].quoted); // \*   -> literal
 }
 
+// ─── wordsplit: JSON payloads, continuations, expansion ───────────────
+
+// Splits `line` with `$` / `~` expanded against `env` and checks the
+// token texts.
+fn expectSplitWith(
+    alloc: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    line: []const u8,
+    want: []const []const u8,
+) !void {
+    const args = try wordsplit.splitArgsWith(alloc, line, .{ .env = env, .last_status = 3 });
+    defer wordsplit.freeArgs(alloc, args);
+    try testz.expectEqual(want.len, args.len);
+    for (want, args) |w, a| try testz.expectEqualStr(w, a.text);
+}
+
+fn testEnv(alloc: std.mem.Allocator) !std.process.Environ.Map {
+    var env = std.process.Environ.Map.init(alloc);
+    try env.put("HOME", "/home/j");
+    try env.put("TOKEN", "s3cr3t");
+    try env.put("SPACEY", "a b");
+    return env;
+}
+
+pub fn splitCurlJsonPayloadsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var env = try testEnv(alloc);
+    defer env.deinit();
+    // Single-quoted JSON is byte-for-byte literal, `$` included.
+    try expectSplitWith(alloc, &env,
+        \\curl -d '{"name": "x", "cost": "$5"}' http://h/api
+    , &.{ "curl", "-d", "{\"name\": \"x\", \"cost\": \"$5\"}", "http://h/api" });
+    // Double-quoted JSON with escaped inner quotes and an expanded token.
+    try expectSplitWith(alloc, &env,
+        \\curl -H "Authorization: Bearer $TOKEN" -d "{\"a\": [1, 2]}"
+    , &.{ "curl", "-H", "Authorization: Bearer s3cr3t", "-d", "{\"a\": [1, 2]}" });
+    // The `'\''` idiom for a `'` inside single-quoted JSON.
+    try expectSplitWith(alloc, &env,
+        \\curl -d '{"q": "it'\''s"}'
+    , &.{ "curl", "-d", "{\"q\": \"it's\"}" });
+}
+
+pub fn splitLineContinuationsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var env = try testEnv(alloc);
+    defer env.deinit();
+    // A pasted multi-line curl: each `\`+newline vanishes, no stray
+    // " " argument, and the newline inside the JSON quotes is kept.
+    try expectSplitWith(alloc, &env, "curl -X POST \\\n  -H 'Content-Type: application/json' \\\r\n  -d '{\n  \"a\": 1\n}' url", &.{
+        "curl", "-X", "POST", "-H", "Content-Type: application/json", "-d", "{\n  \"a\": 1\n}", "url",
+    });
+    // Mid-word, and inside double quotes, the pair joins the halves.
+    try expectSplitWith(alloc, &env, "ab\\\ncd \"x\\\ny\" 'p\\\nq'", &.{ "abcd", "xy", "p\\\nq" });
+}
+
+pub fn splitExpandsVariablesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var env = try testEnv(alloc);
+    defer env.deinit();
+    try expectSplitWith(alloc, &env,
+        \\echo $TOKEN ${TOKEN}x "$TOKEN" '$TOKEN' \$TOKEN "\$TOKEN" $? $ $5 $(x)
+    , &.{ "echo", "s3cr3t", "s3cr3tx", "s3cr3t", "$TOKEN", "$TOKEN", "$TOKEN", "3", "$", "$5", "$(x)" });
+    // No field splitting: an expanded space stays inside one argument.
+    try expectSplitWith(alloc, &env, "ls $SPACEY", &.{ "ls", "a b" });
+    // An unquoted word that expands to nothing disappears; quoted, it
+    // stays as an empty argument.
+    try expectSplitWith(alloc, &env, "ls $NOPE \"$NOPE\" x$NOPE", &.{ "ls", "", "x" });
+}
+
+pub fn splitExpandsTildeOnlyUnquotedTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var env = try testEnv(alloc);
+    defer env.deinit();
+    try expectSplitWith(alloc, &env,
+        \\ls ~ ~/src '~/src' "~" \~ a~/b ~user --x=~/y PATH=~/bin
+    , &.{ "ls", "/home/j", "/home/j/src", "~/src", "~", "~", "a~/b", "~user", "--x=~/y", "PATH=/home/j/bin" });
+}
+
+pub fn splitWithoutExpansionLeavesDollarAndTildeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const toks = try wordsplit.split(alloc, "echo $HOME ~ \"a\\$b\"");
+    defer wordsplit.freeTokens(alloc, toks);
+    try testz.expectEqual(@as(usize, 4), toks.len);
+    try testz.expectEqualStr("$HOME", toks[1]);
+    try testz.expectEqualStr("~", toks[2]);
+    try testz.expectEqualStr("a$b", toks[3]);
+}
+
+pub fn needsContinuationTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectFalse(wordsplit.needsContinuation(""));
+    try testz.expectFalse(wordsplit.needsContinuation("ls -l"));
+    try testz.expectTrue(wordsplit.needsContinuation("echo 'abc"));
+    try testz.expectTrue(wordsplit.needsContinuation("echo \"abc"));
+    try testz.expectTrue(wordsplit.needsContinuation("echo \"a\\\"b"));
+    try testz.expectFalse(wordsplit.needsContinuation("echo \"a\\\"b\""));
+    try testz.expectTrue(wordsplit.needsContinuation("curl -X POST \\"));
+    try testz.expectFalse(wordsplit.needsContinuation("curl -X POST \\\n"));
+    try testz.expectTrue(wordsplit.needsContinuation("ls |"));
+    try testz.expectTrue(wordsplit.needsContinuation("make && "));
+    try testz.expectTrue(wordsplit.needsContinuation("false ||\n"));
+    try testz.expectFalse(wordsplit.needsContinuation("ls '|'"));
+    try testz.expectFalse(wordsplit.needsContinuation("ls \\|"));
+    try testz.expectFalse(wordsplit.needsContinuation("sleep 1 &"));
+    try testz.expectFalse(wordsplit.needsContinuation("echo 'it'\\''s'"));
+}
+
 // ─── wordsplit.quoteArg ───────────────────────────────────────────────
 
 /// `quoteArg` output must re-split (via `split`) to exactly the one
@@ -494,6 +595,19 @@ pub fn historySerializeRoundTripsThroughParseTest(_: std.Io, alloc: std.mem.Allo
     try testz.expectEqualStr("git commit -m 'x y'", entries[2]);
 }
 
+pub fn historyMultiLineEntryStaysOneFileLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src = [_][]const u8{ "ls", "curl -X POST \\\n  -d '{\"a\": 1}' url", "pwd" };
+    const bytes = try history.serialize(alloc, &src);
+    defer alloc.free(bytes);
+    try testz.expectEqual(@as(usize, 3), std.mem.count(u8, bytes, "\n"));
+    try testz.expectEqualStr("curl -X POST \\\x1e  -d '{\"a\": 1}' url", std.mem.sliceTo(bytes[3..], '\n'));
+
+    const entries = try history.parse(alloc, bytes);
+    defer history.freeEntries(alloc, entries);
+    try testz.expectEqual(entries.len, 3);
+    try testz.expectEqualStr(src[1], entries[1]);
+}
+
 // ─── keyencode.toPtyBytes ──────────────────────────────────────────────
 
 pub fn keyencodePlainAndShiftedCharsTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -787,7 +901,6 @@ pub fn modeTrackerKittyKeyboardStackTest(_: std.Io, _: std.mem.Allocator) !void 
     mt.feed("\x1b[>1u\x1b[u");
     try testz.expectEqual(mt.encodeOpts().kitty_flags, @as(u8, 1));
 }
-
 
 // ─── promptrow: where the next prompt lands after a command ───────────
 

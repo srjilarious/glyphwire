@@ -491,8 +491,8 @@ pub fn drawRightChain(self: *Prompt) !void {
     // Caret restore, same frame -- mirrors `placeInputCursor`. Always
     // the input line: the idle-tick caller gates on `browse_pos == null`
     // and `renderInputLine` only runs for the live line.
-    const caret_row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
-    try self.batchSetCursor(&b, caret_row, self.line_start_col + self.caretCol());
+    const caret = self.caretCell();
+    try self.batchSetCursor(&b, caret.row, caret.col);
     var res = try b.send();
     res.deinit();
     self.profiler.add(.batch_sends, 1);
@@ -678,27 +678,65 @@ pub fn collapseHome(self: *Prompt, path: []const u8, buf: []u8) []const u8 {
     return homepath.collapseHome(path, self.environ_map.get("HOME"), buf);
 }
 
-/// The caret's column offset from `line_start_col` -- the display
-/// width of `line` between `input_scroll` and its caret (both byte
-/// offsets on codepoint boundaries). Byte count and column count only
-/// coincide for ASCII; a CJK char is one codepoint, two columns.
+/// The caret's column offset from the left edge of its input row --
+/// the display width of `line` between the row's scroll origin
+/// (`input_scroll`, never before the start of the caret's logical line)
+/// and the caret (both byte offsets on codepoint boundaries). Byte count
+/// and column count only coincide for ASCII; a CJK char is one
+/// codepoint, two columns.
 pub fn caretCol(self: *Prompt) usize {
     const buf = self.line.text();
-    const from = @min(self.input_scroll, buf.len);
     const to = @min(self.line.caret, buf.len);
+    const from = @max(@min(self.input_scroll, buf.len), lineedit.lineStartFrom(buf, to));
     if (to <= from) return 0;
     return lineedit.displayCol(buf[from..], to - from);
 }
 
-/// Repaints the whole input box -- `[line_start_col, input_max_col)` on
-/// `line_start_row` -- from `buffer`, scrolling horizontally
-/// (`input_scroll`, a byte offset kept on a codepoint boundary) so the
-/// caret stays visible, then places the server cursor. Replaces the
-/// old per-edit `insert_cells` / `delete_cells` dance: every editing
-/// op mutates `buffer`/`cursor` locally and calls this. All width math
-/// is in display columns (`lineedit`), so a CJK line lays out right.
-/// On a single-line powerline prompt it also redraws the pinned right
-/// chain so typing can't disturb it.
+/// What every input row after the first starts with, dimmed -- bash's
+/// `PS2`. Those rows begin at column 0 rather than under the first row's
+/// text: a long prompt prefix would otherwise leave a pasted JSON body a
+/// sliver of the window.
+pub const continuation_prefix = "> ";
+
+/// How many grid rows the input occupies: one per logical line of the
+/// buffer (see `lineedit.shell_newlines` and Enter's continuation rule).
+pub fn inputRowCount(self: *Prompt) usize {
+    return std.mem.count(u8, self.line.text(), "\n") + 1;
+}
+
+/// The grid row of the input's last logical line -- where the completion
+/// picker hangs below, and what a resize or submit must clear through.
+pub fn inputBottomRow(self: *Prompt) usize {
+    return self.line_start_row + self.inputRowCount() - 1;
+}
+
+/// The screen cell the caret is drawn in: its logical line's row, and
+/// that row's left edge (`line_start_col` on the first row, past
+/// `continuation_prefix` on the rest) plus `caretCol`. Clamped to the
+/// last grid row, like every other input-row position.
+pub fn caretCell(self: *Prompt) glyphwire.Cursor {
+    const idx = lineedit.lineIndexAt(self.line.text(), self.line.caret);
+    const row = self.line_start_row + idx;
+    const left = if (idx == 0) self.line_start_col else continuation_prefix.len;
+    return .{
+        .row = if (self.grid_rows > 0) @min(row, self.grid_rows - 1) else row,
+        .col = left + self.caretCol(),
+    };
+}
+
+/// Repaints the whole input box from `line`, then places the server
+/// cursor. The first logical line goes in `[line_start_col,
+/// input_max_col)` on `line_start_row`; each further one (the buffer can
+/// hold `\n`s -- a continued line, a pasted multi-line command) gets a
+/// row of its own below, starting with `continuation_prefix`. Only the
+/// caret's row scrolls horizontally (`input_scroll`, a byte offset kept
+/// on a codepoint boundary and inside that row) to keep the caret
+/// visible; the others show their start. Replaces the old per-edit
+/// `insert_cells` / `delete_cells` dance: every editing op mutates
+/// `buffer`/`cursor` locally and calls this. All width math is in
+/// display columns (`lineedit`), so a CJK line lays out right. On a
+/// single-line powerline prompt it also redraws the pinned right chain
+/// so typing can't disturb it.
 pub fn renderInputLine(self: *Prompt) !void {
     const pt0: ?std.Io.Timestamp = if (self.profiler.enabled) self.profiler.nowTs() else null;
     defer if (pt0) |s| self.profiler.record(.prompt_render, self.profiler.elapsedNs(s));
@@ -720,53 +758,109 @@ pub fn renderInputLine(self: *Prompt) !void {
     if (self.right_dynamic and self.prompt_lines == 1) self.drawRightChain() catch {};
 }
 
-/// Appends the input-box repaint (visible slice + completion hint +
-/// blank fill) and the trailing caret placement to `b`, updating
-/// `input_scroll` along the way. Split out of `renderInputLine` so
-/// `handleResize` can fold the input box into the same frame as its
-/// clear + prefix redraw.
+/// Appends the input-box repaint (every input row's visible slice,
+/// completion hint, blank fill) and the trailing caret placement to `b`,
+/// updating `input_scroll` and `input_rows_drawn` along the way. Split
+/// out of `renderInputLine` so `handleResize` can fold the input box into
+/// the same frame as its clear + prefix redraw.
 pub fn appendInputLine(self: *Prompt, b: *glyphwire.Client.Batch) !void {
     const buf = self.line.text();
-    // Clamp to the last real row: a stale `line_start_row` past the
-    // grid bottom (see `writePowerlinePrefix`) would otherwise make
-    // every `setCursor` below scroll the layer.
-    const row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
-    const left = self.line_start_col;
-    const right = if (self.input_max_col > left + 1) self.input_max_col else self.grid_cols;
-    const box_w = right -| left;
-    if (box_w == 0) {
-        try self.batchSetCursor(b, row, @min(left, self.grid_cols -| 1));
-        return;
-    }
+    const rows = self.inputRowCount();
 
-    // Keep the caret within the box, working in columns not bytes.
-    if (self.line.caret < self.input_scroll) {
-        self.input_scroll = self.line.caret;
-    } else {
-        while (self.input_scroll < self.line.caret and
-            lineedit.displayCol(buf[self.input_scroll..], self.line.caret - self.input_scroll) >= box_w)
-        {
-            self.input_scroll = lineedit.nextBoundary(buf, self.input_scroll);
+    // A line that grew past the grid bottom: scroll the layer up front
+    // (`reservePickerRows`' overshoot trick), moving the prompt with it.
+    if (self.grid_rows > 0 and self.line_start_row + rows > self.grid_rows) {
+        const overshoot = @min(self.line_start_row + rows - self.grid_rows, self.line_start_row);
+        if (overshoot > 0) {
+            try self.batchSetCursor(b, self.grid_rows - 1, 0);
+            var k: usize = 0;
+            while (k < overshoot) : (k += 1) try self.batchText(b, "\n", null, null);
+            self.line_start_row -= overshoot;
+            self.pl_top_row -|= overshoot;
         }
     }
-    if (lineedit.cellWidth(buf) <= box_w) self.input_scroll = 0;
 
-    // Visible slice: whole codepoints from `input_scroll` while they fit.
-    const vis_start = @min(self.input_scroll, buf.len);
+    const caret_line = lineedit.lineIndexAt(buf, self.line.caret);
+    var row_start: usize = 0;
+    var idx: usize = 0;
+    while (idx < rows) : (idx += 1) {
+        const row_end = lineedit.lineEndFrom(buf, row_start);
+        const screen_row = self.line_start_row + idx;
+        if (self.grid_rows > 0 and screen_row >= self.grid_rows) break;
+
+        const left = if (idx == 0) self.line_start_col else continuation_prefix.len;
+        const right = if (idx == 0 and self.input_max_col > left + 1) self.input_max_col else self.grid_cols;
+        if (idx > 0) {
+            try self.batchSetCursor(b, screen_row, 0);
+            try self.batchText(b, continuation_prefix, autocomplete_hint_color, null);
+        }
+        try appendInputRow(self, b, buf, row_start, row_end, screen_row, left, right, idx == caret_line, idx == rows - 1);
+        row_start = row_end + 1;
+    }
+
+    // Rows a longer buffer used and this one doesn't (a joined line,
+    // a recalled shorter entry).
+    if (self.input_rows_drawn > rows) {
+        try self.batchClear(b, self.line_start_row + rows, 0, self.input_rows_drawn - rows, null);
+    }
+    self.input_rows_drawn = rows;
+
+    const caret = self.caretCell();
+    try self.batchSetCursor(b, caret.row, @min(caret.col, self.grid_cols -| 1));
+}
+
+/// One input row of `appendInputLine`: `buf[row_start..row_end]` drawn
+/// in `[left, right)` on `screen_row`, scrolled to keep the caret in view
+/// when it is the caret's row, with the inline completion hint after it
+/// when it is the last row and its end is on screen.
+fn appendInputRow(
+    self: *Prompt,
+    b: *glyphwire.Client.Batch,
+    buf: []const u8,
+    row_start: usize,
+    row_end: usize,
+    screen_row: usize,
+    left: usize,
+    right: usize,
+    has_caret: bool,
+    is_last: bool,
+) !void {
+    const box_w = right -| left;
+    if (box_w == 0) return;
+    const row_text = buf[0..row_end];
+
+    var vis_start = row_start;
+    if (has_caret) {
+        // Keep the caret within the box, working in columns not bytes.
+        if (self.input_scroll < row_start or self.input_scroll > row_end) self.input_scroll = row_start;
+        if (self.line.caret < self.input_scroll) {
+            self.input_scroll = self.line.caret;
+        } else {
+            while (self.input_scroll < self.line.caret and
+                lineedit.displayCol(row_text[self.input_scroll..], self.line.caret - self.input_scroll) >= box_w)
+            {
+                self.input_scroll = lineedit.nextBoundary(row_text, self.input_scroll);
+            }
+        }
+        if (lineedit.cellWidth(row_text[row_start..]) <= box_w) self.input_scroll = row_start;
+        vis_start = self.input_scroll;
+    }
+
+    // Visible slice: whole codepoints from `vis_start` while they fit.
     var vis_end = vis_start;
     var w: usize = 0;
-    while (vis_end < buf.len) {
-        const nb = lineedit.nextBoundary(buf, vis_end);
-        const cw = lineedit.cellWidth(buf[vis_end..nb]);
+    while (vis_end < row_end) {
+        const nb = lineedit.nextBoundary(row_text, vis_end);
+        const cw = lineedit.cellWidth(row_text[vis_end..nb]);
         if (w + cw > box_w) break;
         w += cw;
         vis_end = nb;
     }
-    const visible = buf[vis_start..vis_end];
+    const visible = row_text[vis_start..vis_end];
 
     var hint_end: usize = 0;
     var hint_w: usize = 0;
-    if (self.completion_hint_visible and vis_end == buf.len) {
+    if (is_last and self.completion_hint_visible and vis_end == buf.len) {
         const room = box_w -| w;
         const hint = self.completion_hint.items;
         while (hint_end < hint.len) {
@@ -783,21 +877,18 @@ pub fn appendInputLine(self: *Prompt, b: *glyphwire.Client.Batch) !void {
     const fill = @min(fill_w, spaces.len);
     @memset(spaces[0..fill], ' ');
 
-    try self.batchSetCursor(b, row, left);
+    try self.batchSetCursor(b, screen_row, left);
     if (visible.len > 0) try self.batchText(b, visible, null, null);
     if (hint_end > 0) try self.batchText(b, self.completion_hint.items[0..hint_end], autocomplete_hint_color, null);
     if (fill > 0) try self.batchText(b, spaces[0..fill], null, null);
-    try self.batchSetCursor(b, row, self.line_start_col + self.caretCol());
 }
 
-/// Puts the server cursor at the caret's screen cell -- `line_start_col`
-/// plus `caretCol()` (the display-width offset of `cursor` from
-/// `input_scroll`), on the input row clamped to the grid. Used by
-/// `renderInputLine` and the idle right-chain refresh (which moves the
-/// cursor while redrawing).
+/// Puts the server cursor at the caret's screen cell (`caretCell`). Used
+/// by the idle right-chain refresh (which moves the cursor while
+/// redrawing) and the foreground loop's caret restore.
 pub fn placeInputCursor(self: *Prompt) !void {
-    const row = if (self.grid_rows > 0) @min(self.line_start_row, self.grid_rows - 1) else self.line_start_row;
-    try self.drawSetCursor(row, self.line_start_col + self.caretCol());
+    const caret = self.caretCell();
+    try self.drawSetCursor(caret.row, caret.col);
 }
 
 /// A fresh prompt: writes the prefix, resets the line, repaints the
@@ -812,6 +903,7 @@ pub fn showPrompt(self: *Prompt) !void {
     const cur = try self.writePromptPrefix(null);
     self.line_start_row = cur.row;
     self.line_start_col = cur.col;
+    self.input_rows_drawn = 1;
     self.line.clear();
     // A plain typed invocation of a result-returning program (e.g.
     // `gw-hist` run by hand rather than via its Ctrl+R binding) left

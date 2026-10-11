@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 const std = @import("std");
+const wordsplit = @import("applib").wordsplit;
 
 /// `NAME=VALUE` environment-variable assignments for glyphwire-shell.
 ///
@@ -14,30 +15,24 @@ const std = @import("std");
 ///     (`FOO=bar cmd args`) sets those names just for that line, exactly
 ///     as bash / fish do.
 ///
-/// `scanLeading` does the peeling; `validName` and `expandValue` are the
-/// shared pieces the `export` builtin reuses from `shell/main.zig`.
+/// `scanLeading` does the peeling; `validName` is the piece the `export`
+/// builtin reuses from `shell/main.zig`.
 ///
-/// Deliberately simple (see docs/decisions.md, Shell):
-///   * A name is `[A-Za-z_][A-Za-z0-9_]*`. A word with an `=` whose left
-///     side isn't a valid name is not an assignment -- scanning stops and
-///     the caller runs the word as an ordinary command.
-///   * Value expansion covers `$NAME`, `${NAME}` and a leading `~`, and
-///     is *not* quote-context aware: the shell's word splitter has
-///     already collapsed `'...'` / `"..."` / `\` by the time a value
-///     reaches `expandValue`, so a `$NAME` that was written inside single
-///     quotes still expands. There is no way to pass a literal `$`.
-///     Accepted for v1.
-///   * `$NAME` of an unset variable expands to the empty string, like
-///     bash. A `$` that isn't followed by a well-formed name (or
-///     `{name}`) is copied through literally.
-///   * A leading `~` expands to `$HOME` only when it is `~` alone or
-///     `~/...`; `~user` is left alone.
-
+/// Deliberately simple:
+///   * A name is `[A-Za-z_][A-Za-z0-9_]*`, written plainly (no quoting
+///     inside it, as in bash). A word whose left side isn't a valid name
+///     is not an assignment -- scanning stops and the caller runs the
+///     word as an ordinary command.
+///   * The value is read by `wordsplit.readWord`, the splitter every
+///     command word goes through, so it gets the same quoting and the
+///     same `$NAME` / `${NAME}` / leading-`~` expansion: `A='$x'` is the
+///     literal `$x`, `A="$x"` and `A=$x` expand. `$NAME` of an unset
+///     variable is empty, like bash.
 /// One parsed `NAME=VALUE`. Both fields are heap-owned by the allocator
 /// passed to `scanLeading`; free a whole `Leading` with `freeLeading`.
 pub const Assignment = struct {
     name: []const u8,
-    /// Already run through `expandValue`.
+    /// Unquoted and expanded.
     value: []const u8,
 };
 
@@ -72,71 +67,6 @@ pub fn validName(name: []const u8) bool {
     return true;
 }
 
-/// Expands `$NAME`, `${NAME}` and a leading `~` in `value`, looking names
-/// up in `env`. Returns an owned string (possibly empty). See the module
-/// doc comment for the exact rules.
-pub fn expandValue(
-    alloc: std.mem.Allocator,
-    value: []const u8,
-    env: *const std.process.Environ.Map,
-) std.mem.Allocator.Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-
-    var i: usize = 0;
-
-    // Leading `~` / `~/...` -> $HOME. Only at the very start, and only
-    // when HOME is set (otherwise the `~` is left literal, like `cd`).
-    if (value.len > 0 and value[0] == '~' and (value.len == 1 or value[1] == '/')) {
-        if (env.get("HOME")) |home| {
-            try out.appendSlice(alloc, home);
-            i = 1;
-        }
-    }
-
-    while (i < value.len) {
-        const ch = value[i];
-        if (ch != '$') {
-            try out.append(alloc, ch);
-            i += 1;
-            continue;
-        }
-
-        // `${NAME}`
-        if (i + 1 < value.len and value[i + 1] == '{') {
-            if (std.mem.indexOfScalarPos(u8, value, i + 2, '}')) |close| {
-                const name = value[i + 2 .. close];
-                if (validName(name)) {
-                    if (env.get(name)) |v| try out.appendSlice(alloc, v);
-                    i = close + 1;
-                    continue;
-                }
-            }
-            // Malformed -- emit the `$` literally and carry on.
-            try out.append(alloc, '$');
-            i += 1;
-            continue;
-        }
-
-        // `$NAME` -- the run of name characters after `$`, the first of
-        // which must be a name-start character.
-        var j = i + 1;
-        while (j < value.len and (value[j] == '_' or std.ascii.isAlphanumeric(value[j]))) : (j += 1) {}
-        if (j > i + 1 and (value[i + 1] == '_' or std.ascii.isAlphabetic(value[i + 1]))) {
-            const name = value[i + 1 .. j];
-            if (env.get(name)) |v| try out.appendSlice(alloc, v);
-            i = j;
-            continue;
-        }
-
-        // A lone `$`, or `$` followed by a digit / punctuation: literal.
-        try out.append(alloc, '$');
-        i += 1;
-    }
-
-    return out.toOwnedSlice(alloc);
-}
-
 /// Peels the leading `NAME=VALUE` run off `line`. Word boundaries follow
 /// the same quote / escape rules as `applib/wordsplit.zig`; scanning stops
 /// at the first word that is not a clean `NAME=VALUE`, or at an unquoted
@@ -159,106 +89,56 @@ pub fn scanLeading(
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
 
-    var i: usize = 0;
-    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
     // The first non-blank byte: where `rest` reverts to if the whole
     // leading run turns out not to be assignments.
-    const first_word: usize = i;
-    // Where `rest` starts if nothing more peels -- advanced past each
-    // accepted assignment and its trailing blanks.
-    var rest_start: usize = i;
+    const first_word = wordsplit.skipBlanks(line, 0);
+    var i = first_word;
 
     while (i < line.len) {
-        const word_start = i;
-        buf.clearRetainingCapacity();
-        var hit_operator = false;
-
-        // Collect one word.
-        collect: while (i < line.len) {
-            const ch = line[i];
-            switch (ch) {
-                ' ', '\t' => break :collect,
-                '|', '&', ';', '<', '>', '(', ')' => {
-                    hit_operator = true;
-                    break :collect;
-                },
-                '\'' => {
-                    i += 1;
-                    while (i < line.len and line[i] != '\'') : (i += 1) try buf.append(alloc, line[i]);
-                    if (i < line.len) i += 1; // closing quote
-                },
-                '"' => {
-                    i += 1;
-                    while (i < line.len and line[i] != '"') : (i += 1) {
-                        if (line[i] == '\\' and i + 1 < line.len and
-                            (line[i + 1] == '"' or line[i + 1] == '\\'))
-                        {
-                            i += 1;
-                        }
-                        try buf.append(alloc, line[i]);
-                    }
-                    if (i < line.len) i += 1; // closing quote
-                },
-                '\\' => {
-                    i += 1;
-                    if (i < line.len) {
-                        try buf.append(alloc, line[i]);
-                        i += 1;
-                    } else {
-                        try buf.append(alloc, '\\');
-                    }
-                },
-                else => {
-                    try buf.append(alloc, ch);
-                    i += 1;
-                },
-            }
-        }
-
         // An operator interrupting an already-started assignment run
-        // (`A=1 | x`, `A=1; ls`, `A=1 && b`) -- abandon assignment
-        // handling for the whole line and let the parser deal with it
+        // (`A=1 | x`, `A=1; ls`, `A=1 && b`, `A=1>f`) abandons assignment
+        // handling for the whole line and lets the parser deal with it
         // (`A=1` becomes an ordinary, not-found command, as in a shell
-        // with no assignment support). The per-pipeline-stage scoping
+        // with no assignment support); the per-pipeline-stage scoping
         // bash gives these isn't worth reproducing here.
-        if (hit_operator and list.items.len > 0) {
+        if (wordsplit.isOperatorByte(line[i]) and list.items.len > 0) {
             for (list.items) |a| {
                 alloc.free(a.name);
                 alloc.free(a.value);
             }
             list.clearRetainingCapacity();
-            return .{
-                .assignments = try list.toOwnedSlice(alloc),
-                .rest = std.mem.trim(u8, line[first_word..], " \t"),
-            };
+            return .{ .assignments = try list.toOwnedSlice(alloc), .rest = trimBlanks(line[first_word..]) };
         }
 
-        // Only a word that ended at a clean boundary (whitespace or
-        // end-of-line) is eligible: `FOO=bar|x` keeps `FOO=bar` with the
-        // command, matching how odd that input is in bash.
-        const eq = if (!hit_operator) std.mem.indexOfScalar(u8, buf.items, '=') else null;
-        if (eq) |e| {
-            const name = buf.items[0..e];
-            if (validName(name)) {
-                const name_owned = try alloc.dupe(u8, name);
-                errdefer alloc.free(name_owned);
-                const value_owned = try expandValue(alloc, buf.items[e + 1 ..], env);
-                try list.append(alloc, .{ .name = name_owned, .value = value_owned });
-                while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
-                rest_start = i;
-                continue;
+        const word_start = i;
+        const name_end = wordsplit.nameEnd(line, i);
+        if (name_end == i or name_end >= line.len or line[name_end] != '=') break;
+
+        buf.clearRetainingCapacity();
+        const w = try wordsplit.readWord(alloc, &buf, line, name_end + 1, .blanks_and_operators, .{ .env = env });
+
+        // A first word ending right at an operator (`FOO=bar|x`) keeps
+        // `FOO=bar` with the command, matching how odd that input is in
+        // bash.
+        if (w.end < line.len and wordsplit.isOperatorByte(line[w.end])) {
+            if (list.items.len == 0) {
+                return .{ .assignments = try list.toOwnedSlice(alloc), .rest = trimBlanks(line[word_start..]) };
             }
+            i = w.end;
+            continue; // the check at the top abandons the run
         }
 
-        // Not an assignment: the command begins at this word.
-        return .{
-            .assignments = try list.toOwnedSlice(alloc),
-            .rest = std.mem.trim(u8, line[word_start..], " \t"),
-        };
+        const name_owned = try alloc.dupe(u8, line[word_start..name_end]);
+        errdefer alloc.free(name_owned);
+        const value_owned = try alloc.dupe(u8, buf.items);
+        try list.append(alloc, .{ .name = name_owned, .value = value_owned });
+        i = wordsplit.skipBlanks(line, w.end);
     }
 
-    return .{
-        .assignments = try list.toOwnedSlice(alloc),
-        .rest = std.mem.trim(u8, line[rest_start..], " \t"),
-    };
+    // Everything from the first word that didn't peel (or the end).
+    return .{ .assignments = try list.toOwnedSlice(alloc), .rest = trimBlanks(line[i..]) };
+}
+
+fn trimBlanks(s: []const u8) []const u8 {
+    return std.mem.trim(u8, s, " \t\r\n");
 }

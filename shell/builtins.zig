@@ -217,9 +217,11 @@ pub fn doFg(self: *Prompt, args: []const []const u8) !u8 {
 /// `runCommand` reports a spawn failure, rather than propagated.
 pub fn doCd(self: *Prompt, args: []const []const u8) !void {
     const alloc = self.client.alloc;
+    // A typed target's `~` was expanded (or deliberately quoted) when the
+    // line was split; only the no-argument default needs it here.
     const raw_target: []const u8 = if (args.len > 0) args[0] else "~";
 
-    const target = self.expandTilde(raw_target) catch {
+    const target = (if (args.len > 0) raw_target else self.expandTilde(raw_target)) catch {
         try self.drawText("cd: HOME not set", err_color, null);
         return;
     };
@@ -650,15 +652,13 @@ pub fn unsetEnvVar(self: *Prompt, name: []const u8) void {
 }
 
 /// `export` builtin. No args -> print every variable as `NAME=VALUE`,
-/// sorted. `export NAME=VALUE` -> set it (`$NAME` / `${NAME}` and a
-/// leading `~` in VALUE are expanded against the current environment;
-/// see `envassign`). `export NAME` with no `=` -> ensure NAME exists
-/// (created empty if unset), since this shell keeps a single
-/// environment and has no separate "not yet exported" state. An
-/// invalid name is reported and makes the builtin's status 1.
+/// sorted. `export NAME=VALUE` -> set it (`$NAME` / `${NAME}` and a `~`
+/// after the `=` in VALUE were expanded when the line was split, quoting
+/// respected). `export NAME` with no `=` -> ensure NAME exists (created
+/// empty if unset), since this shell keeps a single environment and has
+/// no separate "not yet exported" state. An invalid name is reported and
+/// makes the builtin's status 1.
 pub fn doExport(self: *Prompt, args: []const []const u8) !u8 {
-    const alloc = self.client.alloc;
-
     if (args.len == 0) {
         try self.printEnv();
         return 0;
@@ -673,12 +673,9 @@ pub fn doExport(self: *Prompt, args: []const []const u8) !u8 {
                 status = 1;
                 continue;
             }
-            const value = envassign.expandValue(alloc, arg[eq + 1 ..], &self.env) catch {
-                status = 1;
-                continue;
-            };
-            defer alloc.free(value);
-            self.setEnvVar(name, value);
+            // Already expanded: the word went through the same
+            // `wordsplit.readWord` as every other argument.
+            self.setEnvVar(name, arg[eq + 1 ..]);
         } else {
             if (!envassign.validName(arg)) {
                 try self.reportBadEnvName("export", arg);

@@ -48,25 +48,14 @@ const result_fd_env = main.result_fd_env;
 /// prepended -- see `prependZigOutBinToPath`). A spawn failure is
 /// reported onto the grid, not propagated.
 ///
-/// Every argument gets the same leading `~`/`~/...` expansion `cd`
-/// already gives its target (see `expandTilde`) -- `runCommandOpts`
-/// is the same thing with that switchable.
+/// `argv` is used exactly as given: a typed line's `~` and `$NAME` were
+/// expanded when it was split (`parse.parseWith`), where quoting could
+/// still keep them literal.
 pub fn runCommand(self: *Prompt, argv: []const []const u8) !void {
-    _ = try self.runCommandOpts(argv, .{});
+    _ = try self.runCommandEnd(argv);
 }
 
-/// Knobs for `runCommandOpts`. Everything here defaults to what a
-/// typed command line gets, so plain `runCommand` is `.{}`.
-pub const RunOptions = struct {
-    /// Whether each argument gets `expandTilde`. Off for an argument
-    /// that is *data* rather than a path: `gw-hist`'s seed query (see
-    /// `historySearch`), where expanding a typed `~/code` into
-    /// `/home/you/code` would stop it matching the history lines that
-    /// literally contain `~/code`.
-    expand_tilde: bool = true,
-};
-
-/// How a `runCommandOpts` run ended.
+/// How a `runCommandEnd` run ended.
 pub const RunEnd = union(enum) {
     /// The child was reaped, or never started (then 127 / 1, the same
     /// status recorded for `{exit}`).
@@ -76,31 +65,10 @@ pub const RunEnd = union(enum) {
     backgrounded: *Job,
 };
 
-/// `runCommand`'s body -- see its doc comment. Split out so a caller
-/// that builds argv itself can turn off the tilde expansion meant for a
-/// *typed* path argument, and so a chain (`runChain`) learns how the
-/// run ended.
-pub fn runCommandOpts(self: *Prompt, argv: []const []const u8, opts: RunOptions) !RunEnd {
+/// `runCommand`'s body -- see its doc comment. Split out so a chain
+/// (`runChain`) learns how the run ended.
+pub fn runCommandEnd(self: *Prompt, argv: []const []const u8) !RunEnd {
     const alloc = self.client.alloc;
-    var expanded: std.ArrayList([]const u8) = .empty;
-    defer {
-        // Only the prefix actually appended before an early return
-        // (the HOME-not-set case below) needs freeing.
-        for (expanded.items, argv[0..expanded.items.len]) |exp, raw| {
-            if (exp.ptr != raw.ptr) alloc.free(exp);
-        }
-        expanded.deinit(alloc);
-    }
-    for (argv) |arg| {
-        const exp = if (opts.expand_tilde)
-            self.expandTilde(arg) catch {
-                try self.drawText("~: HOME not set", err_color, null);
-                return .{ .status = 1 };
-            }
-        else
-            arg;
-        try expanded.append(alloc, exp);
-    }
 
     // NUL-terminated, NULL-terminated argv for libc `execvp`.
     var argv_bufs: std.ArrayList([:0]u8) = .empty;
@@ -108,7 +76,7 @@ pub fn runCommandOpts(self: *Prompt, argv: []const []const u8, opts: RunOptions)
         for (argv_bufs.items) |b| alloc.free(b);
         argv_bufs.deinit(alloc);
     }
-    for (expanded.items) |a| try argv_bufs.append(alloc, try std.mem.concatWithSentinel(alloc, u8, &.{a}, 0));
+    for (argv) |a| try argv_bufs.append(alloc, try std.mem.concatWithSentinel(alloc, u8, &.{a}, 0));
     const argv_z = try alloc.allocSentinel(?[*:0]const u8, argv_bufs.items.len, null);
     defer alloc.free(argv_z);
     for (argv_bufs.items, 0..) |b, i| argv_z[i] = b.ptr;
@@ -189,7 +157,7 @@ pub fn runCommandOpts(self: *Prompt, argv: []const []const u8, opts: RunOptions)
     // From here the job owns the pty, the result pipe's read end and
     // the reader thread -- on the heap, since a job put in the
     // background outlives this call.
-    const job = try self.startJob(expanded.items, pty, result_pipe[0], started);
+    const job = try self.startJob(argv, pty, result_pipe[0], started);
 
     // No listener means this isn't the interactive prompt (shouldn't
     // happen -- the exec path in `main` never calls here). Just wait.

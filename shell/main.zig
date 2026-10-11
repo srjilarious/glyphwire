@@ -976,6 +976,12 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
             try prompt.acceptCompletionPicker();
         } else if (prompt.browse_pos != null) {
             try prompt.browseEnter();
+        } else if (alt or wordsplit.needsContinuation(prompt.line.text())) {
+            // An open quote, a trailing `\`, or a dangling `|` / `&&`
+            // isn't a command yet: start another input line the way
+            // bash's `>` prompt does. Alt+Enter forces one anywhere
+            // (fish's binding), for laying out a long command by hand.
+            try prompt.insertLineBreak();
         } else {
             try prompt.submitLine();
         }
@@ -1031,14 +1037,15 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
     } else if (std.mem.eql(u8, ev.key, "end") and prompt.browse_pos != null) {
         try prompt.browseEnd();
     } else if ((ctrl and std.mem.eql(u8, ev.key, "a")) or std.mem.eql(u8, ev.key, "home")) {
-        // On the live line Home mirrors ctrl+a (go to column 0); via
-        // `moveCursorTo` -> `setCursorAt` it also ends any browse and
-        // snaps the view back to the live tail.
-        try prompt.moveCursorTo(0);
+        // On the live line Home mirrors ctrl+a (go to the start of the
+        // caret's line -- the whole buffer's start on a one-line
+        // command); via `moveCursorTo` -> `setCursorAt` it also ends
+        // any browse and snaps the view back to the live tail.
+        try prompt.moveCursorTo(lineedit.lineStartFrom(prompt.line.text(), prompt.line.caret));
     } else if ((ctrl and std.mem.eql(u8, ev.key, "e")) or std.mem.eql(u8, ev.key, "end")) {
         // End mirrors ctrl+e on the live line; the browse-mode form is
         // handled above.
-        try prompt.moveCursorTo(prompt.line.text().len);
+        try prompt.moveCursorTo(lineedit.lineEndFrom(prompt.line.text(), prompt.line.caret));
     } else if (ctrl and std.mem.eql(u8, ev.key, "u")) {
         try prompt.killToStart();
     } else if (ctrl and std.mem.eql(u8, ev.key, "k")) {
@@ -1118,10 +1125,14 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         // Moves the picker's selection when it's open. Otherwise plain
         // Up is readline-style history recall at the prompt, a
         // one-row browse step while already in scrollback mode.
+        // Inside a multi-line command it first walks up its lines (fish
+        // does the same); history recall starts from the top line.
         if (prompt.completion_picker != null) {
             try prompt.moveCompletionPicker(-1);
         } else if (prompt.browse_pos != null) {
             try prompt.browseUp(1);
+        } else if (lineedit.verticalMove(prompt.line.text(), prompt.line.caret, -1)) |to| {
+            try prompt.moveCursorTo(to);
         } else {
             try prompt.historyUp();
         }
@@ -1130,6 +1141,8 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
             try prompt.moveCompletionPicker(1);
         } else if (prompt.browse_pos != null) {
             try prompt.browseDown(1);
+        } else if (lineedit.verticalMove(prompt.line.text(), prompt.line.caret, 1)) |to| {
+            try prompt.moveCursorTo(to);
         } else {
             try prompt.historyDown();
         }
@@ -1285,10 +1298,11 @@ pub const Prompt = struct {
     /// Ctrl+U -- is `lineedit.LineEdit`'s, shared with salacommander's
     /// path row and zoe's `:` line; what stays here is everything that
     /// makes it a *shell* prompt: the incremental repaint, history
-    /// recall, completion. `.flatten_newlines` because a multi-line
-    /// paste at a prompt should become space-separated arguments rather
-    /// than lose its line breaks silently.
-    line: lineedit.LineEdit = .{ .controls = .flatten_newlines },
+    /// recall, completion. `.shell_newlines` because a multi-line paste
+    /// at a prompt should become space-separated arguments rather than
+    /// lose its line breaks silently -- except where a quote or a `\` is
+    /// open, where the newline is part of the command and is kept.
+    line: lineedit.LineEdit = .{ .controls = .shell_newlines },
     /// Set by `submitLine` when the typed line was `exit` -- the caller
     /// (`runPrompt`'s key loop) checks this after every submitted line and
     /// returns instead of drawing another prompt, ending this process.
@@ -1535,6 +1549,11 @@ pub const Prompt = struct {
     /// `delete_cells`.
     input_max_col: usize = 0,
     input_scroll: usize = 0,
+    /// How many grid rows the last input repaint covered (one per logical
+    /// line of `line`), so a repaint after the buffer lost a line clears
+    /// the row it left behind, and a submit or resize knows how far down
+    /// the input reaches. 1 for a fresh prompt.
+    input_rows_drawn: usize = 1,
 
     /// Powerline layout state, set by `writePowerlinePrefix`. `pl_top_row`
     /// is the row the segment chains live on; `right_dynamic` is true when
@@ -1727,6 +1746,10 @@ pub const Prompt = struct {
     pub const emitOps = render.emitOps;
     pub const collapseHome = render.collapseHome;
     pub const caretCol = render.caretCol;
+    pub const caretCell = render.caretCell;
+    pub const inputRowCount = render.inputRowCount;
+    pub const inputBottomRow = render.inputBottomRow;
+    pub const continuation_prefix = render.continuation_prefix;
     pub const renderInputLine = render.renderInputLine;
     pub const appendInputLine = render.appendInputLine;
     pub const placeInputCursor = render.placeInputCursor;
@@ -1804,7 +1827,6 @@ pub const Prompt = struct {
     /// Re-reads the drawing surface's size. Embedded, a `resize` reports
     /// the *context* -- the host's whole window -- while what matters is
     /// the panel's layer, which the host resizes on its own schedule.
-
     /// Applies a directory the host asked for, if one is waiting. Called
     /// where a new prompt is about to be drawn.
     pub fn applyPendingCd(self: *Prompt) void {
@@ -2079,14 +2101,16 @@ pub const Prompt = struct {
         // Wipe the rows the prompt is about to be redrawn on, full width,
         // before anything is drawn over them -- same order, same frame.
         // `prompt_lines` is stable across a resize (it comes from config),
-        // so it still describes how many rows the pre-resize prompt used.
-        const span = @min(self.prompt_lines, rows -| top);
+        // so it still describes how many rows the pre-resize prompt used;
+        // the input's extra rows below it (`input_rows_drawn`) go too.
+        const span = @min(self.prompt_lines + self.input_rows_drawn - 1, rows -| top);
         if (span > 0) try self.batchClear(&b, top, 0, span, null);
 
         const start = try self.writePromptPrefix(&b);
         self.line_start_row = start.row;
         self.line_start_col = start.col;
         self.input_scroll = 0;
+        self.input_rows_drawn = 1; // cleared with the prompt above
         try self.appendInputLine(&b);
 
         var res = try b.send();
@@ -2105,6 +2129,7 @@ pub const Prompt = struct {
         self.line_start_row = cur.row;
         self.line_start_col = cur.col;
         self.input_scroll = 0;
+        self.input_rows_drawn = 1; // the clear took the old rows
         self.armCompletionHint();
         try self.renderInputLine();
     }
@@ -2279,7 +2304,7 @@ pub const Prompt = struct {
 
         var bp = self.browse_pos orelse glyphwire.Cursor{
             .row = self.line_start_row -| 1,
-            .col = self.line_start_col + self.caretCol(),
+            .col = self.caretCell().col,
         };
 
         const plan = browsescroll.up(
@@ -2418,7 +2443,7 @@ pub const Prompt = struct {
         const from_row: usize, const from_col: usize = if (self.browse_pos) |bp|
             .{ bp.row, bp.col }
         else
-            .{ self.line_start_row, self.line_start_col + self.caretCol() };
+            .{ self.caretCell().row, self.caretCell().col };
         // above = view_scroll - screen_row (see core.SelectionPoint).
         const from_above: i64 =
             @as(i64, @intCast(self.view_scroll)) - @as(i64, @intCast(from_row));
@@ -2715,6 +2740,29 @@ pub const Prompt = struct {
         try self.renderInputLine();
     }
 
+    /// Writes the whole command unbounded from `line_start` for scrollback
+    /// to keep (`submitLine`): the first line where it was typed, each
+    /// further one on a row of its own after a dim `continuation_prefix`,
+    /// all of them free to wrap. The clipped continuation rows the input
+    /// box drew go first, so a wrapping first line can't leave pieces of
+    /// them showing between the echoed rows.
+    pub fn echoInputForScrollback(self: *Prompt) !void {
+        if (self.input_rows_drawn > 1) {
+            try self.drawClear(self.line_start_row + 1, 0, self.input_rows_drawn - 1, null);
+        }
+        try self.drawSetCursor(self.line_start_row, self.line_start_col);
+        var lines = std.mem.splitScalar(u8, self.line.text(), '\n');
+        var first = true;
+        while (lines.next()) |part| {
+            if (!first) {
+                try self.drawText("\n", null, null);
+                try self.drawText(continuation_prefix, autocomplete_hint_color, null);
+            }
+            first = false;
+            if (part.len > 0) try self.drawText(part, null, null);
+        }
+    }
+
     /// Re-echoes the whole command line unbounded from `line_start` (the
     /// input box normally shows only a horizontally-scrolled window of it)
     /// so scrollback keeps the full command, then drops to the row below
@@ -2748,8 +2796,7 @@ pub const Prompt = struct {
             try self.renderInputLine();
         }
 
-        try self.drawSetCursor(self.line_start_row, self.line_start_col);
-        if (self.line.text().len > 0) try self.drawText(self.line.text(), null, null);
+        try self.echoInputForScrollback();
         // Drop to the row the re-echo actually ended on, read back from
         // the server rather than assumed: a command line longer than the
         // grid wraps onto further rows here, and `line_start_row + 1`
@@ -2899,10 +2946,8 @@ pub const Prompt = struct {
         // opens already filtered on `git com` instead of throwing that
         // typing away -- fish and mcfly both work this way. The whole
         // line goes as *one* argument, since a query is one string, not
-        // an argv; `expand_tilde = false` keeps `runCommandOpts` from
-        // turning a typed `~/code` into an absolute path that would then
-        // match none of the history lines that literally contain
-        // `~/code` (see `RunOptions`). Trimmed, and
+        // an argv, and unexpanded: a typed `~/code` has to match the
+        // history lines that literally contain `~/code`. Trimmed, and
         // a blank line spawns `gw-hist` bare, so a stray space doesn't
         // open the search filtered down to nothing.
         const seed = std.mem.trim(u8, self.line.text(), " \t");
@@ -2914,7 +2959,7 @@ pub const Prompt = struct {
             try self.runCommand(argv.items);
         } else {
             argv.appendAssumeCapacity(seed);
-            _ = try self.runCommandOpts(argv.items, .{ .expand_tilde = false });
+            try self.runCommand(argv.items);
         }
         if (self.takePendingResultLine()) |line| {
             defer self.client.alloc.free(line);
@@ -2931,9 +2976,9 @@ pub const Prompt = struct {
     /// Ctrl+Delete for that.
     ///
     /// The path is written the way the default prompt shows it
-    /// (`~`-collapsed); `runCommand`'s `expandTilde` turns it back into
-    /// an absolute path when the line is submitted, so the round trip is
-    /// exact. Replaces whatever was typed outright, with the caret at the
+    /// (`~`-collapsed, the rest backslash-escaped); the splitter's `~`
+    /// expansion turns it back into an absolute path when the line is
+    /// submitted, so the round trip is exact. Replaces whatever was typed outright, with the caret at the
     /// end of the path (`setLine`), which is where an edit almost always
     /// starts.
     pub fn cdCwdLine(self: *Prompt) !void {
@@ -2944,7 +2989,13 @@ pub const Prompt = struct {
         // `max_path_bytes + 4` covers `"cd "` before a full-length path,
         // the same slack `writeDefaultPrefix` gives its `" > "` suffix.
         var line_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
-        const text = std.fmt.bufPrint(&line_buf, "cd {s}", .{cwd}) catch "cd ";
+        // Escaped after the `~` so a directory with a space or a `$` in
+        // its name splits back to itself; the `~` stays bare so the
+        // splitter still expands it.
+        const tilde_len: usize = if (std.mem.startsWith(u8, cwd, "~")) 1 else 0;
+        const escaped = try wordsplit.escapeSpecial(self.client.alloc, cwd[tilde_len..]);
+        defer self.client.alloc.free(escaped);
+        const text = std.fmt.bufPrint(&line_buf, "cd {s}{s}", .{ cwd[0..tilde_len], escaped }) catch "cd ";
         try self.setLine(text);
     }
 
@@ -3040,7 +3091,9 @@ pub const Prompt = struct {
     /// sets the session environment, a run before a command sets those
     /// names just for that line and restores them after.
     ///
-    /// Within each command: quote-aware splitting, then alias expansion
+    /// Within each command: quote-aware splitting with `$NAME` / `$?` /
+    /// `~` expanded where they were unquoted (`parse.parseWith`, against
+    /// `expansion()`), then alias expansion
     /// (`expandAliases`), then `*` globs (`expandGlobs`), then
     /// builtin / `$PATH` dispatch -- bash order. A core or script builtin
     /// (`cd`, `exit`, a `defcmd`) works as a whole stage in an
@@ -3078,7 +3131,7 @@ pub const Prompt = struct {
             }
         }
 
-        switch (try parse.parse(alloc, text)) {
+        switch (try parse.parseWith(alloc, text, self.expansion())) {
             .err => |msg| {
                 defer alloc.free(msg);
                 try self.drawText(msg, err_color, null);
@@ -3232,7 +3285,7 @@ pub const Prompt = struct {
         defer wordsplit.freeTokens(self.client.alloc, argv);
         if (argv.len == 0) return .{ .status = 0 };
         if (self.isBuiltinName(argv[0])) return .{ .status = try self.runBuiltin(argv) };
-        return self.runCommandOpts(argv, .{});
+        return self.runCommandEnd(argv);
     }
 
     /// Where a running pipeline's output goes and where its stdin / Ctrl-C
@@ -3297,6 +3350,13 @@ pub const Prompt = struct {
             }
         }
         return self.spawnAndPump(pl.commands, argvs, sink);
+    }
+
+    /// What `$NAME` / `$?` / `~` expand against when this shell splits a
+    /// line to run it: the live environment (`env`, so a `sh.setenv` or
+    /// `export` shows up at once) and the last recorded exit status.
+    pub fn expansion(self: *Prompt) wordsplit.Expansion {
+        return .{ .env = &self.env, .last_status = self.last_status };
     }
 
     /// alias-expands then glob-expands one parsed command into an owned
@@ -3381,10 +3441,10 @@ pub const Prompt = struct {
         for (commands, argvs, 0..) |cmd, argv, i| {
             const arr = try alloc.alloc(?[*:0]const u8, argv.len + 1);
             try argv_arrays.append(alloc, arr);
+            // `~` was already expanded where the line was split, only
+            // where it was unquoted.
             for (argv, 0..) |a, k| {
-                const exp = self.expandTilde(a) catch a;
-                const z = try std.mem.concatWithSentinel(alloc, u8, &.{exp}, 0);
-                if (exp.ptr != a.ptr) alloc.free(exp);
+                const z = try std.mem.concatWithSentinel(alloc, u8, &.{a}, 0);
                 try zbufs.append(alloc, z);
                 arr[k] = z.ptr;
             }
@@ -3451,8 +3511,8 @@ pub const Prompt = struct {
             return .{ .fd = r.fd, .mode = .dup, .dup_fd = r.dup_fd };
         }
 
-        const tilded = self.expandTilde(r.path) catch r.path;
-        defer if (tilded.ptr != r.path.ptr) alloc.free(tilded);
+        // `~` was already expanded by the parser (`parseWith`).
+        const tilded = r.path;
 
         var chosen: []const u8 = tilded;
         var matched: ?[]const []const u8 = null;
@@ -3692,8 +3752,7 @@ pub const Prompt = struct {
 
     // ── Jobs (jobs.zig) ──────────────────────────────────────────────────
     pub const runCommand = jobs.runCommand;
-    pub const RunOptions = jobs.RunOptions;
-    pub const runCommandOpts = jobs.runCommandOpts;
+    pub const runCommandEnd = jobs.runCommandEnd;
     pub const RunEnd = jobs.RunEnd;
     pub const Job = jobs.Job;
     pub const startJob = jobs.startJob;
@@ -3942,11 +4001,13 @@ pub const Prompt = struct {
     /// owned copy of `words`. Always freshly allocated; free with
     /// `wordsplit.freeArgs`.
     ///
-    /// Tokens introduced from an alias body are marked `quoted = false`
-    /// (glob-eligible): re-evaluating an alias body is exactly what makes
-    /// `alias x='echo *'` expand the `*` in the caller's directory, the
-    /// same as bash. Tokens carried over from the original line keep
-    /// their own `quoted` flag.
+    /// An alias body is re-split when it is used, with `$NAME` / `~`
+    /// expanded then: re-evaluating the body is exactly what makes
+    /// `alias x='echo *'` expand the `*` in the caller's directory and
+    /// `alias h='cd $PROJ'` follow `$PROJ`, the same as bash. A body
+    /// token keeps the quoting it was written with (`alias s='echo "*"'`
+    /// prints a literal `*`), and tokens carried over from the original
+    /// line keep their own `quoted` flag.
     pub fn expandAliases(self: *Prompt, words: []const wordsplit.Arg) ![]wordsplit.Arg {
         const alloc = self.client.alloc;
 
@@ -3977,13 +4038,13 @@ pub const Prompt = struct {
             const body = self.aliases.get(first) orelse break;
             try seen.append(alloc, try alloc.dupe(u8, first));
 
-            const body_words = try wordsplit.split(alloc, body);
-            defer wordsplit.freeTokens(alloc, body_words);
+            const body_words = try wordsplit.splitArgsWith(alloc, body, self.expansion());
+            defer wordsplit.freeArgs(alloc, body_words);
 
             alloc.free(list.orderedRemove(0).text);
             var at: usize = 0;
             for (body_words) |bw| {
-                try list.insert(alloc, at, .{ .text = try alloc.dupe(u8, bw), .quoted = false });
+                try list.insert(alloc, at, .{ .text = try alloc.dupe(u8, bw.text), .quoted = bw.quoted });
                 at += 1;
             }
         }
@@ -4069,6 +4130,14 @@ pub const Prompt = struct {
         try self.afterEdit(); // -> renderInputLine repaints the box
     }
 
+    /// Enter on an unfinished command (or Alt+Enter): a real `\n` at the
+    /// caret, past the paste policy that would flatten one typed after a
+    /// `|` -- the input grows a row (`appendInputLine`).
+    pub fn insertLineBreak(self: *Prompt) !void {
+        if (self.completion_hint_visible) self.hideCompletionHint();
+        try self.line.insertLineBreak(self.client.alloc);
+        try self.afterEdit();
+    }
 };
 
 // ─── script engine host hooks ────────────────────────────────────────
@@ -4181,7 +4250,7 @@ fn hookRunLine(
     const self: *Prompt = @ptrCast(@alignCast(ctx));
     const alloc = self.client.alloc;
 
-    switch (parse.parse(alloc, line) catch return 2) {
+    switch (parse.parseWith(alloc, line, self.expansion()) catch return 2) {
         .err => |msg| {
             defer alloc.free(msg);
             if (capture) {

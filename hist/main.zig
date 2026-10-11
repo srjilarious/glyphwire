@@ -620,7 +620,16 @@ const Ui = struct {
             if (idx < self.filtered.items.len) {
                 self.scratch.clearRetainingCapacity();
                 try self.scratch.append(self.alloc, ' ');
-                try self.scratch.appendSlice(self.alloc, self.filtered.items[idx]);
+                // A multi-line command shows on its one row with a `⏎`
+                // where each line break is; picking it still hands the
+                // shell the real newlines.
+                var lines = std.mem.splitScalar(u8, self.filtered.items[idx], '\n');
+                var first = true;
+                while (lines.next()) |part| {
+                    if (!first) try self.scratch.appendSlice(self.alloc, " ⏎ ");
+                    first = false;
+                    try self.scratch.appendSlice(self.alloc, part);
+                }
                 const fg = if (idx == self.list.selected) fg_selected else fg_list;
                 const bg = if (idx == self.list.selected) bg_selected else bg_list;
                 try self.writeLine(b, self.list_layer, row, self.scratch.items, fg, bg);

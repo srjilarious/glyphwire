@@ -13,12 +13,21 @@
 
 const std = @import("std");
 
+/// How a newline *inside* an entry is written to the file: a multi-line
+/// command (a pasted `curl ... \` block, a quoted JSON body) stays one
+/// entry on one file line, with each embedded `\n` stored as this byte.
+/// ASCII "record separator" -- a C0 control the line editor drops on
+/// input, so no typed command can contain one, and a history file
+/// written before multi-line entries existed reads back unchanged.
+pub const newline_marker: u8 = 0x1e;
+
 /// Upper bound on entries kept in the history file. `parse` trims older
 /// entries past this on load; `serialize` trims again on write, so the
 /// file can only briefly exceed it within a single session.
 pub const max_entries: usize = 5000;
 
-/// Splits the raw file bytes into individual command lines, oldest first.
+/// Splits the raw file bytes into individual command lines, oldest first,
+/// turning each `newline_marker` back into the `\n` it stands for.
 /// Blank lines are skipped, consecutive duplicates collapse to one, and
 /// only the last `max_entries` survive. Every returned slice is an owned
 /// dup and so is the outer slice -- the caller frees each entry and the
@@ -34,8 +43,13 @@ pub fn parse(alloc: std.mem.Allocator, bytes: []const u8) ![][]const u8 {
     while (it.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, "\r");
         if (line.len == 0) continue;
-        if (list.items.len > 0 and std.mem.eql(u8, list.items[list.items.len - 1], line)) continue;
-        try list.append(alloc, try alloc.dupe(u8, line));
+        const entry = try alloc.dupe(u8, line);
+        std.mem.replaceScalar(u8, entry, newline_marker, '\n');
+        if (list.items.len > 0 and std.mem.eql(u8, list.items[list.items.len - 1], entry)) {
+            alloc.free(entry);
+            continue;
+        }
+        try list.append(alloc, entry);
     }
 
     if (list.items.len > max_entries) {
@@ -63,8 +77,8 @@ pub fn shouldRecord(prev: ?[]const u8, line: []const u8) bool {
     return true;
 }
 
-/// Renders `entries` back to file bytes: one entry per line, each
-/// terminated by `\n`, keeping only the last `max_entries`. Caller owns
+/// Renders `entries` back to file bytes: one entry per line (an embedded
+/// newline written as `newline_marker`), each terminated by `\n`, keeping only the last `max_entries`. Caller owns
 /// the result.
 pub fn serialize(alloc: std.mem.Allocator, entries: []const []const u8) ![]u8 {
     const start = if (entries.len > max_entries) entries.len - max_entries else 0;
@@ -72,7 +86,9 @@ pub fn serialize(alloc: std.mem.Allocator, entries: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
     for (entries[start..]) |e| {
+        const at = out.items.len;
         try out.appendSlice(alloc, e);
+        std.mem.replaceScalar(u8, out.items[at..], '\n', newline_marker);
         try out.append(alloc, '\n');
     }
     return out.toOwnedSlice(alloc);
