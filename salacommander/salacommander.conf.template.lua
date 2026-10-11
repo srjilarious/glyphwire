@@ -135,6 +135,7 @@
 --     --   invertMarks         kp_multiply
 --     --   rename              F2      (renames the entry in place)
 --     --   find                F3      (searches below the pane's dir)
+--     --   commandPalette      ctrl+shift+p (every action here by name)
 --     --   edit                F4      (the `editor` above)
 --     --   copy                F5
 --     --   move                F6

@@ -85,6 +85,12 @@ pub fn render(self: *Ui) !void {
         const b = self.grp.buffer_bounds;
         try self.finder.render(&batch, .{ .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows });
     }
+    // The palette is placed against the whole window, as VS Code's is:
+    // it's about the program, not the pane.
+    if (self.palette.dirty) {
+        const w = self.winSize();
+        try self.palette.render(&batch, .{ .cols = w.cols, .rows = w.rows });
+    }
     if (self.hover_dirty) try self.renderHover(&batch);
     // Placed against the word being typed, so it follows a buffer
     // repaint (a scroll, a wrap) as well as its own changes.

@@ -233,7 +233,7 @@ pub fn completionDue(self: *Ui) bool {
 /// cursor has to remember the popup exists.
 pub fn syncCompletion(self: *Ui) void {
     const in_insert = self.buf.ed.mode == .insert and self.focus == .buffer and
-        !self.finder.isOpen() and !self.shell.isFocused();
+        !self.finder.isOpen() and !self.palette.isOpen() and !self.shell.isFocused();
     if (!in_insert) {
         self.completion_due = null;
         self.completion_request = null;

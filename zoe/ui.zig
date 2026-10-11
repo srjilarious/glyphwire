@@ -61,6 +61,7 @@ const search = @import("search.zig");
 const tree_mod = @import("tree.zig");
 const finder_mod = @import("applib").finder;
 const finderpopup = @import("applib").finderpopup;
+const palette_mod = @import("applib").palette;
 const filetype = @import("applib").filetype;
 const homepath = @import("applib").homepath;
 const syntax = @import("applib").syntax;
@@ -161,6 +162,20 @@ fn finderStyle(th: *const themes.Stored) finderpopup.Style {
         .max_cols = 84,
         .max_rows = 20,
     };
+}
+
+/// The Ctrl+Shift+P command palette's look: the finder's colours, in the
+/// palette's top-anchored shape (`applib/palette.zig`).
+fn paletteStyle(th: *const themes.Stored) palette_mod.Style {
+    var s = palette_mod.default_style;
+    const f = finderStyle(th);
+    s.frame_style = f.frame_style;
+    s.bg = f.bg;
+    s.selected_bg = f.selected_bg;
+    s.selected_fg = f.selected_fg;
+    s.text_fg = f.text_fg;
+    s.dim_fg = f.dim_fg;
+    return s;
 }
 
 /// The sign-column glyph. Solid for an error, hollow for everything else,
@@ -835,6 +850,9 @@ pub const Ui = struct {
     /// tree -- placed over the buffer pane by `render`, hidden the rest of
     /// the time -- which is why no `layout` notification mentions them.
     finder: finderpopup.Popup,
+    /// The Ctrl+Shift+P command palette, floating like the finder (over
+    /// it: it's created after). Modal while open, the same way.
+    palette: palette_mod.Popup,
 
     /// The language servers, and everything they have said. The pool is
     /// null when `config.lsp.enabled` is false; it exists but holds no
@@ -1163,6 +1181,8 @@ pub const Ui = struct {
         // popups below. It stays invisible until Ctrl+P.
         var finder = try finderpopup.Popup.init(alloc, client, finderStyle(&th));
         errdefer finder.deinit();
+        var palette = try palette_mod.Popup.init(alloc, client, paletteStyle(&th));
+        errdefer palette.deinit();
         // The hover popup, floating like the finder's layers and placed
         // against the cursor rather than the pane -- `hoverRect`.
         const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
@@ -1222,6 +1242,7 @@ pub const Ui = struct {
             .tree_layer = tree_layer,
             .status_layer = status_layer,
             .finder = finder,
+            .palette = palette,
             .hover_layer = hover_layer,
             .hover_panel_patch = hover_panel_patch,
             .completion_layer = completion_layer,
@@ -1725,6 +1746,7 @@ pub const Ui = struct {
         self.client.destroyContext(self.context) catch {};
         self.tree.deinit();
         self.finder.deinit();
+        self.palette.deinit();
         if (self.find) |*f| f.deinit(self.alloc);
         if (self.tree_edit) |*te| te.deinit(self.alloc);
         if (self.prev_cwd) |p| self.alloc.free(p);
@@ -2188,6 +2210,7 @@ pub const Ui = struct {
             // (previous completion) only applies with the completion popup
             // up, and `completionKey` takes it first then.
             .findFile => try self.openFinder(),
+            .commandPalette => try self.openPalette(),
             .toggleTree => try self.toggleTree(),
             // Dotfiles and everything `.gitignore` excludes, in one flag --
             // the sidebar, both tree searches and Ctrl+P alike. Global so
@@ -2391,7 +2414,7 @@ pub const Ui = struct {
             // frame it arrived for rather than the one after.
             self.drainLsp();
             if (self.anyGroupDirty() or self.tree_dirty != .none or
-                self.status_dirty or self.finder.dirty or self.hover_dirty or self.completion_dirty or
+                self.status_dirty or self.finder.dirty or self.palette.dirty or self.hover_dirty or self.completion_dirty or
                 self.path_menu_dirty or self.tree_edit_dirty or self.tab_tip_dirty or self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
@@ -2497,6 +2520,7 @@ pub const Ui = struct {
                 // notification never mentions it -- but it is placed
                 // against the buffer pane, which just moved.
                 if (self.finder.isOpen()) self.finder.dirty = true;
+                if (self.palette.isOpen()) self.palette.dirty = true;
                 self.replaceShell();
             },
             // The shell panel's top edge was dragged. It floats over the
@@ -2529,12 +2553,14 @@ pub const Ui = struct {
                 self.grp.tabs_dirty = true;
                 self.status_dirty = true;
                 if (self.finder.isOpen()) self.finder.dirty = true;
+                if (self.palette.isOpen()) self.palette.dirty = true;
                 self.replaceShell();
             },
             .scroll_offset => |so| {
                 // A wheel or thumb drag over the finder popup's list (the
                 // checks below are for other layers, so it falls through).
                 _ = self.finder.scrolled(so);
+                _ = self.palette.scrolled(so);
                 if (so.layer == self.tree_layer) self.tree_scroll = .{ .row = so.row, .col = so.col };
                 // A wheel or thumb drag over the buffer pane: the host moved
                 // the virtual offset and told us where. Follow it, and drag
@@ -2633,8 +2659,13 @@ pub const Ui = struct {
                     return;
                 }
 
-                // The Ctrl+P popup is modal: while it is open it is the
-                // only thing reading keys, so nothing below here runs.
+                // The Ctrl+P and Ctrl+Shift+P popups are modal: while
+                // one is open it is the only thing reading keys, so
+                // nothing below here runs.
+                if (self.palette.isOpen()) {
+                    try self.paletteKey(k);
+                    return;
+                }
                 if (self.finder.isOpen()) {
                     try self.finderKey(k);
                     return;
@@ -2696,7 +2727,7 @@ pub const Ui = struct {
                 // as a plain `w` whenever a heavy redraw left this loop
                 // behind. The window-level actions are taken here, before
                 // the editor sees the key, so they work in any mode.
-                const scope: actions.Scope = if (self.focus == .tree) .global else self.buf.ed.keyScope();
+                const scope = self.keyScope();
                 const action = self.keymaps.lookup(scope, k.key, k.mods);
                 if (action) |a| {
                     if (a.isUi() and try self.performUi(a)) return;
@@ -2725,6 +2756,10 @@ pub const Ui = struct {
                 // Typed text is the shell's while its panel has focus -- it
                 // has a line editor of its own.
                 if (self.shell.isFocused()) return;
+                if (self.palette.isOpen()) {
+                    try self.palette.text(t.text);
+                    return;
+                }
                 if (self.finder.isOpen()) {
                     try self.finder.text(t.text);
                     return;
@@ -2750,6 +2785,10 @@ pub const Ui = struct {
             },
             .paste => |t| {
                 if (self.shell.isFocused()) return;
+                if (self.palette.isOpen()) {
+                    try self.palette.text(t.text);
+                    return;
+                }
                 if (self.finder.isOpen()) {
                     try self.finder.text(t.text);
                     return;
@@ -2954,6 +2993,10 @@ pub const Ui = struct {
         // moves its cursor behind it is a trap. The release that follows
         // lands here with the popup already closed and nothing dragging,
         // so it does nothing.
+        if (self.palette.isOpen()) {
+            if (ev.pressed and self.palette.click(ev.cell) == .accept) try self.acceptPalette();
+            return;
+        }
         if (self.finder.isOpen()) {
             if (ev.pressed and self.finder.click(ev.cell) == .accept) try self.acceptFinder();
             return;
@@ -3174,8 +3217,8 @@ pub const Ui = struct {
     pub fn trackTabHover(self: *Ui, cell: glyphwire.CellPos) void {
         var over_group: ?*Group = null;
         const over: ?usize = blk: {
-            // A drag and the finder both own the pointer while they last.
-            if (self.drag != null or self.tab_drag != null or self.finder.isOpen()) break :blk null;
+            // A drag and the two popups own the pointer while they last.
+            if (self.drag != null or self.tab_drag != null or self.finder.isOpen() or self.palette.isOpen()) break :blk null;
             const g = self.groupAt(cell) orelse break :blk null;
             const h = tabAt(g, cell) orelse break :blk null;
             if (h.index >= g.buffers.items.len) break :blk null;
@@ -3983,6 +4026,67 @@ pub const Ui = struct {
         if (try self.finder.key(k) == .accept) try self.acceptFinder();
     }
 
+    // ── Command palette ─────────────────────────────────────────────────
+
+    /// Ctrl+Shift+P. Lists every action `inPalette` admits, each with the
+    /// chord that runs it where the keyboard is now -- the tree reads the
+    /// global table, a buffer its mode's.
+    pub fn openPalette(self: *Ui) !void {
+        // Modal, like the finder: a tree search left running under it
+        // would have nothing to type into, and the hover and completion
+        // popups would float over it.
+        self.cancelFind();
+        _ = self.closeHover();
+        self.closeCompletion();
+        if (self.finder.isOpen()) self.finder.close();
+
+        const scope = self.keyScope();
+        var list = palette_mod.List.init(self.alloc);
+        errdefer list.deinit();
+        for (std.enums.values(actions.Action)) |a| {
+            if (!a.inPalette()) continue;
+            try list.add(@intFromEnum(a), @tagName(a), a.paletteLabel(), self.keymaps.chordFor(scope, a));
+        }
+        try self.palette.open(list);
+    }
+
+    /// The keymap table a key is looked up in where the keyboard is: the
+    /// tree has no mode of its own and reads the global one.
+    fn keyScope(self: *const Ui) actions.Scope {
+        return if (self.focus == .tree) .global else self.buf.ed.keyScope();
+    }
+
+    /// Runs whatever the palette is on, closed first so the action sees
+    /// the editor as it was before Ctrl+Shift+P: the same mode, the same
+    /// focus. A window action goes to `performUi`, the rest to the
+    /// editor, and one that doesn't apply where the keyboard is says so
+    /// in the statusline rather than doing nothing silently.
+    pub fn acceptPalette(self: *Ui) !void {
+        const action = self.palette.selectedAs(actions.Action) orelse return self.palette.close();
+        self.palette.close();
+        self.status_dirty = true;
+        if (action.isUi()) {
+            if (!try self.performUi(action)) self.paletteNotHere(action);
+            return;
+        }
+        if (self.focus != .buffer) return self.paletteNotHere(action);
+        try self.applyOutcome(try self.buf.ed.runAction(action));
+        try self.syncPathMenu();
+    }
+
+    fn paletteNotHere(self: *Ui, action: actions.Action) void {
+        var buf: [palette_mod.max_label_len]u8 = undefined;
+        const label = action.paletteLabel() orelse palette_mod.labelFromName(&buf, @tagName(action));
+        self.buf.ed.setStatus("{s}: not available here", .{label});
+    }
+
+    /// A keystroke while the palette is open. Ctrl+Shift+P again closes
+    /// it; everything else is the palette's (`popupframe.applyKey`).
+    pub fn paletteKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        if (self.keymaps.lookup(self.keyScope(), k.key, k.mods) == .commandPalette) return self.palette.close();
+        if (try self.palette.key(k) == .accept) try self.acceptPalette();
+    }
+
     // ── Buffers ─────────────────────────────────────────────────────────
 
     /// Opens `path` in a new tab, or switches to it when it is already
@@ -4564,6 +4668,7 @@ pub const Ui = struct {
         try c.setLayerBackground(self.hover_layer, if (self.hover_panel_patch == null) role(.popup_bg) else null);
         try c.setLayerBackground(self.tab_tip_layer, if (self.tab_tip_patch == null) role(.popup_bg) else null);
         try self.finder.setStyle(finderStyle(&self.th));
+        try self.palette.setStyle(paletteStyle(&self.th));
 
         self.tree_dirty = .full;
         self.status_dirty = true;

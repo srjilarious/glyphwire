@@ -55,6 +55,9 @@ pub const Action = enum {
     /// zoe's Ctrl+P is. Picking one points the pane at it rather than
     /// opening it: Enter (or F4) is one more key from there.
     find,
+    /// Ctrl+Shift+P: every action `inPalette` lists, searchable by name
+    /// and run from the list (`applib/palette.zig`, zoe's too).
+    commandPalette,
     /// Open the file under the cursor in the configured `editor` (zoe by
     /// default). A binary file or a directory is refused in the bar.
     edit,
@@ -142,6 +145,7 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "F1", .action = .fileOpsMenu },
     .{ .chord = "F2", .action = .rename },
     .{ .chord = "F3", .action = .find },
+    .{ .chord = "ctrl+shift+p", .action = .commandPalette },
     .{ .chord = "F4", .action = .edit },
     .{ .chord = "F5", .action = .copy },
     .{ .chord = "F6", .action = .move },
@@ -195,6 +199,7 @@ pub fn barLabel(action: Action) []const u8 {
         .fileOpsMenu => "FileOp",
         .rename, .sudoRename => "Rename",
         .find => "Find",
+        .commandPalette => "Cmds",
         .edit, .sudoEdit => "Edit",
         .newFile, .sudoNewFile => "New",
         .copy, .sudoCopy => "Copy",
@@ -236,6 +241,58 @@ pub fn menuLabel(action: Action) []const u8 {
         .chown => "Change owner/group...",
         .sudoChown => "Change owner/group as root...",
         else => barLabel(action),
+    };
+}
+
+/// Whether the command palette lists `action`. Left out: the palette
+/// itself, and the keys that only move the cursor or mark the row under
+/// it -- by name they'd be slower than the key, and the palette hides the
+/// cursor they act on.
+pub fn inPalette(action: Action) bool {
+    return switch (action) {
+        .commandPalette => false,
+        .cursorUp, .cursorDown, .pageUp, .pageDown, .cursorHome, .cursorEnd => false,
+        .toggleMark, .toggleMarkAndDown => false,
+        else => true,
+    };
+}
+
+/// The palette's name for `action`, where its tag made into words
+/// (`palette.labelFromName`) reads badly. Null for the rest. The root
+/// variants say so in words, since the palette has no danger colour.
+pub fn paletteLabel(action: Action) ?[]const u8 {
+    return switch (action) {
+        .activate => "Open / Enter Directory",
+        .otherPaneToSameDir => "Other Pane to Same Directory",
+        .rightPaneToSameDir => "Right Pane to Same Directory",
+        .leftPaneToSameDir => "Left Pane to Same Directory",
+        .upToParentDir => "Up to Parent Directory",
+        .editPath => "Edit Path",
+        .find => "Find Below This Directory",
+        .copy => "Copy to Other Pane",
+        .move => "Move to Other Pane",
+        .makeDir => "Make Directory",
+        .fileOpsMenu => "File Operations Menu",
+        .chmod => "Change Mode",
+        .chown => "Change Owner/Group",
+        .sudoRename => "Rename as Root",
+        .sudoEdit => "Edit as Root",
+        .sudoNewFile => "New File as Root",
+        .sudoCopy => "Copy to Other Pane as Root",
+        .sudoMove => "Move to Other Pane as Root",
+        .sudoMakeDir => "Make Directory as Root",
+        .sudoDelete => "Delete as Root",
+        .sudoChmod => "Change Mode as Root",
+        .sudoChown => "Change Owner/Group as Root",
+        .toggleShell => "Toggle Shell Panel",
+        .sortByExt => "Sort by Extension",
+        .sortByName => "Sort by Name",
+        .sortBySize => "Sort by Size",
+        .sortByTime => "Sort by Time",
+        .viewSmall => "Compact View (One Row per Entry)",
+        .viewLarge => "Detailed View (Two Rows per Entry)",
+        .toggleHidden => "Toggle Hidden Files",
+        else => null,
     };
 }
 

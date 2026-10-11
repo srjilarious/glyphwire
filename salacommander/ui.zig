@@ -21,8 +21,9 @@
 //! --embed` drawing its own prompt into a layer of ours, docked along an
 //! edge or floating in the middle (`shell_position`; see
 //! `applib/shellpanel.zig`) -- then F3's finder popup, the same
-//! framed popup as zoe's Ctrl+P (`applib/finderpopup.zig`), and the modal
-//! dialog layer on top.
+//! framed popup as zoe's Ctrl+P (`applib/finderpopup.zig`), the
+//! Ctrl+Shift+P command palette (`applib/palette.zig`, zoe's too), and
+//! the modal dialog layer on top.
 //!
 //! A server-side `Table` would sort and paint for us, but it paints every
 //! row and scrolls its layer the way terminal output does; a file pane
@@ -73,6 +74,7 @@ const wordsplit = @import("applib").wordsplit;
 const filetype = @import("applib").filetype;
 const finder_mod = @import("applib").finder;
 const finderpopup = @import("applib").finderpopup;
+const palette_mod = @import("applib").palette;
 const Finder = finder_mod.Finder;
 
 const Pane = pane_mod.Pane;
@@ -147,6 +149,17 @@ const finder_style: finderpopup.Style = .{
     .empty_text = "Nothing matches",
     .max_cols = 100,
     .max_rows = 20,
+};
+
+/// The Ctrl+Shift+P command palette (`applib/palette.zig`): the finder's
+/// colours, in the palette's own top-anchored shape.
+const palette_style: palette_mod.Style = blk: {
+    var s = palette_mod.default_style;
+    s.selected_bg = finder_style.selected_bg;
+    s.selected_fg = finder_style.selected_fg;
+    s.text_fg = finder_style.text_fg;
+    s.dim_fg = finder_style.dim_fg;
+    break :blk s;
 };
 
 /// Rows every pane spends on chrome: title, column header, footer.
@@ -312,8 +325,10 @@ pub const Ui = struct {
     /// all go to it -- and walked afresh on every open, as zoe's Ctrl+P is
     /// (see applib/finder.zig).
     finder: finderpopup.Popup,
-    /// The theme this context resolves against, for the F3 popup's frame
-    /// (`finder.style.frame_style` borrows its name).
+    /// Ctrl+Shift+P: the command palette. Modal while open, like F3's.
+    palette: palette_mod.Popup,
+    /// The theme this context resolves against, for the popups' frames
+    /// (`finder.chrome.style.frame_style` borrows its name).
     th: glyphwire.theme.Stored,
     /// Type-to-find: what's been typed so far, moving the cursor to the
     /// first entry that starts with it. Cleared by anything that moves
@@ -440,6 +455,10 @@ pub const Ui = struct {
         // underneath). Placed per frame by `Popup.render`.
         var finder = try finderpopup.Popup.init(alloc, client, popup_style);
         errdefer finder.deinit();
+        var palette_init_style = palette_style;
+        palette_init_style.frame_style = self.th.panelStyle();
+        var palette = try palette_mod.Popup.init(alloc, client, palette_init_style);
+        errdefer palette.deinit();
         // The drag card rides over the panes; sized and filled per drag.
         const drag_layer = try client.createLayer(10, 1, 0);
         // Created last so it composites over everything else, the panel
@@ -491,6 +510,7 @@ pub const Ui = struct {
             .dialog_layer = dialog_layer,
             .drag_layer = drag_layer,
             .finder = finder,
+            .palette = palette,
             .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layers),
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
@@ -535,6 +555,7 @@ pub const Ui = struct {
         self.endNameEdit();
         if (self.drag) |d| alloc.free(d.sources);
         self.finder.deinit();
+        self.palette.deinit();
         for (&self.panes) |*p| p.deinit();
         self.keymap.deinit(alloc);
         self.menu_keymap.deinit(alloc);
@@ -581,8 +602,8 @@ pub const Ui = struct {
             // panes rather than squeezing them, so nothing else moves.
             .layer_resize => |lr| _ = self.shell.handleLayerResize(lr, .{ .cols = self.win.cols, .rows = self.win.rows }),
             .scroll_offset => |so| {
-                // A wheel or thumb drag over the popup's list.
-                if (self.finder.scrolled(so)) return;
+                // A wheel or thumb drag over a popup's list.
+                if (self.finder.scrolled(so) or self.palette.scrolled(so)) return;
                 for (self.pane_layers, 0..) |l, i| {
                     if (so.layer != l) continue;
                     self.clearFind();
@@ -622,7 +643,9 @@ pub const Ui = struct {
             },
             // Typed text is the shell's while its panel is up -- it has
             // a line editor, and this one has type-to-find.
-            .text, .paste => |t| if (self.drag != null or self.shell.isOpen()) {} else if (self.finder.isOpen()) {
+            .text, .paste => |t| if (self.drag != null or self.shell.isOpen()) {} else if (self.palette.isOpen()) {
+                try self.palette.text(t.text);
+            } else if (self.finder.isOpen()) {
                 try self.finder.text(t.text);
             } else if (self.path_edit) |*e| {
                 _ = try e.line.insert(self.alloc, t.text);
@@ -649,6 +672,9 @@ pub const Ui = struct {
         var style = finder_style;
         style.frame_style = self.th.panelStyle();
         try self.finder.setStyle(style);
+        var pstyle = palette_style;
+        pstyle.frame_style = self.th.panelStyle();
+        try self.palette.setStyle(pstyle);
         self.shell.setFrameStyle(self.th.panelStyle());
     }
 
@@ -684,6 +710,7 @@ pub const Ui = struct {
         self.pane_dirty = .{ .full, .full };
         self.bar_dirty = true;
         if (self.finder.isOpen()) self.finder.dirty = true;
+        if (self.palette.isOpen()) self.palette.dirty = true;
     }
 
     /// Follows the held modifiers from a key event. A modifier key's own
@@ -720,6 +747,7 @@ pub const Ui = struct {
         }
 
         self.clearMessage();
+        if (self.palette.isOpen()) return self.paletteKey(k);
         if (self.finder.isOpen()) return self.finderKey(k);
         if (self.path_edit != null) return self.pathEditKey(k);
         if (self.name_edit != null) return self.nameEditKey(k);
@@ -839,6 +867,7 @@ pub const Ui = struct {
 
             .rename => try self.beginNameEdit(false),
             .find => try self.openFinder(),
+            .commandPalette => try self.openPalette(),
             .edit => try self.editCurrent(false),
             .copy => try self.transfer(.copy, false),
             .move => try self.transfer(.move, false),
@@ -903,9 +932,10 @@ pub const Ui = struct {
             .toggleMark,
             .toggleMarkAndDown,
             => .rows,
-            // Opening the popup leaves the pane behind it alone; picking
-            // a result marks the pane itself (`acceptFinder`).
-            .find => .none,
+            // Opening a popup leaves the pane behind it alone; picking
+            // a result marks the pane itself (`acceptFinder`), and a
+            // palette pick goes back through here.
+            .find, .commandPalette => .none,
             else => .full,
         };
     }
@@ -1226,6 +1256,47 @@ pub const Ui = struct {
         sent.deinit();
     }
 
+    // ── Command palette ─────────────────────────────────────────────────
+
+    /// Ctrl+Shift+P: every action `inPalette` admits, with its chord.
+    fn openPalette(self: *Ui) !void {
+        if (self.finder.isOpen()) self.finder.close();
+        var list = palette_mod.List.init(self.alloc);
+        errdefer list.deinit();
+        for (std.enums.values(Action)) |a| {
+            if (!actions.inPalette(a)) continue;
+            try list.add(@intFromEnum(a), @tagName(a), actions.paletteLabel(a), self.keymap.chordFor(a));
+        }
+        try self.palette.open(list);
+    }
+
+    /// Runs the palette's pick as if its chord had been pressed: closed
+    /// first, so a dialog the action raises isn't under the palette.
+    fn acceptPalette(self: *Ui) !void {
+        const action = self.palette.selectedAs(Action) orelse return self.palette.close();
+        self.palette.close();
+        self.clearFind();
+        try self.perform(action);
+    }
+
+    /// A keystroke while the palette is open. Ctrl+Shift+P again closes
+    /// it, the way F3 toggles the finder; everything else is the
+    /// palette's.
+    fn paletteKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        const toggles = if (self.keymap.lookup(k.key, k.mods)) |a| a == .commandPalette else false;
+        if (toggles) return self.palette.close();
+        if (try self.palette.key(k) == .accept) try self.acceptPalette();
+    }
+
+    /// Across the top of the pane area, as VS Code's palette sits.
+    fn renderPalette(self: *Ui) !void {
+        var b = self.client.batch();
+        defer b.deinit();
+        try self.palette.render(&b, .{ .row = 0, .col = 0, .cols = self.win.cols, .rows = self.paneHeight() });
+        var sent = try b.send();
+        sent.deinit();
+    }
+
     // ── Editing a pane's path ───────────────────────────────────────────
 
     /// Alt+D: turn the active pane's title row into a text field holding
@@ -1406,6 +1477,10 @@ pub const Ui = struct {
         if (!m.pressed) return;
         // The popup owns the pointer while it's up: a click picks a row
         // or dismisses it, and never reaches a pane behind it.
+        if (self.palette.isOpen()) {
+            if (std.mem.eql(u8, m.button, "left") and self.palette.click(m.cell) == .accept) try self.acceptPalette();
+            return;
+        }
         if (self.finder.isOpen()) {
             if (std.mem.eql(u8, m.button, "left") and self.finder.click(m.cell) == .accept) try self.acceptFinder();
             return;
@@ -2575,6 +2650,7 @@ pub const Ui = struct {
         }
         if (self.bar_dirty) try self.renderBar();
         if (self.finder.dirty) try self.renderFinder();
+        if (self.palette.dirty) try self.renderPalette();
     }
 
     /// The cheap repaint, for a move that left the listing itself alone:

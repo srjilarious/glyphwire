@@ -53,6 +53,10 @@
 //!   `finder`     the fuzzy file finder model (zoe, salacommander)
 //!   `finderpopup` the framed popup drawn around a `finder` (zoe's
 //!                Ctrl+P, salacommander's F3)
+//!   `palette`    the Ctrl+Shift+P command palette over a program's
+//!                named actions (zoe, salacommander)
+//!   `popupframe` the framed, shadowed chrome both popups above are
+//!                drawn in
 //!   `filetype`   "is this text?" (zoe, salacommander)
 //!   `entries`    directory scanning and per-entry classification
 //!                (gw-ls, salacommander)
@@ -83,7 +87,9 @@ pub const zjump = @import("zjump.zig");
 pub const fuzzy = @import("fuzzy.zig");
 pub const gitignore = @import("gitignore.zig");
 pub const finder = @import("finder.zig");
+pub const popupframe = @import("popupframe.zig");
 pub const finderpopup = @import("finderpopup.zig");
+pub const palette = @import("palette.zig");
 pub const filetype = @import("filetype.zig");
 pub const entries = @import("entries.zig");
 pub const format = @import("format.zig");

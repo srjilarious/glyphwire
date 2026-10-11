@@ -598,6 +598,20 @@ pub const Editor = struct {
         };
     }
 
+    /// Runs `action` the way a key bound to it would, outside `feedKey`:
+    /// the command palette's pick. Only the binding modes run actions --
+    /// in the `:` or `/` line a key goes to the line, so this does nothing
+    /// there either.
+    pub fn runAction(self: *Editor, action: actions.Action) !Outcome {
+        switch (self.mode) {
+            .normal, .visual, .visual_line, .insert, .select => {},
+            .command, .search => return .none,
+        }
+        self.yank_pending = false;
+        defer self.settleUndo();
+        return self.perform(action);
+    }
+
     /// Visual, visual-line or select mode: a selection is up.
     pub fn hasSelection(self: *const Editor) bool {
         return self.mode == .visual or self.mode == .visual_line or self.mode == .select;
@@ -612,6 +626,7 @@ pub const Editor = struct {
             .none,
             .save,
             .findFile,
+            .commandPalette,
             .toggleTree,
             .toggleHidden,
             .toggleShell,

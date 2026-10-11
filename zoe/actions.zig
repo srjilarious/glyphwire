@@ -36,6 +36,9 @@ pub const Action = enum {
     save,
     /// The Ctrl+P fuzzy file finder.
     findFile,
+    /// The Ctrl+Shift+P command palette: every action here that
+    /// `inPalette` lists, searchable by name (`applib/palette.zig`).
+    commandPalette,
     toggleTree,
     /// Dotfiles and `.gitignore`d paths, in the tree and the finder.
     toggleHidden,
@@ -113,6 +116,46 @@ pub const Action = enum {
     deleteWordBack,
     deleteWordForward,
 
+    /// Whether the command palette lists it. Left out: the palette
+    /// itself, Ctrl+W's prefix (it waits for a key the palette has just
+    /// taken), completion (insert mode's, and its chord's space is
+    /// swallowed), and the keys that move the cursor or type -- running
+    /// "Left" or "Backspace" by name is never quicker than the key.
+    pub fn inPalette(self: Action) bool {
+        return switch (self) {
+            .none, .commandPalette, .windowPrefix, .complete => false,
+            .left, .right, .up, .down, .lineStart, .lineEnd, .wordLeft, .wordRight, .fileStart, .fileEnd, .pageUp, .pageDown => false,
+            .selectLeft, .selectRight, .selectUp, .selectDown, .selectLineStart, .selectLineEnd, .selectWordLeft, .selectWordRight, .selectFileStart, .selectFileEnd => false,
+            .newline, .insertTab, .backspace, .deleteForward, .deleteWordBack, .deleteWordForward => false,
+            else => true,
+        };
+    }
+
+    /// The palette's name for it, where the tag made into words
+    /// (`palette.labelFromName`) reads badly. Null for the rest.
+    pub fn paletteLabel(self: Action) ?[]const u8 {
+        return switch (self) {
+            .prevTab => "Previous Tab",
+            .toggleHidden => "Toggle Hidden Files",
+            .toggleShell => "Toggle Shell Panel",
+            .toggleTree => "Toggle File Tree",
+            .focusLeft => "Focus Group Left",
+            .focusRight => "Focus Group Right",
+            .focusUp => "Focus Group Above",
+            .focusDown => "Focus Group Below",
+            .moveTabUp => "Move Tab Up a Group",
+            .moveTabDown => "Move Tab Down a Group",
+            .moveTabLeft => "Move Tab Left a Group",
+            .moveTabRight => "Move Tab Right a Group",
+            .indent => "Indent Lines",
+            .dedent => "Dedent Lines",
+            .toggleComment => "Toggle Line Comment",
+            .paste => "Paste from Clipboard",
+            .cut => "Cut to Clipboard",
+            else => null,
+        };
+    }
+
     /// Whether `Ui.perform` handles this rather than the editor.
     pub fn isUi(self: Action) bool {
         return @intFromEnum(self) >= @intFromEnum(Action.save) and
@@ -151,8 +194,11 @@ pub const global_defaults = [_]Default{
     .{ .chord = "ctrl+j", .action = .focusDown },
     .{ .chord = "ctrl+o", .action = .jumpBack },
     .{ .chord = "ctrl+i", .action = .jumpForward },
+    .{ .chord = "ctrl+shift+p", .action = .commandPalette },
+    // `paste` has no chord of its own: Ctrl+Shift+V is the host's, which
+    // reads the system clipboard and sends it as a `paste` event zoe
+    // already splices in. The action stays for the palette and `keys`.
     .{ .chord = "ctrl+shift+x", .action = .cut },
-    .{ .chord = "ctrl+shift+p", .action = .paste },
 
     .{ .chord = "left", .action = .left },
     .{ .chord = "right", .action = .right },

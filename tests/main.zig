@@ -52,6 +52,7 @@ const all_tests = blk: {
         testz.Group{ .name = "List Cursor Tests", .tag = "listcursor", .mod = @import("./listcursor_tests.zig") },
         testz.Group{ .name = "Line Edit Tests", .tag = "lineedit", .mod = @import("./lineedit_tests.zig") },
         testz.Group{ .name = "Finder Popup Tests", .tag = "finderpopup", .mod = @import("./finderpopup_tests.zig") },
+        testz.Group{ .name = "Command Palette Tests", .tag = "palette", .mod = @import("./palette_tests.zig") },
         testz.Group{ .name = "Salacommander Tests", .tag = "salacommander", .mod = @import("./salacommander_tests.zig") },
     }, .{});
 };

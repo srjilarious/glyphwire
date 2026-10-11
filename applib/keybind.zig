@@ -398,5 +398,24 @@ pub fn Scoped(
             }
             return null;
         }
+
+        /// The chord that runs `action` in `scope`, for labelling it: the
+        /// first one bound to it along the parent chain that a lookup in
+        /// `scope` still resolves to it. A parent's chord the mode table
+        /// rebinds to something else doesn't count.
+        pub fn chordFor(self: *const Self, scope: Scope, action: Action) ?Chord {
+            var s: ?Scope = scope;
+            while (s) |cur| : (s = parent(cur)) {
+                for (self.tables.getPtrConst(cur).bindings.items) |*b| {
+                    if (b.action != action) continue;
+                    const resolved = if (b.chord.text)
+                        self.lookupText(scope, b.chord.key())
+                    else
+                        self.lookup(scope, b.chord.key(), b.chord.mods);
+                    if (resolved == action) return b.chord;
+                }
+            }
+            return null;
+        }
     };
 }

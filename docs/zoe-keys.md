@@ -34,6 +34,7 @@ Ctrl+W, and the completion popup's keys.
 |---|---|---|
 | `save` | Ctrl+S | `:w`, leaving the mode and selection alone |
 | `findFile` | Ctrl+P | Fuzzy file finder |
+| `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key, by name, with its chord in the current mode. Recently run ones list first |
 | `toggleTree` | Ctrl+N | Show / hide the file tree |
 | `toggleHidden` | Ctrl+H | Dotfiles and `.gitignore`d paths in the tree; dotfiles only in the finder and `/` search |
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
@@ -43,11 +44,13 @@ Ctrl+W, and the completion popup's keys.
 | `moveTabLeft` `moveTabRight` `moveTabUp` `moveTabDown` | (unbound; Ctrl+W Shift+H / L / K / J) | Move the shown tab to the group that way, splitting a new group off on that side if there is none. A group left without tabs closes |
 | `jumpBack` / `jumpForward` | Ctrl+O / Ctrl+I | Jumplist (the way back from `gd`) |
 | `cut` | Ctrl+Shift+X | Selection (or line) to the clipboard, removed |
-| `paste` | Ctrl+Shift+P | Clipboard after the cursor, or over a selection |
+| `paste` | (unbound; the host's Ctrl+Shift+V) | Clipboard after the cursor, or over a selection |
 | `complete` | Ctrl+Space (insert) | Ask the language servers for completions |
 
 Host chords also apply: Ctrl+Shift+C copy and Ctrl+Shift+V paste, Ctrl+- /
-Ctrl+= font size, Super+F10 theme switcher, Super+F12 job switcher.
+Ctrl+= font size, Super+F10 theme switcher, Super+F12 job switcher. With
+`profile` on in `host.conf.lua` the host also takes Ctrl+Shift+P (its
+HUD), so the palette needs another chord there.
 
 ### Moving and selecting (every mode)
 
@@ -313,12 +316,11 @@ groups or the shell panel.
 - **Ctrl+G** go to line, **F12** definition.
 - **Ctrl+Shift+K** delete line, **Ctrl+Enter / Ctrl+Shift+Enter** insert line below / above.
 - **Ctrl+D** add next occurrence / multi-cursor (Ctrl+D is half-page down in normal mode).
-- **Command palette** (Ctrl+Shift+P is paste here).
 - **Auto-indent and bracket pairing.**
 
 Closed since the first version of this list: Shift+arrow selection, Ctrl+Z
 / Ctrl+Y, Ctrl+Backspace / Ctrl+Delete, Ctrl+/, Ctrl+S, Shift+Alt+Up/Down,
-and rebindable keys.
+rebindable keys, and the Ctrl+Shift+P command palette.
 
 ## Modal versus Ctrl/Alt-heavy
 
@@ -332,8 +334,8 @@ and rebindable keys.
   modifier for every motion.
 - **Free keyspace.** Normal mode has the whole keyboard unmodified, so
   window chords (Ctrl+W, Ctrl+N, Ctrl+P) never compete with editing ones.
-  zoe already relies on this: Ctrl+H, Ctrl+L, Ctrl+D, Ctrl+U, Ctrl+Shift+P
-  all mean something non-VSCode.
+  zoe already relies on this: Ctrl+H, Ctrl+L, Ctrl+D, Ctrl+U all mean
+  something non-VSCode.
 
 ### What the chord side gives you
 
@@ -350,7 +352,7 @@ and rebindable keys.
 
 - **Keyspace collisions.** The VSCode set wants Ctrl+H (replace), Ctrl+L
   (select line), Ctrl+D (next occurrence), Ctrl+P (finder, the same),
-  Ctrl+Shift+P (palette), Ctrl+N (new file), Ctrl+W (close tab), Ctrl+Tab
+  Ctrl+N (new file), Ctrl+W (close tab), Ctrl+Tab
   (the same). With `keys` these are now a config choice rather than a
   code change, but the defaults still favour vim.
 - **Ctrl+C / Ctrl+V** belong to the host (Ctrl+Shift+C/V, and Ctrl+C is

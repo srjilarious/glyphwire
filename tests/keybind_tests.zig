@@ -197,3 +197,25 @@ pub fn scopedFalseHidesTheParentBindingTest(_: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqual(km.lookup(.global, "q", .{}).?, ScopedAction.quit);
     try testz.expectEqual(km.lookupText(.card, "?").?, ScopedAction.quit);
 }
+
+/// `chordFor` labels an action with the chord that runs it in a mode:
+/// a parent's binding counts, unless the mode table gave that chord to
+/// something else.
+pub fn scopedChordForSkipsAShadowedParentChordTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try TestScoped.initDefaults(alloc, scopedDefaults());
+    defer km.deinit(alloc);
+    var buf: [32]u8 = undefined;
+    try testz.expectEqualStr(km.chordFor(.normal, .save).?.format(&buf), "Ctrl+S");
+    try testz.expectEqualStr(km.chordFor(.normal, .left).?.format(&buf), "H");
+    try testz.expectTrue(km.chordFor(.global, .left) == null);
+
+    // `q` hidden in normal mode, and quit given a chord of its own there.
+    try km.apply(alloc, &.{
+        .{ .scope = .normal, .chord = try Chord.parse("q"), .action = null },
+        .{ .scope = .normal, .chord = try Chord.parse("ctrl+q"), .action = .quit },
+    });
+    try testz.expectEqualStr(km.chordFor(.normal, .quit).?.format(&buf), "Ctrl+Q");
+    try testz.expectEqualStr(km.chordFor(.global, .quit).?.format(&buf), "Q");
+    try km.apply(alloc, &.{.{ .scope = .normal, .chord = try Chord.parse("ctrl+q"), .action = null }});
+    try testz.expectTrue(km.chordFor(.normal, .quit) == null);
+}
