@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const glyphwire = @import("glyphwire");
+const build_info = @import("build_info");
 const wordsplit = @import("applib").wordsplit;
 const embed = @import("shell_support").embed;
 const parse = @import("shell_support").parse;
@@ -291,6 +292,7 @@ pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+    if (args.len >= 2 and glyphwire.version.isFlag(args[1])) glyphwire.version.printAndExit(init.io, .of(build_info));
 
     // A pipeline writes to a child's stdin fd (`pipeexec`); when that
     // child has already exited the write raises SIGPIPE, which would kill

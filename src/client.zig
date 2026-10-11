@@ -887,6 +887,16 @@ pub const Client = struct {
         return .{ .parsed = parsed };
     }
 
+    /// `get_version` -- a request. The program serving this session, its
+    /// version and build, and the protocol version. A host older than
+    /// protocol 0.7.0 has no `get_version`, and an unknown request severs
+    /// the connection (protocol.md section 10). Caller `deinit`s the
+    /// result.
+    pub fn getVersion(self: *Client) !HostVersion {
+        const parsed = try self.request(protocol.VersionResult, "get_version", .{});
+        return .{ .parsed = parsed };
+    }
+
     /// `attach_context(context)` -- a notification. Retargets this
     /// connection onto an existing context without creating or owning it
     /// -- every later `layer?`-scoped call resolves against it. `create_context`
@@ -2300,6 +2310,19 @@ pub const HighlightSnapshot = struct {
 
 /// Owns the parsed JSON backing a `listContexts` response; `deinit`
 /// frees it.
+/// `getVersion`'s answer. The strings live as long as this does.
+pub const HostVersion = struct {
+    parsed: std.json.Parsed(ResponseOf(protocol.VersionResult)),
+
+    pub fn deinit(self: *HostVersion) void {
+        self.parsed.deinit();
+    }
+
+    pub fn value(self: *const HostVersion) protocol.VersionResult {
+        return self.parsed.value.result;
+    }
+};
+
 pub const ContextList = struct {
     parsed: std.json.Parsed(ResponseOf(protocol.ListContextsResult)),
 

@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const build_info = @import("build_info");
 
 /// Minimal glyphwire server executable: binds a Unix domain socket and
 /// serves one auto-created `Context` to whoever connects. No
@@ -13,6 +14,7 @@ const glyphwire = @import("glyphwire");
 /// falls back to a plain 80x24 default.
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 2 and glyphwire.version.isFlag(args[1])) glyphwire.version.printAndExit(init.io, .of(build_info));
     if (args.len < 2) {
         std.debug.print("usage: {s} <socket-path> [cols] [rows]\n", .{args[0]});
         return error.MissingSocketPath;
@@ -29,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
     defer ctx.deinit();
 
     var srv = try glyphwire.server.Server.bind(init.io, &ctx, socket_path);
+    srv.session.host_info = .of(build_info);
     defer srv.deinit(init.gpa);
 
     std.debug.print("glyphwire server listening on {s}\n", .{socket_path});

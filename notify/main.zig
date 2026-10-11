@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const build_info = @import("build_info");
 
 /// glyphwire-notify: a transient notification box in the top-right corner
 /// of the screen, showing the message given on the command line. Drawn on
@@ -29,6 +30,7 @@ pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(alloc);
+    if (args.len >= 2 and glyphwire.version.isFlag(args[1])) glyphwire.version.printAndExit(io, .of(build_info));
 
     if (args.len < 2) {
         return fallback(io, "usage: glyphwire-notify [info|warn|error] <message>\n");

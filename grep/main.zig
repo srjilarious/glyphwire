@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const build_info = @import("build_info");
 const zargs = @import("zargunaught");
 
 const syntax = @import("applib").syntax;
@@ -80,6 +81,7 @@ pub fn main(init: std.process.Init) !void {
         // and leave no pattern.
         .opts = &.{
             .{ .longName = "help", .shortName = "h", .description = "Show this help", .maxNumParams = 0 },
+            .{ .longName = "version", .shortName = "V", .description = "Print the version and exit", .maxNumParams = 0 },
             .{ .longName = "ignore-case", .shortName = "i", .description = "Case-insensitive search", .maxNumParams = 0 },
             .{ .longName = "word", .shortName = "w", .description = "Match whole words only", .maxNumParams = 0 },
             .{ .longName = "fixed-strings", .shortName = "F", .description = "Literal pattern, not a regex", .maxNumParams = 0 },
@@ -103,6 +105,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer args.deinit();
 
+    if (args.hasOption("version")) glyphwire.version.printAndExit(io, .of(build_info));
     if (args.hasOption("help") or args.positional.items.len == 0) {
         cli.fail(io, "{s}", .{usage});
     }

@@ -21,6 +21,7 @@ pub const pipeexec = @import("pipeexec.zig");
 pub const key_encode = @import("key_encode.zig");
 pub const zoom = @import("zoom.zig");
 pub const profiler = @import("profiler.zig");
+pub const version = @import("version.zig");
 pub const Profiler = profiler.Profiler;
 
 pub const Pty = pty.Pty;
@@ -35,6 +36,7 @@ pub const ErrorReport = client.ErrorReport;
 pub const InputListener = client.InputListener;
 pub const InputStateSnapshot = client.InputStateSnapshot;
 pub const ContextList = client.ContextList;
+pub const HostVersion = client.HostVersion;
 pub const ResizeEvent = client.ResizeEvent;
 pub const ShutdownEvent = client.ShutdownEvent;
 pub const FocusEvent = client.FocusEvent;

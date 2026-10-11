@@ -7,6 +7,7 @@ const protocol = @import("protocol.zig");
 const rpc = @import("rpc.zig");
 const codec = @import("codec.zig");
 const wire = @import("wire.zig");
+const version = @import("version.zig");
 
 /// Dispatches decoded JSON-RPC message bodies (the wire module's frame
 /// payloads) against a headless `Context`. This is the message-catalog
@@ -975,6 +976,7 @@ pub const Dispatcher = struct {
         .{ "set_divider_style", catVoid(handleSetDividerStyle) },
         .{ "get_theme", catBytesIdNoParams(handleGetTheme) },
         .{ "list_contexts", catBytesIdNoParams(handleListContexts) },
+        .{ "get_version", catBytesIdNoParams(handleGetVersion) },
         .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
         .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
         .{ "set_caret_visible", catVoid(handleSetCaretVisible) },
@@ -1835,6 +1837,21 @@ pub const Dispatcher = struct {
         return try self.respond(alloc, id, protocol.ListContextsResult{
             .current = self.active_ctx,
             .contexts = entries,
+        });
+    }
+
+    /// `get_version`: the program serving the session (whatever it put
+    /// in `Session.host_info`) and the protocol version. A dispatcher
+    /// without a session still answers, with empty program fields, so a
+    /// client can always learn the protocol.
+    fn handleGetVersion(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
+        const info: version.Info = if (self.session) |s| s.host_info else .{};
+        return try self.respond(alloc, id, protocol.VersionResult{
+            .program = info.program,
+            .version = info.version,
+            .suite_version = info.suite_version,
+            .git = info.git,
+            .protocol = protocol.protocol_version,
         });
     }
 

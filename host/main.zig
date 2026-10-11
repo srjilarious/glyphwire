@@ -14,12 +14,15 @@ const geometry = @import("geometry.zig");
 const icons = @import("icons.zig");
 const system_font = @import("system_font.zig");
 const remote_mod = @import("remote.zig");
+const build_info = @import("build_info");
 
 pub const panic = host_eng.system.panic;
 pub const std_options = host_eng.system.std_options;
 
 const app_name: [:0]const u8 = "Glyphwire";
-const app_version: [:0]const u8 = "0.1.0";
+/// This program's own version (build.zig's `program_versions`), as SDL's
+/// app metadata wants it.
+const app_version: [:0]const u8 = std.fmt.comptimePrint("{s}", .{build_info.version});
 const app_id: [:0]const u8 = "dev.glyphwire.term";
 const app_icon_asset = "glyphwire_icon.png";
 
@@ -210,7 +213,6 @@ fn fileExists(io: std.Io, path: []const u8) bool {
 }
 
 pub fn main(init: std.process.Init) !void {
-    std.log.info("glyphwire host starting", .{});
     const alloc = init.gpa;
     // Process-lifetime setup values (args, paths, the shell's argv/environ)
     // that are never freed -- deliberately, they're needed until the
@@ -221,6 +223,11 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
+    for (args[1..]) |a| {
+        if (glyphwire.version.isFlag(a)) glyphwire.version.printAndExit(io, .of(build_info));
+    }
+    var version_buf: [256]u8 = undefined;
+    std.log.info("{s} starting", .{glyphwire.version.Info.of(build_info).line(&version_buf)});
     const asset_dir = try resolveAssetDir(arena, io, init.environ_map);
 
     // Font face/size/fallback, caret shape/blink, and initial grid size /
@@ -386,6 +393,8 @@ pub fn main(init: std.process.Init) !void {
     // below with no wait-for-socket-ready polling loop needed.
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
     defer srv.deinit(alloc);
+    // What `get_version` answers; set before any client can connect.
+    srv.session.host_info = .of(build_info);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
     // Set false only if the local shell spawn fails and there's no `--ssh`

@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const glyphwire = @import("glyphwire");
+const build_info = @import("build_info");
 const zargs = @import("zargunaught");
 const gridlayout = @import("applib").gridlayout;
 const lsfmt = @import("applib").format;
@@ -87,6 +88,7 @@ pub fn main(init: std.process.Init) !void {
             .{ .longName = "human", .shortName = "h", .description = "Human-readable sizes (KB/MB/GB) -- the default; the explicit opposite of --bytes", .maxNumParams = 0 },
             .{ .longName = "bytes", .description = "Show sizes as a raw byte count instead of KB/MB/GB (wins unless -h is also given)", .maxNumParams = 0 },
             .{ .longName = "help", .description = "Print help" },
+            .{ .longName = "version", .shortName = "V", .description = "Print the version and exit", .maxNumParams = 0 },
         },
     });
     defer parser.deinit();
@@ -97,6 +99,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer args.deinit();
 
+    if (args.hasOption("version")) glyphwire.version.printAndExit(io, .of(build_info));
     if (args.hasOption("help")) {
         var stdout = try zargs.print.Printer.stdout(alloc);
         defer stdout.deinit();

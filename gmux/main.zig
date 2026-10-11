@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const build_info = @import("build_info");
 const gmux = @import("gmux_support");
 const interrupt = @import("applib").interrupt;
 const cli = @import("applib").cli;
@@ -22,6 +23,8 @@ const cli = @import("applib").cli;
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    if (argv.len >= 2 and glyphwire.version.isFlag(argv[1])) glyphwire.version.printAndExit(io, .of(build_info));
 
     // A Ctrl+C typed into a pane is that pane's program's business;
     // the shell that started gmux sees the key too and must not take the

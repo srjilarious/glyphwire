@@ -4,6 +4,32 @@
 const std = @import("std");
 const testz = @import("testz");
 
+/// The suite's version: what a release (tag, tarball) is called. Each
+/// program has its own on top of it, in `program_versions`.
+const suite_version = @import("build.zig.zon").version;
+
+/// Every versioned program's own version, by executable name. Bump one
+/// when that program changes in a release; the others stay put. A program
+/// reads its line (and the suite version and git revision) from the
+/// `build_info` module `addBuildInfo` gives it -- `--version` prints it,
+/// and the host answers `get_version` with its own.
+const program_versions = [_]struct { name: []const u8, version: []const u8 }{
+    .{ .name = "glyphwire", .version = "0.8.0" },
+    .{ .name = "glyphwire-server", .version = "0.8.0" },
+    .{ .name = "gw-shell", .version = "0.8.0" },
+    .{ .name = "gw-agent", .version = "0.8.0" },
+    .{ .name = "gw-ls", .version = "0.8.0" },
+    .{ .name = "gw-hist", .version = "0.8.0" },
+    .{ .name = "gw-grep", .version = "0.8.0" },
+    .{ .name = "gw-read", .version = "0.8.0" },
+    .{ .name = "gw-view", .version = "0.8.0" },
+    .{ .name = "gwmd", .version = "0.8.0" },
+    .{ .name = "glyphwire-notify", .version = "0.8.0" },
+    .{ .name = "zoe", .version = "0.8.0" },
+    .{ .name = "gmux", .version = "0.8.0" },
+    .{ .name = "salacommander", .version = "0.8.0" },
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -823,6 +849,41 @@ pub fn build(b: *std.Build) void {
     install_local_step.dependOn(&installed_desktop_icon_svg.step);
     install_local_step.dependOn(&installed_desktop_icon_png.step);
     install_local_step.dependOn(grammars_step);
+
+    // `build_info` for every program in `program_versions`.
+    const git = gitDescribe(b);
+    for ([_]*std.Build.Step.Compile{ host_exe, server_exe, shell_exe, agent_exe, ls_exe, hist_exe, grep_exe, read_exe, view_exe, md_exe, notify_exe, zoe_exe, gmux_exe, sala_exe }) |exe| {
+        addBuildInfo(b, exe, git);
+    }
+}
+
+/// Gives `exe` a `build_info` module: `program` (its executable name),
+/// `version` (its line in `program_versions`), `suite_version` and `git`.
+/// `glyphwire.version` formats it. A program missing from the table
+/// is a mistake in this file, so it stops the build.
+fn addBuildInfo(b: *std.Build, exe: *std.Build.Step.Compile, git: []const u8) void {
+    const version = for (program_versions) |p| {
+        if (std.mem.eql(u8, p.name, exe.name)) break p.version;
+    } else std.debug.panic("{s} has no entry in program_versions", .{exe.name});
+    const opts = b.addOptions();
+    opts.addOption([]const u8, "program", exe.name);
+    opts.addOption([]const u8, "version", version);
+    opts.addOption([]const u8, "suite_version", suite_version);
+    opts.addOption([]const u8, "git", git);
+    exe.root_module.addImport("build_info", opts.createModule());
+}
+
+/// `git describe --always --dirty --tags` of the source tree: a tag once
+/// there are any (`v0.8.0`, `v0.8.0-3-g1e34abf`), else the short commit
+/// (`1e34abf`), with `-dirty` while there are uncommitted changes.
+/// "unknown" outside a git checkout (a source tarball) or without git.
+/// Run on every `zig build`; a program's build is only redone when the
+/// answer changes (a commit, or the tree going dirty or clean).
+fn gitDescribe(b: *std.Build) []const u8 {
+    var code: u8 = 0;
+    const root = b.root.joinString(b.allocator, ".") catch return "unknown";
+    const out = b.runAllowFail(&.{ "git", "-C", root, "describe", "--always", "--dirty", "--tags" }, &code, .ignore) catch return "unknown";
+    return std.mem.trim(u8, out, " \n\r\t");
 }
 
 /// One bundled tree-sitter grammar: the lazy-dependency name holding its

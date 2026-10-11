@@ -4990,3 +4990,60 @@ pub fn msgpackLoadImageWithoutDataIsRefusedTest(io: std.Io, alloc: std.mem.Alloc
     defer env.deinit();
     try testz.expectError(dispatch.imagePayloadHeader(alloc, env.value), dispatch.DispatchError.MissingImageData);
 }
+
+// ─── get_version ────────────────────────────────────────────────────────
+
+const VersionResponse = struct { result: glyphwire.protocol.VersionResult };
+
+/// Runs `get_version` on `d` and returns the parsed result.
+fn getVersion(d: *dispatch.Dispatcher, alloc: std.mem.Allocator) !std.json.Parsed(VersionResponse) {
+    const res = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":3,"method":"get_version"}
+    );
+    const body = res.response.?;
+    defer alloc.free(body);
+    return std.json.parseFromSlice(VersionResponse, alloc, body, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
+}
+
+pub fn getVersionReportsTheSessionsHostTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    session.host_info = .{ .program = "glyphwire", .version = "1.2.3", .suite_version = "0.9.0", .git = "abc1234-dirty" };
+
+    var d = dispatch.Dispatcher.initForConnection(&session, 1, null, null);
+    var got = try getVersion(&d, alloc);
+    defer got.deinit();
+    const v = got.value.result;
+    try testz.expectEqualStr(v.program, "glyphwire");
+    try testz.expectEqualStr(v.version, "1.2.3");
+    try testz.expectEqualStr(v.suite_version, "0.9.0");
+    try testz.expectEqualStr(v.git, "abc1234-dirty");
+    try testz.expectEqualStr(v.protocol, glyphwire.protocol.protocol_version);
+}
+
+pub fn getVersionWithoutASessionStillGivesTheProtocolTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 5, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    var got = try getVersion(&d, alloc);
+    defer got.deinit();
+    try testz.expectEqualStr(got.value.result.program, "");
+    try testz.expectEqualStr(got.value.result.protocol, glyphwire.protocol.protocol_version);
+}
+
+pub fn versionLineAndFlagTest(_: std.Io, _: std.mem.Allocator) !void {
+    const info: glyphwire.version.Info = .{ .program = "zoe", .version = "0.8.1", .suite_version = "0.8.0", .git = "v0.8.0-3-g1e34abf" };
+    var buf: [128]u8 = undefined;
+    try testz.expectEqualStr(info.line(&buf), "zoe 0.8.1 (glyphwire 0.8.0, v0.8.0-3-g1e34abf)");
+    try testz.expectTrue(glyphwire.version.isFlag("--version"));
+    try testz.expectTrue(glyphwire.version.isFlag("-V"));
+    try testz.expectFalse(glyphwire.version.isFlag("-v"));
+    try testz.expectFalse(glyphwire.version.isFlag("version"));
+}

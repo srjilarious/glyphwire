@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # glyphwire
 
-![Version Badge](https://img.shields.io/badge/Version-0.6.0-brightgreen)
+![Version Badge](https://img.shields.io/badge/Version-0.8.0-brightgreen)
 ![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0-%23f7a41d?logo=zig)
 [![License](https://img.shields.io/badge/License-MPL--2.0%20%7C%20GPL--3.0%20%7C%20CC--BY--4.0-blue)](#license)
 
@@ -120,7 +120,15 @@ vendored; SDL3 builds from source, so no system dev packages are needed.
 | `zig build install-local --prefix /usr/local` | Install everything under a prefix |
 
 Each program also has its own run step (`zig build zoe`, `zig build gwmd`,
-...). CI builds a `glyphwire-linux-x86_64.tar.gz` on every push and attaches
+...).
+
+Every program answers `--version` (or `-V`) with its own version, the
+glyphwire release and the `git describe` it was built from, e.g. `zoe
+0.8.0 (glyphwire 0.8.0, 1e34abf)`. The programs are versioned separately:
+each one's number is a line in `program_versions` at the top of
+`build.zig`, bumped when that program changes in a release, and the
+release's own number is `build.zig.zon`'s `version`. A client can ask the
+host the same with the `get_version` request. CI builds a `glyphwire-linux-x86_64.tar.gz` on every push and attaches
 it to the GitHub Release on a `vX.Y.Z` tag.
 
 ### Host options

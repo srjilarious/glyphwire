@@ -24,10 +24,12 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const build_info = @import("build_info");
 const mux = glyphwire.mux;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 2 and glyphwire.version.isFlag(args[1])) glyphwire.version.printAndExit(init.io, .of(build_info));
 
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--stdio")) {
         return runStdio(init, Seat.parse(args[2..]));

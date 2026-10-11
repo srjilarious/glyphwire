@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const build_info = @import("build_info");
 const zargs = @import("zargunaught");
 const interactive = @import("interactive.zig");
 
@@ -68,6 +69,7 @@ pub fn main(init: std.process.Init) !void {
                 .maxNumParams = 0,
             },
             .{ .longName = "help", .shortName = "h", .description = "Print this help and exit" },
+            .{ .longName = "version", .shortName = "V", .description = "Print the version and exit", .maxNumParams = 0 },
         },
     });
     defer parser.deinit();
@@ -79,6 +81,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer args.deinit();
 
+    if (args.hasOption("version")) glyphwire.version.printAndExit(io, .of(build_info));
     if (args.hasOption("help")) {
         var stdout = try zargs.print.Printer.stdout(alloc);
         defer stdout.deinit();

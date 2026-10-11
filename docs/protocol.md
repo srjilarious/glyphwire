@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.6.0 — pre-1.0 draft.**
+**Version 0.7.0 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -47,7 +47,9 @@ underspecified and are called out where they arise:
 
 - **Error responses do not exist on the wire** (section 3.4). A failed
   request severs the connection.
-- **There is no version negotiation** (section 10).
+- **There is no version negotiation** (section 10). A client can ask
+  which host and protocol version it is talking to (`get_version`,
+  section 6.18), but nothing adapts to the answer.
 
 ## 2. Transport
 
@@ -1476,6 +1478,7 @@ the change from the next press, never mid-hold.
 | `subscribe` | request | `events`, `pane?` | `{subscribed}` |
 | `get_cell_metrics` | request | — | `{cell_px_w, cell_px_h}` |
 | `get_errors` | request | — | `{errors, dropped}` |
+| `get_version` | request | — | `{program, version, suite_version, git, protocol}` |
 
 The metrics change at runtime with a font-size step. The host keeps the
 window's pixel size and reflows the grid instead, and announces the step
@@ -1494,6 +1497,17 @@ the connect, and staying in the focused pane beats refusing to subscribe.
 `{errors: [{method, code, seq}], dropped}`. `seq` is a per-connection
 monotonic counter; `dropped` counts entries lost to a full ring since the
 last call.
+
+`get_version` names the program serving the session and the protocol it
+speaks. `program` is its executable name (`glyphwire` for the windowed
+host, `glyphwire-server` for the headless one) and `version` that
+program's own version; `suite_version` is the glyphwire release it
+shipped in and `git` the `git describe` of the tree it was built from
+(`"unknown"` outside a git checkout). `protocol` is this document's
+version. A host may leave the program fields empty; `protocol` is always
+set. A host older than 0.7.0 has no `get_version`, so a client that must
+work against one sends it the way section 10 describes for any method
+that might be absent.
 
 ### 6.19 `batch`
 
@@ -1784,9 +1798,11 @@ otherwise stall drawing. Section 6.15's `join_role` and section 6.1's
 ## 10. Versioning and compatibility
 
 **There is no version negotiation.** No handshake, no capability exchange,
-no version field in the envelope. A client cannot ask a host what it
-supports, and a host cannot tell a client what it speaks. This is a known
-gap and is expected to be filled before 1.0.
+no version field in the envelope. Since 0.7.0 a client can ask which
+version of the protocol (and which host program) it is talking to with
+`get_version` (6.18), but a host cannot tell a client what it speaks
+unasked, and nothing in the protocol changes with the answer. This is a
+known gap and is expected to be filled before 1.0.
 
 What a client can rely on today:
 

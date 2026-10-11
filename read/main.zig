@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const build_info = @import("build_info");
 const zargs = @import("zargunaught");
 const read = @import("read_support");
 const themeconf = @import("themeconf");
@@ -63,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
                 .maxNumParams = 0,
             },
             .{ .longName = "help", .shortName = "h", .description = "Print this help and exit", .maxNumParams = 0 },
+            .{ .longName = "version", .shortName = "V", .description = "Print the version and exit", .maxNumParams = 0 },
         },
     });
     defer parser.deinit();
@@ -71,6 +73,7 @@ pub fn main(init: std.process.Init) !void {
         cli.fail(io, "gw-read: error parsing args: {t}\n", .{err});
     defer args.deinit();
 
+    if (args.hasOption("version")) glyphwire.version.printAndExit(io, .of(build_info));
     if (args.hasOption("help")) {
         var stdout = try zargs.print.Printer.stdout(alloc);
         defer stdout.deinit();

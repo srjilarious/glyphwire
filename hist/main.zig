@@ -51,6 +51,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const build_info = @import("build_info");
 const history = @import("applib").history;
 const fuzzy = @import("applib").fuzzy;
 const interrupt = @import("applib").interrupt;
@@ -85,7 +86,9 @@ pub fn main(init: std.process.Init) !void {
     interrupt.keep();
     const arena = init.arena.allocator();
 
-    const args = try parseArgs(arena, try init.minimal.args.toSlice(arena));
+    const argv = try init.minimal.args.toSlice(arena);
+    if (argv.len >= 2 and glyphwire.version.isFlag(argv[1])) glyphwire.version.printAndExit(io, .of(build_info));
+    const args = try parseArgs(arena, argv);
 
     const entries = loadHistory(alloc, io, init.environ_map) catch &.{};
     defer if (entries.len > 0) history.freeEntries(alloc, @constCast(entries));

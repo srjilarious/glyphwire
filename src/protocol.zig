@@ -320,6 +320,23 @@ pub const ListContextsResult = struct {
     contexts: []const ContextEntry,
 };
 
+/// The version of this protocol, as `docs/protocol.md`'s header gives
+/// it. Bumped with that document, not with any program.
+pub const protocol_version = "0.7.0";
+
+/// `get_version`'s result: the program serving the session and the
+/// protocol it speaks. `program` is its executable name
+/// (`glyphwire`, `glyphwire-server`); `version` its own version,
+/// `suite_version` the release it shipped in, `git` the `git describe`
+/// of the tree it was built from.
+pub const VersionResult = struct {
+    program: []const u8,
+    version: []const u8,
+    suite_version: []const u8,
+    git: []const u8,
+    protocol: []const u8,
+};
+
 // ─── Table ───────────────────────────────────────────────────────────────
 
 /// A column as sent to `create_table`. `kind`/`h_align` are optional
@@ -1474,6 +1491,7 @@ pub const Methods = struct {
     set_divider_style: DividerStyleWire,
     get_theme: NoParams,
     list_contexts: NoParams,
+    get_version: NoParams,
     set_window_scrollbar: SetWindowScrollbarParams,
     set_caret_layer: SetCaretLayerParams,
     set_caret_visible: SetCaretVisibleParams,

@@ -12,6 +12,7 @@ const core = @import("core.zig");
 /// Only for `Session.routeKey`'s printable-key test: whether a key name is
 /// a key that also produces committed text. Pure, same module.
 const key_encode = @import("key_encode.zig");
+const version = @import("version.zig");
 
 const CellRect = core.CellRect;
 const ConnId = core.ConnId;
@@ -328,6 +329,13 @@ pub const Session = struct {
     root_pane_split: ?PaneSplitHandle = null,
     /// Cells of gap between two children of a pane split.
     pane_divider_cells: usize = 1,
+
+    /// The program serving this session -- glyphwire-host, or the
+    /// headless glyphwire-server -- as `get_version` reports it. Set once
+    /// by that program right after `Server.bind`; empty fields until then
+    /// (a test's bare session). Borrowed: the strings are the program's
+    /// `build_info` constants.
+    host_info: version.Info = .{},
 
     /// The window size in cells -- the rect the pane tree is laid out
     /// over. Kept here rather than read off the root context, because
