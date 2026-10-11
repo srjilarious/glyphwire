@@ -264,7 +264,7 @@ pub const plColor = render.plColor;
 /// The prompt supports echo, Enter, real cursor movement and interior
 /// insert/delete (arrow keys, ctrl+a/e/u, ctrl+arrow word jumps, Up/Down
 /// history recall, Ctrl+Up to browse scrollback, alt+d to drop
-/// `cd <cwd>` onto the line -- see `Prompt`), and now
+/// `cd <cwd>` onto the line, alt+up to `cd ..` -- see `Prompt`), and now
 /// launches a child process
 /// per submitted line (see `Prompt.runCommand`). Every child's
 /// stdout/stderr is piped and mirrored onto the grid via `write_text` by
@@ -961,7 +961,7 @@ fn takeKeyEvent(prompt: *Prompt, alloc: std.mem.Allocator, input_ev: glyphwire.I
 /// modifier chords, so nothing types.
 fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
     // `ctrl` gates most of the chords below (the ctrl+letter / ctrl+
-    // arrow editing ones); `alt` gates exactly one, alt+d. `super`
+    // arrow editing ones); `alt` gates alt+d, alt+c and alt+up. `super`
     // has no cases and needs no checking: plain characters come from
     // the `text` stream, and the host doesn't emit `text` for a
     // genuine modifier chord, so an unhandled alt/super combo simply
@@ -1057,6 +1057,10 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         // fzf's chord for "cd into a directory I pick" -- see
         // `dirSearch`.
         try prompt.dirSearch();
+    } else if (alt and std.mem.eql(u8, ev.key, "up")) {
+        // Up a directory, salacommander's chord for its parent dir --
+        // see `cdParentDir`. Ahead of plain Up, which ignores modifiers.
+        try prompt.cdParentDir();
     } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
         // While browsing, ctrl+left/right is a bigger horizontal step
         // (`scrollback_jump` columns), mirroring ctrl+up/down's row
@@ -2942,6 +2946,38 @@ pub const Prompt = struct {
         var line_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
         const text = std.fmt.bufPrint(&line_buf, "cd {s}", .{cwd}) catch "cd ";
         try self.setLine(text);
+    }
+
+    /// Alt+Up: submits `cd ..` as if it were typed, so the change is
+    /// echoed, recorded in history and goes through the real `cd`
+    /// (`$PWD`/`$OLDPWD`, the zj visit). It counts as a gw-ls activation
+    /// for `on{ chdir }`, the same as clicking a directory, so with the
+    /// default `list = "metadata"` the parent's listing follows -- Alt+Up
+    /// and clicks together browse the tree.
+    ///
+    /// Whatever was half-typed comes back on the new prompt with its
+    /// caret where it was, so `vim foo` + Alt+Up runs vim one level up
+    /// instead of losing the line. A no-op at `/`, where `cd ..` would
+    /// only echo a line that goes nowhere.
+    pub fn cdParentDir(self: *Prompt) !void {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (std.mem.eql(u8, self.logicalCwd(&cwd_buf), "/")) return;
+
+        if (self.completion_picker != null) try self.closeCompletionPicker();
+
+        const alloc = self.client.alloc;
+        const typed = try alloc.dupe(u8, self.line.text());
+        defer alloc.free(typed);
+        const caret = self.line.caret;
+
+        try self.setLine("cd ..");
+        // See `activateSelectionAt` -- same gw-ls-activation marker.
+        self.chdir_method = .metadata;
+        try self.submitLine();
+        if (self.should_exit or typed.len == 0) return;
+
+        try self.setLine(typed);
+        try self.moveCursorTo(caret);
     }
 
     /// At the prompt, this shell's context is `gw-shell <cwd>` -- the
