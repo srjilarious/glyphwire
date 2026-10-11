@@ -563,6 +563,33 @@ pub const Context = struct {
         return null;
     }
 
+    /// What an Alt+drag starting on a span tagged `id` on `layer` carries,
+    /// owned by `alloc`: when `id` is highlighted, every highlighted
+    /// span's URIs in listing order (gw-shell's marked set, the same one
+    /// Ctrl+Shift+C copies as paths), else `id`'s own payload. Null when
+    /// `id` carries no drag; a highlighted id without one adds nothing.
+    pub fn dragForPress(self: *const Context, alloc: std.mem.Allocator, layer: *const Layer, id: MetadataHandle) !?DragPayload {
+        const own = self.metadataDrag(id) orelse return null;
+        if (!layer.sel.isHighlighted(id)) return try DragPayload.init(alloc, own);
+
+        // Ids are handed out in creation order, which for a listing is the
+        // order it was drawn in.
+        const ids = try alloc.dupe(MetadataHandle, layer.sel.highlighted_ids.items);
+        defer alloc.free(ids);
+        std.mem.sort(MetadataHandle, ids, {}, std.sort.asc(MetadataHandle));
+
+        var uris: std.ArrayList([]const u8) = .empty;
+        defer uris.deinit(alloc);
+        for (ids) |h| {
+            if (self.metadataDrag(h)) |d| try uris.appendSlice(alloc, d.uris);
+        }
+        if (uris.items.len <= own.uris.len) return try DragPayload.init(alloc, own);
+
+        var label_buf: [32]u8 = undefined;
+        const label = try std.fmt.bufPrint(&label_buf, "{d} files", .{uris.items.len});
+        return try DragPayload.init(alloc, .{ .uris = uris.items, .label = label, .icon = own.icon });
+    }
+
     /// `start_drag`: queues `drag` (copied) for glyphwire-host, replacing
     /// any request it hasn't taken yet.
     pub fn requestDrag(self: *Context, drag: DragSpec) !void {

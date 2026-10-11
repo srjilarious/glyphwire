@@ -1394,6 +1394,36 @@ pub fn contextMetadataDragPayloadRoundTripsAndFreesTest(io: std.Io, alloc: std.m
     try testz.expectTrue(ctx.metadataDrag(id) == null);
 }
 
+/// A press on a highlighted span drags every highlighted span, in id
+/// (listing) order whatever order they were marked in; a press on an
+/// unmarked one drags only its own; a highlighted id without a drag adds
+/// nothing.
+pub fn contextDragForPressTakesTheHighlightedSetTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const a = try ctx.createMetadataDrag("{}", .{ .uris = &.{"file:///a"}, .label = "a", .icon = "file/audio" });
+    const b = try ctx.createMetadataDrag("{}", .{ .uris = &.{"file:///b"}, .label = "b" });
+    const c = try ctx.createMetadataDrag("{}", .{ .uris = &.{"file:///c"}, .label = "c" });
+    const plain = try ctx.createMetadata("{}");
+    try ctx.root.sel.setHighlights(&.{ c, plain, a });
+
+    var marked = (try ctx.dragForPress(alloc, &ctx.root, c)).?;
+    defer marked.deinit(alloc);
+    try testz.expectEqual(marked.uris.len, 2);
+    try testz.expectEqualStr(marked.uris[0], "file:///a");
+    try testz.expectEqualStr(marked.uris[1], "file:///c");
+    try testz.expectEqualStr(marked.label.?, "2 files");
+
+    var single = (try ctx.dragForPress(alloc, &ctx.root, b)).?;
+    defer single.deinit(alloc);
+    try testz.expectEqual(single.uris.len, 1);
+    try testz.expectEqualStr(single.label.?, "b");
+
+    try testz.expectTrue((try ctx.dragForPress(alloc, &ctx.root, plain)) == null);
+}
+
 /// A drag with nothing to carry is refused, and no tag is created.
 pub fn contextMetadataDragRefusesEmptyUrisTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;

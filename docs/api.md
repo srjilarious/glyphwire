@@ -726,7 +726,9 @@ long gone:
   reach a client, and the drag starts once the pointer travels 6 px with
   the button held. `gw-ls` tags every entry this way, so a listing stays
   draggable from scrollback after `gw-ls` exits — the same reasoning that
-  keeps its tables sortable.
+  keeps its tables sortable. When the pressed span is highlighted
+  (gw-shell's marked set, `set_highlight`), the drag carries every
+  highlighted span's URIs in id order, labelled "N files".
 - **`start_drag`.** A live client that knows more than one cell can say.
   salacommander gets the Alt+press like any click and answers with the
   marked set (when the row is marked) or the row. The host arms it only

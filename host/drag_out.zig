@@ -33,7 +33,8 @@ const icon_offset = 12;
 ///   press and its release never reach a client. This is what makes an
 ///   `ls` listing draggable long after `ls` has exited -- the payload
 ///   lives in the context with the cells, the same way `table_sort.zig`
-///   and `outline_toggle.zig` keep tables and outlines working.
+///   and `outline_toggle.zig` keep tables and outlines working. Pressing
+///   on a highlighted (gw-shell-marked) entry drags every highlighted one.
 /// - **`start_drag`.** A live client that knows more than one cell can
 ///   say -- salacommander dragging its whole marked set -- gets the press
 ///   as usual and asks for the drag itself. The press stays the client's;
@@ -166,7 +167,8 @@ pub const DragOut = struct {
         return server.ctx.takeDragRequest();
     }
 
-    /// The drag payload on the cell under `pos`, copied, or null when it
+    /// The drag payload on the cell under `pos`, copied (with every other
+    /// highlighted entry's when this one is highlighted), or null when it
     /// carries none. Moves focus to the pane under the pointer first, the
     /// way any click would, so the lookup is in that pane's context.
     fn payloadUnder(self: *DragOut, pos: host_eng.Vec2F) ?glyphwire.DragPayload {
@@ -187,8 +189,8 @@ pub const DragOut = struct {
 
         const cell = layer.viewRow(layer.view_scroll, target.row)[target.col];
         const id = cell.metadata_id orelse return null;
-        const spec = ctx.metadataDrag(id) orelse return null;
-        return glyphwire.DragPayload.init(self.app.alloc, spec) catch |err| {
+        // A marked entry drags the whole marked set along with it.
+        return ctx.dragForPress(self.app.alloc, layer, id) catch |err| {
             std.log.err("drag payload copy failed: {t}", .{err});
             return null;
         };

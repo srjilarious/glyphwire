@@ -1200,7 +1200,9 @@ The same three fields form `create_metadata`'s `drag`.
 
 There are two ways to start one. A host that supports dragging out SHOULD
 treat an Alt+left press on a cell whose metadata carries a `drag` as its
-own: neither the press nor its release is delivered to a client. A live
+own: neither the press nor its release is delivered to a client. When
+that cell's span is highlighted (6.13), the drag SHOULD carry every
+highlighted span's `uris`, so a marked set is dragged together. A live
 client that wants to choose the payload itself (several selected files)
 sends `start_drag` in response to the press it was handed. Either way the
 host SHOULD begin the drag only once the pointer has moved a few pixels
