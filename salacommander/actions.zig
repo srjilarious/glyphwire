@@ -57,6 +57,22 @@ pub const Action = enum {
     move,
     makeDir,
     delete,
+    /// Name a file that doesn't exist yet and open it in the `editor`
+    /// (Midnight Commander's Shift+F4). Nothing is created until the
+    /// editor saves it.
+    newFile,
+
+    /// The same operations as root, through sudo (see `sudo.zig`): a
+    /// masked dialog asks for the password when sudo doesn't remember
+    /// one. Edit and new file are `sudoedit`, so the editor still runs
+    /// as you.
+    sudoRename,
+    sudoEdit,
+    sudoNewFile,
+    sudoCopy,
+    sudoMove,
+    sudoMakeDir,
+    sudoDelete,
 
     /// Open or close the shell panel across the bottom (see
     /// `applib/shellpanel.zig`). Closing it leaves the shell running.
@@ -112,6 +128,17 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "F7", .action = .makeDir },
     .{ .chord = "F8", .action = .delete },
     .{ .chord = "delete", .action = .delete },
+    .{ .chord = "shift+F4", .action = .newFile },
+
+    // Super is "as root": the same function keys, through sudo.
+    .{ .chord = "super+F2", .action = .sudoRename },
+    .{ .chord = "super+F4", .action = .sudoEdit },
+    .{ .chord = "super+shift+F4", .action = .sudoNewFile },
+    .{ .chord = "super+F5", .action = .sudoCopy },
+    .{ .chord = "super+F6", .action = .sudoMove },
+    .{ .chord = "super+F7", .action = .sudoMakeDir },
+    .{ .chord = "super+F8", .action = .sudoDelete },
+    .{ .chord = "super+delete", .action = .sudoDelete },
 
     .{ .chord = "ctrl+`", .action = .toggleShell },
 

@@ -58,6 +58,7 @@ const dialog_mod = @import("dialog.zig");
 const config_mod = @import("config.zig");
 const openaction = @import("openaction.zig");
 const drag_mod = @import("drag.zig");
+const sudo = @import("sudo.zig");
 const shellpanel = @import("applib").shellpanel;
 const wordsplit = @import("applib").wordsplit;
 const filetype = @import("applib").filetype;
@@ -172,6 +173,8 @@ const NameEdit = struct {
     /// Owned.
     original: []u8,
     line: LineEdit,
+    /// Super+F2: Enter renames as root (`sudo.zig`).
+    as_root: bool = false,
 };
 
 /// Where one pane's columns fall, for its current width and view.
@@ -250,6 +253,9 @@ pub const Ui = struct {
     listener: *glyphwire.InputListener,
     /// `$HOME`, for `~` in titles and typed paths. Borrowed.
     home: ?[]const u8,
+    /// The environment salacommander started with, for what Super+F4's
+    /// sudoedit passes on to the editor (`sudo.editArgv`). Borrowed.
+    environ: ?*const std.process.Environ.Map = null,
 
     context: glyphwire.ContextHandle,
     pane_layers: [2]glyphwire.LayerHandle,
@@ -345,6 +351,8 @@ pub const Ui = struct {
         left: []const u8,
         right: []const u8,
         home: ?[]const u8,
+        /// See `Ui.environ`.
+        environ: ?*const std.process.Environ.Map = null,
         /// See `Ui.profile`.
         profile: bool = false,
         /// Taken over by the `Ui`.
@@ -453,6 +461,7 @@ pub const Ui = struct {
             .client = client,
             .listener = listener,
             .home = opts.home,
+            .environ = opts.environ,
             .profile = opts.profile,
             .context = context,
             .pane_layers = .{ left_layer, right_layer },
@@ -765,13 +774,22 @@ pub const Ui = struct {
             .unmarkAll => p.unmarkAll(),
             .invertMarks => p.invertMarks(),
 
-            .rename => try self.beginNameEdit(),
+            .rename => try self.beginNameEdit(false),
             .find => try self.openFinder(),
-            .edit => try self.editCurrent(),
-            .copy => try self.transfer(.copy),
-            .move => try self.transfer(.move),
-            .makeDir => try self.makeDir(),
-            .delete => try self.deleteSelection(),
+            .edit => try self.editCurrent(false),
+            .copy => try self.transfer(.copy, false),
+            .move => try self.transfer(.move, false),
+            .makeDir => try self.makeDir(false),
+            .delete => try self.deleteSelection(false),
+            .newFile => try self.newFile(false),
+
+            .sudoRename => try self.beginNameEdit(true),
+            .sudoEdit => try self.editCurrent(true),
+            .sudoNewFile => try self.newFile(true),
+            .sudoCopy => try self.transfer(.copy, true),
+            .sudoMove => try self.transfer(.move, true),
+            .sudoMakeDir => try self.makeDir(true),
+            .sudoDelete => try self.deleteSelection(true),
 
             .toggleShell => try self.toggleShell(),
 
@@ -883,24 +901,34 @@ pub const Ui = struct {
     /// shell's screen, sitting under our context, and writing there would
     /// show up as damage once we're gone.
     fn runInSession(self: *Ui, argv: []const []const u8) !void {
+        return self.runInSessionAs(argv, argv[0], null);
+    }
+
+    /// `runInSession`, named `name` in the bar, with stderr kept in
+    /// `complaint` (when given) so a failure can say why.
+    fn runInSessionAs(self: *Ui, argv: []const []const u8, name: []const u8, complaint: ?sudo.Complaint) !void {
         var child = std.process.spawn(self.io, .{
             .argv = argv,
             .stdin = .ignore,
             .stdout = .ignore,
-            .stderr = .ignore,
+            .stderr = if (complaint) |c| c.stdio() else .ignore,
         }) catch |err| {
-            try self.setMessage("{s}: {t}", .{ argv[0], err });
+            try self.setMessage("{s}: {t}", .{ name, err });
             return;
         };
         const term = child.wait(self.io) catch |err| {
-            try self.setMessage("{s}: {t}", .{ argv[0], err });
+            try self.setMessage("{s}: {t}", .{ name, err });
             try self.resync();
             return;
         };
         try self.resync();
+        if (term.success()) return;
+        var why_buf: [512]u8 = undefined;
+        const why = if (complaint) |c| c.last(self.io, &why_buf) else "";
+        if (why.len > 0) return self.setMessage("{s}: {s}", .{ name, why });
         switch (term) {
-            .exited => |code| if (code != 0) try self.setMessage("{s} exited with {d}", .{ argv[0], code }),
-            else => try self.setMessage("{s} was killed", .{argv[0]}),
+            .exited => |code| try self.setMessage("{s} exited with {d}", .{ name, code }),
+            else => try self.setMessage("{s} was killed", .{name}),
         }
     }
 
@@ -943,8 +971,9 @@ pub const Ui = struct {
     /// cursor's entry, never the marks -- an editor takes one file. A
     /// directory, the `..` row and a file that isn't text are refused in
     /// the bar before anything starts: zoe would refuse a binary file
-    /// too, but only after taking the screen to say so.
-    fn editCurrent(self: *Ui) !void {
+    /// too, but only after taking the screen to say so. `as_root`
+    /// (Super+F4) is sudoedit -- see `editAsRoot`.
+    fn editCurrent(self: *Ui, as_root: bool) !void {
         const p = &self.panes[self.active];
         const e = p.current() orelse return;
         if ((e.link_target_kind orelse e.kind) == .directory) {
@@ -956,17 +985,72 @@ pub const Ui = struct {
         defer self.alloc.free(path);
         const name = std.fs.path.basename(path);
 
-        const binary = filetype.fileLooksBinary(self.io, path) catch |err| {
-            return self.setMessage("{s}: {t}", .{ name, err });
+        const binary = filetype.fileLooksBinary(self.io, path) catch |err| switch (err) {
+            // A file only root can read is what Super+F4 is for: sudo
+            // reads it, and the editor judges what it gets.
+            error.AccessDenied, error.PermissionDenied => if (as_root) false else {
+                return self.setMessage("{s}: {t}", .{ name, err });
+            },
+            else => return self.setMessage("{s}: {t}", .{ name, err }),
         };
         if (binary) return self.setMessage("{s} is not a text file", .{name});
+        try self.openInEditor(path, as_root);
+    }
 
+    /// Shift+F4: asks for a name and opens it in the `editor` without
+    /// creating it -- the editor makes the file when it saves, so backing
+    /// out leaves nothing behind. A name that is already a file opens
+    /// that file; a directory is refused. Relative to the active pane,
+    /// like F7's names. `as_root` is Super+Shift+F4, a sudoedit, which
+    /// creates a missing file the same way.
+    fn newFile(self: *Ui, as_root: bool) !void {
+        const p = &self.panes[self.active];
+        var title_buf: [64]u8 = undefined;
+        var d = try Dialog.init(self.alloc, titleFor(&title_buf, "New file", as_root), "Name of the file to edit:", &dialog_mod.ok_cancel, .{ .input = "" });
+        defer d.deinit(self.alloc);
+        if (try self.runDialog(&d) != .ok) return;
+        const typed = std.mem.trim(u8, d.inputText(), " ");
+        if (typed.len == 0) return;
+
+        const path = try self.resolveTyped(p.path, typed);
+        defer self.alloc.free(path);
+        if (std.Io.Dir.cwd().statFile(self.io, path, .{})) |st| {
+            if (st.kind == .directory) return self.setMessage("{s} is a directory", .{typed});
+        } else |_| {}
+        try self.openInEditor(path, as_root);
+
+        // Saved into this pane's directory: land on it.
+        if (std.mem.eql(u8, std.fs.path.dirname(path) orelse "", p.path)) {
+            if (p.rowOf(std.fs.path.basename(path))) |row| p.setCursor(row);
+        }
+    }
+
+    /// `path` in the configured `editor`, or through sudoedit.
+    fn openInEditor(self: *Ui, path: []const u8, as_root: bool) !void {
         const template = self.cfg.editorCommand();
+        if (as_root) return self.editAsRoot(template, path);
         var argv_buf: [openaction.max_args][]const u8 = undefined;
         const argv = openaction.buildArgv(&argv_buf, template, path) catch |err| {
             return self.setMessage("editor \"{s}\": {t}", .{ template, err });
         };
         try self.runInSession(argv);
+    }
+
+    /// sudoedit: sudo copies `path` somewhere you can write, runs the
+    /// editor on the copy *as you*, and puts it back as root if it
+    /// changed. Safer than an editor running as root, and a missing file
+    /// is created on save. sudo's refusals ("editing files in a writable
+    /// directory is not permitted") land in the bar.
+    fn editAsRoot(self: *Ui, template: []const u8, path: []const u8) !void {
+        if (!try self.sudoAuthorize()) return;
+        var arena: std.heap.ArenaAllocator = .init(self.alloc);
+        defer arena.deinit();
+        const argv = sudo.editArgv(arena.allocator(), self.environ, template, path) catch |err| {
+            return self.setMessage("editor \"{s}\": {t}", .{ template, err });
+        };
+        const complaint = sudo.Complaint.open();
+        defer complaint.close(self.io);
+        try self.runInSessionAs(argv, "sudoedit", complaint);
     }
 
     // ── F3: find ────────────────────────────────────────────────────────
@@ -1110,7 +1194,8 @@ pub const Ui = struct {
     /// F2: turn the name of the entry under the cursor into a text field
     /// in its row, the caret before the extension (see `renameCaret`).
     /// The `..` row has no name of its own to change.
-    fn beginNameEdit(self: *Ui) !void {
+    /// `as_root` is Super+F2: the same field, renaming through sudo.
+    fn beginNameEdit(self: *Ui, as_root: bool) !void {
         self.endPathEdit();
         self.endNameEdit();
         const p = &self.panes[self.active];
@@ -1119,7 +1204,7 @@ pub const Ui = struct {
         errdefer self.alloc.free(original);
         var line = try LineEdit.init(self.alloc, e.name);
         _ = line.moveTo(renameCaret(e.name, (e.link_target_kind orelse e.kind) == .directory));
-        self.name_edit = .{ .pane = self.active, .row = p.list.selected, .original = original, .line = line };
+        self.name_edit = .{ .pane = self.active, .row = p.list.selected, .original = original, .line = line, .as_root = as_root };
         self.markDirty(self.active, .full);
     }
 
@@ -1164,8 +1249,14 @@ pub const Ui = struct {
         const typed = e.line.text();
         if (typed.len == 0 or std.mem.eql(u8, typed, e.original)) return self.endNameEdit();
 
-        fileops.renameInDir(self.io, self.alloc, p.path, e.original, typed) catch |err| {
+        const renamed = if (e.as_root)
+            self.runSudoSingle(&.{ "rename", p.path, e.original, typed })
+        else
+            fileops.renameInDir(self.io, self.alloc, p.path, e.original, typed);
+        renamed catch |err| {
             switch (err) {
+                // Cancelled at the password, or sudo said why in the bar.
+                error.NotRun => {},
                 error.PathAlreadyExists => try self.setMessage("{s} already exists", .{typed}),
                 error.InvalidName => try self.setMessage("can't rename to {s}: a name only, no '/'", .{typed}),
                 else => try self.setMessage("rename {s}: {t}", .{ e.original, err }),
@@ -1575,8 +1666,9 @@ pub const Ui = struct {
     // ── File operations ─────────────────────────────────────────────────
 
     /// F5 / F6: copy or move the selection, to a destination the user
-    /// confirms (the other pane's directory to start with).
-    fn transfer(self: *Ui, kind: fileops.Kind) !void {
+    /// confirms (the other pane's directory to start with). `as_root` is
+    /// Super+F5 / Super+F6.
+    fn transfer(self: *Ui, kind: fileops.Kind, as_root: bool) !void {
         const src_i = self.active;
         const src = &self.panes[src_i];
         const sel = try src.selection(self.alloc);
@@ -1588,22 +1680,23 @@ pub const Ui = struct {
         const prompt = try std.fmt.allocPrint(self.alloc, "{s} {s} to:", .{ kind.label(), what });
         defer self.alloc.free(prompt);
 
-        var d = try Dialog.init(self.alloc, kind.label(), prompt, &dialog_mod.ok_cancel, .{ .input = self.panes[1 - src_i].path });
+        var title_buf: [64]u8 = undefined;
+        var d = try Dialog.init(self.alloc, titleFor(&title_buf, kind.label(), as_root), prompt, &dialog_mod.ok_cancel, .{ .input = self.panes[1 - src_i].path });
         defer d.deinit(self.alloc);
         if (try self.runDialog(&d) != .ok) return;
 
         const dest = try self.resolveTyped(src.path, d.inputText());
         defer self.alloc.free(dest);
 
-        const result = self.runOperation(.{ .kind = kind, .sources = sel, .dest = dest });
+        const result = (try self.runOperationAs(.{ .kind = kind, .sources = sel, .dest = dest }, as_root)) orelse return;
         if (!result.cancelled and result.failed == 0) src.unmarkAll();
         try self.reloadBoth();
         try self.reportResult(kind, result);
     }
 
     /// F8: delete the selection after a yes/no. The default button is No,
-    /// so a stray Enter doesn't delete anything.
-    fn deleteSelection(self: *Ui) !void {
+    /// so a stray Enter doesn't delete anything. `as_root` is Super+F8.
+    fn deleteSelection(self: *Ui, as_root: bool) !void {
         const p = &self.panes[self.active];
         const sel = try p.selection(self.alloc);
         defer self.alloc.free(sel);
@@ -1614,20 +1707,22 @@ pub const Ui = struct {
         const prompt = try std.fmt.allocPrint(self.alloc, "Delete {s}?", .{what});
         defer self.alloc.free(prompt);
 
-        var d = try Dialog.init(self.alloc, "Delete", prompt, &dialog_mod.yes_no, .{ .danger = true, .focus = 1 });
+        var title_buf: [64]u8 = undefined;
+        var d = try Dialog.init(self.alloc, titleFor(&title_buf, "Delete", as_root), prompt, &dialog_mod.yes_no, .{ .danger = true, .focus = 1 });
         defer d.deinit(self.alloc);
         if (try self.runDialog(&d) != .yes) return;
 
-        const result = self.runOperation(.{ .kind = .delete, .sources = sel });
+        const result = (try self.runOperationAs(.{ .kind = .delete, .sources = sel }, as_root)) orelse return;
         try self.reloadBoth();
         try self.reportResult(.delete, result);
     }
 
     /// F7: make a directory (and any missing parents) in the active pane,
-    /// then put the cursor on it.
-    fn makeDir(self: *Ui) !void {
+    /// then put the cursor on it. `as_root` is Super+F7.
+    fn makeDir(self: *Ui, as_root: bool) !void {
         const p = &self.panes[self.active];
-        var d = try Dialog.init(self.alloc, "Make directory", "Name of the new directory:", &dialog_mod.ok_cancel, .{ .input = "" });
+        var title_buf: [64]u8 = undefined;
+        var d = try Dialog.init(self.alloc, titleFor(&title_buf, "Make directory", as_root), "Name of the new directory:", &dialog_mod.ok_cancel, .{ .input = "" });
         defer d.deinit(self.alloc);
         if (try self.runDialog(&d) != .ok) return;
         const typed = std.mem.trim(u8, d.inputText(), " ");
@@ -1635,7 +1730,9 @@ pub const Ui = struct {
 
         const path = try self.resolveTyped(p.path, typed);
         defer self.alloc.free(path);
-        fileops.makeDir(self.io, path) catch |err| {
+        const made = if (as_root) self.runSudoSingle(&.{ "mkdir", path }) else fileops.makeDir(self.io, path);
+        made catch |err| {
+            if (err == error.NotRun) return;
             try self.setMessage("mkdir {s}: {t}", .{ typed, err });
             return;
         };
@@ -1647,13 +1744,91 @@ pub const Ui = struct {
     }
 
     fn runOperation(self: *Ui, op: fileops.Operation) fileops.Result {
-        const hooks: fileops.Hooks = .{
+        return op.run(self.io, self.alloc, self.fileHooks());
+    }
+
+    /// `runOperation`, or as root through the sudo helper. Null when the
+    /// root run never happened -- cancelled at the password, or sudo
+    /// refused, which the bar already says.
+    fn runOperationAs(self: *Ui, op: fileops.Operation, as_root: bool) !?fileops.Result {
+        if (!as_root) return self.runOperation(op);
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.alloc);
+        try args.append(self.alloc, @tagName(op.kind));
+        if (op.kind != .delete) try args.append(self.alloc, op.dest);
+        try args.appendSlice(self.alloc, op.sources);
+        return self.runSudo(args.items);
+    }
+
+    /// The dialogs and progress line every file operation reports
+    /// through, in-process or relayed from the sudo helper.
+    fn fileHooks(self: *Ui) fileops.Hooks {
+        return .{
             .ctx = self,
             .onConflict = hookConflict,
             .onProgress = hookProgress,
             .onError = hookError,
         };
-        return op.run(self.io, self.alloc, hooks);
+    }
+
+    /// Runs the sudo helper for `args` (see `sudo.Op`), after the
+    /// password if sudo wants one. Null when it didn't run.
+    fn runSudo(self: *Ui, args: []const []const u8) !?fileops.Result {
+        if (!try self.sudoAuthorize()) return null;
+        const exe = try std.process.executablePathAlloc(self.io, self.alloc);
+        defer self.alloc.free(exe);
+        const outcome = try sudo.run(self.io, self.alloc, exe, args, self.fileHooks());
+        defer outcome.deinit(self.alloc);
+        switch (outcome) {
+            .result => |r| return r,
+            .failed => |why| {
+                try self.setMessage("sudo: {s}", .{why});
+                return null;
+            },
+        }
+    }
+
+    /// `runSudo` for a one-shot operation (mkdir, rename), as the error
+    /// it failed with, so its caller reads it like the in-process call's.
+    /// `error.NotRun` when it never ran.
+    fn runSudoSingle(self: *Ui, args: []const []const u8) anyerror!void {
+        const r = (try self.runSudo(args)) orelse return error.NotRun;
+        if (r.first_error) |err| return err;
+    }
+
+    /// Makes sure sudo will run things without asking: straight through
+    /// when it remembers a recent password (or needs none), otherwise a
+    /// masked password dialog, three tries as sudo itself gives. False
+    /// when cancelled or refused; a refusal is said in the bar.
+    fn sudoAuthorize(self: *Ui) !bool {
+        if (sudo.hasCachedCredentials(self.io)) return true;
+        var why: ?[]u8 = null;
+        defer if (why) |w| self.alloc.free(w);
+        for (0..3) |_| {
+            const prompt = if (why) |w|
+                try std.fmt.allocPrint(self.alloc, "{s}\nPassword for sudo:", .{w})
+            else
+                try self.alloc.dupe(u8, "Password for sudo:");
+            defer self.alloc.free(prompt);
+            var d = try Dialog.init(self.alloc, "sudo", prompt, &dialog_mod.ok_cancel, .{ .input = "", .masked = true });
+            defer d.deinit(self.alloc);
+            if (try self.runDialog(&d) != .ok) return false;
+
+            try self.setMessage("checking the password...", .{});
+            self.renderBar() catch {};
+            switch (try sudo.checkPassword(self.io, self.alloc, d.inputText())) {
+                .ok => {
+                    try self.setMessage("", .{});
+                    return true;
+                },
+                .rejected => |w| {
+                    if (why) |old| self.alloc.free(old);
+                    why = w;
+                },
+            }
+        }
+        try self.setMessage("sudo: {s}", .{why.?});
+        return false;
     }
 
     fn hookConflict(ctx: *anyopaque, src: []const u8, dest: []const u8) fileops.Conflict {
@@ -1825,12 +2000,20 @@ pub const Ui = struct {
 
         if (d.input) |*in| {
             const field_w = w -| 4;
-            const view = fieldView(in.text(), in.caret, field_w);
-            try b.writeText(in.text()[view.start..], .{ .layer = layer, .row = row, .col = 2, .fg = fg_dialog, .bg = bg_input, .max_cols = field_w, .pad = true });
+            // A password field shows its mask instead, on masked cells,
+            // so the text never leaves this process and the ●s never
+            // read back out of the grid. See `Dialog.masked`.
+            var mask_buf: [512 * dialog_mod.mask_glyph.len]u8 = undefined;
+            const shown = if (d.masked)
+                dialog_mod.maskText(&mask_buf, in.text(), in.caret)
+            else
+                dialog_mod.Shown{ .text = in.text(), .caret = in.caret };
+            const view = fieldView(shown.text, shown.caret, field_w);
+            try b.writeText(shown.text[view.start..], .{ .layer = layer, .row = row, .col = 2, .fg = fg_dialog, .bg = bg_input, .max_cols = field_w, .pad = true, .masked = d.masked });
             // The caret: the character under it (or a blank past the end)
             // drawn in reverse.
-            const under = if (in.caret < in.text().len) in.text()[in.caret..nextCodepoint(in.text(), in.caret)] else " ";
-            try b.writeText(under, .{ .layer = layer, .row = row, .col = 2 + view.caret_col, .fg = bg_input, .bg = fg_dialog });
+            const under = if (shown.caret < shown.text.len) shown.text[shown.caret..nextCodepoint(shown.text, shown.caret)] else " ";
+            try b.writeText(under, .{ .layer = layer, .row = row, .col = 2 + view.caret_col, .fg = bg_input, .bg = fg_dialog, .masked = d.masked });
             row += 2;
         }
 
@@ -2442,6 +2625,12 @@ fn entryColor(e: FileEntry) Color {
 fn describeSelection(alloc: std.mem.Allocator, sel: []const []const u8) ![]u8 {
     if (sel.len == 1) return std.fmt.allocPrint(alloc, "\"{s}\"", .{std.fs.path.basename(sel[0])});
     return std.fmt.allocPrint(alloc, "{d} files", .{sel.len});
+}
+
+/// A dialog title, with "sudo " in front for an operation run as root.
+fn titleFor(buf: []u8, label: []const u8, as_root: bool) []const u8 {
+    if (!as_root) return label;
+    return std.fmt.bufPrint(buf, "sudo {s}", .{label}) catch label;
 }
 
 fn errorText(err: anyerror) []const u8 {

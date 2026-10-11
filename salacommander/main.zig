@@ -15,6 +15,8 @@
 //! on a column header) re-orders a pane, Ctrl+Shift+C copies the
 //! selected paths as a shell-quoted argument list, and Ctrl+` opens a
 //! shell across the bottom that follows the active pane's directory.
+//! Shift+F4 edits a file that doesn't exist yet, and Super with F2, F4,
+//! F5-F8 does the same as root through sudo (see `sudo.zig`).
 //! Every key is an action that `salacommander.conf.lua` can rebind (see
 //! `actions.zig`), and what Enter opens a file with is its `open_actions`
 //! table (see `openaction.zig`). It needs a glyphwire session; there is
@@ -34,6 +36,13 @@ const themeconf = @import("themeconf");
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
+
+    // Run as root by a Super+F-key operation: no window, just the one
+    // operation over stdin/stdout. See `sudo.zig`.
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    if (argv.len > 1 and std.mem.eql(u8, argv[1], sala.sudo.helper_flag)) {
+        std.process.exit(sala.sudo.helperMain(io, alloc, argv[2..]));
+    }
 
     // Ctrl+C cancels F3's finder popup, and the embedded shell panel
     // is ours to keep alive.
@@ -113,6 +122,7 @@ pub fn main(init: std.process.Init) !void {
         .left = left,
         .right = right,
         .home = init.environ_map.get("HOME"),
+        .environ = init.environ_map,
         .profile = init.environ_map.get("GLYPHWIRE_SALA_PROFILE") != null,
         .cfg = cfg,
         .theme = own_theme,

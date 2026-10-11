@@ -138,6 +138,14 @@
 --     --   move                F6
 --     --   makeDir             F7
 --     --   delete              F8, delete
+--     --   newFile             shift+F4 (edits a file not created yet)
+--     --   sudoRename          super+F2 (the same, as root via sudo)
+--     --   sudoEdit            super+F4 (sudoedit: the editor runs as you)
+--     --   sudoNewFile         super+shift+F4
+--     --   sudoCopy            super+F5
+--     --   sudoMove            super+F6
+--     --   sudoMakeDir         super+F7
+--     --   sudoDelete          super+F8, super+delete
 --     --   sortByName          ctrl+F3
 --     --   sortByExt           ctrl+F4
 --     --   sortBySize          ctrl+F5

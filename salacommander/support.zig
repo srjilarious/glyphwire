@@ -10,6 +10,7 @@ pub const actions = @import("actions.zig");
 pub const openaction = @import("openaction.zig");
 pub const config = @import("config.zig");
 pub const drag = @import("drag.zig");
+pub const sudo = @import("sudo.zig");
 pub const ui = @import("ui.zig");
 
 pub const Pane = pane.Pane;

@@ -1352,3 +1352,204 @@ pub fn dragStartsPastTheSlopTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectTrue(drag.pastThreshold(10, 10, 16, 10));
     try testz.expectTrue(drag.pastThreshold(10, 10, 10, 4));
 }
+
+// ─── Masked dialog field (the sudo password) ────────────────────────────
+
+pub fn maskTextIsOneGlyphPerCodepointTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [64]u8 = undefined;
+    const g = dialog.mask_glyph;
+    // Three codepoints, the last two bytes long: three glyphs, and a
+    // caret after the first lands after the first glyph.
+    const m = dialog.maskText(&buf, "aé!", 1);
+    try testz.expectEqualStr(m.text, g ++ g ++ g);
+    try testz.expectEqual(m.caret, g.len);
+    // A caret at the end of the text is at the end of the mask.
+    try testz.expectEqual(dialog.maskText(&buf, "aé!", 4).caret, 3 * g.len);
+    try testz.expectEqualStr(dialog.maskText(&buf, "", 0).text, "");
+    // Too small a buffer truncates rather than overrunning it.
+    var small: [5]u8 = undefined;
+    const t = dialog.maskText(&small, "abc", 3);
+    try testz.expectEqualStr(t.text, g);
+    try testz.expectEqual(t.caret, g.len);
+}
+
+/// A masked field's word keys act on the whole field: a password has no
+/// words, and stopping at one would give away where its punctuation is.
+pub fn maskedDialogWordKeysTakeTheWholeFieldTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var d = try dialog.Dialog.init(alloc, "sudo", "Password for sudo:", &dialog.ok_cancel, .{ .input = "", .masked = true });
+    defer d.deinit(alloc);
+    try d.handleText(alloc, "hunter/2 x");
+    try testz.expectTrue(d.handleKey("left", .{ .ctrl = true }) == null);
+    try testz.expectEqual(d.input.?.caret, 0);
+    try testz.expectTrue(d.handleKey("right", .{ .ctrl = true }) == null);
+    try testz.expectEqual(d.input.?.caret, "hunter/2 x".len);
+    try testz.expectTrue(d.handleKey("backspace", .{ .ctrl = true }) == null);
+    try testz.expectEqualStr(d.inputText(), "");
+
+    // An unmasked field keeps its word jumps.
+    var plain = try dialog.Dialog.init(alloc, "t", "m", &dialog.ok_cancel, .{ .input = "/a/b" });
+    defer plain.deinit(alloc);
+    try testz.expectTrue(plain.handleKey("backspace", .{ .ctrl = true }) == null);
+    try testz.expectEqualStr(plain.inputText(), "/a/");
+}
+
+// ─── sudo helper ────────────────────────────────────────────────────────
+
+/// Collects what the commander's side of `sudo.drive` was asked, and
+/// answers conflicts with `answer`.
+const Asked = struct {
+    conflicts: usize = 0,
+    progress: usize = 0,
+    errors: usize = 0,
+    answer: fileops.Conflict = .overwrite,
+
+    fn hooks(self: *Asked) fileops.Hooks {
+        return .{ .ctx = self, .onConflict = onConflict, .onProgress = onProgress, .onError = onError };
+    }
+    fn onConflict(ctx: *anyopaque, _: []const u8, _: []const u8) fileops.Conflict {
+        const self: *Asked = @ptrCast(@alignCast(ctx));
+        self.conflicts += 1;
+        return self.answer;
+    }
+    fn onProgress(ctx: *anyopaque, _: fileops.Kind, _: usize, _: usize, _: []const u8) void {
+        const self: *Asked = @ptrCast(@alignCast(ctx));
+        self.progress += 1;
+    }
+    fn onError(ctx: *anyopaque, _: []const u8, _: anyerror) bool {
+        const self: *Asked = @ptrCast(@alignCast(ctx));
+        self.errors += 1;
+        return true;
+    }
+};
+
+/// The helper's messages, replayed into the commander's `drive`: the
+/// root side asks "File exists" over the pipe, the answer it was given
+/// is the one the commander's hook gives, and both ends agree on the
+/// result. The two halves run one after the other here, with the
+/// helper's answers scripted -- `drive` must write the same ones back.
+pub fn sudoHelperRoundTripsAConflictTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "sudo-copy");
+    defer s.deinit();
+    try s.mkdir("dest");
+    try s.file("a.txt", "new");
+    try s.file("dest/a.txt", "old");
+    const src = try s.abs("a.txt");
+    defer alloc.free(src);
+    const dest = try s.abs("dest");
+    defer alloc.free(dest);
+
+    var helper_in: std.Io.Reader = .fixed("overwrite\x00");
+    var helper_out: std.Io.Writer.Allocating = .init(alloc);
+    defer helper_out.deinit();
+    try testz.expectEqual(sala.sudo.serve(io, alloc, &.{ "copy", dest, src }, &helper_in, &helper_out.writer), 0);
+    const copied = try s.read("dest/a.txt");
+    defer alloc.free(copied);
+    try testz.expectEqualStr(copied, "new");
+
+    var ui_in: std.Io.Reader = .fixed(helper_out.written());
+    var ui_out: std.Io.Writer.Allocating = .init(alloc);
+    defer ui_out.deinit();
+    var asked: Asked = .{};
+    const result = (try sala.sudo.drive(alloc, &ui_in, &ui_out.writer, asked.hooks())).?;
+    try testz.expectEqual(asked.progress, 1);
+    try testz.expectEqual(asked.conflicts, 1);
+    try testz.expectEqualStr(ui_out.written(), "overwrite\x00");
+    try testz.expectEqual(result.done, 1);
+    try testz.expectEqual(result.failed, 0);
+    try testz.expectFalse(result.cancelled);
+}
+
+/// A one-shot operation's failure crosses the pipe by name and comes
+/// back as the same error, which is what lets F7 and F2 say "already
+/// exists" for a root run exactly as for their own.
+pub fn sudoHelperReportsErrorsByNameTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "sudo-mkdir");
+    defer s.deinit();
+    try s.mkdir("there");
+    const there = try s.abs("there");
+    defer alloc.free(there);
+
+    var helper_in: std.Io.Reader = .fixed("");
+    var helper_out: std.Io.Writer.Allocating = .init(alloc);
+    defer helper_out.deinit();
+    try testz.expectEqual(sala.sudo.serve(io, alloc, &.{ "mkdir", there }, &helper_in, &helper_out.writer), 0);
+
+    var ui_in: std.Io.Reader = .fixed(helper_out.written());
+    var ui_out: std.Io.Writer.Allocating = .init(alloc);
+    defer ui_out.deinit();
+    var asked: Asked = .{};
+    const result = (try sala.sudo.drive(alloc, &ui_in, &ui_out.writer, asked.hooks())).?;
+    try testz.expectEqual(result.failed, 1);
+    try testz.expectTrue(result.first_error.? == error.PathAlreadyExists);
+
+    try testz.expectTrue(sala.sudo.errorFromName("AccessDenied") == error.AccessDenied);
+    try testz.expectTrue(sala.sudo.errorFromName("NoSuchThing") == error.Unexpected);
+}
+
+/// Arguments the helper can't read get nothing on the pipe, and the
+/// commander reads a helper that stopped before `done` as "didn't run".
+pub fn sudoHelperRefusesBadArgumentsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var helper_in: std.Io.Reader = .fixed("");
+    var helper_out: std.Io.Writer.Allocating = .init(alloc);
+    defer helper_out.deinit();
+    try testz.expectEqual(sala.sudo.serve(io, alloc, &.{"chmod"}, &helper_in, &helper_out.writer), 2);
+    try testz.expectEqual(sala.sudo.serve(io, alloc, &.{"copy"}, &helper_in, &helper_out.writer), 2);
+    try testz.expectEqual(sala.sudo.serve(io, alloc, &.{ "rename", "/tmp", "a" }, &helper_in, &helper_out.writer), 2);
+    try testz.expectEqual(helper_out.written().len, 0);
+
+    var ui_in: std.Io.Reader = .fixed("");
+    var ui_out: std.Io.Writer.Allocating = .init(alloc);
+    defer ui_out.deinit();
+    var asked: Asked = .{};
+    try testz.expectTrue((try sala.sudo.drive(alloc, &ui_in, &ui_out.writer, asked.hooks())) == null);
+}
+
+/// sudoedit's command line: the editor template without its `{sel}`,
+/// behind an `env` carrying the glyphwire variables and the few that
+/// find the editor and its config -- nothing else from the environment,
+/// and nothing whose value sudo would split on whitespace.
+pub fn sudoEditArgvForwardsTheGlyphwireEnvironmentTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var env: std.process.Environ.Map = .init(alloc);
+    defer env.deinit();
+    try env.put("GLYPHWIRE_SOCK", "/run/user/1000/gw.sock");
+    try env.put("HOME", "/home/me");
+    try env.put("SECRET_TOKEN", "abc");
+    try env.put("GLYPHWIRE_CTX", "has space");
+
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const argv = try sala.sudo.editArgv(arena.allocator(), &env, "zoe --wrap {sel}", "/etc/hosts");
+    try testz.expectEqual(argv.len, 7);
+    try testz.expectEqualStr(argv[0], "env");
+    try testz.expectEqualStr(argv[2], "sudo");
+    try testz.expectEqualStr(argv[4], "-e");
+    try testz.expectEqualStr(argv[6], "/etc/hosts");
+
+    const editor = argv[1];
+    try testz.expectTrue(std.mem.startsWith(u8, editor, "SUDO_EDITOR=env "));
+    try testz.expectTrue(std.mem.indexOf(u8, editor, " GLYPHWIRE_SOCK=/run/user/1000/gw.sock") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, editor, " HOME=/home/me") != null);
+    try testz.expectTrue(std.mem.indexOf(u8, editor, "SECRET_TOKEN") == null);
+    try testz.expectTrue(std.mem.indexOf(u8, editor, "GLYPHWIRE_CTX") == null);
+    try testz.expectTrue(std.mem.endsWith(u8, editor, " zoe --wrap"));
+
+    try testz.expectError(sala.sudo.editArgv(arena.allocator(), null, "{sel}", "/etc/hosts"), error.EmptyCommand);
+}
+
+pub fn sudoLastLineIsTheComplaintTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(sala.sudo.lastLine("sudo: a password is required\n"), "a password is required");
+    try testz.expectEqualStr(sala.sudo.lastLine("Sorry, try again.\nsudo: 1 incorrect password attempt\n\n"), "1 incorrect password attempt");
+    try testz.expectEqualStr(sala.sudo.lastLine(""), "");
+}
+
+/// Super is "as root" on the same function keys, and Shift+F4 is MC's
+/// edit-a-new-file.
+pub fn sudoActionsHaveSuperChordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
+    defer km.deinit(alloc);
+    try testz.expectEqual(km.lookup("F5", .{ .super = true }).?, actions.Action.sudoCopy);
+    try testz.expectEqual(km.lookup("F8", .{ .super = true }).?, actions.Action.sudoDelete);
+    try testz.expectEqual(km.lookup("F4", .{ .shift = true }).?, actions.Action.newFile);
+    try testz.expectEqual(km.lookup("F4", .{ .super = true, .shift = true }).?, actions.Action.sudoNewFile);
+    try testz.expectEqual(km.lookup("F5", .{}).?, actions.Action.copy);
+}

@@ -67,6 +67,35 @@ pub const ok_only = [_]Button{.ok};
 /// pasted newline in a destination path is a mistake, not a separator.
 pub const LineEdit = @import("applib").LineEdit;
 
+/// What a masked field draws for each character typed into it.
+pub const mask_glyph = "\u{25CF}";
+
+/// Room reserved up front in a masked field, so a password typed into it
+/// never makes the buffer grow and leave a copy behind in freed memory.
+/// Longer still works; it just isn't guaranteed to be wiped.
+const masked_capacity = 256;
+
+/// A field's text as drawn, and the caret's byte offset into it.
+pub const Shown = struct { text: []const u8, caret: usize };
+
+/// The mask a masked field shows for `text`: one `mask_glyph` per
+/// codepoint, written into `buf`, plus where `caret` (a byte offset into
+/// `text`) lands in it. Truncated, caret clamped, if `buf` is too short.
+pub fn maskText(buf: []u8, text: []const u8, caret: usize) Shown {
+    var n: usize = 0;
+    var mask_caret: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (i == caret) mask_caret = n;
+        if (n + mask_glyph.len > buf.len) break;
+        @memcpy(buf[n..][0..mask_glyph.len], mask_glyph);
+        n += mask_glyph.len;
+        i += std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+    }
+    if (caret >= text.len) mask_caret = n;
+    return .{ .text = buf[0..n], .caret = @min(mask_caret, n) };
+}
+
 pub const Dialog = struct {
     /// Owned.
     title: []u8,
@@ -77,11 +106,17 @@ pub const Dialog = struct {
     focus: usize = 0,
     /// Drawn in the warning colour (delete confirmations, errors).
     danger: bool = false,
+    /// The field is a password: drawn as `mask_glyph`s on masked cells
+    /// (`write_text`'s `masked`), its word keys act on the whole field,
+    /// and `deinit` wipes it.
+    masked: bool = false,
 
     pub const Options = struct {
         /// Starts a text field holding this.
         input: ?[]const u8 = null,
         danger: bool = false,
+        /// See `Dialog.masked`. Only means anything with `input`.
+        masked: bool = false,
         /// Which button starts focused.
         focus: usize = 0,
     };
@@ -91,20 +126,29 @@ pub const Dialog = struct {
         errdefer alloc.free(t);
         const m = try alloc.dupe(u8, message);
         errdefer alloc.free(m);
+        var input: ?LineEdit = if (opts.input) |initial| try LineEdit.init(alloc, initial) else null;
+        errdefer if (input) |*i| i.deinit(alloc);
+        if (opts.masked) {
+            if (input) |*i| try i.buf.ensureTotalCapacity(alloc, masked_capacity);
+        }
         return .{
             .title = t,
             .message = m,
-            .input = if (opts.input) |initial| try LineEdit.init(alloc, initial) else null,
+            .input = input,
             .buttons = buttons,
             .focus = @min(opts.focus, buttons.len -| 1),
             .danger = opts.danger,
+            .masked = opts.masked,
         };
     }
 
     pub fn deinit(self: *Dialog, alloc: std.mem.Allocator) void {
         alloc.free(self.title);
         alloc.free(self.message);
-        if (self.input) |*i| i.deinit(alloc);
+        if (self.input) |*i| {
+            if (self.masked) std.crypto.secureZero(u8, i.buf.allocatedSlice());
+            i.deinit(alloc);
+        }
     }
 
     /// The text field's contents, or "" without one.
@@ -128,6 +172,22 @@ pub const Dialog = struct {
         }
 
         if (self.input) |*in| {
+            // A password has no words to jump between, and stopping at
+            // one would say where its punctuation is: the word keys move
+            // and delete to the field's ends instead.
+            if (self.masked and mods.ctrl and !mods.alt and !mods.super) {
+                const whole: ?bool = if (eq(u8, key, "left"))
+                    in.home()
+                else if (eq(u8, key, "right"))
+                    in.end()
+                else if (eq(u8, key, "backspace"))
+                    in.killToStart()
+                else if (eq(u8, key, "delete"))
+                    in.killToEnd()
+                else
+                    null;
+                if (whole != null) return null;
+            }
             _ = in.handleKey(key, mods);
             // Letters are typing (they arrive again as `text`), not
             // button hotkeys.
