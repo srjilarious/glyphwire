@@ -91,10 +91,12 @@ pub const KeyInput = struct {
         self.reportModifier(2, "left_shift", kb.shift());
         self.reportModifier(3, "left_super", kb.super());
 
-        // Ctrl+Shift+P toggles the profiler HUD and Ctrl+Shift+R toggles
-        // forced every-frame redraw, but only when `host.conf.lua` enabled
-        // profiling at all. Handled once here (not per-key in the loop)
-        // and swallowed below so the shell / grid never see them.
+        // Ctrl+Alt+Shift+P toggles the profiler HUD and Ctrl+Alt+Shift+R
+        // toggles forced every-frame redraw, but only when `host.conf.lua`
+        // enabled profiling at all. Handled once here (not per-key in the
+        // loop) and swallowed below so the shell / grid never see them.
+        // Not plain Ctrl+Shift: Ctrl+Shift+P is zoe's and salacommander's
+        // command palette.
         const profile_toggle = self.profileToggleArmed(kb);
         if (profile_toggle and kb.pressed(.p)) _ = self.app.profiler.toggleHud();
         if (profile_toggle and kb.pressed(.r)) _ = self.app.profiler.toggleForceRedraw();
@@ -128,12 +130,12 @@ pub const KeyInput = struct {
         return any_pressed;
     }
 
-    /// Whether Ctrl+Shift is held with profiling enabled, i.e. whether
-    /// the Ctrl+Shift+P / Ctrl+Shift+R host shortcuts are live this
-    /// frame. Both `reportKeyEvents` and `handleRepeatKeys` need it, so
+    /// Whether Ctrl+Alt+Shift is held with profiling enabled, i.e.
+    /// whether the Ctrl+Alt+Shift+P / Ctrl+Alt+Shift+R host shortcuts are
+    /// live this frame. Both `reportKeyEvents` and `handleRepeatKeys` need it, so
     /// the condition lives in one place.
     fn profileToggleArmed(self: *KeyInput, kb: *const host_eng.input.Keyboard) bool {
-        return self.app.profiler.active() and kb.ctrl() and kb.shift();
+        return self.app.profiler.active() and kb.ctrl() and kb.alt() and kb.shift();
     }
 
     /// Whether `key` is consumed by the host itself this frame and so
@@ -148,7 +150,7 @@ pub const KeyInput = struct {
             // swallow them here so the shell/grid never sees the
             // keystroke.
             .minus, .equal, .zero, .kp_subtract, .kp_add, .kp_0 => kb.ctrl(),
-            // Ctrl+Shift+P / Ctrl+Shift+R are profiler toggles.
+            // Ctrl+Alt+Shift+P / Ctrl+Alt+Shift+R are profiler toggles.
             .p, .r => profile_toggle,
             else => false,
         };

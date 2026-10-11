@@ -48,9 +48,7 @@ Ctrl+W, and the completion popup's keys.
 | `complete` | Ctrl+Space (insert) | Ask the language servers for completions |
 
 Host chords also apply: Ctrl+Shift+C copy and Ctrl+Shift+V paste, Ctrl+- /
-Ctrl+= font size, Super+F10 theme switcher, Super+F12 job switcher. With
-`profile` on in `host.conf.lua` the host also takes Ctrl+Shift+P (its
-HUD), so the palette needs another chord there.
+Ctrl+= font size, Super+F10 theme switcher, Super+F12 job switcher.
 
 ### Moving and selecting (every mode)
 

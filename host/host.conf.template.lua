@@ -190,17 +190,17 @@
 --     -- wire as `get_property "profile"`.
 --     profile = false,
 --
---     -- Whether the on-screen profiler HUD starts visible. Ctrl+Shift+P
---     -- toggles it while `profile` is true. The HUD forces a repaint
---     -- every frame while shown (bounded to ~10 Hz), so leave it off
---     -- until you want to watch the numbers.
+--     -- Whether the on-screen profiler HUD starts visible.
+--     -- Ctrl+Alt+Shift+P toggles it while `profile` is true. The HUD
+--     -- forces a repaint every frame while shown (bounded to ~10 Hz), so
+--     -- leave it off until you want to watch the numbers.
 --     profile_hud = false,
 --
 --     -- Start with forced every-frame redraw: the host repaints every
 --     -- frame instead of only on a change, the way it did before the
 --     -- redraw-on-demand work. For measuring steady-state draw cost and
---     -- A/B-ing it against the idle path. Ctrl+Shift+R toggles it while
---     -- `profile` is true.
+--     -- A/B-ing it against the idle path. Ctrl+Alt+Shift+R toggles it
+--     -- while `profile` is true.
 --     profile_force_redraw = false,
 --
 --     -- Averaging window in milliseconds. Every profiler number (phase

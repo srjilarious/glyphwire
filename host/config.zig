@@ -152,7 +152,7 @@ pub const default_icon_theme = "oxygen";
 pub const profile_enabled_default: bool = false;
 pub const profile_hud_default: bool = false;
 // Start with forced every-frame redraw (bypasses redraw-on-demand, for
-// measuring draw cost continuously). Ctrl+Shift+R toggles it at runtime.
+// measuring draw cost continuously). Ctrl+Alt+Shift+R toggles it at runtime.
 pub const profile_force_redraw_default: bool = false;
 pub const profile_log_ms_default: f64 = 0; // 0 = no periodic std.log summary
 pub const profile_log_ms_min: f64 = 250;
@@ -166,8 +166,8 @@ pub const profile_window_ms_min: f64 = 100;
 pub const profile_window_ms_max: f64 = 10_000;
 
 /// Resolved profiler settings. `enabled` gates the whole subsystem;
-/// `hud` is the initial visibility of the on-screen overlay (Ctrl+Shift+P
-/// toggles it at runtime while `enabled`); `window_ms` is the stat
+/// `hud` is the initial visibility of the on-screen overlay
+/// (Ctrl+Alt+Shift+P toggles it at runtime while `enabled`); `window_ms` is the stat
 /// averaging window; `log_interval_ms` is the cadence of the periodic
 /// text summary to `std.log` (0 = never).
 pub const ProfileConfig = struct {

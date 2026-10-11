@@ -469,7 +469,7 @@ pub const App = struct {
         const cur = self.redrawSig(eng);
         defer self.redraw_prev = cur;
 
-        // Forced every-frame redraw (Ctrl+Shift+R) bypasses change
+        // Forced every-frame redraw (Ctrl+Alt+Shift+R) bypasses change
         // detection entirely -- for profiling steady-state draw cost.
         if (self.profiler.force_redraw) return true;
         // The HUD shows live numbers, so it repaints continuously while

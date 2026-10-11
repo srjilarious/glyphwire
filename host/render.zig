@@ -34,7 +34,7 @@ const preedit_bg = host_eng.Color.from(40, 44, 60, 255);
 const preedit_fg = host_eng.Color.from(235, 235, 240, 255);
 const preedit_underline_px = 2;
 
-// Profiler HUD overlay (Ctrl+Shift+P). A translucent plate top-right
+// Profiler HUD overlay (Ctrl+Alt+Shift+P). A translucent plate top-right
 // with one text line per timed phase / counter -- see `drawProfilerHud`.
 const hud_bg = host_eng.Color.from(12, 14, 20, 232);
 const hud_head = host_eng.Color.from(255, 220, 120, 255);
@@ -2163,10 +2163,11 @@ pub const Renderer = struct {
     }
 
     /// Paints the profiler overlay in the top-right corner while the HUD
-    /// is toggled on (Ctrl+Shift+P; only possible when `host.conf.lua` set
-    /// `profile`). Immediate-mode like the caret. Lines are formatted
-    /// first so the panel can be sized to the widest one (and clamped to
-    /// the window) -- monospace, so column count is exact. All numbers
+    /// is toggled on (Ctrl+Alt+Shift+P; only possible when
+    /// `host.conf.lua` set `profile`). Immediate-mode like the caret.
+    /// Lines are formatted first so the panel can be sized to the widest
+    /// one (and clamped to the window) -- monospace, so column count is
+    /// exact. All numbers
     /// are the profiler's windowed values, not lifetime.
     fn drawProfilerHud(self: *Renderer, eng: *Engine) void {
         if (!self.app.profiler.hud_visible) return;

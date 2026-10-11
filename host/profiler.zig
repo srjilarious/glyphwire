@@ -16,7 +16,7 @@
 //!  - `host/render.zig` times `sync_batches` and the whole `draw`, and
 //!    adds the `layers_rebuilt` / `draw_calls` / `quads` counters, then
 //!    paints the HUD when `hud_visible`.
-//!  - `host/input.zig` toggles `hud_visible` on Ctrl+Shift+P.
+//!  - `host/input.zig` toggles `hud_visible` on Ctrl+Alt+Shift+P.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -51,14 +51,14 @@ pub const HostProfiler = struct {
     core: Profiler,
     /// Whether the on-screen overlay is currently painted. Only ever true
     /// when `core.enabled`; `host.conf.lua`'s `profile_hud` seeds it and
-    /// Ctrl+Shift+P flips it.
+    /// Ctrl+Alt+Shift+P flips it.
     hud_visible: bool = false,
     /// When set, `App.needsRedraw` always returns true and
     /// `App.idleTimeoutMs` stops blocking, so the host repaints every
     /// frame the way it did before redraw-on-demand -- for measuring
     /// draw cost continuously and A/B-ing it against the idle path. Only
     /// ever true when `core.enabled`; `host.conf.lua`'s `profile_force_redraw`
-    /// seeds it and Ctrl+Shift+R flips it.
+    /// seeds it and Ctrl+Alt+Shift+R flips it.
     force_redraw: bool = false,
 
     pub fn init(io: std.Io, enabled: bool, hud: bool, force_redraw: bool, window_ms: f64, log_interval_ms: f64) HostProfiler {
