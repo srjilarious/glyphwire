@@ -122,6 +122,9 @@
 --     --   cursorEnd           end
 --     --   activate            enter, kp_enter
 --     --   upToParentDir       alt+up
+--     --   historyBack         alt+left  (the directory before, this pane)
+--     --   historyForward      alt+right
+--     --   showHistory         alt+down  (this pane's directories, to pick)
 --     --   editPath            alt+d   (edits the pane's path in place)
 --     --   switchPane          tab
 --     --   otherPaneToSameDir  alt+o
@@ -140,7 +143,8 @@
 --     --   copy                F5
 --     --   move                F6
 --     --   makeDir             F7
---     --   delete              F8, delete
+--     --   trash               F8, delete (to the desktop trash)
+--     --   delete              shift+F8, shift+delete (gone for good)
 --     --   newFile             shift+F4 (edits a file not created yet)
 --     --   fileOpsMenu         F1      (the menu below: chmod, chown)
 --     --   chmod               (none; in the F1 menu)
@@ -151,7 +155,7 @@
 --     --   sudoCopy            super+F5
 --     --   sudoMove            super+F6
 --     --   sudoMakeDir         super+F7
---     --   sudoDelete          super+F8, super+delete
+--     --   sudoDelete          super+F8, super+delete (never the trash)
 --     --   sudoChmod           (none; in the F1 menu)
 --     --   sudoChown           (none; in the F1 menu)
 --     --   sortByName          ctrl+F3

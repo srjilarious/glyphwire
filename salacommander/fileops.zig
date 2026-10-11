@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The file operations behind F2/F5/F6/F7/F8: rename, copy, move, make
-//! directory and delete, run synchronously over absolute paths.
+//! directory, move to the trash and delete, run synchronously over
+//! absolute paths.
 //!
 //! No UI lives here. Whatever needs a person -- "the target exists,
 //! overwrite it?", "this one failed, carry on?", "how far along are we?"
@@ -18,10 +19,15 @@
 
 const std = @import("std");
 const fsops = @import("applib").fsops;
+const trash_mod = @import("applib").trash;
 
 pub const Kind = enum {
     copy,
     move,
+    /// F8: to the freedesktop trash (`applib/trash.zig`), where the
+    /// desktop's trash can can restore it from.
+    trash,
+    /// Shift+F8: gone for good.
     delete,
     /// F1's attribute changes. They report through the same `Hooks`, but
     /// run as an `attrs.Operation`, never an `Operation` here.
@@ -33,6 +39,7 @@ pub const Kind = enum {
         return switch (self) {
             .copy => "Copy",
             .move => "Move",
+            .trash => "Trash",
             .delete => "Delete",
             .chmod => "Change mode",
             .chown => "Change owner",
@@ -52,6 +59,21 @@ pub const Conflict = enum {
     cancel,
 };
 
+/// What to do with an entry that can't go to the trash -- there's no
+/// trash on its filesystem we can use, or it's in a trash already.
+pub const NoTrash = enum {
+    /// Delete this one outright instead.
+    delete,
+    /// Leave it where it is.
+    skip,
+    /// Delete this one and every later one that can't be trashed.
+    delete_all,
+    /// Leave this one and every later one.
+    skip_all,
+    /// Stop the whole operation here.
+    cancel,
+};
+
 pub const Hooks = struct {
     ctx: *anyopaque,
     /// `dest` exists and `src` would replace it.
@@ -61,7 +83,15 @@ pub const Hooks = struct {
     /// `path` failed with `err`. Return true to carry on with the rest,
     /// false to stop.
     onError: *const fn (ctx: *anyopaque, path: []const u8, err: anyerror) bool,
+    /// `path` can't be moved to the trash, for the reason `err` gives
+    /// (`error.NoTrash`, `error.InTrash`). Only a `.trash` operation asks,
+    /// so callers that never run one can leave it skipping.
+    onNoTrash: *const fn (ctx: *anyopaque, path: []const u8, err: anyerror) NoTrash = skipNoTrash,
 };
+
+fn skipNoTrash(_: *anyopaque, _: []const u8, _: anyerror) NoTrash {
+    return .skip;
+}
 
 /// Hooks that never ask: conflicts are skipped, errors are skipped and
 /// counted, progress goes nowhere. For tests and for callers that want a
@@ -107,8 +137,11 @@ pub const Operation = struct {
     kind: Kind,
     /// Absolute paths. Borrowed.
     sources: []const []const u8,
-    /// Absolute path; ignored for `.delete`. Borrowed.
+    /// Absolute path; ignored for `.trash` and `.delete`. Borrowed.
     dest: []const u8 = "",
+    /// Which trash, and the date to file things under. Required for
+    /// `.trash`, ignored otherwise.
+    trash: ?trash_mod.Options = null,
 
     pub fn run(self: Operation, io: std.Io, alloc: std.mem.Allocator, hooks: Hooks) Result {
         var runner: Runner = .{ .io = io, .alloc = alloc, .hooks = hooks };
@@ -152,6 +185,7 @@ fn exists(io: std.Io, path: []const u8) bool {
 }
 
 const Policy = enum { ask, overwrite_all, skip_all };
+const NoTrashPolicy = enum { ask, delete_all, skip_all };
 
 const Runner = struct {
     io: std.Io,
@@ -159,6 +193,7 @@ const Runner = struct {
     hooks: Hooks,
     result: Result = .{},
     policy: Policy = .ask,
+    no_trash_policy: NoTrashPolicy = .ask,
 
     const Stop = error{Cancelled};
 
@@ -166,6 +201,7 @@ const Runner = struct {
         for (op.sources, 0..) |src, i| {
             self.hooks.onProgress(self.hooks.ctx, op.kind, i, op.sources.len, src);
             const outcome = switch (op.kind) {
+                .trash => self.trashOne(op.trash.?, src),
                 .delete => self.deleteOne(src),
                 .copy, .move => self.transferOne(op, src),
                 .chmod, .chown => unreachable,
@@ -189,6 +225,50 @@ const Runner = struct {
         self.result.done += 1;
     }
 
+    /// Moves `path` to the trash. One the trash can't take is put to
+    /// `onNoTrash` (or a standing answer to it) instead of failing, since
+    /// deleting it outright may be just what was wanted.
+    fn trashOne(self: *Runner, opts: trash_mod.Options, path: []const u8) Stop!void {
+        trash_mod.moveToTrash(self.io, self.alloc, path, opts) catch |err| switch (err) {
+            error.NoTrash, error.InTrash => {
+                if (!try self.resolveNoTrash(path, err)) return;
+                return self.deleteOne(path);
+            },
+            else => return self.fail(path, err),
+        };
+        self.result.done += 1;
+    }
+
+    /// Asks (or applies a standing answer) whether an entry the trash
+    /// can't take may be deleted outright. True means delete it.
+    fn resolveNoTrash(self: *Runner, path: []const u8, err: anyerror) Stop!bool {
+        switch (self.no_trash_policy) {
+            .delete_all => return true,
+            .skip_all => {
+                self.result.skipped += 1;
+                return false;
+            },
+            .ask => {},
+        }
+        switch (self.hooks.onNoTrash(self.hooks.ctx, path, err)) {
+            .delete => return true,
+            .delete_all => {
+                self.no_trash_policy = .delete_all;
+                return true;
+            },
+            .skip => {
+                self.result.skipped += 1;
+                return false;
+            },
+            .skip_all => {
+                self.no_trash_policy = .skip_all;
+                self.result.skipped += 1;
+                return false;
+            },
+            .cancel => return error.Cancelled,
+        }
+    }
+
     fn transferOne(self: *Runner, op: Operation, src: []const u8) Stop!void {
         const dest = targetPath(self.io, self.alloc, src, op.dest, op.sources.len) catch |err| return self.fail(src, err);
         defer self.alloc.free(dest);
@@ -199,7 +279,7 @@ const Runner = struct {
         switch (op.kind) {
             .copy => try self.copyTree(src, dest),
             .move => try self.moveTree(src, dest),
-            .delete, .chmod, .chown => unreachable,
+            .trash, .delete, .chmod, .chown => unreachable,
         }
     }
 

@@ -22,8 +22,9 @@
 //! edge or floating in the middle (`shell_position`; see
 //! `applib/shellpanel.zig`) -- then F3's finder popup, the same
 //! framed popup as zoe's Ctrl+P (`applib/finderpopup.zig`), the
-//! Ctrl+Shift+P command palette (`applib/palette.zig`, zoe's too), and
-//! the modal dialog layer on top.
+//! Ctrl+Shift+P command palette (`applib/palette.zig`, zoe's too),
+//! Alt+Down's directory history (the palette's list over the active
+//! pane, see `dirhistory.zig`), and the modal dialog layer on top.
 //!
 //! A server-side `Table` would sort and paint for us, but it paints every
 //! row and scrolls its layer the way terminal output does; a file pane
@@ -75,6 +76,7 @@ const filetype = @import("applib").filetype;
 const finder_mod = @import("applib").finder;
 const finderpopup = @import("applib").finderpopup;
 const palette_mod = @import("applib").palette;
+const trash_mod = @import("applib").trash;
 const Finder = finder_mod.Finder;
 
 const Pane = pane_mod.Pane;
@@ -149,6 +151,16 @@ const finder_style: finderpopup.Style = .{
     .empty_text = "Nothing matches",
     .max_cols = 100,
     .max_rows = 20,
+};
+
+/// Alt+Down's directory history: the palette's list widget, dropped
+/// over the active pane, as wide as the finder may be since what it
+/// lists is paths.
+const history_style: palette_mod.Style = blk: {
+    var s = palette_style;
+    s.empty_text = "No other directories this session";
+    s.max_cols = finder_style.max_cols;
+    break :blk s;
 };
 
 /// The Ctrl+Shift+P command palette (`applib/palette.zig`): the finder's
@@ -327,6 +339,9 @@ pub const Ui = struct {
     finder: finderpopup.Popup,
     /// Ctrl+Shift+P: the command palette. Modal while open, like F3's.
     palette: palette_mod.Popup,
+    /// Alt+Down: the active pane's directory history, in the palette's
+    /// list widget (each row a path rather than a command). Modal too.
+    history_popup: palette_mod.Popup,
     /// The theme this context resolves against, for the popups' frames
     /// (`finder.chrome.style.frame_style` borrows its name).
     th: glyphwire.theme.Stored,
@@ -459,6 +474,10 @@ pub const Ui = struct {
         palette_init_style.frame_style = self.th.panelStyle();
         var palette = try palette_mod.Popup.init(alloc, client, palette_init_style);
         errdefer palette.deinit();
+        var history_init_style = history_style;
+        history_init_style.frame_style = self.th.panelStyle();
+        var history_popup = try palette_mod.Popup.init(alloc, client, history_init_style);
+        errdefer history_popup.deinit();
         // The drag card rides over the panes; sized and filled per drag.
         const drag_layer = try client.createLayer(10, 1, 0);
         // Created last so it composites over everything else, the panel
@@ -511,6 +530,7 @@ pub const Ui = struct {
             .drag_layer = drag_layer,
             .finder = finder,
             .palette = palette,
+            .history_popup = history_popup,
             .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layers),
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
@@ -556,6 +576,7 @@ pub const Ui = struct {
         if (self.drag) |d| alloc.free(d.sources);
         self.finder.deinit();
         self.palette.deinit();
+        self.history_popup.deinit();
         for (&self.panes) |*p| p.deinit();
         self.keymap.deinit(alloc);
         self.menu_keymap.deinit(alloc);
@@ -603,7 +624,7 @@ pub const Ui = struct {
             .layer_resize => |lr| _ = self.shell.handleLayerResize(lr, .{ .cols = self.win.cols, .rows = self.win.rows }),
             .scroll_offset => |so| {
                 // A wheel or thumb drag over a popup's list.
-                if (self.finder.scrolled(so) or self.palette.scrolled(so)) return;
+                if (self.finder.scrolled(so) or self.palette.scrolled(so) or self.history_popup.scrolled(so)) return;
                 for (self.pane_layers, 0..) |l, i| {
                     if (so.layer != l) continue;
                     self.clearFind();
@@ -645,6 +666,8 @@ pub const Ui = struct {
             // a line editor, and this one has type-to-find.
             .text, .paste => |t| if (self.drag != null or self.shell.isOpen()) {} else if (self.palette.isOpen()) {
                 try self.palette.text(t.text);
+            } else if (self.history_popup.isOpen()) {
+                try self.history_popup.text(t.text);
             } else if (self.finder.isOpen()) {
                 try self.finder.text(t.text);
             } else if (self.path_edit) |*e| {
@@ -675,6 +698,9 @@ pub const Ui = struct {
         var pstyle = palette_style;
         pstyle.frame_style = self.th.panelStyle();
         try self.palette.setStyle(pstyle);
+        var hstyle = history_style;
+        hstyle.frame_style = self.th.panelStyle();
+        try self.history_popup.setStyle(hstyle);
         self.shell.setFrameStyle(self.th.panelStyle());
     }
 
@@ -711,6 +737,7 @@ pub const Ui = struct {
         self.bar_dirty = true;
         if (self.finder.isOpen()) self.finder.dirty = true;
         if (self.palette.isOpen()) self.palette.dirty = true;
+        if (self.history_popup.isOpen()) self.history_popup.dirty = true;
     }
 
     /// Follows the held modifiers from a key event. A modifier key's own
@@ -748,6 +775,7 @@ pub const Ui = struct {
 
         self.clearMessage();
         if (self.palette.isOpen()) return self.paletteKey(k);
+        if (self.history_popup.isOpen()) return self.historyKey(k);
         if (self.finder.isOpen()) return self.finderKey(k);
         if (self.path_edit != null) return self.pathEditKey(k);
         if (self.name_edit != null) return self.nameEditKey(k);
@@ -841,6 +869,21 @@ pub const Ui = struct {
             .upToParentDir => {
                 _ = p.upToParentDir() catch |err| try self.setMessage("can't go up: {t}", .{err});
             },
+            .historyBack => {
+                const moved = p.back() catch |err| blk: {
+                    try self.setMessage("can't go back: {t}", .{err});
+                    break :blk true;
+                };
+                if (!moved) try self.setMessage("nothing further back", .{});
+            },
+            .historyForward => {
+                const moved = p.forward() catch |err| blk: {
+                    try self.setMessage("can't go forward: {t}", .{err});
+                    break :blk true;
+                };
+                if (!moved) try self.setMessage("nothing further forward", .{});
+            },
+            .showHistory => try self.openHistory(),
             .editPath => try self.beginPathEdit(),
             .switchPane => {
                 self.active = 1 - i;
@@ -872,6 +915,7 @@ pub const Ui = struct {
             .copy => try self.transfer(.copy, false),
             .move => try self.transfer(.move, false),
             .makeDir => try self.makeDir(false),
+            .trash => try self.trashSelection(),
             .delete => try self.deleteSelection(false),
             .newFile => try self.newFile(false),
             .fileOpsMenu => try self.fileOpsMenu(),
@@ -935,7 +979,7 @@ pub const Ui = struct {
             // Opening a popup leaves the pane behind it alone; picking
             // a result marks the pane itself (`acceptFinder`), and a
             // palette pick goes back through here.
-            .find, .commandPalette => .none,
+            .find, .commandPalette, .showHistory => .none,
             else => .full,
         };
     }
@@ -1297,6 +1341,69 @@ pub const Ui = struct {
         sent.deinit();
     }
 
+    // ── Directory history ───────────────────────────────────────────────
+
+    /// Alt+Down: every directory the active pane has shown this session,
+    /// newest first, leaving out the one it shows now -- so the top row
+    /// is where Alt+Left would go. Typing filters it the way the palette
+    /// filters commands, on the path as shown (`~/...`) or in full.
+    fn openHistory(self: *Ui) !void {
+        self.endPathEdit();
+        self.endNameEdit();
+        self.clearFind();
+        if (self.finder.isOpen()) self.finder.close();
+        const p = &self.panes[self.active];
+        var list = palette_mod.List.init(self.alloc);
+        errdefer list.deinit();
+        // A row's id is its index in `recent`, which can't change while
+        // the popup is up: it's modal, so the pane can't move.
+        for (p.history.recent.items, 0..) |path, idx| {
+            if (std.mem.eql(u8, path, p.path)) continue;
+            var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+            try list.add(@intCast(idx), path, self.displayPath(&buf, path, 0), null);
+        }
+        // The palette puts what was picked from it lately first; a
+        // history is already in that order, and its ids are positions
+        // that shift between opens, so it starts every open with none.
+        self.history_popup.recent = .{};
+        try self.history_popup.open(list);
+    }
+
+    /// Enter or a click on a row: the pane goes there, as a visit of its
+    /// own (so Alt+Left comes back from it).
+    fn acceptHistory(self: *Ui) !void {
+        const idx = self.history_popup.selected() orelse return self.history_popup.close();
+        self.history_popup.close();
+        const i = self.active;
+        const p = &self.panes[i];
+        // `load` reorders `recent`, so the path can't be borrowed from it.
+        const path = try self.alloc.dupe(u8, p.history.recent.items[idx]);
+        defer self.alloc.free(path);
+        p.load(path) catch |err| try self.setMessage("{s}: {t}", .{ path, err });
+        self.markDirty(i, .full);
+        self.bar_dirty = true;
+        self.shell.setCwd(p.path);
+    }
+
+    /// A keystroke while the history is open. Alt+Down again closes it;
+    /// everything else is the list's.
+    fn historyKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        const toggles = if (self.keymap.lookup(k.key, k.mods)) |a| a == .showHistory else false;
+        if (toggles) return self.history_popup.close();
+        if (try self.history_popup.key(k) == .accept) try self.acceptHistory();
+    }
+
+    /// Dropped from the top of the active pane, the way a path box's
+    /// dropdown hangs under it.
+    fn renderHistory(self: *Ui) !void {
+        var b = self.client.batch();
+        defer b.deinit();
+        const i = self.active;
+        try self.history_popup.render(&b, .{ .row = 0, .col = self.paneCol(i), .cols = self.paneWidth(i), .rows = self.paneHeight() });
+        var sent = try b.send();
+        sent.deinit();
+    }
+
     // ── Editing a pane's path ───────────────────────────────────────────
 
     /// Alt+D: turn the active pane's title row into a text field holding
@@ -1479,6 +1586,10 @@ pub const Ui = struct {
         // or dismisses it, and never reaches a pane behind it.
         if (self.palette.isOpen()) {
             if (std.mem.eql(u8, m.button, "left") and self.palette.click(m.cell) == .accept) try self.acceptPalette();
+            return;
+        }
+        if (self.history_popup.isOpen()) {
+            if (std.mem.eql(u8, m.button, "left") and self.history_popup.click(m.cell) == .accept) try self.acceptHistory();
             return;
         }
         if (self.finder.isOpen()) {
@@ -1881,8 +1992,43 @@ pub const Ui = struct {
         try self.reportResult(kind, result);
     }
 
-    /// F8: delete the selection after a yes/no. The default button is No,
-    /// so a stray Enter doesn't delete anything. `as_root` is Super+F8.
+    /// F8: move the selection to the trash after a yes/no. Yes is the
+    /// default, since the trash gives it back. Anything the trash can't
+    /// take is put to `hookNoTrash`.
+    fn trashSelection(self: *Ui) !void {
+        const p = &self.panes[self.active];
+        const sel = try p.selection(self.alloc);
+        defer self.alloc.free(sel);
+        if (sel.len == 0) return;
+
+        const what = try describeSelection(self.alloc, sel);
+        defer self.alloc.free(what);
+        const prompt = try std.fmt.allocPrint(self.alloc, "Move {s} to the trash?", .{what});
+        defer self.alloc.free(prompt);
+
+        var d = try Dialog.init(self.alloc, "Trash", prompt, &dialog_mod.yes_no, .{});
+        defer d.deinit(self.alloc);
+        if (try self.runDialog(&d) != .yes) return;
+
+        const xdg = if (self.environ) |env| env.get("XDG_DATA_HOME") else null;
+        const home_trash = try trash_mod.homeTrashPath(self.alloc, xdg, self.home);
+        defer if (home_trash) |h| self.alloc.free(h);
+        const now = std.Io.Clock.real.now(self.io).toSeconds();
+        var date_buf: [32]u8 = undefined;
+        const opts: trash_mod.Options = .{
+            .home_trash = home_trash,
+            .deletion_date = trash_mod.formatDeletionDate(&date_buf, now, trash_mod.localUtcOffset(now)),
+            .uid = trash_mod.currentUid(),
+        };
+
+        const result = self.runOperation(.{ .kind = .trash, .sources = sel, .trash = opts });
+        try self.reloadBoth();
+        try self.reportResult(.trash, result);
+    }
+
+    /// Shift+F8: delete the selection outright after a yes/no. The
+    /// default button is No, so a stray Enter doesn't delete anything.
+    /// `as_root` is Super+F8, which never goes through the trash.
     fn deleteSelection(self: *Ui, as_root: bool) !void {
         const p = &self.panes[self.active];
         const sel = try p.selection(self.alloc);
@@ -2051,6 +2197,7 @@ pub const Ui = struct {
             .onConflict = hookConflict,
             .onProgress = hookProgress,
             .onError = hookError,
+            .onNoTrash = hookNoTrash,
         };
     }
 
@@ -2156,10 +2303,29 @@ pub const Ui = struct {
         return b == .@"continue";
     }
 
+    /// An entry the trash can't take: delete it outright instead? Skip is
+    /// the focused answer, as No is for Shift+F8.
+    fn hookNoTrash(ctx: *anyopaque, path: []const u8, err: anyerror) fileops.NoTrash {
+        const self: *Ui = @ptrCast(@alignCast(ctx));
+        const msg = std.fmt.allocPrint(self.alloc, "Can't move to the trash:\n{s}\n\n{s}\n\nDelete it permanently?", .{ path, errorText(err) }) catch return .cancel;
+        defer self.alloc.free(msg);
+        var d = Dialog.init(self.alloc, "No trash", msg, &dialog_mod.no_trash_buttons, .{ .danger = true, .focus = dialog_mod.no_trash_skip }) catch return .cancel;
+        defer d.deinit(self.alloc);
+        const b = self.runDialog(&d) catch return .cancel;
+        return switch (b) {
+            .delete => .delete,
+            .skip => .skip,
+            .delete_all => .delete_all,
+            .skip_all => .skip_all,
+            else => .cancel,
+        };
+    }
+
     fn reportResult(self: *Ui, kind: fileops.Kind, r: fileops.Result) !void {
         const verb = switch (kind) {
             .copy => "copied",
             .move => "moved",
+            .trash => "trashed",
             .delete => "deleted",
             .chmod => "changed the mode of",
             .chown => "changed the owner of",
@@ -2651,6 +2817,7 @@ pub const Ui = struct {
         if (self.bar_dirty) try self.renderBar();
         if (self.finder.dirty) try self.renderFinder();
         if (self.palette.dirty) try self.renderPalette();
+        if (self.history_popup.dirty) try self.renderHistory();
     }
 
     /// The cheap repaint, for a move that left the listing itself alone:
@@ -3297,6 +3464,8 @@ fn errorText(err: anyerror) []const u8 {
         error.NoSpaceLeft => "no space left on device",
         error.ReadOnlyFileSystem => "read-only file system",
         error.DirNotEmpty => "directory not empty",
+        error.NoTrash => "no trash on its filesystem could be used",
+        error.InTrash => "it's in the trash already",
         else => @errorName(err),
     };
 }

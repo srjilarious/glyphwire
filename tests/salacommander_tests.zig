@@ -553,6 +553,272 @@ pub fn deleteRemovesTreesTest(io: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectFalse(s.exists("lone.txt"));
 }
 
+// ─── Trash ──────────────────────────────────────────────────────────────
+
+const trash = @import("applib").trash;
+
+fn trashOptions(home_trash: ?[]const u8) trash.Options {
+    return .{ .home_trash = home_trash, .deletion_date = "2026-10-11T09:30:00", .uid = trash.currentUid() };
+}
+
+pub fn trashMovesIntoHomeTrashWithInfoTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "trashhome");
+    defer s.deinit();
+    try s.mkdir("work/sub");
+    try s.file("work/sub/a b%.txt", "alpha");
+    const home_trash = try s.abs("Trash");
+    defer alloc.free(home_trash);
+    const victim = try s.abs("work/sub/a b%.txt");
+    defer alloc.free(victim);
+
+    // The trash doesn't exist yet: it's made on demand, files/ and info/.
+    try trash.moveToTrash(io, alloc, victim, trashOptions(home_trash));
+    try testz.expectFalse(s.exists("work/sub/a b%.txt"));
+    const got = try s.read("Trash/files/a b%.txt");
+    defer alloc.free(got);
+    try testz.expectEqualStr(got, "alpha");
+
+    // The home trash records the absolute path, URL-escaped.
+    const info = try s.read("Trash/info/a b%.txt.trashinfo");
+    defer alloc.free(info);
+    const escaped = try trash.escapePath(alloc, victim);
+    defer alloc.free(escaped);
+    const want = try std.fmt.allocPrint(alloc, "[Trash Info]\nPath={s}\nDeletionDate=2026-10-11T09:30:00\n", .{escaped});
+    defer alloc.free(want);
+    try testz.expectEqualStr(info, want);
+    try testz.expectTrue(std.mem.indexOf(u8, info, "a%20b%25.txt") != null);
+}
+
+pub fn trashSameNameTwiceGetsNumberedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "trashtwice");
+    defer s.deinit();
+    try s.mkdir("one");
+    try s.mkdir("two");
+    try s.file("one/notes.md", "first");
+    try s.file("two/notes.md", "second");
+    try s.mkdir("tree/deep");
+    const home_trash = try s.abs("Trash");
+    defer alloc.free(home_trash);
+    const first = try s.abs("one/notes.md");
+    defer alloc.free(first);
+    const second = try s.abs("two/notes.md");
+    defer alloc.free(second);
+    const tree = try s.abs("tree");
+    defer alloc.free(tree);
+
+    const r = (fileops.Operation{ .kind = .trash, .sources = &.{ first, second, tree }, .trash = trashOptions(home_trash) }).run(io, alloc, fileops.quiet_hooks);
+    try testz.expectEqual(r.done, 3);
+    try testz.expectEqual(r.failed, 0);
+    const a = try s.read("Trash/files/notes.md");
+    defer alloc.free(a);
+    try testz.expectEqualStr(a, "first");
+    // The second keeps its extension behind the number.
+    const b = try s.read("Trash/files/notes.2.md");
+    defer alloc.free(b);
+    try testz.expectEqualStr(b, "second");
+    try testz.expectTrue(s.exists("Trash/info/notes.2.md.trashinfo"));
+    // A directory goes in whole.
+    try testz.expectTrue(s.exists("Trash/files/tree/deep"));
+}
+
+/// Hooks that answer "can't trash" with `answer` and count the calls.
+const NoTrashScript = struct {
+    answer: fileops.NoTrash,
+    asked: usize = 0,
+    last_err: ?anyerror = null,
+
+    fn hooks(self: *NoTrashScript) fileops.Hooks {
+        var h = fileops.quiet_hooks;
+        h.ctx = self;
+        h.onNoTrash = onNoTrash;
+        return h;
+    }
+    fn onNoTrash(ctx: *anyopaque, _: []const u8, err: anyerror) fileops.NoTrash {
+        const self: *NoTrashScript = @ptrCast(@alignCast(ctx));
+        self.asked += 1;
+        self.last_err = err;
+        return self.answer;
+    }
+};
+
+pub fn trashInsideTrashOffersDeleteTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "trashintrash");
+    defer s.deinit();
+    try s.mkdir("Trash/files");
+    try s.mkdir("Trash/info");
+    try s.file("Trash/files/old.txt", "");
+    try s.file("Trash/files/older.txt", "");
+    const home_trash = try s.abs("Trash");
+    defer alloc.free(home_trash);
+    const old = try s.abs("Trash/files/old.txt");
+    defer alloc.free(old);
+    const older = try s.abs("Trash/files/older.txt");
+    defer alloc.free(older);
+
+    // Skip leaves it be.
+    var skip: NoTrashScript = .{ .answer = .skip };
+    const r1 = (fileops.Operation{ .kind = .trash, .sources = &.{old}, .trash = trashOptions(home_trash) }).run(io, alloc, skip.hooks());
+    try testz.expectEqual(skip.asked, 1);
+    try testz.expectTrue(skip.last_err.? == error.InTrash);
+    try testz.expectEqual(r1.skipped, 1);
+    try testz.expectTrue(s.exists("Trash/files/old.txt"));
+
+    // "All" deletes this one and the next without asking again.
+    var all: NoTrashScript = .{ .answer = .delete_all };
+    const r2 = (fileops.Operation{ .kind = .trash, .sources = &.{ old, older }, .trash = trashOptions(home_trash) }).run(io, alloc, all.hooks());
+    try testz.expectEqual(all.asked, 1);
+    try testz.expectEqual(r2.done, 2);
+    try testz.expectFalse(s.exists("Trash/files/old.txt"));
+    try testz.expectFalse(s.exists("Trash/files/older.txt"));
+}
+
+pub fn trashTopdirPrefersStickySharedTrashTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "trashtop");
+    defer s.deinit();
+    const uid = trash.currentUid();
+
+    // No `.Trash`: `.Trash-$uid`, made with files/ and info/.
+    const own = try trash.topdirTrash(io, alloc, s.path, uid);
+    defer alloc.free(own);
+    const own_want = try std.fmt.allocPrint(alloc, "{s}/.Trash-{d}", .{ s.path, uid });
+    defer alloc.free(own_want);
+    try testz.expectEqualStr(own, own_want);
+    const own_files = try std.fmt.allocPrint(alloc, ".Trash-{d}/files", .{uid});
+    defer alloc.free(own_files);
+    try testz.expectTrue(s.exists(own_files));
+
+    // A `.Trash` without the sticky bit is passed over...
+    try s.mkdir(".Trash");
+    const still_own = try trash.topdirTrash(io, alloc, s.path, uid);
+    defer alloc.free(still_own);
+    try testz.expectEqualStr(still_own, own_want);
+
+    // ...and with it, `$uid` inside it is used.
+    const shared = try s.abs(".Trash");
+    defer alloc.free(shared);
+    try std.Io.Dir.cwd().setFilePermissions(io, shared, .fromMode(0o1777), .{});
+    const in_shared = try trash.topdirTrash(io, alloc, s.path, uid);
+    defer alloc.free(in_shared);
+    const shared_want = try std.fmt.allocPrint(alloc, "{s}/.Trash/{d}", .{ s.path, uid });
+    defer alloc.free(shared_want);
+    try testz.expectEqualStr(in_shared, shared_want);
+}
+
+pub fn trashTextHelpersTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf: [64]u8 = undefined;
+    // 2026-10-11 12:34:56 UTC, shown two hours east.
+    try testz.expectEqualStr(trash.formatDeletionDate(&buf, 1_791_722_096, 2 * 3600), "2026-10-11T14:34:56");
+    try testz.expectEqualStr(trash.candidateName(&buf, "a.tar.gz", 1).?, "a.tar.gz");
+    try testz.expectEqualStr(trash.candidateName(&buf, "a.tar.gz", 3).?, "a.tar.3.gz");
+    try testz.expectEqualStr(trash.candidateName(&buf, "Makefile", 2).?, "Makefile.2");
+    const e = try trash.escapePath(alloc, "/home/me/ä b/(x)~");
+    defer alloc.free(e);
+    try testz.expectEqualStr(e, "/home/me/%C3%A4%20b/(x)~");
+
+    const p1 = (try trash.homeTrashPath(alloc, "/x/data", "/home/me")).?;
+    defer alloc.free(p1);
+    try testz.expectEqualStr(p1, "/x/data/Trash");
+    const p2 = (try trash.homeTrashPath(alloc, "", "/home/me")).?;
+    defer alloc.free(p2);
+    try testz.expectEqualStr(p2, "/home/me/.local/share/Trash");
+    try testz.expectTrue((try trash.homeTrashPath(alloc, null, null)) == null);
+}
+
+// ─── Directory history ──────────────────────────────────────────────────
+
+pub fn paneBackForwardRestoresCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "histback");
+    defer s.deinit();
+    try s.mkdir("a/inner");
+    try s.mkdir("b");
+    try s.file("a/x.txt", "");
+    try s.file("a/y.txt", "");
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    try testz.expectFalse(try p.back());
+
+    const a = try s.abs("a");
+    defer alloc.free(a);
+    const b = try s.abs("b");
+    defer alloc.free(b);
+    try p.load(a);
+    p.setCursor(p.rowOf("y.txt").?);
+    try p.load(b);
+
+    // Back to `a`, on the entry it was left on.
+    try testz.expectTrue(try p.back());
+    try testz.expectEqualStr(p.path, a);
+    try testz.expectEqualStr(p.current().?.name, "y.txt");
+    try testz.expectTrue(try p.back());
+    try testz.expectEqualStr(p.path, s.path);
+    try testz.expectFalse(try p.back());
+
+    try testz.expectTrue(try p.forward());
+    try testz.expectTrue(try p.forward());
+    try testz.expectEqualStr(p.path, b);
+    try testz.expectFalse(try p.forward());
+
+    // Going somewhere new from the middle drops what was ahead.
+    try testz.expectTrue(try p.back());
+    const inner = try s.abs("a/inner");
+    defer alloc.free(inner);
+    try p.load(inner);
+    try testz.expectFalse(try p.forward());
+    try testz.expectTrue(try p.back());
+    try testz.expectEqualStr(p.path, a);
+}
+
+pub fn paneHistoryRecentIsNewestFirstWithoutRepeatsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "histrecent");
+    defer s.deinit();
+    try s.mkdir("a");
+    try s.mkdir("b");
+    const a = try s.abs("a");
+    defer alloc.free(a);
+    const b = try s.abs("b");
+    defer alloc.free(b);
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    try p.load(a);
+    try p.load(b);
+    try p.load(a);
+    // Loading where it already is changes nothing on the trail.
+    try p.load(a);
+
+    const recent = p.history.recent.items;
+    try testz.expectEqual(recent.len, 3);
+    try testz.expectEqualStr(recent[0], a);
+    try testz.expectEqualStr(recent[1], b);
+    try testz.expectEqualStr(recent[2], s.path);
+    try testz.expectEqual(p.history.trail.items.len, 4);
+
+    // Back counts as a visit for the list, without growing the trail.
+    try testz.expectTrue(try p.back());
+    try testz.expectEqualStr(p.history.recent.items[0], b);
+    try testz.expectEqual(p.history.trail.items.len, 4);
+}
+
+pub fn paneBackToVanishedDirStaysPutTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "histgone");
+    defer s.deinit();
+    try s.mkdir("gone");
+    try s.mkdir("here");
+    const gone = try s.abs("gone");
+    defer alloc.free(gone);
+    const here = try s.abs("here");
+    defer alloc.free(here);
+
+    var p = try Pane.init(alloc, io, gone, .{});
+    defer p.deinit();
+    try p.load(here);
+    try s.dir.deleteTree(io, "gone");
+    if (p.back()) |_| return error.BackShouldHaveFailed else |_| {}
+    try testz.expectEqualStr(p.path, here);
+    try testz.expectEqualStr(p.history.current().?.path, here);
+}
+
 pub fn makeDirCreatesParentsAndRefusesExistingTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var s = try Scratch.init(io, alloc, "mkdir");
     defer s.deinit();
@@ -774,7 +1040,15 @@ pub fn defaultBindingsCoverTheBasicsTest(_: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(km.lookup("F4", .{}).?, actions.Action.edit);
     try testz.expectEqual(km.lookup("F5", .{}).?, actions.Action.copy);
     try testz.expectEqual(km.lookup("F6", .{}).?, actions.Action.move);
-    try testz.expectEqual(km.lookup("F8", .{}).?, actions.Action.delete);
+    // F8 and Delete trash; Shift is gone for good, Super gone as root.
+    try testz.expectEqual(km.lookup("F8", .{}).?, actions.Action.trash);
+    try testz.expectEqual(km.lookup("delete", .{}).?, actions.Action.trash);
+    try testz.expectEqual(km.lookup("F8", .{ .shift = true }).?, actions.Action.delete);
+    try testz.expectEqual(km.lookup("delete", .{ .shift = true }).?, actions.Action.delete);
+    try testz.expectEqual(km.lookup("F8", .{ .super = true }).?, actions.Action.sudoDelete);
+    try testz.expectEqual(km.lookup("left", .{ .alt = true }).?, actions.Action.historyBack);
+    try testz.expectEqual(km.lookup("right", .{ .alt = true }).?, actions.Action.historyForward);
+    try testz.expectEqual(km.lookup("down", .{ .alt = true }).?, actions.Action.showHistory);
     try testz.expectEqual(km.lookup("space", .{}).?, actions.Action.toggleMark);
     try testz.expectEqual(km.lookup("insert", .{}).?, actions.Action.toggleMarkAndDown);
     try testz.expectEqual(km.lookup("d", .{ .alt = true }).?, actions.Action.editPath);

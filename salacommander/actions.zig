@@ -27,6 +27,14 @@ pub const Action = enum {
     /// desktop's opener.
     activate,
     upToParentDir,
+    /// Back and forward through the directories this pane has shown,
+    /// the way a browser's buttons go; Back puts the cursor on the entry
+    /// it was on (see `dirhistory.zig`).
+    historyBack,
+    historyForward,
+    /// A list of the directories this pane has been in this session,
+    /// most recent first, to filter by typing and pick one from.
+    showHistory,
     /// Turn the active pane's title row into a text field holding its
     /// directory: Enter goes there, Escape puts the title back. Clicking
     /// a title row does the same without a key.
@@ -64,6 +72,11 @@ pub const Action = enum {
     copy,
     move,
     makeDir,
+    /// Move the selection to the desktop trash (the freedesktop.org one
+    /// the file manager's trash can shows), after a yes/no that defaults
+    /// to yes. What can't go there is offered for `delete` instead.
+    trash,
+    /// Delete the selection outright, after a yes/no that defaults to no.
     delete,
     /// Name a file that doesn't exist yet and open it in the `editor`
     /// (Midnight Commander's Shift+F4). Nothing is created until the
@@ -127,6 +140,9 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "enter", .action = .activate },
     .{ .chord = "kp_enter", .action = .activate },
     .{ .chord = "alt+up", .action = .upToParentDir },
+    .{ .chord = "alt+left", .action = .historyBack },
+    .{ .chord = "alt+right", .action = .historyForward },
+    .{ .chord = "alt+down", .action = .showHistory },
     .{ .chord = "alt+d", .action = .editPath },
     .{ .chord = "tab", .action = .switchPane },
     .{ .chord = "alt+o", .action = .otherPaneToSameDir },
@@ -150,8 +166,12 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "F5", .action = .copy },
     .{ .chord = "F6", .action = .move },
     .{ .chord = "F7", .action = .makeDir },
-    .{ .chord = "F8", .action = .delete },
-    .{ .chord = "delete", .action = .delete },
+    // The trash by default, Shift for gone-for-good: the desktop's own
+    // Delete / Shift+Delete.
+    .{ .chord = "F8", .action = .trash },
+    .{ .chord = "delete", .action = .trash },
+    .{ .chord = "shift+F8", .action = .delete },
+    .{ .chord = "shift+delete", .action = .delete },
     .{ .chord = "shift+F4", .action = .newFile },
 
     // Super is "as root": the same function keys, through sudo.
@@ -205,6 +225,7 @@ pub fn barLabel(action: Action) []const u8 {
         .copy, .sudoCopy => "Copy",
         .move, .sudoMove => "RenMov",
         .makeDir, .sudoMakeDir => "Mkdir",
+        .trash => "Trash",
         .delete, .sudoDelete => "Delete",
         .chmod, .sudoChmod => "Chmod",
         .chown, .sudoChown => "Chown",
@@ -213,6 +234,9 @@ pub fn barLabel(action: Action) []const u8 {
         .sortBySize => "Size",
         .sortByTime => "Time",
         .upToParentDir => "Up",
+        .historyBack => "Back",
+        .historyForward => "Fwd",
+        .showHistory => "Hist",
         .editPath => "Path",
         .switchPane => "Other",
         .otherPaneToSameDir => "Same",
@@ -267,11 +291,16 @@ pub fn paletteLabel(action: Action) ?[]const u8 {
         .rightPaneToSameDir => "Right Pane to Same Directory",
         .leftPaneToSameDir => "Left Pane to Same Directory",
         .upToParentDir => "Up to Parent Directory",
+        .historyBack => "Back to Previous Directory",
+        .historyForward => "Forward to Next Directory",
+        .showHistory => "Directory History",
         .editPath => "Edit Path",
         .find => "Find Below This Directory",
         .copy => "Copy to Other Pane",
         .move => "Move to Other Pane",
         .makeDir => "Make Directory",
+        .trash => "Move to Trash",
+        .delete => "Delete Permanently",
         .fileOpsMenu => "File Operations Menu",
         .chmod => "Change Mode",
         .chown => "Change Owner/Group",
@@ -281,7 +310,7 @@ pub fn paletteLabel(action: Action) ?[]const u8 {
         .sudoCopy => "Copy to Other Pane as Root",
         .sudoMove => "Move to Other Pane as Root",
         .sudoMakeDir => "Make Directory as Root",
-        .sudoDelete => "Delete as Root",
+        .sudoDelete => "Delete Permanently as Root",
         .sudoChmod => "Change Mode as Root",
         .sudoChown => "Change Owner/Group as Root",
         .toggleShell => "Toggle Shell Panel",
@@ -308,7 +337,7 @@ pub fn isRoot(action: Action) bool {
 /// The actions the function-key bar shows, in order, when no modifier
 /// is held. With one held it shows whatever each F-key is bound to
 /// under it instead (`Ui.renderBar`).
-pub const bar_actions = [_]Action{ .fileOpsMenu, .rename, .find, .edit, .copy, .move, .makeDir, .delete, .toggleView, .toggleHidden, .refresh, .quit };
+pub const bar_actions = [_]Action{ .fileOpsMenu, .rename, .find, .edit, .copy, .move, .makeDir, .trash, .toggleView, .toggleHidden, .refresh, .quit };
 
 /// What a pick in the F1 menu means: an entry's unmodified chord key
 /// pressed again with `held`, looked up in the menu keymap, else the

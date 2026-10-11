@@ -32,6 +32,9 @@
 //!                Tab, zoe's `:` line)
 //!   `fsops`      make a directory / file, rename in place
 //!                (salacommander, zoe's sidebar)
+//!   `trash`      the freedesktop.org trash: move an entry to it
+//!                (salacommander's F8; here so zoe's sidebar can offer
+//!                the same when it grows a delete)
 //!   `homepath`   `~` <-> `$HOME` (gw-shell, zoe), and a typed path
 //!                made absolute (gw-ls, gw-grep, gw-read, gwmd,
 //!                salacommander, zoe)
@@ -101,6 +104,7 @@ pub const splittree = @import("splittree.zig");
 pub const walk = @import("walk.zig");
 pub const listcursor = @import("listcursor");
 pub const fsops = @import("fsops.zig");
+pub const trash = @import("trash.zig");
 pub const pathcomplete = @import("pathcomplete.zig");
 pub const syntax = @import("syntax.zig");
 pub const theme = @import("glyphwire").theme;

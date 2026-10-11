@@ -4,6 +4,7 @@
 //! `salacommander_support`: panes, fileops, UI. See CONTRIBUTING.md.
 
 pub const pane = @import("pane.zig");
+pub const dirhistory = @import("dirhistory.zig");
 pub const fileops = @import("fileops.zig");
 pub const dialog = @import("dialog.zig");
 pub const actions = @import("actions.zig");

@@ -17,12 +17,17 @@
 //! Insert toggles it and steps down. An operation acts on the marked
 //! entries, or on the cursor's entry when nothing is marked
 //! (`selection`).
+//!
+//! Each pane keeps its own `DirHistory` (`dirhistory.zig`): every
+//! directory change comes through `load`, which records it, and
+//! `back`/`forward` walk it without recording.
 
 const std = @import("std");
 
 const lsentries = @import("applib").entries;
 const homepath = @import("applib").homepath;
 const ListCursor = @import("applib").listcursor.ListCursor;
+const DirHistory = @import("dirhistory.zig").DirHistory;
 pub const FileEntry = lsentries.FileEntry;
 pub const EntryKind = lsentries.EntryKind;
 
@@ -104,6 +109,8 @@ pub const Pane = struct {
     view: ViewMode = .small,
     show_hidden: bool = false,
     sort: Sort = .{},
+    /// Where this pane has been this session (see the module doc).
+    history: DirHistory,
 
     /// Opens `path` (absolute or relative to the cwd). Fails if it can't
     /// be listed.
@@ -114,6 +121,7 @@ pub const Pane = struct {
             .path = try alloc.dupe(u8, ""),
             .view = opts.view,
             .show_hidden = opts.show_hidden,
+            .history = .init(alloc),
         };
         errdefer self.deinit();
         try self.load(path);
@@ -123,6 +131,7 @@ pub const Pane = struct {
     pub fn deinit(self: *Pane) void {
         self.freeListing();
         self.alloc.free(self.path);
+        self.history.deinit();
     }
 
     fn freeListing(self: *Pane) void {
@@ -196,15 +205,25 @@ pub const Pane = struct {
 
     /// Replaces the listing with `path`'s. On failure the pane is left as
     /// it was, so a directory that can't be opened doesn't blank the side.
-    /// The cursor goes to the top and all marks are dropped.
+    /// The cursor goes to the top and all marks are dropped. Recorded in
+    /// `history` as a new visit.
     pub fn load(self: *Pane, path: []const u8) !void {
+        try self.showDir(path);
+        try self.history.visit(self.path);
+    }
+
+    /// `load` without the history: what Back and Forward use.
+    fn showDir(self: *Pane, path: []const u8) !void {
         const abs = try homepath.absolute(self.io, self.alloc, path);
         errdefer self.alloc.free(abs);
         const entries = try self.readSorted(abs);
         errdefer lsentries.freeEntries(self.alloc, entries);
         const marked = try self.alloc.alloc(bool, entries.len);
+        errdefer self.alloc.free(marked);
         @memset(marked, false);
 
+        // Before the listing goes: Back to here should land on it again.
+        try self.history.leave(if (self.current()) |e| e.name else null);
         self.freeListing();
         self.alloc.free(self.path);
         self.path = abs;
@@ -435,6 +454,31 @@ pub const Pane = struct {
         defer self.alloc.free(parent);
         try self.load(parent);
         if (self.rowOf(left)) |row| self.list.selected = row;
+        return true;
+    }
+
+    /// Alt+Left: the directory shown before this one, with the cursor on
+    /// the entry it was on when the pane left. False when there's
+    /// nothing further back. A directory that's gone since is an error,
+    /// and the pane (and its history) stays where it is.
+    pub fn back(self: *Pane) !bool {
+        return self.step(-1);
+    }
+
+    /// Alt+Right: undoes a `back`. False when there's nothing ahead.
+    pub fn forward(self: *Pane) !bool {
+        return self.step(1);
+    }
+
+    fn step(self: *Pane, delta: isize) !bool {
+        const target = (if (delta < 0) self.history.backTarget() else self.history.forwardTarget()) orelse return false;
+        // `showDir` changes only the current spot's cursor and appends
+        // nothing, so `target` stays valid through it.
+        try self.showDir(target.path);
+        try self.history.stepped(delta);
+        if (target.cursor) |name| {
+            if (self.rowOf(name)) |row| self.list.selected = row;
+        }
         return true;
     }
 };

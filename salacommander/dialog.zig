@@ -21,6 +21,10 @@ pub const Button = enum {
     skip,
     overwrite_all,
     skip_all,
+    /// "This can't go to the trash": delete it outright, or that and
+    /// every later one.
+    delete,
+    delete_all,
     @"continue",
     abort,
     set,
@@ -38,6 +42,8 @@ pub const Button = enum {
             .skip => "Skip",
             .overwrite_all => "All",
             .skip_all => "None",
+            .delete => "Delete",
+            .delete_all => "All",
             .@"continue" => "Continue",
             .abort => "Abort",
             .set => "Set",
@@ -63,6 +69,10 @@ pub const Button = enum {
 pub const ok_cancel = [_]Button{ .ok, .cancel };
 pub const yes_no = [_]Button{ .yes, .no };
 pub const conflict_buttons = [_]Button{ .overwrite, .skip, .overwrite_all, .skip_all, .cancel };
+/// Skip is the one focused (`no_trash_skip`): deleting outright is
+/// never what a stray Enter does.
+pub const no_trash_buttons = [_]Button{ .delete, .skip, .delete_all, .skip_all, .cancel };
+pub const no_trash_skip: usize = 1;
 pub const error_buttons = [_]Button{ .@"continue", .abort };
 pub const error_root_buttons = [_]Button{ .@"continue", .abort, .retry_as_root };
 pub const set_cancel = [_]Button{ .set, .cancel };
