@@ -384,6 +384,11 @@ pub const Server = struct {
                         };
                     }
                 }
+                if (result.broadcast_after) |b| {
+                    defer alloc.free(b.body);
+                    const scope: ?core.ContextHandle = if (isContextScopedEvent(b.event)) d.active_ctx else null;
+                    self.broadcastIn(&conn, scope, b.event, b.body);
+                }
                 // A pane-tree edit reshaped the window: re-lay-out, tell
                 // the manager the new rects, and tell every *other* client
                 // its own context changed size. Done after the response so

@@ -127,6 +127,8 @@ pub const Ui = struct {
         errdefer self.bounds.deinit();
         self.keymap = try actions.Keymap.initDefaults(alloc, &actions.defaults);
         errdefer self.keymap.deinit(alloc);
+        // Before `apply`, so `keys` can still move or drop it.
+        try self.keymap.bind(alloc, actions.sendPrefixChord(cfg.prefix_key), .sendPrefix);
         try self.keymap.apply(alloc, cfg.keys);
 
         // The prefix chord the session will enforce for us. From here on
@@ -277,6 +279,7 @@ pub const Ui = struct {
             .resizeUp => self.resizeFocused(.column, false) catch |err| self.logError("resize", err),
             .resizeDown => self.resizeFocused(.column, true) catch |err| self.logError("resize", err),
             .quit => self.quit = true,
+            .sendPrefix => self.client.sendWindowPrefix() catch |err| self.logError("send prefix", err),
         }
     }
 

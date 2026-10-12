@@ -479,6 +479,12 @@ pub fn Ops(comptime Self: type) type {
             try self.notify("replace_pane_split_child", .{ .split = split, .index = index, .child = child });
         }
 
+        /// `send_window_prefix`: delivers the registered prefix chord itself
+        /// to the focused pane's program, once -- tmux's `send-prefix`.
+        pub fn sendWindowPrefix(self: *Self) !void {
+            try self.notify("send_window_prefix", .{});
+        }
+
         pub fn setRootPaneSplit(self: *Self, split: ?core.PaneSplitHandle) !void {
             try self.notify("set_root_pane_split", .{ .split = split });
         }

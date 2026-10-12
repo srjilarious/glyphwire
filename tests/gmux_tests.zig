@@ -50,4 +50,17 @@ pub fn keymapDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(km.lookup("left", .{}).?, actions.Action.focusLeft);
     try testz.expectTrue(actions.Action.zoom.keepsZoom());
     try testz.expectTrue(!actions.Action.splitRight.keepsZoom());
+    try testz.expectTrue(actions.Action.sendPrefix.keepsZoom());
+}
+
+/// The prefix pressed twice sends it on, whatever letter the prefix is --
+/// and, bound before the config's `keys`, it can still be rebound there.
+pub fn sendPrefixFollowsThePrefixKeyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const actions = gmux.actions;
+    var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
+    defer km.deinit(alloc);
+    try km.bind(alloc, actions.sendPrefixChord('a'), .sendPrefix);
+    try testz.expectEqual(km.lookup("a", .{ .ctrl = true }).?, actions.Action.sendPrefix);
+    try testz.expectEqual(km.lookup("b", .{ .ctrl = true }), null);
+    try testz.expectEqual(km.lookup("a", .{}), null);
 }

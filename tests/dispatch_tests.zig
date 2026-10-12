@@ -4271,6 +4271,62 @@ pub fn setWindowPrefixRequiresTheRoleAndRegistersTheChordTest(io: std.Io, alloc:
     try testz.expectTrue(!session.prefix_armed);
 }
 
+const KeyNotif = struct {
+    method: []const u8,
+    params: struct { key: []const u8, mods: glyphwire.Mods = .{} },
+};
+
+/// `send_window_prefix` hands the chord the session holds to the focused
+/// pane as a whole keystroke, with the chord's own modifiers, and leaves
+/// the real keyboard's state alone.
+pub fn sendWindowPrefixDeliversTheChordAsAKeystrokeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
+    const send =
+        \\{"jsonrpc":"2.0","method":"send_window_prefix"}
+    ;
+
+    try testz.expectError(d.handle(alloc, send), error.NotWindowManager);
+    try testz.expectTrue(session.claimManager(4, 0) != null);
+
+    // Nothing registered: nothing to send.
+    const none = try d.handle(alloc, send);
+    try testz.expectTrue(none.broadcast == null);
+    try testz.expectTrue(none.broadcast_after == null);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_window_prefix","params":{"key":"b","ctrl":true}}
+    );
+    const res = try d.handle(alloc, send);
+    const down = res.broadcast.?;
+    defer alloc.free(down.body);
+    const up = res.broadcast_after.?;
+    defer alloc.free(up.body);
+    try testz.expectEqualStr(down.event, "key");
+    try testz.expectEqualStr(up.event, "key");
+
+    const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+    const pd = try std.json.parseFromSlice(KeyNotif, alloc, down.body, opts);
+    defer pd.deinit();
+    try testz.expectEqualStr(pd.value.method, "key_down");
+    try testz.expectEqualStr(pd.value.params.key, "b");
+    try testz.expectTrue(pd.value.params.mods.ctrl);
+    try testz.expectFalse(pd.value.params.mods.alt);
+    const pu = try std.json.parseFromSlice(KeyNotif, alloc, up.body, opts);
+    defer pu.deinit();
+    try testz.expectEqualStr(pu.value.method, "key_up");
+    try testz.expectEqualStr(pu.value.params.key, "b");
+
+    // Synthetic: the prefix stays disarmed and nothing is held down.
+    try testz.expectFalse(session.prefix_armed);
+    try testz.expectFalse(session.mods.ctrl);
+    try testz.expectEqual(session.swallowed_key_len, 0);
+}
+
 pub fn spawnInPaneWithoutASpawnerIsUnsupportedTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var root = try glyphwire.Context.init(alloc, 40, 10, 0);

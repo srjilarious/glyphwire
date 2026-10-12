@@ -178,6 +178,9 @@ pub const global_defaults = [_]Default{
     .{ .chord = "ctrl+s", .action = .save },
     .{ .chord = "ctrl+p", .action = .findFile },
     .{ .chord = "ctrl+b", .action = .toggleTree },
+    // A second chord for the same thing: gmux's prefix is Ctrl+B, and
+    // the session hands it to gmux before zoe ever sees it.
+    .{ .chord = "ctrl+n", .action = .toggleTree },
     .{ .chord = "ctrl+h", .action = .toggleHidden },
     .{ .chord = "ctrl+grave_accent", .action = .toggleShell },
     .{ .chord = "ctrl+tab", .action = .nextTab },

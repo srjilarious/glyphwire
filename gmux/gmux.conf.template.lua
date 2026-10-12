@@ -30,8 +30,9 @@
 --     -- right, an arrow key moves focus in that direction, x kills the
 --     -- focused pane, z toggles zooming it to fill the window (any
 --     -- other command un-zooms first, then acts), H/L shrink/grow it
---     -- along a row-axis split, J/K along a column-axis one, and q quits
---     -- gmux.
+--     -- along a row-axis split, J/K along a column-axis one, q quits
+--     -- gmux, and the prefix again (Ctrl-B Ctrl-B) sends one Ctrl-B on
+--     -- to the focused program -- zoe's sidebar toggle, say.
 --     prefix_key = "b",
 --
 --     -- The command run in a fresh pane, overriding the default
@@ -57,7 +58,8 @@
 --     --
 --     --   focusLeft left, focusRight right, focusUp up, focusDown down,
 --     --   splitBelow ", splitRight %, killPane x, zoom z,
---     --   resizeLeft H, resizeRight L, resizeUp K, resizeDown J, quit q
+--     --   resizeLeft H, resizeRight L, resizeUp K, resizeDown J, quit q,
+--     --   sendPrefix ctrl+<prefix_key>
 --     keys = {
 --         -- ["-"] = "splitBelow", ["|"] = "splitRight",
 --     },

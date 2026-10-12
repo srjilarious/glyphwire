@@ -1405,6 +1405,7 @@ gets `NotWindowManager`.
 | `move_pane_divider` | notification | `split`, `index`, `delta` | — |
 | `spawn_in_pane` | request | `pane`, `argv`, `cols?`, `rows?` | `{pid}` |
 | `set_window_prefix` | notification | `key?`, `ctrl?` = true, `alt?` = false, `shift?` = false | — |
+| `send_window_prefix` | notification | — | — |
 
 `request_role` claims a role; `granted` is false when another connection
 holds it. The returned `token` lets the holder's *other* connections
@@ -1441,6 +1442,13 @@ because the host reports each keystroke on two streams and modifier state
 belongs to the session. The key after the prefix arrives as
 `window_key_down` / `window_key_up` / `window_text` (section 7), addressed
 to the manager alone and never broadcast. Passing `key: null` unregisters.
+
+`send_window_prefix` lets the prefix through once: the session delivers
+the registered chord to the focused pane's on-screen context as a
+`key_down` then a `key_up`, with the chord's own modifiers. It names no
+key — the manager can pass on only the chord it took, never inject
+arbitrary input. It does not change the input down-set or the prefix
+state, and is a no-op when no prefix is registered.
 
 ### 6.16 Remote sessions
 

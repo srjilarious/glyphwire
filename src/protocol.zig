@@ -1582,6 +1582,7 @@ pub const Methods = struct {
     start_remote: StartRemoteParams,
     stop_remote: StopRemoteParams,
     set_window_prefix: SetWindowPrefixParams,
+    send_window_prefix: NoParams,
     // Input.
     report_key: ReportKeyParams,
     report_text: ReportTextParams,

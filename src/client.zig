@@ -349,6 +349,7 @@ pub const Client = struct {
 
     // -- Panes --
     pub const setWindowPrefix = ops.setWindowPrefix;
+    pub const sendWindowPrefix = ops.sendWindowPrefix;
     pub const destroyPane = ops.destroyPane;
     pub const focusPane = ops.focusPane;
     pub const destroyPaneSplit = ops.destroyPaneSplit;
@@ -1855,6 +1856,7 @@ pub const Client = struct {
 
         // -- Panes --
         pub const setWindowPrefix = batch_ops.setWindowPrefix;
+        pub const sendWindowPrefix = batch_ops.sendWindowPrefix;
         pub const destroyPane = batch_ops.destroyPane;
         pub const focusPane = batch_ops.focusPane;
         pub const destroyPaneSplit = batch_ops.destroyPaneSplit;

@@ -2720,7 +2720,7 @@ pub const Ui = struct {
                 self.swallow_space_text = false;
                 // The completion popup reads its keys before the bindings
                 // below: with it up, Ctrl+N / Ctrl+P move through it
-                // rather than opening the finder.
+                // rather than toggling the sidebar or opening the finder.
                 if (self.completion != null and self.focus == .buffer and self.buf.ed.mode == .insert) {
                     if (try self.completionKey(k)) return;
                 }

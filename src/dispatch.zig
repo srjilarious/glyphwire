@@ -472,6 +472,10 @@ pub const HandleResult = struct {
     /// broadcasting.
     response: ?[]u8 = null,
     broadcast: ?Broadcast = null,
+    /// A second broadcast, sent right after `broadcast` and the same way:
+    /// the release half of a synthetic press/release pair
+    /// (`send_window_prefix`), so a program never sees half a keystroke.
+    broadcast_after: ?Broadcast = null,
     /// Set by every handler that reshaped the pane tree. The caller
     /// (`server.zig`) re-runs `Session.layoutPanes`, broadcasts
     /// `pane_layout`, and sends each affected connection a `resize` for
@@ -1005,6 +1009,7 @@ pub const Dispatcher = struct {
         .{ "start_remote", catBytesId(handleStartRemote) },
         .{ "stop_remote", catVoid(handleStopRemote) },
         .{ "set_window_prefix", catVoid(handleSetWindowPrefix) },
+        .{ "send_window_prefix", catResult(handleSendWindowPrefix) },
         .{ "create_split", catBytesId(handleCreateSplit) },
         .{ "destroy_split", catResult(handleDestroySplit) },
         .{ "set_split_children", catResult(handleSetSplitChildren) },
@@ -1162,6 +1167,7 @@ pub const Dispatcher = struct {
                 alloc.free(b.body);
                 std.log.warn("glyphwire: broadcast from batched '{s}' dropped", .{sub.value.method});
             }
+            if (result.broadcast_after) |b| alloc.free(b.body);
 
             if (result.response) |resp| {
                 if (outer_id == null) {
@@ -2208,6 +2214,32 @@ pub const Dispatcher = struct {
         // was armed when the binding changed can't fire the new one.
         session.prefix_armed = false;
         session.swallowed_key_len = 0;
+    }
+
+    /// `send_window_prefix`: hands the registered prefix chord itself to
+    /// the focused pane's program, as one press and release -- tmux's
+    /// `send-prefix`, what a manager binds to the prefix pressed twice so
+    /// a program can still have the chord the manager took (zoe's Ctrl+B
+    /// under gmux).
+    ///
+    /// The session builds the keystroke from the chord it already holds,
+    /// carrying the chord's own modifiers: the manager names no key, so it
+    /// still never relays input, it only says "let the prefix through
+    /// once". Synthetic like `Server.reportKeyTapIn`: no physical key
+    /// changed, so neither the down-set nor the prefix state is touched.
+    /// A no-op with no prefix registered.
+    fn handleSendWindowPrefix(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        _ = params_value;
+        const session = try self.requireManager();
+        const prefix = session.window_prefix orelse return .{};
+        const mods: core.Mods = .{ .ctrl = prefix.ctrl, .alt = prefix.alt, .shift = prefix.shift };
+        const down = try rpc.keyNotification(alloc, prefix.key(), true, mods);
+        errdefer alloc.free(down);
+        const up = try rpc.keyNotification(alloc, prefix.key(), false, mods);
+        return .{
+            .broadcast = .{ .event = "key", .body = down },
+            .broadcast_after = .{ .event = "key", .body = up },
+        };
     }
 
     /// `set_window_scrollbar`: toggles glyphwire-host's always-on

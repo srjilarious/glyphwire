@@ -35,7 +35,7 @@ Ctrl+W, and the completion popup's keys.
 | `save` | Ctrl+S | `:w`, leaving the mode and selection alone |
 | `findFile` | Ctrl+P | Fuzzy file finder |
 | `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key, by name, with its chord in the current mode. Recently run ones list first |
-| `toggleTree` | Ctrl+B | Show / hide the file tree (VS Code's chord) |
+| `toggleTree` | Ctrl+B, Ctrl+N | Show / hide the file tree. Ctrl+B is VS Code's chord; under gmux it is the prefix, so use Ctrl+N or gmux's Ctrl+B Ctrl+B |
 | `toggleHidden` | Ctrl+H | Dotfiles and `.gitignore`d paths in the tree; dotfiles only in the finder and `/` search |
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
 | `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |

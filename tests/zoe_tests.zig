@@ -4241,6 +4241,16 @@ pub fn keymapsLookInTheModeTableFirstTest(_: std.Io, alloc: std.mem.Allocator) !
     try testz.expectFalse(actions.Action.none.isUi());
 }
 
+/// Ctrl+B is VS Code's sidebar chord, and Ctrl+N stays for when gmux has
+/// Ctrl+B as its prefix.
+pub fn sidebarToggleHasBothChordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
+    defer km.deinit(alloc);
+    try testz.expectEqual(km.lookup(.normal, "b", .{ .ctrl = true }).?, .toggleTree);
+    try testz.expectEqual(km.lookup(.normal, "n", .{ .ctrl = true }).?, .toggleTree);
+    try testz.expectEqual(km.lookup(.global, "b", .{ .ctrl = true }).?, .toggleTree);
+}
+
 pub fn keysConfigRebindsAndUnbindsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var cfg = try parseConf(alloc,
         \\config = { keys = {
