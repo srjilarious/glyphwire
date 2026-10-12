@@ -20,14 +20,21 @@ const Engine = app_mod.Engine;
 /// top keeps running and keeps its screen, it just isn't drawn and gets
 /// no input.
 ///
+/// Below the programs is a pinned "+ new shell" row (also `n`): a fresh
+/// `gw-shell` on a context of its own in the same pane, started in the
+/// directory of the shell it was opened over (`App.spawnShell`). That is
+/// how one pane holds several shells, each with its own long-running
+/// program (an agent, a build) going on in the background.
+///
 /// Host-side rather than a client, so it works whichever program is in
 /// front, pops up over the current screen instead of replacing it, and
 /// the keys that drive it never reach a program at all.
 ///
 /// Keys while open are `modal_list.readAction`'s: Up/Down move, Enter
-/// switches, 1..9 switch straight to that row, Escape closes. Drawn by
-/// `Renderer.drawListDialog` from `view`, like the theme switcher. It opens with the *second* row selected, so the chord then Enter flips
-/// between the two most recent programs.
+/// switches, 1..9 switch straight to that row, Escape closes; plus `n`
+/// for a new shell. Drawn by `Renderer.drawListDialog` from `view`, like
+/// the theme switcher. It opens with the *second* program selected, so
+/// the chord then Enter flips between the two most recent programs.
 pub const Switcher = struct {
     app: *App,
     /// Null disables the switcher entirely.
@@ -39,6 +46,8 @@ pub const Switcher = struct {
     /// jumps to another pane's.
     pane: glyphwire.PaneHandle = glyphwire.root_pane_handle,
     entries: [max_entries]Entry = undefined,
+    /// Programs in `entries`. The rows are these plus the new-shell row,
+    /// which is always row `len`.
     len: usize = 0,
     selected: usize = 0,
     /// Bumped on every visible change, so the redraw fingerprint notices
@@ -52,10 +61,11 @@ pub const Switcher = struct {
     /// `input.KeyInput.reportKeyEvents`).
     consumed: bool = false,
     /// `view`'s rows, rebuilt each time it is asked for.
-    row_buf: [max_entries]modal_list.Row = undefined,
+    row_buf: [max_entries + 1]modal_list.Row = undefined,
 
     pub const max_entries = 32;
     pub const max_title = glyphwire.Context.max_title_len;
+    pub const new_shell_text = "+ new shell";
 
     pub const Entry = struct {
         context: glyphwire.ContextHandle,
@@ -90,67 +100,82 @@ pub const Switcher = struct {
         self.refresh();
         if (!self.open) return true;
 
+        if (kb.pressed(.n) and !kb.ctrl() and !kb.alt() and !kb.super()) {
+            self.commit(self.len);
+            return true;
+        }
         switch (modal_list.readAction(kb, chord_hit)) {
             .none => {},
             .close => self.close(),
             .commit => self.commit(self.selected),
             .move => |d| self.move(d),
-            .pick => |i| if (i < self.len) self.commit(i),
+            .pick => |i| if (i < self.rowCount()) self.commit(i),
         }
         return true;
     }
 
+    /// Programs plus the new-shell row.
+    fn rowCount(self: *const Switcher) usize {
+        return self.len + 1;
+    }
+
     fn openOn(self: *Switcher) void {
-        const server = self.app.server;
-        {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
-            self.pane = server.session.focusedPaneHandle();
-            self.snapshotLocked();
-        }
-        if (self.len == 0) return;
+        self.pane = self.app.server.session.focusedPaneHandle();
+        if (!self.snapshot()) return;
         self.open = true;
         self.selected = if (self.len > 1) 1 else 0;
         self.gen +%= 1;
     }
 
     /// Re-reads the pane's stack, keeping the selection on the same
-    /// context when it is still there. Closes if the pane went away.
+    /// context (or on the new-shell row) when it is still there. Closes if
+    /// the pane went away.
     fn refresh(self: *Switcher) void {
-        const keep = if (self.selected < self.len) self.entries[self.selected].context else null;
+        const keep: ?glyphwire.ContextHandle = if (self.selected < self.len) self.entries[self.selected].context else null;
+        const on_new_shell = self.selected == self.len;
         const before_len = self.len;
-        const server = self.app.server;
-        {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
-            self.snapshotLocked();
-        }
-        if (self.len == 0) {
+        if (!self.snapshot()) {
             self.close();
             return;
         }
-        if (keep) |h| {
+        if (on_new_shell) {
+            self.selected = self.len;
+        } else if (keep) |h| {
             for (self.entries[0..self.len], 0..) |e, i| {
                 if (e.context == h) {
                     self.selected = i;
                     break;
                 }
-            } else self.selected = @min(self.selected, self.len - 1);
+            } else self.selected = @min(self.selected, self.len);
         }
         if (self.len != before_len) self.gen +%= 1;
     }
 
     /// Copies `pane`'s stack, top first, with each context's title (or a
-    /// fallback name). Call under `ctx_mutex`.
-    fn snapshotLocked(self: *Switcher) void {
-        const session = &self.app.server.session;
-        const stack = session.paneStack(self.pane) orelse {
+    /// fallback name). False when the pane is gone. A pane whose own
+    /// program has exited while other things hold it open has nothing
+    /// alive on its base context, so that one is left out.
+    fn snapshot(self: *Switcher) bool {
+        // Asked before taking `ctx_mutex`: it takes the process table's
+        // lock, which is never taken while holding that one.
+        const hide_base = self.app.paneProgramExited(self.pane);
+
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
+
+        const session = &server.session;
+        const pane = session.panePtr(self.pane) orelse {
             self.len = 0;
-            return;
+            return false;
         };
-        const n = @min(stack.len, max_entries);
-        for (0..n) |i| {
-            const handle = stack[stack.len - 1 - i];
+        const stack = pane.stack.items;
+        var n: usize = 0;
+        var i: usize = stack.len;
+        while (i > 0 and n < max_entries) {
+            i -= 1;
+            const handle = stack[i];
+            if (hide_base and handle == pane.base) continue;
             var e: Entry = .{ .context = handle };
             const title = if (session.contextPtr(handle)) |ctx| ctx.title.items else "";
             if (title.len > 0) {
@@ -160,27 +185,33 @@ pub const Switcher = struct {
             } else {
                 // A program that never named itself: a pane's base is
                 // whatever the pane was started with, which is a shell
-                // unless a window manager says otherwise.
-                const fallback = if (session.isBaseContext(handle))
+                // unless a window manager says otherwise, and the switcher
+                // only ever makes shells.
+                const fallback = if (session.isShellContext(handle))
                     std.fmt.bufPrint(&e.title_buf, "shell", .{}) catch ""
                 else
                     std.fmt.bufPrint(&e.title_buf, "context {d}", .{handle}) catch "";
                 e.title_len = fallback.len;
             }
-            self.entries[i] = e;
+            self.entries[n] = e;
+            n += 1;
         }
         self.len = n;
+        return true;
     }
 
     fn move(self: *Switcher, delta: isize) void {
-        if (self.len == 0) return;
-        self.selected = listcursor.wrap(self.selected, self.len, delta);
+        self.selected = listcursor.wrap(self.selected, self.rowCount(), delta);
         self.gen +%= 1;
     }
 
     fn commit(self: *Switcher, index: usize) void {
-        const target = self.entries[index].context;
         self.close();
+        if (index == self.len) {
+            self.app.spawnShell(self.pane);
+            return;
+        }
+        const target = self.entries[index].context;
         _ = self.app.server.activateContext(self.app.alloc, target) catch |err| {
             std.log.err("glyphwire-host: context switch failed: {t}", .{err});
         };
@@ -192,18 +223,19 @@ pub const Switcher = struct {
     }
 
     /// What to draw while open: the pane's stack, top first, the top
-    /// one tagged as the program in front. Borrowed; valid until the
-    /// next `handleKeys`.
+    /// one tagged as the program in front, then the new-shell row.
+    /// Borrowed; valid until the next `handleKeys`.
     pub fn view(self: *Switcher) ?modal_list.View {
-        if (!self.open or self.len == 0) return null;
+        if (!self.open) return null;
         for (self.entries[0..self.len], 0..) |*e, i| {
             self.row_buf[i] = .{ .text = e.title(), .tag = if (i == 0) "  (current)" else "" };
         }
+        self.row_buf[self.len] = .{ .text = new_shell_text };
         return .{
             .pane = self.pane,
             .title = "Switch to",
-            .foot = "Enter switch  Esc close",
-            .rows = self.row_buf[0..self.len],
+            .foot = "Enter switch  n new shell  Esc close",
+            .rows = self.row_buf[0..self.rowCount()],
             .selected = self.selected,
         };
     }

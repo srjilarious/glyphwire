@@ -2165,3 +2165,68 @@ fn waitForCell(client: *glyphwire.Client, row: usize, col: usize, expected: []co
     }
     return error.TimedOutWaitingForCell;
 }
+
+/// The context switcher's "new shell" path, minus the host window: a
+/// context made the way glyphwire-host makes one (`createShellContext`),
+/// then put *behind* the base context before `gw-shell --context <n>`
+/// starts. The prompt has to land on context n anyway, which only the
+/// explicit attach gets right -- a shell that took whatever was on screen
+/// at connect time would draw on the base instead.
+pub fn shellWithContextFlagDrawsOnThatContextNotTheVisibleOneTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-shellctx-e2e-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    const shell_ctx = try srv.createShellContext(alloc, glyphwire.root_pane_handle);
+    _ = try srv.activateContext(alloc, glyphwire.root_context_handle);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+
+    var handle_buf: [16]u8 = undefined;
+    const handle_arg = try std.fmt.bufPrint(&handle_buf, "{d}", .{shell_ctx});
+    var shell_child = try spawnChecked(io, .{
+        .argv = &.{ shell_path, "--context", handle_arg },
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+
+    var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer reporter.deinit();
+    try reporter.attachContext(shell_ctx);
+
+    const arrow_col = cwd_len + 1;
+    try waitForCell(&reporter, 0, arrow_col, ">");
+
+    // Nothing reached the base context, which is still the one on screen.
+    try reporter.attachContext(glyphwire.root_context_handle);
+    var base = try reporter.getCells();
+    defer base.deinit();
+    try testz.expectFalse(std.mem.eql(u8, base.cellAt(0, arrow_col).grapheme, ">"));
+
+    var list = try reporter.listContexts();
+    defer list.deinit();
+    const entries = list.entries();
+    try testz.expectEqual(entries.len, 2);
+    try testz.expectEqual(entries[0].context, glyphwire.root_context_handle);
+    try testz.expectEqual(entries[1].context, shell_ctx);
+    try testz.expectTrue(entries[1].shell);
+}

@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.8.0 — pre-1.0 draft.**
+**Version 0.9.0 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -429,6 +429,27 @@ the pane stack rather than the `context` notification's handle because
 under a multiplexer that notification names the *focused* context, which
 changes whenever focus moves to another pane.
 
+**Several shells in one pane.** The switcher can also start a new shell in
+the pane, on a fresh context the host makes and puts on top. That context
+is owned by no connection; the host destroys it when that shell's process
+exits. It and the pane's base context are flagged `shell` in
+`list_contexts`, and a shell waiting on a child **MUST NOT** take a
+`shell` context coming up on top for its child's screen: that is the user
+switching shells, and treating it as the child's screen would make
+switching back look like the child being backgrounded. A plain terminal
+program a shell runs (an agent, a build) draws on that shell's own
+context, so it keeps running, and keeps its output, while another shell
+is on top.
+
+A pane whose own program exits stays open while anything is left above
+its base context: a spawned shell, or a program's own screen. The host
+brings the most recent of those up over the dead base, sends `pane_exit`
+(or, for the window's own pane, closes the window) only once the last of
+them has gone, and leaves the dead base out of the switcher. A shell
+**SHOULD** let `exit` leave a background program that has a screen of its
+own running, keeping its PTY open until it exits, so that exiting a shell
+never takes a still-running program with it.
+
 ### 4.3 Layer
 
 A layer is a grid of cells with a cursor, a viewport, an optional
@@ -628,7 +649,7 @@ Each entry gives the method, its kind, its params and its result.
 | `set_theme` | notification | `name?`, `theme?` | — |
 | `get_theme` | request | — | `{name, dark, panel_style, own, slots, roles}` |
 | `set_divider_style` | notification | `style?`, `chars?` | — |
-| `list_contexts` | request | — | `{current, contexts: [{context, title, visible}]}` |
+| `list_contexts` | request | — | `{current, contexts: [{context, title, visible, shell}]}` |
 | `set_window_scrollbar` | notification | `visible` | — |
 | `set_caret_layer` | notification | `layer?` | — |
 | `set_caret_visible` | notification | `visible` | — |
@@ -691,9 +712,13 @@ as it was. It never changes the bands between panes, which belong to no
 program. No ownership needed.
 
 `list_contexts` returns the issuing connection's **own pane's** stack, top
-(on screen) first, each with its `title` (empty if never set) and
-`visible` (true for the first only), plus `current`: the connection's own
-current context. It never reveals other panes.
+(on screen) first, each with its `title` (empty if never set), `visible`
+(true for the first only) and `shell`, plus `current`: the connection's own
+current context. It never reveals other panes. `shell` is true for a
+context that belongs to a shell rather than to a program run from one: the
+pane's base context, or one the host made for a shell its context switcher
+spawned (section 4.2, *Switching between programs*). A host older than
+0.9.0 omits it; read that as false.
 
 `attach_context` retargets the issuing connection onto an existing
 context; ownership is untouched. This is how a paired input listener joins
@@ -1428,7 +1453,9 @@ spawned into a pane sends first, from `GLYPHWIRE_PANE`.
 pane. `argv` **MUST** be non-empty; the first element is resolved through
 `PATH`. A host with no spawner — the headless server — reports
 `SpawnUnsupported`; a failed fork or exec reports `SpawnFailed`. When the
-program exits, `pane_exit` is delivered to `panes` subscribers.
+program exits, `pane_exit` is delivered to `panes` subscribers, once
+nothing else holds the pane open (section 4.2, *Several shells in one
+pane*).
 
 Whenever the focused pane changes, by any route (`focus_pane`, the host's
 own click-to-focus, or a fallback when the focused pane is destroyed or

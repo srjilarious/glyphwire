@@ -23,3 +23,4 @@ pub const openaction = @import("openaction.zig");
 pub const logicalpath = @import("logicalpath.zig");
 pub const remotecmd = @import("remotecmd.zig");
 pub const embed = @import("embed.zig");
+pub const jobstack = @import("jobstack.zig");

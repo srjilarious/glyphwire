@@ -184,7 +184,7 @@ pub const Server = struct {
     /// update loop) re-checks its redraw state the same iteration anyway.
     /// A spurious wake (a read-only `get_cells`, say) is harmless: the
     /// front end just re-evaluates and goes back to waiting.
-    fn wake(self: *Server) void {
+    pub fn wake(self: *Server) void {
         if (self.wake_fn) |f| f(self.wake_ctx);
     }
 
@@ -504,6 +504,10 @@ pub const Server = struct {
                 std.log.err("glyphwire: layout after context cull failed: {t}", .{err});
             };
         }
+        // A culled context may have been the last thing holding a pane
+        // open after its program exited (glyphwire-host's
+        // `PaneProcs.pump`), and an idle host is parked until woken.
+        if (culled_ctx.items.len > 0) self.wake();
     }
 
     /// Fans `body` out to every connection subscribed to `event`, except
@@ -880,6 +884,52 @@ pub const Server = struct {
             try self.reportLayout(alloc);
         }
         return changed;
+    }
+
+    /// Makes a context in `pane` for a shell the host is about to spawn
+    /// there (the context switcher's "new shell") and puts it on top. It
+    /// has the scrollback of the pane's base context, since it is a shell's
+    /// screen just like that one, and is flagged `spawned_shell` so other
+    /// shells' job control leaves it alone. Owned by no connection: the
+    /// host destroys it with `destroyShellContext` when the shell exits.
+    pub fn createShellContext(self: *Server, alloc: std.mem.Allocator, pane: core.PaneHandle) !core.ContextHandle {
+        const handle = blk: {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            const p = self.session.panePtr(pane) orelse return error.UnknownPane;
+            const scrollback = if (self.session.contextPtr(p.base)) |c| c.root.scrollback_rows else 0;
+            const h = try self.session.createContext(pane, null, null, scrollback);
+            self.session.contextPtr(h).?.spawned_shell = true;
+            self.ctx = self.session.focusedContext();
+            break :blk h;
+        };
+        try self.reportStackChange(alloc);
+        return handle;
+    }
+
+    /// Destroys a context `createShellContext` made, once its shell has
+    /// exited. Its pane shows whatever was under it. A no-op for a handle
+    /// that is already gone (its pane went first).
+    pub fn destroyShellContext(self: *Server, alloc: std.mem.Allocator, context: core.ContextHandle) !void {
+        {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            self.session.destroyContext(context) catch return;
+            self.ctx = self.session.focusedContext();
+        }
+        try self.reportStackChange(alloc);
+    }
+
+    /// What follows a pane stack changing outside any connection's
+    /// dispatch. Unconditional, unlike `activateContext`'s: the stack may
+    /// be a pane without focus, and the shells in it still have to hear
+    /// that their stack moved (`context` is what makes a waiting shell
+    /// re-read it).
+    fn reportStackChange(self: *Server, alloc: std.mem.Allocator) !void {
+        try self.reportContext(alloc);
+        try self.reportPaneFocusIfChanged(alloc);
+        try self.syncConnectionFocus(alloc);
+        try self.reportLayout(alloc);
     }
 
     /// Replaces the window theme (`core.Session.setTheme`) and sends a

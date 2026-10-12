@@ -1837,7 +1837,8 @@ pub const Dispatcher = struct {
     }
 
     /// `list_contexts`: this connection's pane stack, top first, with
-    /// titles, plus its own active context handle. Only the connection's
+    /// titles and which belong to shells, plus its own active context
+    /// handle. Only the connection's
     /// own pane: a program inside a pane never learns what other panes
     /// hold (see the Panes section of api.md).
     fn handleListContexts(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
@@ -1848,7 +1849,7 @@ pub const Dispatcher = struct {
         for (entries, 0..) |*e, i| {
             const h = stack[stack.len - 1 - i];
             const ctx = session.contextPtr(h).?;
-            e.* = .{ .context = h, .title = ctx.title.items, .visible = i == 0 };
+            e.* = .{ .context = h, .title = ctx.title.items, .visible = i == 0, .shell = session.isShellContext(h) };
         }
         return try self.respond(alloc, id, protocol.ListContextsResult{
             .current = self.active_ctx,

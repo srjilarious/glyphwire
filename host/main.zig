@@ -46,10 +46,15 @@ const app_icon_asset = "glyphwire_icon.png";
 /// what quits the host now, not a keypress. Not joined by `main`, same as
 /// `serveForeverThread`: nothing needs its result once the run loop below
 /// is what keeps the process alive.
-fn reapChild(io: std.Io, child_in: std.process.Child, shell_exited: *std.atomic.Value(bool)) void {
+///
+/// The window doesn't necessarily end there: shells the context switcher
+/// spawned, or programs this shell left running, hold the root pane open
+/// (`App.update`). The wake gets an idle window to notice either way.
+fn reapChild(io: std.Io, child_in: std.process.Child, shell_exited: *std.atomic.Value(bool), server: *glyphwire.server.Server) void {
     var child = child_in;
     _ = child.wait(io) catch {};
     shell_exited.store(true, .monotonic);
+    server.wake();
 }
 
 /// Runs `Server.serveForever` for the lifetime of the process, on its own
@@ -401,6 +406,9 @@ pub fn main(init: std.process.Init) !void {
     // remote to end the session either -- an edge case not worth a
     // fallback keybinding for.
     var shell_exited: std.atomic.Value(bool) = .init(false);
+    // The root pane's first shell, for the context switcher to start a new
+    // shell in its directory. Null under `--ssh`.
+    var root_shell_pid: ?std.posix.pid_t = null;
 
     // `start_remote`: a shell in any pane asks the *host* to drop that pane
     // into a remote session, for the same reason `spawn_in_pane` is the
@@ -439,7 +447,8 @@ pub fn main(init: std.process.Init) !void {
         const shell_argv = try std.mem.concat(arena, []const u8, &.{ &.{shell_path}, shell_child_argv });
 
         if (std.process.spawn(io, .{ .argv = shell_argv, .environ_map = &shell_env })) |shell_child| {
-            _ = try std.Thread.spawn(.{}, reapChild, .{ io, shell_child, &shell_exited });
+            root_shell_pid = shell_child.id;
+            _ = try std.Thread.spawn(.{}, reapChild, .{ io, shell_child, &shell_exited, &srv });
         } else |err| {
             std.log.err("failed to spawn gw-shell: {t}", .{err});
         }
@@ -514,6 +523,7 @@ pub fn main(init: std.process.Init) !void {
     var pane_procs = pane_proc_mod.PaneProcs.init(alloc, io, &srv, socket_path, init.environ_map);
     defer pane_procs.deinit();
     app.pane_procs = &pane_procs;
+    app.root_shell_pid = root_shell_pid;
     srv.setPaneSpawner(pane_procs.spawner());
 
     // The render loop only repaints on demand (`EngOptions.redrawOnDemand`)
@@ -533,11 +543,12 @@ pub fn main(init: std.process.Init) !void {
     // database) and exit cleanly: the `serveForever` thread is still up,
     // so a `shutdown` notification still reaches it, and then wait a
     // bounded time for its process to actually exit -- `reapChild` flips
-    // `shell_exited` when it does.
+    // `shell_exited` when it does. Sent even when that shell is gone:
+    // shells the context switcher spawned can be holding the window open,
+    // and they flush on the same notification.
+    const grace_ms: u32 = 1500;
+    srv.reportShutdown(alloc, grace_ms) catch {};
     if (!shell_exited.load(.monotonic)) {
-        const grace_ms: u32 = 1500;
-        srv.reportShutdown(alloc, grace_ms) catch {};
-
         const start = std.Io.Timestamp.now(io, .awake);
         while (!shell_exited.load(.monotonic)) {
             const elapsed = std.Io.Timestamp.now(io, .awake).toMilliseconds() - start.toMilliseconds();

@@ -47,6 +47,9 @@ const PtyStub = struct {
     pub fn spawn(_: [*:null]const ?[*:0]const u8, _: u16, _: u16, _: ?[*:null]const ?[*:0]const u8) SpawnError!PtyStub {
         return error.Unsupported;
     }
+    pub fn spawnIn(_: [*:null]const ?[*:0]const u8, _: u16, _: u16, _: ?[*:null]const ?[*:0]const u8, _: ?[*:0]const u8) SpawnError!PtyStub {
+        return error.Unsupported;
+    }
     pub fn resize(_: PtyStub, _: u16, _: u16) void {}
     pub fn writeAll(_: PtyStub, _: []const u8) void {}
     pub fn reaped(_: *PtyStub) bool {
@@ -191,6 +194,20 @@ const PtyLinux = struct {
         rows: u16,
         envp: ?[*:null]const ?[*:0]const u8,
     ) SpawnError!PtyLinux {
+        return spawnIn(argv, cols, rows, envp, null);
+    }
+
+    /// `spawn`, with the child starting in `cwd` (null: this process's
+    /// own). A `cwd` the child can't enter is ignored rather than failing
+    /// the spawn, the way a shell started from a deleted directory still
+    /// starts.
+    pub fn spawnIn(
+        argv: [*:null]const ?[*:0]const u8,
+        cols: u16,
+        rows: u16,
+        envp: ?[*:null]const ?[*:0]const u8,
+        cwd: ?[*:0]const u8,
+    ) SpawnError!PtyLinux {
         var master: c_int = undefined;
         var slave: c_int = undefined;
         const ws = Winsize{ .row = rows, .col = cols };
@@ -222,6 +239,7 @@ const PtyLinux = struct {
             _ = c.dup2(slave, 2);
             if (slave > 2) _ = c.close(slave);
             _ = c.close(master);
+            if (cwd) |d| _ = c.chdir(d);
             if (envp) |e| {
                 _ = execvpe(argv[0].?, argv, e);
             } else {

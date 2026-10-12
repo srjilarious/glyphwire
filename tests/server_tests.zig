@@ -1670,3 +1670,30 @@ pub fn destroyContextSendsTheRevealedContextItsOwedLayoutTest(io: std.Io, alloc:
     try testz.expectEqualStr("layout", parsed.value.method);
     try testz.expectEqual(parsed.value.params.layers[0].cols, ctx.root.width);
 }
+
+pub fn shellContextIsMadeOnTopFlaggedAndDroppedByTheHostTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 500);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-shellctx-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const handle = try srv.createShellContext(alloc, glyphwire.root_pane_handle);
+    try testz.expectEqual(srv.session.focusedContextHandle(), handle);
+    const made = srv.session.contextPtr(handle).?;
+    try testz.expectTrue(made.spawned_shell);
+    try testz.expectTrue(srv.session.isShellContext(handle));
+    // A shell's screen: the base's scrollback, and no owner to cull it.
+    try testz.expectEqual(made.root.scrollback_rows, 500);
+    try testz.expectFalse(made.connection_owned);
+
+    try srv.destroyShellContext(alloc, handle);
+    try testz.expectTrue(srv.session.contextPtr(handle) == null);
+    try testz.expectEqual(srv.session.focusedContextHandle(), glyphwire.root_context_handle);
+    // Already gone: a no-op, not an error.
+    try srv.destroyShellContext(alloc, handle);
+}

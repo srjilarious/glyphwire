@@ -257,7 +257,9 @@ pub const plColor = render.plColor;
 /// -- see decisions.md, Discovery & Connection. The third form,
 /// `gw-shell --embed <context>,<layer>[,<control-fd>]`, runs that same
 /// prompt inside a layer another client owns (salacommander's Ctrl+`
-/// panel) -- see `shell/embed.zig`. Deliberately has no
+/// panel) -- see `shell/embed.zig`. The fourth,
+/// `gw-shell --context <handle>`, runs it on a context glyphwire-host made
+/// for it (the context switcher's "new shell"). Deliberately has no
 /// engine dependency: input arrives as wire-level key events (see
 /// src/client.zig's `InputListener`), captured by glyphwire-host and
 /// relayed through the server, not read directly.
@@ -316,7 +318,7 @@ pub fn main(init: std.process.Init) !void {
         try spawnOwnServer(init.io, arena, init.environ_map);
 
     if (args.len < 2) {
-        return runPrompt(init.io, alloc, socket_path, init.environ_map, null);
+        return runPrompt(init.io, alloc, socket_path, init.environ_map, null, null);
     }
 
     // `--embed <context>,<layer>[,<control-fd>]`: the prompt as a panel
@@ -331,7 +333,23 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("gw-shell: --embed '{s}' isn't <context>,<layer>[,<control-fd>]\n", .{value});
             return error.EmbedArgsMalformed;
         };
-        return runPrompt(init.io, alloc, socket_path, init.environ_map, opts);
+        return runPrompt(init.io, alloc, socket_path, init.environ_map, opts, null);
+    }
+
+    // `--context <handle>`: the prompt on a context glyphwire-host made
+    // for it, the context switcher's "new shell". Without it the shell
+    // would land on whatever context is on screen when it connects, which
+    // by then may be another one the user switched to.
+    if (std.mem.eql(u8, args[1], "--context")) {
+        const value: []const u8 = if (args.len > 2) args[2] else {
+            std.debug.print("gw-shell: --context needs a context handle\n", .{});
+            return error.ContextArgMissing;
+        };
+        const handle = std.fmt.parseInt(glyphwire.ContextHandle, value, 10) catch {
+            std.debug.print("gw-shell: --context '{s}' isn't a context handle\n", .{value});
+            return error.ContextArgMalformed;
+        };
+        return runPrompt(init.io, alloc, socket_path, init.environ_map, null, handle);
     }
 
     const child_argv = try arena.allocSentinel(?[*:0]const u8, args.len - 1, null);
@@ -608,6 +626,8 @@ fn runPrompt(
     socket_path: []const u8,
     environ_map: *const std.process.Environ.Map,
     embed_opts: ?embed.Options,
+    /// `--context`: the context to draw on instead of the one on screen.
+    own_context: ?glyphwire.ContextHandle,
 ) !void {
     // Before either connection: if a window manager seated this shell in a
     // pane, both the drawing `Client` and the `InputListener` below have to
@@ -643,6 +663,9 @@ fn runPrompt(
     if (embed_opts) |eo| {
         if (!attachEmbedded(&prompt, listener, alloc, eo, &control)) return;
     }
+    if (own_context) |h| {
+        if (!attachOwnContext(&prompt, listener, h)) return;
+    }
 
     try seedPromptEnv(&prompt, io, alloc);
     // Unreachable before `exit` gave this loop a clean return path --
@@ -653,6 +676,15 @@ fn runPrompt(
     try preparePrompt(&prompt, io, alloc, environ_map);
     if (runStartupScript(&prompt, io, alloc, environ_map)) return;
     try promptEventLoop(&prompt, io, alloc, listener);
+    // A panel's programs belong to the program hosting the panel, which
+    // is not going anywhere; only a shell with a screen of its own keeps
+    // its background programs past `exit`.
+    if (prompt.exit_typed and prompt.layer == null) {
+        // Saved now rather than in `deinit`, which may be a long time
+        // coming while a kept program runs.
+        prompt.flushPersistentState(.due);
+        prompt.lingerForScreenJobs(listener);
+    }
 }
 
 /// `--embed`: join the host's context and draw on the layer it made for
@@ -675,6 +707,23 @@ fn attachEmbedded(prompt: *Prompt, listener: *glyphwire.InputListener, alloc: st
     prompt.focused = false;
     if (eo.control_fd) |fd| control.* = embed.Control.init(alloc, fd);
     prompt.control = if (control.*) |*ctl| ctl else null;
+    return true;
+}
+
+/// `--context`: draw on, and take input for, the context the host made
+/// for this shell. Both connections attach, as `attachEmbedded`'s do, but
+/// on the root layer: the context is this shell's own, the way a pane's
+/// base context is its first shell's. False (already logged) when either
+/// attach failed and the shell should give up.
+fn attachOwnContext(prompt: *Prompt, listener: *glyphwire.InputListener, context: glyphwire.ContextHandle) bool {
+    prompt.client.attachContext(context) catch |err| {
+        std.log.err("prompt: --context: can't attach to context {d}: {t}", .{ context, err });
+        return false;
+    };
+    listener.attachContext(context) catch |err| {
+        std.log.err("prompt: --context: listener can't attach to context {d}: {t}", .{ context, err });
+        return false;
+    };
     return true;
 }
 
@@ -1314,6 +1363,10 @@ pub const Prompt = struct {
     /// (`runPrompt`'s key loop) checks this after every submitted line and
     /// returns instead of drawing another prompt, ending this process.
     should_exit: bool = false,
+    /// Whether `should_exit` came from the `exit` builtin rather than the
+    /// host going away: only then do background programs with screens of
+    /// their own outlive the shell (`lingerForScreenJobs`).
+    exit_typed: bool = false,
     /// Programs put in the background (see `foregroundJob`), oldest
     /// first. Each is heap-owned; `reportFinishedJobs` reaps and frees the
     /// ones that exit, `hangUpJobs` the rest on the way out.
@@ -3210,6 +3263,7 @@ pub const Prompt = struct {
         // to `$PATH` when typed on its own.
         if (std.mem.eql(u8, argv[0], "exit")) {
             self.should_exit = true;
+            self.exit_typed = true;
         } else if (std.mem.eql(u8, argv[0], "unalias")) {
             try self.doUnalias(argv[1..]);
         } else if (std.mem.eql(u8, argv[0], "cd")) {
@@ -3796,6 +3850,7 @@ pub const Prompt = struct {
     pub const reportCrash = jobs.reportCrash;
     pub const writeCrashLog = jobs.writeCrashLog;
     pub const hangUpJobs = jobs.hangUpJobs;
+    pub const lingerForScreenJobs = jobs.lingerForScreenJobs;
     pub const readResultPipe = jobs.readResultPipe;
     pub const PtyReaderCtx = jobs.PtyReaderCtx;
     pub const syncMouseReport = jobs.syncMouseReport;

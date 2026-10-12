@@ -12,6 +12,7 @@ const hs = @import("shell_support").handshake;
 const crashlog = @import("shell_support").crashlog;
 const keyencode = @import("shell_support").keyencode;
 const parse = @import("shell_support").parse;
+const jobstack = @import("shell_support").jobstack;
 
 const main = @import("main.zig");
 const Prompt = main.Prompt;
@@ -442,7 +443,8 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
 /// on top with the job's context still behind it -- the job has been
 /// put in the background. Otherwise
 /// remembers whatever else is on top as the job's screen the first
-/// time there is one, which is how `fg` later knows what to activate.
+/// time there is one (never another shell's), which is how `fg` later
+/// knows what to activate. The rules are `jobstack.read`'s.
 ///
 /// The pane's stack rather than the event's own `context`: the event
 /// names the *focused* context, and under a multiplexer that moves
@@ -450,23 +452,14 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
 pub fn noteVisibleContext(self: *Prompt, job: *Job) bool {
     var list = self.client.listContexts() catch return false;
     defer list.deinit();
-    const entries = list.entries();
-    if (entries.len == 0) return false;
-    const top = entries[0].context;
-    if (top != list.current()) {
-        if (job.context == null) job.context = top;
-        return false;
+    switch (jobstack.read(list.entries(), list.current(), job.context)) {
+        .none => return false,
+        .claim => |ctx| {
+            job.context = ctx;
+            return false;
+        },
+        .backgrounded => return true,
     }
-    // Back on top, but only a switch away if the job's screen is still
-    // in the stack behind this one. A program on its way out destroys
-    // its context before it is reaped, which also puts this shell back
-    // on top; that is an exit in progress, and the loop keeps waiting
-    // for the reap instead of announcing a background job.
-    const ctx = job.context orelse return false;
-    for (entries[1..]) |entry| {
-        if (entry.context == ctx) return true;
-    }
-    return false;
 }
 
 /// The end of a foreground run: collects the reader thread and the
@@ -725,18 +718,44 @@ pub fn writeCrashLog(self: *Prompt, job: *const Job, program: []const u8, what: 
 /// terminal hangs up its session: SIGHUP, a short grace period to save
 /// and exit, then SIGKILL for anything still there.
 pub fn hangUpJobs(self: *Prompt) void {
-    const alloc = self.client.alloc;
-    for (self.jobs.items) |job| job.pty.signalGroup(std.posix.SIG.HUP);
+    hangUp(self, false);
+    self.jobs.deinit(self.client.alloc);
+}
+
+/// `hangUpJobs`' work on every job, or with `spare_screens` on every job
+/// but those with a screen of their own (`Job.context`), which stay on
+/// `jobs`.
+fn hangUp(self: *Prompt, spare_screens: bool) void {
+    var doomed: std.ArrayList(*Job) = .empty;
+    defer doomed.deinit(self.client.alloc);
+    var i: usize = 0;
+    while (i < self.jobs.items.len) {
+        const job = self.jobs.items[i];
+        if (spare_screens and job.context != null) {
+            i += 1;
+            continue;
+        }
+        _ = self.jobs.orderedRemove(i);
+        doomed.append(self.client.alloc, job) catch {
+            // Nowhere to hold it for the grace period: hang it up now.
+            job.pty.signalGroup(std.posix.SIG.KILL);
+            job.pty.wait();
+            job.reader.join();
+            self.freeJob(job);
+        };
+    }
+
+    for (doomed.items) |job| job.pty.signalGroup(std.posix.SIG.HUP);
     var waited_ms: u32 = 0;
     while (waited_ms < job_hangup_grace_ms) : (waited_ms += 20) {
         var all = true;
-        for (self.jobs.items) |job| {
+        for (doomed.items) |job| {
             if (!job.pty.reaped()) all = false;
         }
         if (all) break;
         std.Io.sleep(self.client.io, .fromMilliseconds(20), .awake) catch break;
     }
-    for (self.jobs.items) |job| {
+    for (doomed.items) |job| {
         if (!job.pty.reaped()) {
             job.pty.signalGroup(std.posix.SIG.KILL);
             job.pty.wait();
@@ -744,7 +763,68 @@ pub fn hangUpJobs(self: *Prompt) void {
         job.reader.join();
         self.freeJob(job);
     }
-    self.jobs.deinit(alloc);
+}
+
+/// A typed `exit` with programs in the background that have screens of
+/// their own (salacommander, zoe): those keep running rather than being
+/// hung up with the shell. Their PTYs are this process's, so it stays
+/// alive until the last of them has exited, but as a shell it is gone:
+/// background jobs without a screen are hung up as usual, the prompt is
+/// not drawn again, its context is retitled `gw-shell (exited)`, and if
+/// it was on screen the newest program is brought up over it. A host
+/// shutdown, or losing the connection, ends the wait early, and
+/// `hangUpJobs` then stops whatever is left. Returns at once when there
+/// is nothing to keep.
+///
+/// The window's pane stays open as long as this process does (and, past
+/// it, as long as anything is left above the pane's base context), so a
+/// program kept this way keeps its pane.
+pub fn lingerForScreenJobs(self: *Prompt, listener: *glyphwire.InputListener) void {
+    const alloc = self.client.alloc;
+    hangUp(self, true);
+    if (self.jobs.items.len == 0) return;
+
+    self.client.setContextTitle("gw-shell (exited)") catch {};
+    const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = 0, .col = 0 };
+    if (cur.col != 0) self.drawText("\n", null, null) catch {};
+    self.drawText("exited; keeping its programs running:\n", job_color, null) catch {};
+    for (self.jobs.items) |job| {
+        var buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "  [{d}] {s}\n", .{ job.id, self.jobTitle(job) }) catch "  [?]\n";
+        self.drawText(line, job_color, null) catch {};
+    }
+
+    // Off this shell's dead prompt, if that is what is showing.
+    on_top: {
+        var list = self.client.listContexts() catch break :on_top;
+        defer list.deinit();
+        const entries = list.entries();
+        if (entries.len == 0 or entries[0].context != list.current()) break :on_top;
+        const newest = self.jobs.items[self.jobs.items.len - 1];
+        self.client.activateContext(newest.context.?) catch {};
+    }
+
+    while (self.jobs.items.len > 0) {
+        var i: usize = 0;
+        while (i < self.jobs.items.len) {
+            const job = self.jobs.items[i];
+            if (!job.pty.reaped()) {
+                i += 1;
+                continue;
+            }
+            _ = self.jobs.orderedRemove(i);
+            job.reader.join();
+            self.freeJob(job);
+        }
+        if (self.jobs.items.len == 0) break;
+
+        // Nothing here wants input; the wait is only for the host
+        // going away. Everything else is dropped as it arrives.
+        const ev = (listener.next(.{ .duration = .{ .raw = .fromMilliseconds(250), .clock = .awake } }) catch return) orelse continue;
+        const shutdown = ev == .shutdown;
+        ev.deinit(alloc);
+        if (shutdown) return;
+    }
 }
 
 /// Drains `read_fd` (the result pipe's read end) to EOF and returns

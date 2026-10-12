@@ -5239,3 +5239,35 @@ pub fn versionLineAndFlagTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectFalse(glyphwire.version.isFlag("-v"));
     try testz.expectFalse(glyphwire.version.isFlag("version"));
 }
+
+pub fn listContextsFlagsEveryShellsContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    // A program's own screen, from a shell on the base context.
+    var program = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
+    const created = try program.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+
+    // A shell the host's context switcher spawned, on top of both.
+    const spawned = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
+    session.contextPtr(spawned).?.spawned_shell = true;
+
+    var list = try listContexts(&program, alloc);
+    defer list.deinit();
+    const r = list.value.result;
+    try testz.expectEqual(r.contexts.len, 3);
+    try testz.expectEqual(r.contexts[0].context, spawned);
+    try testz.expectTrue(r.contexts[0].shell);
+    try testz.expectEqual(r.contexts[1].context, 1);
+    try testz.expectFalse(r.contexts[1].shell);
+    // The pane's base is a shell's too, flagged or not.
+    try testz.expectEqual(r.contexts[2].context, glyphwire.root_context_handle);
+    try testz.expectTrue(r.contexts[2].shell);
+}

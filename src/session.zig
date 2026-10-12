@@ -1316,6 +1316,16 @@ pub const Session = struct {
         return false;
     }
 
+    /// Whether `handle` belongs to a shell rather than to a program run
+    /// from one: any pane's base context, or one the host made for a
+    /// switcher-spawned shell (`Context.spawned_shell`). `list_contexts`'
+    /// `shell`.
+    pub fn isShellContext(self: *Session, handle: ContextHandle) bool {
+        if (self.isBaseContext(handle)) return true;
+        const ctx = self.contexts.get(handle) orelse return false;
+        return ctx.spawned_shell;
+    }
+
     /// `pane`'s context stack, bottom (its base) to top (on screen), or
     /// null for an unknown pane. Borrowed: valid until the next pane or
     /// context mutation. What the context switcher and `list_contexts`

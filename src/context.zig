@@ -363,6 +363,12 @@ pub const Context = struct {
     /// context, which has no lifecycle.
     owners: std.AutoHashMap(ConnId, void),
     connection_owned: bool = false,
+    /// Made by glyphwire-host for a shell its context switcher spawned
+    /// (`Server.createShellContext`). Like a base context it belongs to a
+    /// shell rather than to a program that shell is waiting on, which is
+    /// what `list_contexts`' `shell` tells a shell's job control. Never
+    /// connection-owned: the host destroys it when that shell exits.
+    spawned_shell: bool = false,
     /// A read-only asset source consulted when this context's own
     /// `icons` / `images` don't have a name/handle -- set by
     /// `Session.createContext` to the session's root context, so a

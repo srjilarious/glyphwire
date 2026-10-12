@@ -90,6 +90,7 @@ pub fn isBuiltinName(self: *Prompt, name: []const u8) bool {
 pub fn runBuiltin(self: *Prompt, argv: []const []const u8) !u8 {
     if (std.mem.eql(u8, argv[0], "exit")) {
         self.should_exit = true;
+        self.exit_typed = true;
         return 0;
     }
     if (std.mem.eql(u8, argv[0], "unalias")) {

@@ -200,10 +200,15 @@ pub const App = struct {
     /// Super+F10's theme switcher. Chord and theme list set by `main`
     /// after `init`.
     theme_switcher: theme_switcher_mod.ThemeSwitcher,
-    /// The programs `spawn_in_pane` started, one per pane. Null when
-    /// nothing has ever asked for a pane, which is every session without a
-    /// window manager -- so the common case pays nothing for this.
+    /// The programs `spawn_in_pane` started, one per pane, and the shells
+    /// the context switcher spawned. Set by `main` before the first frame.
     pane_procs: ?*pane_proc_mod.PaneProcs = null,
+    /// The root pane's first shell (`main` starts it, not `pane_procs`),
+    /// for a new shell to start in its directory. Null under `--ssh`.
+    root_shell_pid: ?std.posix.pid_t = null,
+    /// Whether the root pane has been brought off its first shell's dead
+    /// screen yet, once that shell exited with the pane still held open.
+    root_exit_handled: bool = false,
     window_sizing: window_sizing_mod.WindowSizing,
     renderer: render_mod.Renderer,
     /// The OS window title, following the focused pane's program.
@@ -302,7 +307,6 @@ pub const App = struct {
         const t0: ?std.Io.Timestamp = if (self.profiler.active()) self.profiler.now() else null;
         defer if (t0) |s| self.profiler.recordSince(.update, s);
 
-        if (self.shell_exited.load(.monotonic)) return false;
         // A `--screenshot` run quits the frame after `render` has taken
         // the capture, so an automated run terminates on its own.
         if (self.screenshot.done) return false;
@@ -312,6 +316,10 @@ pub const App = struct {
         // here, on the main loop -- never from a reader thread. See
         // `pane_proc.PaneProcs.pump`.
         if (self.pane_procs) |pp| pp.pump(self.alloc);
+
+        // After `pump`, which may just have dropped the last thing
+        // holding the window open.
+        if (self.shell_exited.load(.monotonic) and !self.rootHeld()) return false;
 
         self.syncWindowFocus(eng);
         self.syncWindowTitle(eng);
@@ -630,6 +638,81 @@ pub const App = struct {
         wait = softMin(wait, input_mod.repeatTimeoutMs(eng));
         wait = softMin(wait, self.drag_out.idleTimeoutMs());
         return wait;
+    }
+
+    /// The root pane's first shell has exited: whether the window stays
+    /// open anyway, because something is left above the pane's base
+    /// (`PaneProcs.paneHeld`). The first time it does, the shell's dead
+    /// screen gives way to whatever was shown before it.
+    fn rootHeld(self: *App) bool {
+        const pp = self.pane_procs orelse return false;
+        if (!pp.paneHeld(glyphwire.root_pane_handle)) return false;
+        if (!self.root_exit_handled) {
+            self.root_exit_handled = true;
+            pp.bringForwardOverBase(self.alloc, glyphwire.root_pane_handle);
+        }
+        return true;
+    }
+
+    /// Whether `pane`'s own program has exited while the pane is held
+    /// open. The context switcher leaves that program's base context out:
+    /// there is nothing alive on it to switch to.
+    pub fn paneProgramExited(self: *App, pane: glyphwire.PaneHandle) bool {
+        if (pane == glyphwire.root_pane_handle and self.shell_exited.load(.monotonic)) return true;
+        const pp = self.pane_procs orelse return false;
+        return pp.programExited(pane);
+    }
+
+    /// The context switcher's "new shell": a `gw-shell` on a context of
+    /// its own in `pane`, put on top, starting in the directory of the
+    /// shell nearest the top of that pane (`shellCwd`).
+    pub fn spawnShell(self: *App, pane: glyphwire.PaneHandle) void {
+        const pp = self.pane_procs orelse return;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = self.shellCwd(pane, &buf);
+        _ = pp.spawnShell(pane, cwd) catch |err| {
+            std.log.err("glyphwire-host: spawning a shell in pane {d} failed: {t}", .{ pane, err });
+        };
+    }
+
+    /// The working directory of the topmost context in `pane` whose
+    /// process the host started (a spawned shell, the pane's own program,
+    /// or the root pane's first shell), read from `/proc/<pid>/cwd`. A
+    /// program's own screen is skipped: the shell under it is what a new
+    /// shell should feel like a sibling of. Null when there is none (the
+    /// new shell then starts in the host's own directory).
+    fn shellCwd(self: *App, pane: glyphwire.PaneHandle, buf: []u8) ?[]const u8 {
+        const pp = self.pane_procs orelse return null;
+        // Copied out first: `pidFor` takes the process table's lock, which
+        // is never taken while holding `ctx_mutex`.
+        var handles: [switcher_mod.Switcher.max_entries]glyphwire.ContextHandle = undefined;
+        var base: glyphwire.ContextHandle = 0;
+        const n = blk: {
+            const server = self.server;
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            const p = server.session.panePtr(pane) orelse return null;
+            base = p.base;
+            const stack = p.stack.items;
+            const count = @min(stack.len, handles.len);
+            for (0..count) |i| handles[i] = stack[stack.len - 1 - i];
+            break :blk count;
+        };
+        for (handles[0..n]) |h| {
+            var pid = pp.pidFor(pane, h);
+            if (pid == null and pane == glyphwire.root_pane_handle and h == base) pid = self.root_shell_pid;
+            const known = pid orelse continue;
+            if (procCwd(known, buf)) |dir| return dir;
+        }
+        return null;
+    }
+
+    fn procCwd(pid: std.posix.pid_t, buf: []u8) ?[]const u8 {
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrintSentinel(&path_buf, "/proc/{d}/cwd", .{pid}, 0) catch return null;
+        const n = std.c.readlink(path.ptr, buf.ptr, buf.len);
+        if (n <= 0) return null;
+        return buf[0..@intCast(n)];
     }
 
     fn softMin(a: ?f64, b: ?f64) ?f64 {

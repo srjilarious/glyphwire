@@ -309,6 +309,12 @@ pub const ContextEntry = struct {
     title: []const u8,
     /// Whether this is the one on screen in the pane (always the first).
     visible: bool,
+    /// Whether it belongs to a shell (a pane's base context, or one the
+    /// host made for a shell its context switcher spawned) rather than to
+    /// a program run from one. A shell waiting on a job never takes such a
+    /// context for that job's screen. Absent (false) from a host older
+    /// than protocol 0.9.0.
+    shell: bool = false,
 };
 
 /// The `list_contexts` response body: the issuing connection's pane
@@ -322,7 +328,7 @@ pub const ListContextsResult = struct {
 
 /// The version of this protocol, as `docs/protocol.md`'s header gives
 /// it. Bumped with that document, not with any program.
-pub const protocol_version = "0.8.0";
+pub const protocol_version = "0.9.0";
 
 /// `get_version`'s result: the program serving the session and the
 /// protocol it speaks. `program` is its executable name
