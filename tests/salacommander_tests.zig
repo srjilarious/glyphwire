@@ -769,6 +769,32 @@ pub fn paneBackForwardRestoresCursorTest(io: std.Io, alloc: std.mem.Allocator) !
     try testz.expectEqualStr(p.path, a);
 }
 
+/// `visits` moves on every trip the pane takes, back to where it was
+/// included, and never on a reread: what Shift+F4's landing checks to
+/// leave alone a pane the user has since moved.
+pub fn paneVisitsCountTripsNotRereadsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "visits");
+    defer s.deinit();
+    try s.mkdir("a");
+
+    var p = try Pane.init(alloc, io, s.path, .{});
+    defer p.deinit();
+    const start = p.visits;
+    try p.reload();
+    try testz.expectEqual(p.visits, start);
+
+    const a = try s.abs("a");
+    defer alloc.free(a);
+    try p.load(a);
+    try testz.expectEqual(p.visits, start + 1);
+    try testz.expectTrue(try p.back());
+    try testz.expectEqualStr(p.path, s.path);
+    try testz.expectEqual(p.visits, start + 2);
+    try testz.expectTrue(try p.forward());
+    try testz.expectTrue(try p.upToParentDir());
+    try testz.expectEqual(p.visits, start + 4);
+}
+
 pub fn paneHistoryRecentIsNewestFirstWithoutRepeatsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var s = try Scratch.init(io, alloc, "histrecent");
     defer s.deinit();

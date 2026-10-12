@@ -297,11 +297,14 @@ const Launched = struct {
 };
 
 /// Shift+F4's new file, which only exists once the editor has saved it:
-/// when the editor exits, pane `pane` lands on `path` if it is still
-/// showing that file's directory.
+/// when the editor exits, pane `pane` lands on `path` if it never left
+/// the directory it was showing. One that went elsewhere -- even back
+/// again -- has a cursor the user put there since, and keeps it.
 const Landing = struct {
     pane: usize,
     path: []const u8,
+    /// The pane's `visits` when the editor started.
+    visits: u64,
 };
 
 /// How long the loop waits for an event while a launched program is
@@ -1191,7 +1194,7 @@ pub const Ui = struct {
         try self.launched.ensureUnusedCapacity(self.alloc, 1);
         const owned_name = try self.alloc.dupe(u8, name);
         errdefer self.alloc.free(owned_name);
-        const owned_land: ?Landing = if (land) |l| .{ .pane = l.pane, .path = try self.alloc.dupe(u8, l.path) } else null;
+        const owned_land: ?Landing = if (land) |l| .{ .pane = l.pane, .path = try self.alloc.dupe(u8, l.path), .visits = l.visits } else null;
         return .{ .pid = 0, .name = owned_name, .complaint = complaint, .land = owned_land };
     }
 
@@ -1236,10 +1239,12 @@ pub const Ui = struct {
         }
     }
 
-    /// `land`'s pane onto its file, if the pane still shows the file's
-    /// directory and the file is there now.
+    /// `land`'s pane onto its file, if the pane hasn't moved since the
+    /// editor started, is showing the file's directory, and the file is
+    /// there now.
     fn landOn(self: *Ui, land: Landing) void {
         const p = &self.panes[land.pane];
+        if (p.visits != land.visits) return;
         if (!std.mem.eql(u8, std.fs.path.dirname(land.path) orelse "", p.path)) return;
         if (p.rowOf(std.fs.path.basename(land.path))) |row| {
             p.setCursor(row);
@@ -1317,7 +1322,7 @@ pub const Ui = struct {
         } else |_| {}
         // Saved into this pane's directory: land on it once the editor
         // exits (`reapLaunched`), which is when the file is there.
-        try self.openInEditor(path, as_root, .{ .pane = self.active, .path = path });
+        try self.openInEditor(path, as_root, .{ .pane = self.active, .path = path, .visits = p.visits });
     }
 
     /// `path` in the configured `editor`, or through sudoedit, landing

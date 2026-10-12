@@ -111,6 +111,11 @@ pub const Pane = struct {
     sort: Sort = .{},
     /// Where this pane has been this session (see the module doc).
     history: DirHistory,
+    /// Bumped each time the pane shows a directory -- a `load`, Back or
+    /// Forward, never a `reload` -- so something that waits can tell
+    /// whether the pane went anywhere meanwhile, even back to where it
+    /// was (Shift+F4's landing, `Ui.Landing`).
+    visits: u64 = 0,
 
     /// Opens `path` (absolute or relative to the cwd). Fails if it can't
     /// be listed.
@@ -231,6 +236,7 @@ pub const Pane = struct {
         self.marked = marked;
         self.list.selected = 0;
         self.list.top = 0;
+        self.visits += 1;
     }
 
     /// Re-reads the current directory, keeping the cursor on the entry it
