@@ -276,6 +276,7 @@ pub fn main(init: std.process.Init) !void {
             .paste,
             .buffer_step,
             .buffer_close,
+            .buffer_new,
             .split,
             .close_group,
             .lsp_hover,

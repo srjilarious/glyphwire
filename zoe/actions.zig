@@ -48,6 +48,11 @@ pub const Action = enum {
     toggleShell,
     nextTab,
     prevTab,
+    /// The focused group's shown tab, refused on a modified buffer the
+    /// way `:bd` and the tab's `×` are. Ctrl+W x too.
+    closeTab,
+    /// A new `[No Name]` scratch tab next to the shown one (`:enew`).
+    newBuffer,
     /// vim's Ctrl+W: the next key splits, closes or moves between groups.
     windowPrefix,
     focusLeft,
@@ -148,6 +153,7 @@ pub const Action = enum {
     pub fn paletteLabel(self: Action) ?[]const u8 {
         return switch (self) {
             .prevTab => "Previous Tab",
+            .newBuffer => "New Scratch Buffer",
             .toggleHidden => "Toggle Hidden Files",
             .toggleShell => "Toggle Shell Panel",
             .toggleTree => "Toggle File Tree",
@@ -201,6 +207,10 @@ pub const global_defaults = [_]Default{
     .{ .chord = "ctrl+grave_accent", .action = .toggleShell },
     .{ .chord = "ctrl+tab", .action = .nextTab },
     .{ .chord = "ctrl+shift+tab", .action = .prevTab },
+    // Ctrl+W is the window prefix, so closing a tab takes the Windows /
+    // VS Code alternate (Ctrl+W x is the prefix's own route).
+    .{ .chord = "ctrl+F4", .action = .closeTab },
+    .{ .chord = "ctrl+shift+n", .action = .newBuffer },
     .{ .chord = "ctrl+w", .action = .windowPrefix },
     // `h` is deliberately absent: Ctrl+H is hidden files, and focusing
     // left is already Ctrl+Left and Ctrl+W h.

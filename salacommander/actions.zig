@@ -49,6 +49,15 @@ pub const Action = enum {
     leftPaneToSameDir,
     swapPanes,
 
+    /// A new tab in the active pane, showing its directory, right after
+    /// the shown one (see `tabs.zig`).
+    newTab,
+    /// The active pane's shown tab. A pane's last tab stays.
+    closeTab,
+    /// The active pane's next / previous tab, wrapping.
+    nextTab,
+    prevTab,
+
     toggleMark,
     toggleMarkAndDown,
     markAll,
@@ -149,6 +158,11 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "ctrl+right", .action = .rightPaneToSameDir },
     .{ .chord = "ctrl+left", .action = .leftPaneToSameDir },
     .{ .chord = "ctrl+u", .action = .swapPanes },
+    // Total Commander's tab keys.
+    .{ .chord = "ctrl+t", .action = .newTab },
+    .{ .chord = "ctrl+w", .action = .closeTab },
+    .{ .chord = "ctrl+tab", .action = .nextTab },
+    .{ .chord = "ctrl+shift+tab", .action = .prevTab },
 
     .{ .chord = "space", .action = .toggleMark },
     .{ .chord = "insert", .action = .toggleMarkAndDown },
@@ -243,6 +257,10 @@ pub fn barLabel(action: Action) []const u8 {
         .rightPaneToSameDir => "Same>",
         .leftPaneToSameDir => "<Same",
         .swapPanes => "Swap",
+        .newTab => "NewTab",
+        .closeTab => "Close",
+        .nextTab => "Next",
+        .prevTab => "Prev",
         .markAll => "All",
         .unmarkAll => "None",
         .invertMarks => "Invert",
@@ -295,6 +313,7 @@ pub fn paletteLabel(action: Action) ?[]const u8 {
         .historyForward => "Forward to Next Directory",
         .showHistory => "Directory History",
         .editPath => "Edit Path",
+        .prevTab => "Previous Tab",
         .find => "Find Below This Directory",
         .copy => "Copy to Other Pane",
         .move => "Move to Other Pane",

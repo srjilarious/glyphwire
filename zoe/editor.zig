@@ -153,6 +153,8 @@ pub const Outcome = union(enum) {
     /// plain `:bd` on a modified buffer never gets this far (E37, the
     /// same guard `:q` uses).
     buffer_close: struct { force: bool },
+    /// `:enew` -- a new empty `[No Name]` tab beside this one.
+    buffer_new,
     /// `:vsplit [path]` / `:split [path]` -- a new editor group beside
     /// (`vertical`) or under this one. `path` borrows `Editor.cmd_arg`
     /// like `edit` does; null moves the current buffer into the new
@@ -717,6 +719,8 @@ pub const Editor = struct {
             .toggleShell,
             .nextTab,
             .prevTab,
+            .closeTab,
+            .newBuffer,
             .windowPrefix,
             .focusLeft,
             .focusRight,
@@ -3204,6 +3208,7 @@ pub const Editor = struct {
         if (eq(u8, name, "bn") or eq(u8, name, "bnext")) return .{ .buffer_step = .{ .forward = true } };
         if (eq(u8, name, "bp") or eq(u8, name, "bprev") or eq(u8, name, "bprevious"))
             return .{ .buffer_step = .{ .forward = false } };
+        if (eq(u8, name, "ene") or eq(u8, name, "enew")) return .buffer_new;
         if (eq(u8, name, "bd!") or eq(u8, name, "bdelete!")) return .{ .buffer_close = .{ .force = true } };
         if (eq(u8, name, "bd") or eq(u8, name, "bdelete")) {
             if (self.buf.dirty) {

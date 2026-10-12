@@ -929,6 +929,21 @@ pub fn commandLineBufferDeleteRefusesADirtyBufferTest(_: std.Io, alloc: std.mem.
     }
 }
 
+pub fn commandLineEnewOpensAScratchTabTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    // A modified buffer doesn't stop it: the new tab sits beside it.
+    _ = try keys.feed(&ed, "iy<esc>");
+    switch (try keys.feed(&ed, ":enew<cr>")) {
+        .buffer_new => {},
+        else => try testz.fail(),
+    }
+    switch (try keys.feed(&ed, ":ene<cr>")) {
+        .buffer_new => {},
+        else => try testz.fail(),
+    }
+}
+
 pub fn commandLineQuitAfterSaveIsCleanTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
@@ -4248,6 +4263,22 @@ pub fn sidebarToggleHasBothChordsTest(_: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectEqual(km.lookup(.normal, "b", .{ .ctrl = true }).?, .toggleTree);
     try testz.expectEqual(km.lookup(.normal, "n", .{ .ctrl = true }).?, .toggleTree);
     try testz.expectEqual(km.lookup(.global, "b", .{ .ctrl = true }).?, .toggleTree);
+}
+
+/// Ctrl+W is the window prefix, so closing a tab is Ctrl+F4; both it and
+/// Ctrl+Shift+N's scratch tab are window-level, so they work from the
+/// tree and from insert mode alike.
+pub fn tabChordsCloseAndOpenTabsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
+    defer km.deinit(alloc);
+    try testz.expectEqual(km.lookup(.normal, "F4", .{ .ctrl = true }).?, .closeTab);
+    try testz.expectEqual(km.lookup(.insert, "F4", .{ .ctrl = true }).?, .closeTab);
+    try testz.expectEqual(km.lookup(.normal, "n", .{ .ctrl = true, .shift = true }).?, .newBuffer);
+    try testz.expectEqual(km.lookup(.insert, "n", .{ .ctrl = true, .shift = true }).?, .newBuffer);
+    try testz.expectTrue(actions.Action.closeTab.isUi());
+    try testz.expectTrue(actions.Action.newBuffer.isUi());
+    try testz.expectTrue(actions.Action.closeTab.inPalette());
+    try testz.expectTrue(actions.Action.newBuffer.inPalette());
 }
 
 pub fn keysConfigRebindsAndUnbindsTest(_: std.Io, alloc: std.mem.Allocator) !void {

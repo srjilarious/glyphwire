@@ -1055,7 +1055,166 @@ pub fn ListingChangesTakeTheFullRepaintTest(_: std.Io, _: std.mem.Allocator) !vo
     for (full) |a| try testz.expectEqual(sala.ui.Ui.dirtyFor(a), .full);
 }
 
+// ─── Tabs ───────────────────────────────────────────────────────────────
+
+const tabs = sala.tabs;
+
+/// The strip in order, the shown tab included, for comparing against.
+fn tabOrder(set: *tabs.TabSet(u32), shown: *u32, out: []u32) []u32 {
+    for (0..set.count()) |k| out[k] = set.at(shown, k).*;
+    return out[0..set.count()];
+}
+
+pub fn tabsOpenAfterTheShownOneTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var set: tabs.TabSet(u32) = .{};
+    defer set.deinit(alloc);
+    var shown: u32 = 1;
+    try testz.expectEqual(set.count(), 1);
+
+    try set.open(alloc, &shown, 2);
+    try testz.expectEqual(shown, 2);
+    try testz.expectEqual(set.active, 1);
+    // From the first tab, a new one goes between it and the rest.
+    try testz.expectTrue(set.switchTo(&shown, 0));
+    try set.open(alloc, &shown, 3);
+    var buf: [8]u32 = undefined;
+    try std.testing.expectEqualSlices(u32, &.{ 1, 3, 2 }, tabOrder(&set, &shown, &buf));
+    try testz.expectEqual(set.active, 1);
+}
+
+pub fn tabsSwitchKeepsTheStripOrderTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var set: tabs.TabSet(u32) = .{};
+    defer set.deinit(alloc);
+    var shown: u32 = 0;
+    for (1..5) |n| try set.open(alloc, &shown, @intCast(n));
+    var buf: [8]u32 = undefined;
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4 }, tabOrder(&set, &shown, &buf));
+
+    // Every jump, left and right, leaves the order alone and shows `k`.
+    for ([_]usize{ 0, 3, 1, 4, 2, 0, 4 }) |k| {
+        try testz.expectTrue(set.switchTo(&shown, k));
+        try testz.expectEqual(shown, @as(u32, @intCast(k)));
+        try testz.expectEqual(set.active, k);
+        try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4 }, tabOrder(&set, &shown, &buf));
+    }
+    try testz.expectFalse(set.switchTo(&shown, 4));
+    try testz.expectFalse(set.switchTo(&shown, 5));
+}
+
+pub fn tabsStepWrapsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var set: tabs.TabSet(u32) = .{};
+    defer set.deinit(alloc);
+    var shown: u32 = 0;
+    try testz.expectFalse(set.step(&shown, true));
+    try set.open(alloc, &shown, 1);
+    try set.open(alloc, &shown, 2);
+    try testz.expectTrue(set.step(&shown, true));
+    try testz.expectEqual(shown, 0);
+    try testz.expectTrue(set.step(&shown, false));
+    try testz.expectEqual(shown, 2);
+    try testz.expectTrue(set.step(&shown, false));
+    try testz.expectEqual(shown, 1);
+}
+
+pub fn tabsCloseShowsTheRightNeighbourTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var set: tabs.TabSet(u32) = .{};
+    defer set.deinit(alloc);
+    var shown: u32 = 0;
+    for (1..4) |n| try set.open(alloc, &shown, @intCast(n));
+    _ = set.switchTo(&shown, 1);
+    var buf: [8]u32 = undefined;
+
+    // The shown one: its right neighbour slides in.
+    try testz.expectEqual(set.close(&shown, 1).?, 1);
+    try testz.expectEqual(shown, 2);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2, 3 }, tabOrder(&set, &shown, &buf));
+    // One to its left: the shown tab stays, one slot further left.
+    try testz.expectEqual(set.close(&shown, 0).?, 0);
+    try testz.expectEqual(shown, 2);
+    try testz.expectEqual(set.active, 0);
+    // The last one while shown: its left neighbour.
+    _ = set.switchTo(&shown, 1);
+    try testz.expectEqual(set.close(&shown, 1).?, 3);
+    try testz.expectEqual(shown, 2);
+    try testz.expectEqual(set.active, 0);
+    // A side's only tab never closes.
+    try testz.expectEqual(set.close(&shown, 0), null);
+    try testz.expectEqual(set.count(), 1);
+}
+
+pub fn tabStripLayoutAndHitsTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(tabs.labelFor("/home/me/src"), "src");
+    try testz.expectEqualStr(tabs.labelFor("/"), "/");
+
+    var spans: [3]tabs.Span = undefined;
+    // ` src │ / │ docs `
+    const total = tabs.layout(&.{ "src", "/", "docs" }, &spans);
+    try testz.expectEqual(total, 5 + 1 + 3 + 1 + 6);
+    try testz.expectEqual(spans[1].start, 6);
+    try testz.expectEqual(tabs.hit(&spans, 0), 0);
+    try testz.expectEqual(tabs.hit(&spans, 5), null); // the separator
+    try testz.expectEqual(tabs.hit(&spans, 7), 1);
+    try testz.expectEqual(tabs.hit(&spans, total), null);
+
+    // It fits: no slide. It doesn't: just enough for the right edge, but
+    // never past the tab's own left edge.
+    try testz.expectEqual(tabs.scrollFor(spans[2], 20), 0);
+    try testz.expectEqual(tabs.scrollFor(spans[2], 12), total - 12);
+    try testz.expectEqual(tabs.scrollFor(spans[2], 3), spans[2].start);
+}
+
+/// Panes move in and out of a set by value, each keeping its own
+/// directory, cursor and history; nothing leaks or is freed twice.
+pub fn tabsHoldWholePanesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "tabs");
+    defer s.deinit();
+    try s.mkdir("one");
+    try s.mkdir("two");
+    try s.file("one/a", "");
+    try s.file("one/b", "");
+
+    const one = try s.abs("one");
+    defer alloc.free(one);
+    const two = try s.abs("two");
+    defer alloc.free(two);
+
+    var shown = try Pane.init(alloc, io, one, .{});
+    var set: tabs.TabSet(Pane) = .{};
+    defer {
+        shown.deinit();
+        for (set.others.items) |*p| p.deinit();
+        set.deinit(alloc);
+    }
+    shown.setCursor(2);
+
+    try set.open(alloc, &shown, try Pane.init(alloc, io, one, .{}));
+    try shown.load(two);
+    try testz.expectEqualStr(shown.path, two);
+
+    try testz.expectTrue(set.step(&shown, false));
+    try testz.expectEqualStr(shown.path, one);
+    try testz.expectEqual(shown.list.selected, 2);
+    try testz.expectEqualStr(set.at(&shown, 1).path, two);
+    // The hidden tab's own history went one -> two.
+    try testz.expectTrue(set.at(&shown, 1).history.backTarget() != null);
+
+    var gone = set.close(&shown, 0).?;
+    gone.deinit();
+    try testz.expectEqualStr(shown.path, two);
+}
+
 // ─── Actions and config ─────────────────────────────────────────────────
+
+pub fn tabChordsAreTotalCommandersTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
+    defer km.deinit(alloc);
+    try testz.expectEqual(km.lookup("t", .{ .ctrl = true }).?, actions.Action.newTab);
+    try testz.expectEqual(km.lookup("w", .{ .ctrl = true }).?, actions.Action.closeTab);
+    try testz.expectEqual(km.lookup("tab", .{ .ctrl = true }).?, actions.Action.nextTab);
+    try testz.expectEqual(km.lookup("tab", .{ .ctrl = true, .shift = true }).?, actions.Action.prevTab);
+    // Plain Tab still crosses to the other pane.
+    try testz.expectEqual(km.lookup("tab", .{}).?, actions.Action.switchPane);
+}
 
 pub fn defaultBindingsCoverTheBasicsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);

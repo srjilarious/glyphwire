@@ -2287,6 +2287,8 @@ pub const Ui = struct {
             .toggleShell => self.toggleShell(),
             .nextTab => self.stepBuffer(true),
             .prevTab => self.stepBuffer(false),
+            .closeTab => try self.closeBuffer(self.grp.active, false),
+            .newBuffer => try self.newBuffer(),
             // vim's window prefix: the next key splits (`v`, `s`), closes
             // (`q`, `c`) or moves (`w`, a direction). See `windowCommand`.
             .windowPrefix => {
@@ -2358,6 +2360,10 @@ pub const Ui = struct {
             try self.splitGroup(.horizontal, .after, null);
         } else if (eq(u8, key, "q") or eq(u8, key, "c")) {
             try self.closeGroup();
+        } else if (eq(u8, key, "x")) {
+            // The tab, not the group: vim's Ctrl+W x swaps windows, which
+            // zoe's tab moves already cover.
+            try self.closeBuffer(self.grp.active, false);
         } else if (eq(u8, key, "w")) {
             try self.cycleFocus();
         } else if (eq(u8, key, "h")) {
@@ -3073,7 +3079,8 @@ pub const Ui = struct {
             self.closeCompletion();
             self.dismissTabTip();
         }
-        if (!std.mem.eql(u8, ev.button, "left")) return;
+        const middle = std.mem.eql(u8, ev.button, "middle");
+        if (!middle and !std.mem.eql(u8, ev.button, "left")) return;
 
         // While the finder is up it owns the pointer too: a result row
         // opens that file, anywhere outside the popup dismisses it, and
@@ -3091,6 +3098,17 @@ pub const Ui = struct {
         }
         if (self.finder.isOpen()) {
             if (ev.pressed and self.finder.click(ev.cell) == .accept) try self.acceptFinder();
+            return;
+        }
+
+        // A middle click on a tab closes it, the browser way, with the
+        // same E37 refusal as its `×`. Anywhere else it does nothing.
+        if (middle) {
+            if (!ev.pressed) return;
+            const g = self.groupAt(ev.cell) orelse return;
+            const h = tabAt(g, ev.cell) orelse return;
+            if (g != self.grp) self.focusGroup(g);
+            try self.closeBuffer(h.index, false);
             return;
         }
 
@@ -3523,6 +3541,7 @@ pub const Ui = struct {
             },
             .buffer_step => |b| self.stepBuffer(b.forward),
             .buffer_close => |b| try self.closeBuffer(self.grp.active, b.force),
+            .buffer_new => try self.newBuffer(),
             .split => |sp| try self.splitGroup(if (sp.vertical) .vertical else .horizontal, .after, self.expandArg(sp.path, &home_buf)),
             .close_group => try self.closeGroup(),
             .chdir => |target| self.changeDir(target),
@@ -4644,6 +4663,16 @@ pub const Ui = struct {
         const n = self.grp.buffers.items.len;
         if (n < 2) return;
         self.setActive(if (forward) (self.grp.active + 1) % n else (self.grp.active + n - 1) % n);
+    }
+
+    /// Ctrl+Shift+N and `:enew`: an empty `[No Name]` tab beside the
+    /// shown one in the focused group, with the keyboard in it.
+    pub fn newBuffer(self: *Ui) !void {
+        const slot = try self.newSlot(null);
+        errdefer slot.deinit(self.alloc);
+        try self.grp.buffers.insert(self.alloc, self.grp.active + 1, slot);
+        self.setActive(self.grp.active + 1);
+        self.setFocus(.buffer);
     }
 
     /// Closes tab `index` of the focused group. A modified buffer refuses

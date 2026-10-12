@@ -17,6 +17,9 @@
 //!     last row     a summary: what's marked (or the cursor entry) on the
 //!                  left, the directory's item count and total on the right
 //!
+//! A pane with more than one tab (`tabs.zig`) spends a row over all of
+//! that on its tab strip, and the rows above move down one to make room.
+//!
 //! More layers sit over those: the Ctrl+` shell panel -- a `gw-shell
 //! --embed` drawing its own prompt into a layer of ours, docked along an
 //! edge or floating in the middle (`shell_position`; see
@@ -69,6 +72,7 @@ const dialog_mod = @import("dialog.zig");
 const config_mod = @import("config.zig");
 const openaction = @import("openaction.zig");
 const drag_mod = @import("drag.zig");
+const tabs_mod = @import("tabs.zig");
 const sudo = @import("sudo.zig");
 const shellpanel = @import("applib").shellpanel;
 const wordsplit = @import("applib").wordsplit;
@@ -106,6 +110,9 @@ const bg_header = role(.table_header_bg);
 const bg_footer = role(.status_bg);
 const bg_title_active = role(.title_bg);
 const bg_title_inactive = role(.title_inactive_bg);
+/// A pane's tab strip, and its tabs that aren't shown (zoe's roles).
+const bg_tab_bar = role(.tab_bar_bg);
+const bg_tab = role(.tab_bg);
 const bg_cursor = role(.list_cursor_bg);
 const bg_cursor_inactive = role(.list_cursor_inactive_bg);
 const fg_cursor = role(.list_cursor_fg);
@@ -174,7 +181,9 @@ const palette_style: palette_mod.Style = blk: {
     break :blk s;
 };
 
-/// Rows every pane spends on chrome: title, column header, footer.
+/// Rows every pane spends on chrome: title, column header, footer. A
+/// pane with two or more tabs spends one more, on its tab strip above
+/// the title (`Ui.stripRows`), and every row below moves down with it.
 const chrome_rows = 3;
 /// The column-header row, between the title and the listing. Clicking it
 /// re-orders the pane -- see `sortKeyForColumn`.
@@ -305,6 +314,9 @@ const Landing = struct {
     path: []const u8,
     /// The pane's `visits` when the editor started.
     visits: u64,
+    /// The side's `Ui.shown_serial` then: a different tab shown since
+    /// counts as having gone elsewhere, even one on the same directory.
+    serial: u64,
 };
 
 /// How long the loop waits for an event while a launched program is
@@ -371,7 +383,14 @@ pub const Ui = struct {
     /// a permission error (`hookError`); `chosen` once it's been taken,
     /// which stops the run so `runAttrs` can start it over through sudo.
     root_retry: enum { off, offered, chosen } = .off,
+    /// The shown tab of each side. Its hidden tabs are in `tab_sets`.
     panes: [2]Pane,
+    /// Each side's other tabs, and where the shown one sits among them
+    /// (`tabs.zig`).
+    tab_sets: [2]tabs_mod.TabSet(Pane) = .{ .{}, .{} },
+    /// Bumped whenever a side's shown tab changes -- a switch, a new tab,
+    /// a close, Ctrl+U -- so a Shift+F4 `Landing` can tell.
+    shown_serial: [2]u64 = .{ 0, 0 },
     active: usize = 0,
 
     /// The dialog on screen, while `runDialog` has one up.
@@ -632,6 +651,10 @@ pub const Ui = struct {
         self.palette.deinit();
         self.history_popup.deinit();
         for (&self.panes) |*p| p.deinit();
+        for (&self.tab_sets) |*set| {
+            for (set.others.items) |*p| p.deinit();
+            set.deinit(alloc);
+        }
         self.keymap.deinit(alloc);
         self.menu_keymap.deinit(alloc);
         self.cfg.deinit(alloc);
@@ -958,9 +981,17 @@ pub const Ui = struct {
             .rightPaneToSameDir => if (i == 0) try self.otherPaneToSameDir(),
             .leftPaneToSameDir => if (i == 1) try self.otherPaneToSameDir(),
             .swapPanes => {
+                // Tabs and all: each side's strip goes with its pane.
                 std.mem.swap(Pane, &self.panes[0], &self.panes[1]);
+                std.mem.swap(tabs_mod.TabSet(Pane), &self.tab_sets[0], &self.tab_sets[1]);
+                self.shown_serial[0] += 1;
+                self.shown_serial[1] += 1;
                 self.pane_dirty = .{ .full, .full };
             },
+            .newTab => try self.newTab(),
+            .closeTab => try self.closeTab(i, self.tab_sets[i].active),
+            .nextTab => try self.stepTab(true),
+            .prevTab => try self.stepTab(false),
 
             .toggleMark => p.toggleMark(p.list.selected),
             .toggleMarkAndDown => {
@@ -1054,6 +1085,118 @@ pub const Ui = struct {
         const path = self.panes[i].path;
         self.panes[1 - i].load(path) catch |err| try self.setMessage("{s}: {t}", .{ path, err });
         self.markDirty(1 - i, .full);
+    }
+
+    // ── Tabs ────────────────────────────────────────────────────────────
+
+    /// Ctrl+T: a new tab in the active pane, on its directory and with
+    /// its view, sort and hidden-file setting. Its history starts fresh.
+    fn newTab(self: *Ui) !void {
+        const i = self.active;
+        const p = &self.panes[i];
+        var fresh = try Pane.init(self.alloc, self.io, p.path, .{ .show_hidden = p.show_hidden, .view = p.view });
+        errdefer fresh.deinit();
+        fresh.setSort(p.sort);
+        self.leaveTab();
+        try self.tab_sets[i].open(self.alloc, p, fresh);
+        self.shown_serial[i] += 1;
+        self.markDirty(i, .full);
+    }
+
+    /// Ctrl+Tab / Ctrl+Shift+Tab in the active pane.
+    fn stepTab(self: *Ui, forward: bool) !void {
+        const i = self.active;
+        self.leaveTab();
+        if (self.tab_sets[i].step(&self.panes[i], forward)) try self.tabShown(i);
+    }
+
+    /// A click on pane `i`'s strip.
+    fn showTab(self: *Ui, i: usize, k: usize) !void {
+        self.leaveTab();
+        if (self.tab_sets[i].switchTo(&self.panes[i], k)) try self.tabShown(i);
+    }
+
+    /// Ctrl+W and a middle click on the strip: closes tab `k` of pane
+    /// `i`, unless it is the pane's last.
+    fn closeTab(self: *Ui, i: usize, k: usize) !void {
+        const was_shown = k == self.tab_sets[i].active;
+        self.leaveTab();
+        var gone = self.tab_sets[i].close(&self.panes[i], k) orelse return;
+        gone.deinit();
+        if (was_shown) try self.tabShown(i);
+        // Down to one tab, the strip's row goes and everything moves up.
+        self.markDirty(i, .full);
+    }
+
+    /// The fields and the find prefix belong to the tab they were opened
+    /// in, so they close before another one is shown.
+    fn leaveTab(self: *Ui) void {
+        self.endPathEdit();
+        self.endNameEdit();
+        self.clearFind();
+    }
+
+    /// Pane `i` is showing a different tab: reread it, since its
+    /// directory may have changed while it was hidden.
+    fn tabShown(self: *Ui, i: usize) !void {
+        self.shown_serial[i] += 1;
+        const p = &self.panes[i];
+        p.reload() catch |err| try self.setMessage("{s}: {t}", .{ p.path, err });
+        self.markDirty(i, .full);
+    }
+
+    /// Pane `i`'s strip laid out, in a slice the caller frees, and how
+    /// far it slides left to show the active tab.
+    fn stripLayout(self: *Ui, i: usize) !struct { spans: []tabs_mod.Span, scroll: usize } {
+        const set = &self.tab_sets[i];
+        const n = set.count();
+        const labels = try self.alloc.alloc([]const u8, n);
+        defer self.alloc.free(labels);
+        for (labels, 0..) |*l, k| l.* = tabs_mod.labelFor(set.at(&self.panes[i], k).path);
+        const spans = try self.alloc.alloc(tabs_mod.Span, n);
+        _ = tabs_mod.layout(labels, spans);
+        return .{ .spans = spans, .scroll = tabs_mod.scrollFor(spans[set.active], self.paneWidth(i)) };
+    }
+
+    /// The tab under pane-local column `col` of pane `i`'s strip.
+    fn tabAt(self: *Ui, i: usize, col: usize) !?usize {
+        const l = try self.stripLayout(i);
+        defer self.alloc.free(l.spans);
+        return tabs_mod.hit(l.spans, col + l.scroll);
+    }
+
+    /// Pane `i`'s strip, on the row over its title. The shown tab wears
+    /// the title's colours, so it reads as one piece with the path under
+    /// it; the rest sit a shade down. A tab slid partly off the left edge
+    /// shows as `…`.
+    fn writeStrip(self: *Ui, b: *Batch, i: usize) !void {
+        const layer = self.pane_layers[i];
+        const w = self.paneWidth(i);
+        const set = &self.tab_sets[i];
+        const l = try self.stripLayout(i);
+        defer self.alloc.free(l.spans);
+
+        try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = bg_tab_bar });
+        const lit = i == self.active;
+        for (l.spans, 0..) |span, k| {
+            if (span.end <= l.scroll) continue;
+            if (span.start >= l.scroll + w) break;
+            const shown = k == set.active;
+            const bg = if (!shown) bg_tab else if (lit) bg_title_active else bg_title_inactive;
+            const fg = if (!shown) fg_detail else if (lit) fg_title_active else fg_title_inactive;
+            const label = tabs_mod.labelFor(set.at(&self.panes[i], k).path);
+            if (span.start < l.scroll) {
+                try b.clearArea(.{ .layer = layer, .row = 0, .col = 0, .rows = 1, .cols = span.end - l.scroll, .bg = bg });
+                try b.writeText("…", .{ .layer = layer, .row = 0, .col = 0, .fg = fg, .bg = bg });
+            } else {
+                const col = span.start - l.scroll;
+                try b.clearArea(.{ .layer = layer, .row = 0, .col = col, .rows = 1, .cols = @min(span.end - span.start, w - col), .bg = bg });
+                try b.writeText(label, .{ .layer = layer, .row = 0, .col = col + 1, .fg = fg, .bg = bg, .max_cols = w -| (col + 1) });
+            }
+            if (k + 1 < l.spans.len and span.end >= l.scroll and span.end < l.scroll + w) {
+                try b.writeText(tabs_mod.separator, .{ .layer = layer, .row = 0, .col = span.end - l.scroll, .fg = fg_detail, .bg = bg_tab_bar });
+            }
+        }
     }
 
     /// Ctrl+`: show the shell panel (starting it the first time) or hide
@@ -1194,7 +1337,7 @@ pub const Ui = struct {
         try self.launched.ensureUnusedCapacity(self.alloc, 1);
         const owned_name = try self.alloc.dupe(u8, name);
         errdefer self.alloc.free(owned_name);
-        const owned_land: ?Landing = if (land) |l| .{ .pane = l.pane, .path = try self.alloc.dupe(u8, l.path), .visits = l.visits } else null;
+        const owned_land: ?Landing = if (land) |l| .{ .pane = l.pane, .path = try self.alloc.dupe(u8, l.path), .visits = l.visits, .serial = l.serial } else null;
         return .{ .pid = 0, .name = owned_name, .complaint = complaint, .land = owned_land };
     }
 
@@ -1244,7 +1387,7 @@ pub const Ui = struct {
     /// there now.
     fn landOn(self: *Ui, land: Landing) void {
         const p = &self.panes[land.pane];
-        if (p.visits != land.visits) return;
+        if (p.visits != land.visits or self.shown_serial[land.pane] != land.serial) return;
         if (!std.mem.eql(u8, std.fs.path.dirname(land.path) orelse "", p.path)) return;
         if (p.rowOf(std.fs.path.basename(land.path))) |row| {
             p.setCursor(row);
@@ -1322,7 +1465,7 @@ pub const Ui = struct {
         } else |_| {}
         // Saved into this pane's directory: land on it once the editor
         // exits (`reapLaunched`), which is when the file is there.
-        try self.openInEditor(path, as_root, .{ .pane = self.active, .path = path, .visits = p.visits });
+        try self.openInEditor(path, as_root, .{ .pane = self.active, .path = path, .visits = p.visits, .serial = self.shown_serial[self.active] });
     }
 
     /// `path` in the configured `editor`, or through sudoedit, landing
@@ -1712,7 +1855,8 @@ pub const Ui = struct {
         }
         const left = std.mem.eql(u8, m.button, "left");
         const right = std.mem.eql(u8, m.button, "right");
-        if (!left and !right) return;
+        const middle = std.mem.eql(u8, m.button, "middle");
+        if (!left and !right and !middle) return;
         if (m.cell.row >= self.paneHeight()) return;
 
         const i = self.paneAtCol(m.cell.col) orelse return;
@@ -1721,10 +1865,22 @@ pub const Ui = struct {
             self.pane_dirty = .{ .full, .full };
         }
 
+        // The tab strip: a left click shows the tab, a middle click
+        // closes it. A middle click anywhere else does nothing.
+        if (m.cell.row < self.stripRows(i)) {
+            const k = try self.tabAt(i, m.cell.col - self.paneCol(i)) orelse return;
+            if (left) try self.showTab(i, k);
+            if (middle) try self.closeTab(i, k);
+            self.bar_dirty = true;
+            self.shell.setCwd(self.panes[self.active].path);
+            return;
+        }
+        if (middle) return;
+
         // A left click on a title row is about the path: it opens the
         // field there, or moves the caret in the one already open --
         // Alt+D with the mouse.
-        if (m.cell.row == 0 and left) {
+        if (m.cell.row == self.titleRow(i) and left) {
             if (self.pathEditFor(i)) |_| self.movePathCaret(m.cell.col) else try self.beginPathEdit();
             return;
         }
@@ -1738,7 +1894,7 @@ pub const Ui = struct {
         const p = &self.panes[i];
         // The column header row: a click re-orders the pane by that
         // column, the same cycle `sortByName` and friends run.
-        if (m.cell.row == header_row and left) {
+        if (m.cell.row == self.headerRow(i) and left) {
             const cols = self.columns(self.paneWidth(i), p.view);
             if (sortKeyForColumn(cols, m.cell.col -| self.paneCol(i))) |key| {
                 p.setSort(p.sort.cycled(key));
@@ -1746,8 +1902,8 @@ pub const Ui = struct {
             }
             return;
         }
-        if (m.cell.row < list_top) return;
-        const slot = (m.cell.row - list_top) / p.view.rowHeight();
+        if (m.cell.row < self.listTop(i)) return;
+        const slot = (m.cell.row - self.listTop(i)) / p.view.rowHeight();
         if (slot >= self.visibleRows(i)) return;
         const row = p.list.top + slot;
         if (row >= p.rowCount()) return;
@@ -1864,9 +2020,9 @@ pub const Ui = struct {
         if (cell.row >= self.paneHeight()) return null;
         const i = self.paneAtCol(cell.col) orelse return null;
         var hit: drag_mod.Hit = .{ .pane = i };
-        if (cell.row >= list_top) {
+        if (cell.row >= self.listTop(i)) {
             const p = &self.panes[i];
-            const slot = (cell.row - list_top) / p.view.rowHeight();
+            const slot = (cell.row - self.listTop(i)) / p.view.rowHeight();
             const row = p.list.top + slot;
             if (slot < self.visibleRows(i) and row < p.rowCount()) hit.row = row;
         }
@@ -1897,9 +2053,9 @@ pub const Ui = struct {
             const rh = p.view.rowHeight();
             const w = self.paneWidth(i);
             if (t.row) |row| {
-                try b.setDropTarget(layer, .{ .cells = .{ .row = list_top + (row - p.list.top) * rh, .col = 0, .rows = rh, .cols = w } });
+                try b.setDropTarget(layer, .{ .cells = .{ .row = self.listTop(i) + (row - p.list.top) * rh, .col = 0, .rows = rh, .cols = w } });
             } else {
-                try b.setDropTarget(layer, .{ .cells = .{ .row = list_top, .col = 0, .rows = self.visibleRows(i) * rh, .cols = w } });
+                try b.setDropTarget(layer, .{ .cells = .{ .row = self.listTop(i), .col = 0, .rows = self.visibleRows(i) * rh, .cols = w } });
             }
         }
 
@@ -1989,7 +2145,7 @@ pub const Ui = struct {
         if (d.cell.row >= self.paneHeight()) return null;
         const i = self.paneAtCol(d.cell.col) orelse return null;
         const p = &self.panes[i];
-        if (d.cell.row == header_row and p.list.top > 0) return .{ .pane = i, .up = true };
+        if (d.cell.row == self.headerRow(i) and p.list.top > 0) return .{ .pane = i, .up = true };
         if (d.cell.row == self.paneHeight() -| 1 and p.list.top + self.visibleRows(i) < p.rowCount()) return .{ .pane = i, .up = false };
         return null;
     }
@@ -2839,6 +2995,30 @@ pub const Ui = struct {
         return null;
     }
 
+    /// Pane `i`'s tab strip: a row over its title while it has two or
+    /// more tabs, nothing while it has one.
+    fn stripRows(self: *const Ui, i: usize) usize {
+        return if (self.tab_sets[i].count() > 1) 1 else 0;
+    }
+
+    /// Pane `i`'s title, column-header and first listing rows, and all
+    /// the rows it spends on chrome, each moved down by its strip.
+    fn titleRow(self: *const Ui, i: usize) usize {
+        return self.stripRows(i);
+    }
+
+    fn headerRow(self: *const Ui, i: usize) usize {
+        return self.stripRows(i) + header_row;
+    }
+
+    fn listTop(self: *const Ui, i: usize) usize {
+        return self.stripRows(i) + list_top;
+    }
+
+    fn chromeRows(self: *const Ui, i: usize) usize {
+        return self.stripRows(i) + chrome_rows;
+    }
+
     /// The field open on pane `i`'s title row, if that's where it is.
     fn pathEditFor(self: *Ui, i: usize) ?*PathEdit {
         if (self.path_edit) |*e| {
@@ -2857,7 +3037,7 @@ pub const Ui = struct {
 
     /// How many entries fit in pane `i`'s list area.
     fn visibleRows(self: *const Ui, i: usize) usize {
-        const list_rows = self.paneHeight() -| chrome_rows;
+        const list_rows = self.paneHeight() -| self.chromeRows(i);
         return @max(list_rows / self.panes[i].view.rowHeight(), 1);
     }
 
@@ -2985,8 +3165,8 @@ pub const Ui = struct {
         if (delta > 0) {
             try b.moveContent(
                 layer,
-                list_top,
-                list_top + visible * rh - 1,
+                self.listTop(i),
+                self.listTop(i) + visible * rh - 1,
                 delta * rh,
                 if (scrolled_down) .up else .down,
             );
@@ -3050,7 +3230,7 @@ pub const Ui = struct {
     fn writeListRow(self: *Ui, b: *Batch, i: usize, row: usize, w: usize, cols: Columns) !void {
         const p = &self.panes[i];
         const rh = p.view.rowHeight();
-        const y = list_top + (row - p.list.top) * rh;
+        const y = self.listTop(i) + (row - p.list.top) * rh;
         try writeRow(b, self.pane_layers[i], p, row, y, w, cols, i == self.active);
         const icon = if (p.entryAt(row)) |e| lsentries.iconForEntry(e.*) else "file/folder";
         try b.drawIconOnStyled(self.pane_layers[i], y, cols.icon_col, icon, .{
@@ -3078,6 +3258,8 @@ pub const Ui = struct {
         defer b.deinit();
         try b.clearArea(.{ .layer = layer, .bg = bg_pane });
 
+        if (self.stripRows(i) > 0) try self.writeStrip(&b, i);
+
         // Title: the directory, `~`-shortened and cut from the left so the
         // end of a long path (the part that changes) stays visible --
         // unless Alt+D has made this row a field, which takes the whole
@@ -3085,13 +3267,14 @@ pub const Ui = struct {
         {
             const bg = if (active) bg_title_active else bg_title_inactive;
             const fg = if (active) fg_title_active else fg_title_inactive;
-            try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = bg });
+            const row = self.titleRow(i);
+            try b.clearArea(.{ .layer = layer, .row = row, .rows = 1, .bg = bg });
             if (self.pathEditFor(i)) |e| {
-                e.view_start = try writeField(&b, layer, &e.line, 0, 1, w -| 2);
+                e.view_start = try writeField(&b, layer, &e.line, row, 1, w -| 2);
             } else {
                 var pbuf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
                 const shown = self.displayPath(&pbuf, p.path, w -| 2);
-                try b.writeText(shown, .{ .layer = layer, .row = 0, .col = 1, .fg = fg, .bg = bg, .max_cols = w -| 2 });
+                try b.writeText(shown, .{ .layer = layer, .row = row, .col = 1, .fg = fg, .bg = bg, .max_cols = w -| 2 });
             }
         }
 
@@ -3099,28 +3282,28 @@ pub const Ui = struct {
         // Size label is right-aligned in its column the way the sizes
         // under it are, so the arrow sits against the numbers.
         var head_buf: [32]u8 = undefined;
-        try b.clearArea(.{ .layer = layer, .row = header_row, .rows = 1, .bg = bg_header });
-        try b.writeText(headerLabel(&head_buf, "Name", p.sort, .name), .{ .layer = layer, .row = header_row, .col = cols.name_col, .fg = fg_header, .bg = bg_header });
+        try b.clearArea(.{ .layer = layer, .row = self.headerRow(i), .rows = 1, .bg = bg_header });
+        try b.writeText(headerLabel(&head_buf, "Name", p.sort, .name), .{ .layer = layer, .row = self.headerRow(i), .col = cols.name_col, .fg = fg_header, .bg = bg_header });
         if (cols.size_col) |c| {
             const label = headerLabel(&head_buf, "Size", p.sort, .size);
             const pad = size_w -| gridlayout.displayWidth(label);
-            try b.writeText(label, .{ .layer = layer, .row = header_row, .col = c + pad, .fg = fg_header, .bg = bg_header });
+            try b.writeText(label, .{ .layer = layer, .row = self.headerRow(i), .col = c + pad, .fg = fg_header, .bg = bg_header });
         }
-        if (cols.date_col) |c| try b.writeText(headerLabel(&head_buf, "Modified", p.sort, .time), .{ .layer = layer, .row = header_row, .col = c, .fg = fg_header, .bg = bg_header });
+        if (cols.date_col) |c| try b.writeText(headerLabel(&head_buf, "Modified", p.sort, .time), .{ .layer = layer, .row = self.headerRow(i), .col = c, .fg = fg_header, .bg = bg_header });
 
         // Rows: text first, icons last -- a text write clears a cell's
         // foreground icon, and a tall icon spills into the row below.
         const end = @min(p.list.top + visible, p.rowCount());
-        for (p.list.top..end) |row| try writeRow(&b, layer, p, row, list_top + (row - p.list.top) * rh, w, cols, active);
+        for (p.list.top..end) |row| try writeRow(&b, layer, p, row, self.listTop(i) + (row - p.list.top) * rh, w, cols, active);
         // The F2 field over its row's name, before the icons for the
         // same reason the rows are.
         if (self.nameEditFor(i)) |e| {
-            if (e.row >= p.list.top and e.row < end) _ = try writeField(&b, layer, &e.line, list_top + (e.row - p.list.top) * rh, cols.name_col, cols.name_w);
+            if (e.row >= p.list.top and e.row < end) _ = try writeField(&b, layer, &e.line, self.listTop(i) + (e.row - p.list.top) * rh, cols.name_col, cols.name_w);
         }
         const icon_px = self.iconPx(p.view);
         for (p.list.top..end) |row| {
             const icon = if (p.entryAt(row)) |e| lsentries.iconForEntry(e.*) else "file/folder";
-            try b.drawIconOnStyled(layer, list_top + (row - p.list.top) * rh, cols.icon_col, icon, .{
+            try b.drawIconOnStyled(layer, self.listTop(i) + (row - p.list.top) * rh, cols.icon_col, icon, .{
                 .scale = .natural,
                 .h_align = .start,
                 .v_align = if (rh > 1) .start else .center,
@@ -3133,7 +3316,7 @@ pub const Ui = struct {
 
         // The host scrollbar, in list-row units: the extent is the whole
         // listing plus the chrome, so its range matches `top`'s.
-        const extent = p.rowCount() * rh + chrome_rows + (self.paneHeight() -| chrome_rows) % rh;
+        const extent = p.rowCount() * rh + self.chromeRows(i) + (self.paneHeight() -| self.chromeRows(i)) % rh;
         const offset = p.list.top * rh;
         if (self.pushed_scroll[i][0] != extent) try b.setLayerContentExtent(layer, w, extent);
         if (self.pushed_scroll[i][0] != extent or self.pushed_scroll[i][1] != offset) try b.setLayerScrollOffset(layer, offset, 0);
@@ -3209,7 +3392,7 @@ pub const Ui = struct {
         const p = &self.panes[i];
         const rh = p.view.rowHeight();
         const layer = self.pane_layers[i];
-        const y = list_top + (row - p.list.top) * rh;
+        const y = self.listTop(i) + (row - p.list.top) * rh;
         const w = self.paneWidth(i);
         const fg = rowFg(p, row, i == self.active);
         try b.setBg(.{ .layer = layer, .row = y, .rows = rh, .cols = w, .bg = rowBg(p, row, i == self.active) });

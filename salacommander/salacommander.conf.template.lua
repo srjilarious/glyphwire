@@ -130,7 +130,11 @@
 --     --   otherPaneToSameDir  alt+o
 --     --   rightPaneToSameDir  ctrl+right (from the left pane only)
 --     --   leftPaneToSameDir   ctrl+left  (from the right pane only)
---     --   swapPanes           ctrl+u
+--     --   swapPanes           ctrl+u  (tabs and all)
+--     --   newTab              ctrl+t  (on the pane's directory)
+--     --   closeTab            ctrl+w  (a pane's last tab stays)
+--     --   nextTab             ctrl+tab
+--     --   prevTab             ctrl+shift+tab
 --     --   toggleMark          space
 --     --   toggleMarkAndDown   insert
 --     --   markAll             kp_add, ctrl+a

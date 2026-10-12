@@ -44,7 +44,9 @@ Ctrl+W, and the completion popup's keys.
 | `toggleHidden` | Ctrl+H | Dotfiles and `.gitignore`d paths in the tree; dotfiles only in the finder and `/` search |
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
 | `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |
-| `windowPrefix` | Ctrl+W | Then `v` / `s` split, `q` / `c` close, `w` (or Ctrl+W) next group, `h` `j` `k` `l` / arrows focus, Shift+`H` `J` `K` `L` / Shift+arrows move the tab |
+| `closeTab` | Ctrl+F4, Ctrl+W x | Close the shown tab (`:bd`); refused on a modified buffer |
+| `newBuffer` | Ctrl+Shift+N | A new `[No Name]` scratch tab beside the shown one (`:enew`) |
+| `windowPrefix` | Ctrl+W | Then `v` / `s` split, `q` / `c` close the group, `x` close the tab, `w` (or Ctrl+W) next group, `h` `j` `k` `l` / arrows focus, Shift+`H` `J` `K` `L` / Shift+arrows move the tab |
 | `focusLeft` `focusRight` `focusUp` `focusDown` | Ctrl+Left / Right / Up / Down, Ctrl+L / K / J | Focus the group (or tree) that way |
 | `moveTabLeft` `moveTabRight` `moveTabUp` `moveTabDown` | (unbound; Ctrl+W Shift+H / L / K / J) | Move the shown tab to the group that way, splitting a new group off on that side if there is none. A group left without tabs closes |
 | `jumpBack` / `jumpForward` | Ctrl+O / Ctrl+I | Jumplist (the way back from `gd`) |
@@ -224,6 +226,7 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:e` `:e!` | Reload from disk (`!` discards changes) |
 | `:bn` `:bp` | Next / previous tab |
 | `:bd` `:bd!` | Close the tab |
+| `:enew` | New `[No Name]` scratch tab |
 | `:vs [path]` `:sp [path]` `:clo` | Split / close a group |
 | `:cd [dir]` `:pwd` | Working directory (in a workspace, `:cd` leaves the sidebar's folders alone) |
 | `:addfolder dir` | Add a folder to the sidebar's workspace |
@@ -354,7 +357,7 @@ Click to place the cursor and focus a group; drag to select (enters
 visual mode); double-click selects a word (vim's `iw` run: identifier,
 punctuation or blanks) and triple-click a line (`V`), and dragging on
 from either grows the selection a word or line at a time; wheel and scrollbar thumb scroll any group; Shift+wheel
-scrolls a tab strip; click a tab to switch, its `×` to close; drag a tab
+scrolls a tab strip; click a tab to switch, its `×` (or a middle click anywhere on it) to close; drag a tab
 onto another group's strip (dropped in front of the tab under the pointer)
 or pane (added at the end) to move it there, or along its own strip to
 reorder it, with a bar marking the gap it would land in on a strip and a
