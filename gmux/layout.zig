@@ -3,9 +3,10 @@
 
 //! gmux's pane-arrangement tree: `applib/splittree.zig` over pane ids,
 //! with `ui.zig` as the half that turns a mutation into the matching
-//! `create_pane_split` / `set_pane_split_children` / `set_root_pane_split`
-//! / `destroy_pane_split` wire calls. See `splittree` for why it is
-//! binary and why an edit re-sends only the child lists it changed.
+//! `create_pane_split` / `set_pane_split_children` /
+//! `replace_pane_split_child` / `set_root_pane_split` / `destroy_pane_split`
+//! wire calls. See `splittree` for why it is binary and why an edit swaps
+//! one slot rather than re-sending a list.
 //!
 //! The ids are real `glyphwire.PaneHandle`s and a split's handle a
 //! `glyphwire.PaneSplitHandle`, but this file only says `u32`, which is
@@ -24,7 +25,8 @@ pub const Tree = splittree.SplitTree(PaneId, Axis, u32);
 pub const Node = Tree.Node;
 
 /// A pane leaf, or a live split, described by whatever it currently is --
-/// what `set_pane_split_children` wants for one child slot.
+/// what `set_pane_split_children` / `replace_pane_split_child` want for
+/// one child slot.
 pub const ChildRef = union(enum) { pane: PaneId, split: u32 };
 
 pub fn childRef(node: *const Node) ChildRef {

@@ -4319,6 +4319,76 @@ pub fn moveDividerWontSqueezeAPaneToNothingTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectEqual(ctx.layerPtr(right).?.viewportCols(), 1);
 }
 
+/// Swapping what sits in a slot keeps the ratio the user dragged it to:
+/// the case a client splitting one pane of several hits, where re-sending
+/// the whole list would reset every other divider.
+pub fn replaceSplitChildKeepsTheSlotsSizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 10, 0);
+    defer ctx.deinit();
+    const left = try ctx.createLayer(200, 10, 0);
+    const right = try ctx.createLayer(200, 10, 0);
+    const other = try ctx.createLayer(200, 10, 0);
+
+    const split = try ctx.createSplit(.row);
+    try ctx.setSplitChildren(split, &.{
+        .{ .target = .{ .layer = left }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .layer = right }, .size = .{ .weight = 1 } },
+    });
+    try ctx.setRootSplit(split);
+    try ctx.layoutSplits(null, null);
+    try ctx.moveDivider(split, 0, 20);
+
+    try ctx.replaceSplitChild(split, 1, .{ .layer = other }, null);
+    try ctx.layoutSplits(null, null);
+    try testz.expectEqual(ctx.layerPtr(left).?.viewportCols(), 69);
+    try testz.expectEqual(ctx.layerPtr(other).?.viewportCols(), 30);
+
+    // A size given with the swap replaces the slot's.
+    try ctx.replaceSplitChild(split, 0, .{ .layer = left }, .{ .fixed = 10 });
+    try ctx.layoutSplits(null, null);
+    try testz.expectEqual(ctx.layerPtr(left).?.viewportCols(), 10);
+}
+
+pub fn replaceSplitChildRejectsAMissingSlotTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 10, 0);
+    defer ctx.deinit();
+    const layer = try ctx.createLayer(10, 10, 0);
+    const split = try ctx.createSplit(.row);
+    try ctx.setSplitChildren(split, &.{.{ .target = .{ .layer = layer } }});
+
+    try testz.expectError(ctx.replaceSplitChild(split, 1, .{ .layer = layer }, null), error.SplitChildOutOfRange);
+    try testz.expectError(ctx.replaceSplitChild(77, 0, .{ .layer = layer }, null), error.UnknownSplit);
+}
+
+/// Extents are what the last layout gave each child, and nothing before
+/// the split has ever been laid out.
+pub fn splitExtentsAreTheLastLayoutsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 10, 0);
+    defer ctx.deinit();
+    const left = try ctx.createLayer(200, 10, 0);
+    const right = try ctx.createLayer(200, 10, 0);
+    const handle = try ctx.createSplit(.row);
+    try ctx.setSplitChildren(handle, &.{
+        .{ .target = .{ .layer = left }, .size = .{ .fixed = 20 } },
+        .{ .target = .{ .layer = right }, .size = .{ .weight = 1 } },
+    });
+    const split = ctx.splits.getPtr(handle).?;
+
+    var extents: [2]usize = undefined;
+    ctx.splitExtents(split, &extents);
+    try testz.expectEqual(extents[0], 0);
+    try testz.expectEqual(extents[1], 0);
+
+    try ctx.setRootSplit(handle);
+    try ctx.layoutSplits(null, null);
+    ctx.splitExtents(split, &extents);
+    try testz.expectEqual(extents[0], 20);
+    try testz.expectEqual(extents[1], 79);
+}
+
 pub fn destroyingTheRootSplitDropsTheLayoutTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
@@ -4952,6 +5022,39 @@ pub fn sessionCreatePaneGetsItsOwnContextAndStaysUnmappedTest(io: std.Io, alloc:
     try testz.expectEqual(ctx.asset_fallback, &root);
     // A pane holds one program's whole surface, so no window scrollbar.
     try testz.expectTrue(!ctx.window_scrollbar);
+}
+
+/// The pane mirror of `replaceSplitChildKeepsTheSlotsSizeTest`: what
+/// gmux sends when one pane of a dragged pair is split.
+pub fn replacePaneSplitChildKeepsTheSlotsSizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 41, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    const a = try session.createPane(1, 0);
+    const b = try session.createPane(1, 0);
+    const split = try session.createPaneSplit(.row, true);
+    try session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = a.pane }, .size = .{ .weight = 1 } },
+    });
+    try session.setRootPaneSplit(split);
+    try session.layoutPanes(null, null);
+    try session.movePaneDivider(split, 0, 10);
+
+    try session.replacePaneSplitChild(split, 1, .{ .pane = b.pane }, null);
+    try session.layoutPanes(null, null);
+    try testz.expectEqual(session.panePtr(glyphwire.root_pane_handle).?.rect.cols, @as(usize, 30));
+    try testz.expectEqual(session.panePtr(b.pane).?.rect.cols, @as(usize, 10));
+
+    var extents: [2]usize = undefined;
+    session.paneSplitExtents(session.pane_splits.getPtr(split).?, &extents);
+    try testz.expectEqual(extents[0], 30);
+    try testz.expectEqual(extents[1], 10);
+
+    try testz.expectError(session.replacePaneSplitChild(split, 2, .{ .pane = b.pane }, null), error.PaneSplitChildOutOfRange);
 }
 
 pub fn sessionLayoutPanesSplitsTheWindowAndSetsContextOriginsTest(io: std.Io, alloc: std.mem.Allocator) !void {

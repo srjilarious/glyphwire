@@ -470,6 +470,15 @@ pub fn Ops(comptime Self: type) type {
             try self.notify("set_pane_split_children", .{ .split = split, .children = children });
         }
 
+        /// `replace_pane_split_child`: puts `child` in slot `index` of
+        /// `split`. Leave `child`'s `weight` and `fixed` unset (`.{ .pane = p }`
+        /// / `.{ .split = s }`) to keep the slot's current size -- what a
+        /// split or close of one pane wants, so the ratios the user dragged
+        /// elsewhere survive.
+        pub fn replacePaneSplitChild(self: *Self, split: core.PaneSplitHandle, index: usize, child: PaneSplitChildInput) !void {
+            try self.notify("replace_pane_split_child", .{ .split = split, .index = index, .child = child });
+        }
+
         pub fn setRootPaneSplit(self: *Self, split: ?core.PaneSplitHandle) !void {
             try self.notify("set_root_pane_split", .{ .split = split });
         }
@@ -673,6 +682,15 @@ pub fn Ops(comptime Self: type) type {
         /// `fixed` (that many cells along the split's axis).
         pub fn setSplitChildren(self: *Self, split: core.SplitHandle, children: []const SplitChildInput) !void {
             try self.notify("set_split_children", .{ .split = split, .children = children });
+        }
+
+        /// `replace_split_child(split, index, child)` -- a notification.
+        /// Puts `child` in slot `index`, keeping the slot's current size
+        /// when `child` gives neither `weight` nor `fixed` (`.{ .layer = l }`
+        /// / `.{ .split = s }`). Re-sending the whole list with
+        /// `setSplitChildren` would reset what the user dragged it to.
+        pub fn replaceSplitChild(self: *Self, split: core.SplitHandle, index: usize, child: SplitChildInput) !void {
+            try self.notify("replace_split_child", .{ .split = split, .index = index, .child = child });
         }
 
         /// `set_root_split(split?)` -- a notification. Which split fills the

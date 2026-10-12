@@ -16,12 +16,14 @@
 //! made panes out of *layers* in one context that gmux owned, and therefore
 //! had to be in the path of every byte of output and every keystroke.
 //!
-//! **The wire tree is edited minimally, not rebuilt.** glyphwire has no way
-//! to read a split's current (possibly mouse-dragged) child weights back,
-//! so a structural edit only ever touches the nodes on the path between the
-//! edit and its nearest surviving ancestor -- see `layout.zig`'s module doc
-//! comment. Zoom is cheaper still: it never touches the real tree at all,
-//! just swaps which split is the wire root.
+//! **The wire tree is edited minimally, not rebuilt.** A split's child
+//! weights are the user's (a mouse drag or a resize key moved them), so a
+//! structural edit sends the one fresh split's children and swaps exactly
+//! one slot in its parent with `replace_pane_split_child`, which keeps that
+//! slot's size. Splitting a pane halves that pane and leaves every other
+//! ratio alone; closing one hands its whole slot to its sibling -- see
+//! `splittree`'s module doc comment. Zoom is cheaper still: it never
+//! touches the real tree at all, just swaps which split is the wire root.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -326,12 +328,23 @@ pub const Ui = struct {
         };
     }
 
-    /// Pushes split node `node`'s *current* two children -- called only
-    /// for a split whose child set just changed, never for an untouched
-    /// sibling elsewhere in the tree (see the module doc comment).
+    /// Pushes split node `node`'s *current* two children at even weights --
+    /// only for a split just created, whose list has never been sent.
     fn pushChildren(self: *Ui, node: *const layout.Node) !void {
         const refs = layout.childRefs(node);
         try self.client.setPaneSplitChildren(node.kind.split.handle, &.{ childInput(refs[0]), childInput(refs[1]) });
+    }
+
+    /// Re-points the slot `node` occupies in its parent split at whatever
+    /// `node` now is, keeping the slot's size: the parent's ratio is
+    /// whatever the user dragged it to (see the module doc comment).
+    fn replaceInParent(self: *Ui, node: *const layout.Node) !void {
+        const parent = node.parent.?;
+        const child: glyphwire.PaneSplitChildInput = switch (layout.childRef(node)) {
+            .pane => |id| .{ .pane = id },
+            .split => |wire| .{ .split = wire },
+        };
+        try self.client.replacePaneSplitChild(parent.kind.split.handle, node.slot().?.index(), child);
     }
 
     fn splitFocused(self: *Ui, axis: layout.Axis) !void {
@@ -344,8 +357,8 @@ pub const Ui = struct {
         const node = try self.tree.split(self.focused, made.pane, axis, handle, .after);
         try self.pushChildren(node);
 
-        if (node.parent) |p| {
-            try self.pushChildren(p);
+        if (node.parent != null) {
+            try self.replaceInParent(node);
         } else {
             // The fresh split is now the whole tree -- install it as the
             // real wire root, replacing the single-pane wrapper.
@@ -366,9 +379,10 @@ pub const Ui = struct {
         try self.removePane(self.focused);
     }
 
-    /// Tears a pane down: promotes its sibling subtree in the tree,
-    /// destroys the vacated split, and destroys the pane (which stops the
-    /// program in it). Closing the last pane is gmux's cue to quit, from
+    /// Tears a pane down: promotes its sibling subtree in the tree (into
+    /// the vacated split's slot, at that slot's size), destroys the
+    /// vacated split, and destroys the pane (which stops the program in
+    /// it). Closing the last pane is gmux's cue to quit, from
     /// either `x` or a program exiting on its own.
     ///
     /// A no-op for a pane that is already gone, so a `pane_exit` arriving
@@ -390,8 +404,8 @@ pub const Ui = struct {
             else => return err,
         };
 
-        if (removal.replacement.parent) |gp| {
-            try self.pushChildren(gp);
+        if (removal.replacement.parent != null) {
+            try self.replaceInParent(removal.replacement);
         } else {
             switch (removal.replacement.kind) {
                 .leaf => |only_id| {

@@ -8,17 +8,18 @@
 //!
 //! Pure structure: no wire calls, so splitting and closing are testable
 //! without a server. Each program turns what an edit reports into its own
-//! `create_*split` / `set_*split_children` / `destroy_*split` calls, and
-//! keeps whatever handle the host gave a split in `Split.handle`.
+//! `create_*split` / `set_*split_children` / `replace_*split_child` /
+//! `destroy_*split` calls, and keeps whatever handle the host gave a split
+//! in `Split.handle`.
 //!
 //! **Binary, not n-ary.** Splitting a leaf turns it into a split holding
 //! the old leaf and the new one; removing a leaf puts its sibling where
 //! their split was. Every split therefore has exactly one divider (one
-//! neighbour to grow into on a keyboard resize), and an edit changes the
-//! child list of at most one surviving split. That matters because the
-//! wire can't read a split's dragged proportions back: re-sending a list
-//! that didn't change would reset a divider the user just dragged, so a
-//! caller re-sends only the lists an edit reports as changed.
+//! neighbour to grow into on a keyboard resize), and an edit changes what
+//! sits in exactly one slot of at most one surviving split. A caller sends
+//! that as one `replace_*split_child`, which keeps the slot's size: the
+//! proportions the user dragged belong to the host, and re-sending the
+//! whole list would reset them.
 //!
 //! **Nodes never move.** A split happens in place (the leaf's node becomes
 //! the split) and a removal collapses the sibling into the parent's node,
@@ -31,7 +32,19 @@ const std = @import("std");
 pub const Side = enum { before, after };
 
 /// Which child of its parent split a node is.
-pub const Slot = enum { first, second };
+pub const Slot = enum {
+    first,
+    second,
+
+    /// The slot's position in the host split's child list, as
+    /// `replace_*split_child` names it.
+    pub fn index(self: Slot) usize {
+        return switch (self) {
+            .first => 0,
+            .second => 1,
+        };
+    }
+};
 
 /// `Id` names a leaf; `Axis` is the caller's own name for a split's
 /// direction (the tree only stores it); `Handle` is the host's handle for
@@ -76,9 +89,9 @@ pub fn SplitTree(comptime Id: type, comptime Axis: type, comptime Handle: type) 
             /// sibling, now gone: the caller destroys it on the host.
             handle: Handle,
             /// The node that took the split's place (the sibling's
-            /// contents, at the split's address). The caller re-sends its
-            /// parent's children, or installs it as the root when it has
-            /// no parent.
+            /// contents, at the split's address). The caller puts it in
+            /// its parent's slot for it, or installs it as the root when
+            /// it has no parent.
             replacement: *Node,
             /// Where focus goes: the first leaf of the sibling subtree,
             /// the one that grew into the space.
@@ -163,7 +176,8 @@ pub fn SplitTree(comptime Id: type, comptime Axis: type, comptime Handle: type) 
         /// Splits leaf `id` in two along `axis`, `new_id` taking `side`,
         /// under the host split `handle` the caller has already created.
         /// Returns the new split node: the caller sends its children, and
-        /// its parent's (or installs it as the root when it has none).
+        /// puts its handle in its parent's slot for it (or installs it as
+        /// the root when it has none).
         pub fn split(self: *Self, id: Id, new_id: Id, axis: Axis, handle: Handle, side: Side) Error!*Node {
             const leaf = self.find(id) orelse return error.UnknownLeaf;
             const first = try self.alloc.create(Node);

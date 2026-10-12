@@ -103,6 +103,9 @@ pub const DispatchError = error{
     /// A `set_split_children` entry named both a layer and a split, or
     /// neither.
     InvalidSplitChild,
+    /// `replace_split_child` named a slot past the end of the split's
+    /// child list.
+    SplitChildOutOfRange,
     /// `create_context` / `destroy_context` / `activate_context` /
     /// `adopt_context` named a context that doesn't exist.
     UnknownContext,
@@ -129,6 +132,9 @@ pub const DispatchError = error{
     /// A `set_pane_split_children` entry named both a pane and a split,
     /// or neither.
     InvalidPaneSplitChild,
+    /// `replace_pane_split_child` named a slot past the end of the
+    /// split's child list.
+    PaneSplitChildOutOfRange,
     /// A pane-tree message arrived from a connection that doesn't hold the
     /// window-manager role. Claim it with `request_role` first; if another
     /// connection holds it, there is already a multiplexer in this window.
@@ -991,6 +997,8 @@ pub const Dispatcher = struct {
         .{ "create_pane_split", catBytesId(handleCreatePaneSplit) },
         .{ "destroy_pane_split", catResult(handleDestroyPaneSplit) },
         .{ "set_pane_split_children", catResult(handleSetPaneSplitChildren) },
+        .{ "replace_pane_split_child", catResult(handleReplacePaneSplitChild) },
+        .{ "get_pane_split", catBytesId(handleGetPaneSplit) },
         .{ "set_root_pane_split", catResult(handleSetRootPaneSplit) },
         .{ "move_pane_divider", catResult(handleMovePaneDivider) },
         .{ "spawn_in_pane", catBytesId(handleSpawnInPane) },
@@ -1000,6 +1008,8 @@ pub const Dispatcher = struct {
         .{ "create_split", catBytesId(handleCreateSplit) },
         .{ "destroy_split", catResult(handleDestroySplit) },
         .{ "set_split_children", catResult(handleSetSplitChildren) },
+        .{ "replace_split_child", catResult(handleReplaceSplitChild) },
+        .{ "get_split", catBytesId(handleGetSplit) },
         .{ "set_root_split", catResult(handleSetRootSplit) },
         .{ "move_divider", catResult(handleMoveDivider) },
         .{ "raise_layer", catVoid(handleRaiseLayer) },
@@ -2002,6 +2012,26 @@ pub const Dispatcher = struct {
         return .{ .panes_changed = true };
     }
 
+    /// A `set_pane_split_children` / `replace_pane_split_child` entry's
+    /// target: exactly one of `pane` / `split`, same contract as
+    /// `set_split_children`.
+    fn paneSplitChildTarget(c: protocol.PaneSplitChildParams) DispatchError!core.PaneSplitChild.Target {
+        if (c.pane) |h| {
+            if (c.split != null) return DispatchError.InvalidPaneSplitChild;
+            return .{ .pane = h };
+        }
+        if (c.split) |h| return .{ .split = h };
+        return DispatchError.InvalidPaneSplitChild;
+    }
+
+    /// An entry's declared size, or null when it gave neither `weight`
+    /// nor `fixed`.
+    fn paneSplitChildSize(c: protocol.PaneSplitChildParams) ?core.PaneSplitChild.Size {
+        if (c.fixed) |f| return .{ .fixed = f };
+        if (c.weight) |w| return .{ .weight = w };
+        return null;
+    }
+
     fn handleSetPaneSplitChildren(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = try self.requireManager();
         const parsed = try codec.parseParams(protocol.SetPaneSplitChildrenParams, alloc, params_value);
@@ -2011,23 +2041,10 @@ pub const Dispatcher = struct {
         const children = try alloc.alloc(core.PaneSplitChild, p.children.len);
         defer alloc.free(children);
         for (p.children, 0..) |c, i| {
-            // Exactly one target, same contract as `set_split_children`.
-            const target: core.PaneSplitChild.Target = if (c.pane) |h| blk: {
-                if (c.split != null) return DispatchError.InvalidPaneSplitChild;
-                break :blk .{ .pane = h };
-            } else if (c.split) |h|
-                .{ .split = h }
-            else
-                return DispatchError.InvalidPaneSplitChild;
-
-            const size: core.PaneSplitChild.Size = if (c.fixed) |f|
-                .{ .fixed = f }
-            else if (c.weight) |w|
-                .{ .weight = w }
-            else
-                .{ .weight = 1 };
-
-            children[i] = .{ .target = target, .size = size };
+            children[i] = .{
+                .target = try paneSplitChildTarget(c),
+                .size = paneSplitChildSize(c) orelse .{ .weight = 1 },
+            };
         }
 
         session.setPaneSplitChildren(p.split, children) catch |err| return switch (err) {
@@ -2035,6 +2052,54 @@ pub const Dispatcher = struct {
             else => DispatchError.UnknownPaneSplit,
         };
         return .{ .panes_changed = true };
+    }
+
+    /// `replace_pane_split_child`: swaps what sits in one slot, keeping
+    /// the slot's size unless the entry gives one.
+    fn handleReplacePaneSplitChild(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const session = try self.requireManager();
+        const parsed = try codec.parseParams(protocol.ReplacePaneSplitChildParams, alloc, params_value);
+        defer parsed.deinit();
+        const p = parsed.value;
+        const target = try paneSplitChildTarget(p.child);
+        session.replacePaneSplitChild(p.split, p.index, target, paneSplitChildSize(p.child)) catch |err| return switch (err) {
+            error.PaneSplitChildOutOfRange => DispatchError.PaneSplitChildOutOfRange,
+            else => DispatchError.UnknownPaneSplit,
+        };
+        return .{ .panes_changed = true };
+    }
+
+    /// `get_pane_split`: the split as the session holds it now, with each
+    /// child's laid-out extent.
+    fn handleGetPaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const session = try self.requireManager();
+        const parsed = try codec.parseParams(protocol.PaneSplitHandleParams, alloc, params_value);
+        defer parsed.deinit();
+        const split = session.pane_splits.getPtr(parsed.value.split) orelse return DispatchError.UnknownPaneSplit;
+
+        const n = split.children.items.len;
+        const extents = try alloc.alloc(usize, n);
+        defer alloc.free(extents);
+        session.paneSplitExtents(split, extents);
+
+        const children = try alloc.alloc(protocol.PaneSplitChildInfo, n);
+        defer alloc.free(children);
+        for (split.children.items, children, extents) |c, *out, extent| {
+            out.* = .{ .extent = extent };
+            switch (c.target) {
+                .pane => |h| out.pane = h,
+                .split => |h| out.split = h,
+            }
+            switch (c.size) {
+                .weight => |w| out.weight = w,
+                .fixed => |f| out.fixed = f,
+            }
+        }
+        return try self.respond(alloc, id, protocol.GetPaneSplitResult{
+            .axis = @tagName(split.axis),
+            .resizable = split.resizable,
+            .children = children,
+        });
     }
 
     fn handleSetRootPaneSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
@@ -2264,6 +2329,26 @@ pub const Dispatcher = struct {
         return try self.relayout(alloc);
     }
 
+    /// A `set_split_children` / `replace_split_child` entry's target:
+    /// exactly one of `layer` / `split`. Naming both (or neither) is a
+    /// malformed child rather than something to guess at.
+    fn splitChildTarget(c: protocol.SplitChildParams) DispatchError!core.SplitChild.Target {
+        if (c.layer) |h| {
+            if (c.split != null) return DispatchError.InvalidSplitChild;
+            return .{ .layer = h };
+        }
+        if (c.split) |h| return .{ .split = h };
+        return DispatchError.InvalidSplitChild;
+    }
+
+    /// An entry's declared size, or null when it gave neither `weight`
+    /// nor `fixed`.
+    fn splitChildSize(c: protocol.SplitChildParams) ?core.SplitChild.Size {
+        if (c.fixed) |f| return .{ .fixed = f };
+        if (c.weight) |w| return .{ .weight = w };
+        return null;
+    }
+
     fn handleSetSplitChildren(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const parsed = try codec.parseParams(protocol.SetSplitChildrenParams, alloc, params_value);
         defer parsed.deinit();
@@ -2272,24 +2357,10 @@ pub const Dispatcher = struct {
         const children = try alloc.alloc(core.SplitChild, p.children.len);
         defer alloc.free(children);
         for (p.children, 0..) |c, i| {
-            // Exactly one target; naming both (or neither) is a malformed
-            // child rather than something to guess at.
-            const target: core.SplitChild.Target = if (c.layer) |h| blk: {
-                if (c.split != null) return DispatchError.InvalidSplitChild;
-                break :blk .{ .layer = h };
-            } else if (c.split) |h|
-                .{ .split = h }
-            else
-                return DispatchError.InvalidSplitChild;
-
-            const size: core.SplitChild.Size = if (c.fixed) |f|
-                .{ .fixed = f }
-            else if (c.weight) |w|
-                .{ .weight = w }
-            else
-                .{ .weight = 1 };
-
-            children[i] = .{ .target = target, .size = size };
+            children[i] = .{
+                .target = try splitChildTarget(c),
+                .size = splitChildSize(c) orelse .{ .weight = 1 },
+            };
         }
 
         self.ctx.setSplitChildren(p.split, children) catch |err| return switch (err) {
@@ -2297,6 +2368,52 @@ pub const Dispatcher = struct {
             else => DispatchError.UnknownSplit,
         };
         return try self.relayout(alloc);
+    }
+
+    /// `replace_split_child`: swaps what sits in one slot, keeping the
+    /// slot's size unless the entry gives one.
+    fn handleReplaceSplitChild(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const parsed = try codec.parseParams(protocol.ReplaceSplitChildParams, alloc, params_value);
+        defer parsed.deinit();
+        const p = parsed.value;
+        const target = try splitChildTarget(p.child);
+        self.ctx.replaceSplitChild(p.split, p.index, target, splitChildSize(p.child)) catch |err| return switch (err) {
+            error.SplitChildOutOfRange => DispatchError.SplitChildOutOfRange,
+            else => DispatchError.UnknownSplit,
+        };
+        return try self.relayout(alloc);
+    }
+
+    /// `get_split`: the split as the context holds it now, with each
+    /// child's laid-out extent.
+    fn handleGetSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
+        const parsed = try codec.parseParams(protocol.GetSplitParams, alloc, params_value);
+        defer parsed.deinit();
+        const split = self.ctx.splits.getPtr(parsed.value.split) orelse return DispatchError.UnknownSplit;
+
+        const n = split.children.items.len;
+        const extents = try alloc.alloc(usize, n);
+        defer alloc.free(extents);
+        self.ctx.splitExtents(split, extents);
+
+        const children = try alloc.alloc(protocol.SplitChildInfo, n);
+        defer alloc.free(children);
+        for (split.children.items, children, extents) |c, *out, extent| {
+            out.* = .{ .extent = extent };
+            switch (c.target) {
+                .layer => |h| out.layer = h,
+                .split => |h| out.split = h,
+            }
+            switch (c.size) {
+                .weight => |w| out.weight = w,
+                .fixed => |f| out.fixed = f,
+            }
+        }
+        return try self.respond(alloc, id, protocol.GetSplitResult{
+            .axis = @tagName(split.axis),
+            .resizable = split.resizable,
+            .children = children,
+        });
     }
 
     fn handleSetRootSplit(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {

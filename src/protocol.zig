@@ -322,7 +322,7 @@ pub const ListContextsResult = struct {
 
 /// The version of this protocol, as `docs/protocol.md`'s header gives
 /// it. Bumped with that document, not with any program.
-pub const protocol_version = "0.7.0";
+pub const protocol_version = "0.8.0";
 
 /// `get_version`'s result: the program serving the session and the
 /// protocol it speaks. `program` is its executable name
@@ -881,6 +881,40 @@ pub const SetPaneSplitChildrenParams = struct {
     children: []const PaneSplitChildParams,
 };
 
+/// `replace_pane_split_child`: puts `child` in slot `index` of `split`.
+/// `child` names exactly one of `pane` / `split`, as a
+/// `set_pane_split_children` entry does; its `weight` / `fixed` are both
+/// optional here, and omitting both keeps the slot's current size --
+/// which is the point (see `Session.replacePaneSplitChild`).
+pub const ReplacePaneSplitChildParams = struct {
+    split: core.PaneSplitHandle,
+    index: usize,
+    child: PaneSplitChildParams,
+};
+
+/// One child of a `get_pane_split` result: the target and size it was
+/// declared with (exactly one of `pane` / `split`, exactly one of
+/// `weight` / `fixed`), plus `extent`, the cells it took along the
+/// split's axis at the last layout (0 before the split was ever laid
+/// out).
+pub const PaneSplitChildInfo = struct {
+    pane: ?core.PaneHandle = null,
+    split: ?core.PaneSplitHandle = null,
+    weight: ?f32 = null,
+    fixed: ?usize = null,
+    extent: usize = 0,
+};
+
+/// `get_pane_split`'s result: everything `create_pane_split` and
+/// `set_pane_split_children` declared, as the split holds it now --
+/// including weights a `move_pane_divider` (a mouse drag) has changed
+/// since.
+pub const GetPaneSplitResult = struct {
+    axis: []const u8,
+    resizable: bool,
+    children: []const PaneSplitChildInfo,
+};
+
 /// `set_root_pane_split`: null tears the window layout down, leaving the
 /// root pane as the whole window again.
 pub const SetRootPaneSplitParams = struct { split: ?core.PaneSplitHandle = null };
@@ -1009,6 +1043,37 @@ pub const SetSplitChildrenParams = struct {
 };
 
 pub const SetRootSplitParams = struct { split: ?core.SplitHandle = null };
+
+/// `replace_split_child`: puts `child` in slot `index` of `split`.
+/// `child` names exactly one of `layer` / `split`, as a
+/// `set_split_children` entry does; omitting both `weight` and `fixed`
+/// keeps the slot's current size (see `Context.replaceSplitChild`).
+pub const ReplaceSplitChildParams = struct {
+    split: core.SplitHandle,
+    index: usize,
+    child: SplitChildParams,
+};
+
+pub const GetSplitParams = struct { split: core.SplitHandle };
+
+/// One child of a `get_split` result: its declared target and size, plus
+/// `extent`, the cells it took along the split's axis at the last layout
+/// (0 before the split was ever laid out). Mirrors `PaneSplitChildInfo`.
+pub const SplitChildInfo = struct {
+    layer: ?core.LayerHandle = null,
+    split: ?core.SplitHandle = null,
+    weight: ?f32 = null,
+    fixed: ?usize = null,
+    extent: usize = 0,
+};
+
+/// `get_split`'s result: the split as it is now, including weights a
+/// `move_divider` (a mouse drag) has changed since the client set them.
+pub const GetSplitResult = struct {
+    axis: []const u8,
+    resizable: bool,
+    children: []const SplitChildInfo,
+};
 
 pub const MoveDividerParams = struct {
     split: core.SplitHandle,
@@ -1478,6 +1543,8 @@ pub const Methods = struct {
     create_split: CreateSplitParams,
     destroy_split: DestroySplitParams,
     set_split_children: SetSplitChildrenParams,
+    replace_split_child: ReplaceSplitChildParams,
+    get_split: GetSplitParams,
     set_root_split: SetRootSplitParams,
     move_divider: MoveDividerParams,
     // Contexts and window state.
@@ -1507,6 +1574,8 @@ pub const Methods = struct {
     create_pane_split: CreatePaneSplitParams,
     destroy_pane_split: PaneSplitHandleParams,
     set_pane_split_children: SetPaneSplitChildrenParams,
+    replace_pane_split_child: ReplacePaneSplitChildParams,
+    get_pane_split: PaneSplitHandleParams,
     set_root_pane_split: SetRootPaneSplitParams,
     move_pane_divider: MovePaneDividerParams,
     spawn_in_pane: SpawnInPaneParams,

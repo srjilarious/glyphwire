@@ -1798,10 +1798,12 @@ pub const Ui = struct {
     //
     // The arrangement is `layout` (zoe/groups.zig), and each of its nodes
     // is one host split: a group is its `col_split`, a split node its
-    // own resizable split of two. Every change below re-sends only the
-    // child lists whose shape changed, because `set_split_children`
-    // replaces a list wholesale and so resets the proportions the user
-    // dragged it to.
+    // own resizable split of two. A change sends a fresh split's list and
+    // swaps the one slot it touched in the list holding it with
+    // `replace_split_child`, never re-sending that list: the slot keeps
+    // its size, so splitting a group halves that group and leaves every
+    // proportion the user dragged elsewhere (the sidebar's width too)
+    // alone.
 
     pub fn groupById(self: *const Ui, id: groups.GroupId) *Group {
         for (self.group_list.items) |g| {
@@ -1827,10 +1829,19 @@ pub const Ui = struct {
         try self.client.setSplitChildren(s.handle, &.{ self.layoutChild(s.first), self.layoutChild(s.second) });
     }
 
-    /// Re-sends the one list that holds `node`: its parent split's, or
-    /// the tree|editor split's when it is the layout's root.
-    pub fn sendListHolding(self: *Ui, node: *const groups.Node) !void {
-        if (node.parent) |p| try self.sendSplit(p) else try self.applySplitChildren();
+    /// Points the slot that holds `node` -- in its parent split, or in
+    /// the tree|editor split when it is the layout's root -- at whatever
+    /// `node` now is, keeping the slot's size.
+    pub fn replaceInListHolding(self: *Ui, node: *const groups.Node) !void {
+        const child: glyphwire.SplitChildInput = .{ .split = self.layoutChild(node).split.? };
+        if (node.parent) |p| {
+            try self.client.replaceSplitChild(p.kind.split.handle, node.slot().?.index(), child);
+        } else {
+            // The editors follow the sidebar when it is shown (see
+            // `applySplitChildren`).
+            const index: usize = if (self.tree_visible) 1 else 0;
+            try self.client.replaceSplitChild(self.pane_split, index, child);
+        }
     }
 
     pub const SlotAt = struct { group: *Group, index: usize };
@@ -1942,7 +1953,7 @@ pub const Ui = struct {
             self.dropGroup(g, removed) catch {};
         } else |_| {};
         try self.sendSplit(node);
-        try self.sendListHolding(node);
+        try self.replaceInListHolding(node);
         return g;
     }
 
@@ -2106,11 +2117,11 @@ pub const Ui = struct {
     }
 
     /// Takes an emptied group off the screen and frees it: its sibling
-    /// takes the parent split's place in the host tree, and the group's
-    /// own layers and split go. `g` must already be out of `layout`, its
-    /// buffers gone, and `grp` pointing at another group.
+    /// takes the parent split's place (and size) in the host tree, and
+    /// the group's own layers and split go. `g` must already be out of
+    /// `layout`, its buffers gone, and `grp` pointing at another group.
     pub fn dropGroup(self: *Ui, g: *Group, removed: groups.Layout.Removed) !void {
-        try self.sendListHolding(removed.replacement);
+        try self.replaceInListHolding(removed.replacement);
         self.client.destroySplit(removed.handle) catch {};
         self.client.destroySplit(g.col_split) catch {};
         self.client.destroyLayer(g.tabs_layer) catch {};
@@ -3681,15 +3692,7 @@ pub const Ui = struct {
         const out = try arena.create(zoe_workspace.EditorNode);
         switch (node.kind) {
             .split => |s| {
-                // The proportions the user dragged the band to, read back
-                // off the panes' bounds: zoe never sees the weights.
-                const a = self.nodeRect(s.first);
-                const b = self.nodeRect(s.second);
-                const ea: usize, const eb: usize = switch (s.axis) {
-                    .vertical => .{ a.cols, b.cols },
-                    .horizontal => .{ a.rows, b.rows },
-                };
-                const ratio: f32 = if (ea + eb == 0) 0.5 else @as(f32, @floatFromInt(ea)) / @as(f32, @floatFromInt(ea + eb));
+                const ratio = try self.splitRatio(s.handle);
                 out.* = .{ .split = .{
                     .orientation = switch (s.axis) {
                         .vertical => .vertical,
@@ -3716,24 +3719,24 @@ pub const Ui = struct {
         return out;
     }
 
-    /// The cells a layout node covers: its group's, or the union of every
-    /// group under a split.
-    pub fn nodeRect(self: *const Ui, node: *const groups.Node) groups.Rect {
-        switch (node.kind) {
-            .leaf => |id| return self.groupById(id).rect(),
-            .split => |s| {
-                const a = self.nodeRect(s.first);
-                const b = self.nodeRect(s.second);
-                const row = @min(a.row, b.row);
-                const col = @min(a.col, b.col);
-                return .{
-                    .row = row,
-                    .col = col,
-                    .rows = @max(a.row + a.rows, b.row + b.rows) - row,
-                    .cols = @max(a.col + a.cols, b.col + b.cols) - col,
-                };
-            },
+    /// The first child's share of a two-child split, as the host holds
+    /// it now: the weights the user dragged the band to, read back with
+    /// `get_split`. A split whose children aren't both weighted (none of
+    /// zoe's, today) falls back to the cells each took at the last layout.
+    pub fn splitRatio(self: *Ui, handle: glyphwire.SplitHandle) !f32 {
+        var state = try self.client.getSplit(handle);
+        defer state.deinit();
+        const children = state.value().children;
+        if (children.len != 2) return 0.5;
+        const a = children[0];
+        const b = children[1];
+        if (a.weight != null and b.weight != null) {
+            const wa = @max(a.weight.?, 0);
+            const wb = @max(b.weight.?, 0);
+            return if (wa + wb <= 0) 0.5 else wa / (wa + wb);
         }
+        const total = a.extent + b.extent;
+        return if (total == 0) 0.5 else @as(f32, @floatFromInt(a.extent)) / @as(f32, @floatFromInt(total));
     }
 
     /// `:wsopen <file>`: the workspace's folders replace the sidebar's,
@@ -3858,8 +3861,8 @@ pub const Ui = struct {
     /// Rebuilds a saved `editors` tree from the single group zoe has at
     /// startup (or after `resetEditors`): each split grows a group off the
     /// one before it, each group opens its files, and the saved group gets
-    /// the keyboard. The split proportions go on last, because building
-    /// the tree re-sends lists at even weights as it goes.
+    /// the keyboard. The split proportions go on last, once every split
+    /// they name exists: each new split starts out at even weights.
     pub fn restoreEditors(self: *Ui, root: *const zoe_workspace.EditorNode) !void {
         std.debug.assert(self.group_list.items.len == 1);
         var focus: ?*Group = null;

@@ -353,6 +353,7 @@ pub const Client = struct {
     pub const focusPane = ops.focusPane;
     pub const destroyPaneSplit = ops.destroyPaneSplit;
     pub const setPaneSplitChildren = ops.setPaneSplitChildren;
+    pub const replacePaneSplitChild = ops.replacePaneSplitChild;
     pub const setRootPaneSplit = ops.setRootPaneSplit;
     pub const movePaneDivider = ops.movePaneDivider;
     pub const stopRemote = ops.stopRemote;
@@ -379,6 +380,7 @@ pub const Client = struct {
     // -- Splits and stacking --
     pub const destroySplit = ops.destroySplit;
     pub const setSplitChildren = ops.setSplitChildren;
+    pub const replaceSplitChild = ops.replaceSplitChild;
     pub const setRootSplit = ops.setRootSplit;
     pub const moveDivider = ops.moveDivider;
     pub const raiseLayer = ops.raiseLayer;
@@ -965,6 +967,15 @@ pub const Client = struct {
         return parsed.value.result.split;
     }
 
+    /// `get_pane_split` -- a request. The split as the session holds it
+    /// now: its axis, whether it is resizable, and each child's target,
+    /// declared size (including weights a mouse drag has changed since)
+    /// and laid-out extent. Caller `deinit`s the result.
+    pub fn getPaneSplit(self: *Client, split: core.PaneSplitHandle) !PaneSplitState {
+        const parsed = try self.request(protocol.GetPaneSplitResult, "get_pane_split", .{ .split = split });
+        return .{ .parsed = parsed };
+    }
+
     /// `spawn_in_pane`: starts a program seated in a pane, and answers its
     /// pid. The host handles the fork, the PTY, the environment that lets
     /// the child find its pane, and the reaping -- see
@@ -1122,6 +1133,15 @@ pub const Client = struct {
         });
         defer parsed.deinit();
         return parsed.value.result.handle;
+    }
+
+    /// `get_split` -- a request. The split as the context holds it now:
+    /// its axis, whether it is resizable, and each child's target,
+    /// declared size (including weights a mouse drag has changed since)
+    /// and laid-out extent. Caller `deinit`s the result.
+    pub fn getSplit(self: *Client, split: core.SplitHandle) !SplitState {
+        const parsed = try self.request(protocol.GetSplitResult, "get_split", .{ .split = split });
+        return .{ .parsed = parsed };
     }
 
     /// `get_cell_metrics` -- a request returning the session's fixed cell
@@ -1839,6 +1859,7 @@ pub const Client = struct {
         pub const focusPane = batch_ops.focusPane;
         pub const destroyPaneSplit = batch_ops.destroyPaneSplit;
         pub const setPaneSplitChildren = batch_ops.setPaneSplitChildren;
+        pub const replacePaneSplitChild = batch_ops.replacePaneSplitChild;
         pub const setRootPaneSplit = batch_ops.setRootPaneSplit;
         pub const movePaneDivider = batch_ops.movePaneDivider;
         pub const stopRemote = batch_ops.stopRemote;
@@ -1865,6 +1886,7 @@ pub const Client = struct {
         // -- Splits and stacking --
         pub const destroySplit = batch_ops.destroySplit;
         pub const setSplitChildren = batch_ops.setSplitChildren;
+        pub const replaceSplitChild = batch_ops.replaceSplitChild;
         pub const setRootSplit = batch_ops.setRootSplit;
         pub const moveDivider = batch_ops.moveDivider;
         pub const raiseLayer = batch_ops.raiseLayer;
@@ -2319,6 +2341,32 @@ pub const HostVersion = struct {
     }
 
     pub fn value(self: *const HostVersion) protocol.VersionResult {
+        return self.parsed.value.result;
+    }
+};
+
+/// `getSplit`'s answer. The child list lives as long as this does.
+pub const SplitState = struct {
+    parsed: std.json.Parsed(ResponseOf(protocol.GetSplitResult)),
+
+    pub fn deinit(self: *SplitState) void {
+        self.parsed.deinit();
+    }
+
+    pub fn value(self: *const SplitState) protocol.GetSplitResult {
+        return self.parsed.value.result;
+    }
+};
+
+/// `getPaneSplit`'s answer. The child list lives as long as this does.
+pub const PaneSplitState = struct {
+    parsed: std.json.Parsed(ResponseOf(protocol.GetPaneSplitResult)),
+
+    pub fn deinit(self: *PaneSplitState) void {
+        self.parsed.deinit();
+    }
+
+    pub fn value(self: *const PaneSplitState) protocol.GetPaneSplitResult {
         return self.parsed.value.result;
     }
 };

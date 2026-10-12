@@ -125,6 +125,23 @@ pub fn removeKeepsTheGrandparentLinkTest(_: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(tree.root.kind.split.first.kind.leaf, 1);
 }
 
+/// The slot an edit reports is the host child index a caller passes to
+/// `replace_*split_child`: a split in place sits where its leaf did, and
+/// a removal's replacement where the removed split did.
+pub fn slotIndexNamesTheHostChildTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try testz.expectEqual(splittree.Slot.first.index(), 0);
+    try testz.expectEqual(splittree.Slot.second.index(), 1);
+
+    var tree = try Tree.init(alloc, 1);
+    defer tree.deinit();
+    _ = try tree.split(1, 2, .row, 100, .after);
+    const inner = try tree.split(1, 3, .column, 101, .before);
+    try testz.expectEqual(inner.slot().?.index(), 0);
+
+    const r = try tree.remove(3);
+    try testz.expectEqual(r.replacement.slot().?.index(), 0);
+}
+
 pub fn neighborPicksTheFacingPaneTest(_: std.Io, _: std.mem.Allocator) !void {
     // [0 | 1]
     // [0 | 2]   -- 0 is full height on the left, 1 over 2 on the right.

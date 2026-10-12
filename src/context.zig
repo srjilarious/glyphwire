@@ -79,6 +79,9 @@ pub const SplitError = error{
     /// A split named itself, directly or through a cycle, and the layout
     /// walk hit `max_split_depth`.
     SplitTooDeep,
+    /// `replace_split_child` named a slot past the end of the split's
+    /// child list.
+    SplitChildOutOfRange,
 };
 
 /// Which way a split's children run.
@@ -916,6 +919,42 @@ pub const Context = struct {
         split.children.clearRetainingCapacity();
         try split.children.appendSlice(self.alloc, children);
         self.layout_gen +%= 1;
+    }
+
+    /// `replace_split_child`: puts `target` in slot `index` of the
+    /// split's child list, keeping that slot's size unless `size` says
+    /// otherwise. What a client splitting or closing one pane sends
+    /// instead of re-sending the parent's whole list, which would reset
+    /// every proportion the user dragged it to: the slot's weight (or
+    /// fixed cells) is the user's, not the client's.
+    pub fn replaceSplitChild(
+        self: *Context,
+        handle: SplitHandle,
+        index: usize,
+        target: SplitChild.Target,
+        size: ?SplitChild.Size,
+    ) SplitError!void {
+        const split = self.splits.getPtr(handle) orelse return SplitError.UnknownSplit;
+        if (index >= split.children.items.len) return SplitError.SplitChildOutOfRange;
+        const slot = &split.children.items[index];
+        slot.target = target;
+        if (size) |sz| slot.size = sz;
+        self.layout_gen +%= 1;
+    }
+
+    /// Each child's extent along the split's axis, in cells, as of the
+    /// last `layoutSplits` -- what `get_split` reports next to the sizes
+    /// it was declared with. All zero for a split that has never been
+    /// laid out (not yet reached from the root), since it has no size of
+    /// its own until then.
+    ///
+    /// `out.len` must equal the child count.
+    pub fn splitExtents(self: *const Context, split: *const Split, out: []usize) void {
+        if (!split.laid_out) {
+            @memset(out, 0);
+            return;
+        }
+        self.childExtents(split, split.last_rect, out);
     }
 
     /// `set_root_split`: which split fills the context. Null tears the

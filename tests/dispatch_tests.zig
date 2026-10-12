@@ -4506,6 +4506,65 @@ pub fn paneSplitChildNamingBothTargetsIsRejectedTest(io: std.Io, alloc: std.mem.
     ), error.InvalidPaneSplitChild);
 }
 
+const PaneSplitResponse = struct { result: glyphwire.protocol.GetPaneSplitResult };
+
+/// The window-manager path gmux takes: a pane swapped into a split's slot
+/// keeps the slot's size, and `get_pane_split` reads it back.
+pub fn replaceAndGetPaneSplitTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 41, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
+    try testz.expectTrue(session.claimManager(4, 0) != null);
+    const a = (try session.createPane(4, 0)).pane;
+    const b = (try session.createPane(4, 0)).pane;
+    const split = try session.createPaneSplit(.row, true);
+    try session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 3 } },
+        .{ .target = .{ .pane = a }, .size = .{ .weight = 1 } },
+    });
+    try session.setRootPaneSplit(split);
+
+    const replace = try std.fmt.allocPrint(
+        alloc,
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"replace_pane_split_child\",\"params\":{{\"split\":{d},\"index\":1,\"child\":{{\"pane\":{d}}}}}}}",
+        .{ split, b },
+    );
+    defer alloc.free(replace);
+    _ = try d.handle(alloc, replace);
+    try session.layoutPanes(null, null);
+
+    const get = try std.fmt.allocPrint(
+        alloc,
+        "{{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"get_pane_split\",\"params\":{{\"split\":{d}}}}}",
+        .{split},
+    );
+    defer alloc.free(get);
+    const res = try d.handle(alloc, get);
+    const body = res.response.?;
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(PaneSplitResponse, alloc, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const v = parsed.value.result;
+    try testz.expectEqualStr(v.axis, "row");
+    try testz.expectEqual(v.children.len, 2);
+    try testz.expectEqual(v.children[1].pane.?, b);
+    try testz.expectEqual(v.children[0].weight.?, 3);
+    try testz.expectEqual(v.children[1].weight.?, 1);
+    try testz.expectEqual(v.children[0].extent, 30);
+    try testz.expectEqual(v.children[1].extent, 10);
+
+    const past = try std.fmt.allocPrint(
+        alloc,
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"replace_pane_split_child\",\"params\":{{\"split\":{d},\"index\":2,\"child\":{{\"pane\":{d}}}}}}}",
+        .{ split, b },
+    );
+    defer alloc.free(past);
+    try testz.expectError(d.handle(alloc, past), error.PaneSplitChildOutOfRange);
+}
+
 pub fn createPaneSplitRejectsABadAxisTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var root = try glyphwire.Context.init(alloc, 40, 10, 0);
@@ -4989,6 +5048,83 @@ pub fn msgpackLoadImageWithoutDataIsRefusedTest(io: std.Io, alloc: std.mem.Alloc
     const env = try glyphwire.codec.parseEnvelope(.msgpack, alloc, body);
     defer env.deinit();
     try testz.expectError(dispatch.imagePayloadHeader(alloc, env.value), dispatch.DispatchError.MissingImageData);
+}
+
+pub fn replaceSplitChildKeepsTheSlotsSizeOverTheWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    _ = try ctx.createLayer(10, 10, 0);
+    _ = try ctx.createLayer(10, 10, 0);
+    const third = try ctx.createLayer(10, 10, 0);
+    _ = try ctx.createSplit(.row);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_split_children","params":{"split":1,"children":[{"layer":1,"weight":3},{"layer":2,"fixed":20}]}}
+    );
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"replace_split_child","params":{"split":1,"index":0,"child":{"layer":3}}}
+    );
+    const children = ctx.splits.getPtr(1).?.children.items;
+    try testz.expectEqual(children[0].target.layer, third);
+    try testz.expectEqual(children[0].size.weight, 3);
+    try testz.expectEqual(children[1].size.fixed, 20);
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"replace_split_child","params":{"split":1,"index":2,"child":{"layer":3}}}
+    ), error.SplitChildOutOfRange);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"replace_split_child","params":{"split":1,"index":0,"child":{"layer":3,"split":1}}}
+    ), error.InvalidSplitChild);
+}
+
+const SplitResponse = struct { result: glyphwire.protocol.GetSplitResult };
+
+/// `get_split` hands back the weights a drag left, not the ones the
+/// client sent, plus what each child measured at the last layout.
+pub fn getSplitReportsDraggedWeightsAndExtentsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    _ = try ctx.createLayer(10, 10, 0);
+    _ = try ctx.createLayer(10, 10, 0);
+    _ = try ctx.createSplit(.row);
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_split_children","params":{"split":1,"children":[{"layer":1},{"layer":2}]}}
+    );
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"set_root_split","params":{"split":1}}
+    );
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"move_divider","params":{"split":1,"index":0,"delta":20}}
+    );
+
+    const res = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":5,"method":"get_split","params":{"split":1}}
+    );
+    const body = res.response.?;
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(SplitResponse, alloc, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const v = parsed.value.result;
+    try testz.expectEqualStr(v.axis, "row");
+    try testz.expectTrue(v.resizable);
+    try testz.expectEqual(v.children.len, 2);
+    try testz.expectEqual(v.children[0].layer.?, 1);
+    try testz.expectEqual(v.children[1].layer.?, 2);
+    try testz.expectEqual(v.children[0].extent, 69);
+    try testz.expectEqual(v.children[1].extent, 30);
+    // A drag keeps the pair's combined weight and re-splits it.
+    const wa = v.children[0].weight.?;
+    const wb = v.children[1].weight.?;
+    try testz.expectTrue(@abs(wa + wb - 2) < 0.001);
+    try testz.expectTrue(wa > wb);
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":6,"method":"get_split","params":{"split":9}}
+    ), error.UnknownSplit);
 }
 
 // ─── get_version ────────────────────────────────────────────────────────

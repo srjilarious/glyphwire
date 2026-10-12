@@ -156,6 +156,9 @@ pub const PaneSplitError = error{
     /// A pane split named itself, directly or through a cycle, and the
     /// layout walk hit `max_pane_split_depth`.
     PaneSplitTooDeep,
+    /// `replace_pane_split_child` named a slot past the end of the
+    /// split's child list.
+    PaneSplitChildOutOfRange,
 };
 
 /// One child of a pane split: what to place, and how big it is along the
@@ -963,6 +966,39 @@ pub const Session = struct {
         split.children.clearRetainingCapacity();
         try split.children.appendSlice(self.alloc, children);
         _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
+    }
+
+    /// `replace_pane_split_child`: puts `target` in slot `index`,
+    /// keeping that slot's size unless `size` says otherwise. The pane
+    /// counterpart of `Context.replaceSplitChild` -- what a multiplexer
+    /// splitting or closing one pane sends so the ratios the user dragged
+    /// everywhere else survive.
+    pub fn replacePaneSplitChild(
+        self: *Session,
+        handle: PaneSplitHandle,
+        index: usize,
+        target: PaneSplitChild.Target,
+        size: ?PaneSplitChild.Size,
+    ) PaneSplitError!void {
+        const split = self.pane_splits.getPtr(handle) orelse return PaneSplitError.UnknownPaneSplit;
+        if (index >= split.children.items.len) return PaneSplitError.PaneSplitChildOutOfRange;
+        const slot = &split.children.items[index];
+        slot.target = target;
+        if (size) |sz| slot.size = sz;
+        _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
+    }
+
+    /// Each child's extent along the split's axis as of the last
+    /// `layoutPanes`, all zero for a split never laid out. The pane
+    /// counterpart of `Context.splitExtents`, behind `get_pane_split`.
+    ///
+    /// `out.len` must equal the child count.
+    pub fn paneSplitExtents(self: *const Session, split: *const PaneSplit, out: []usize) void {
+        if (!split.laid_out) {
+            @memset(out, 0);
+            return;
+        }
+        self.paneChildExtents(split, split.last_rect, out);
     }
 
     /// `set_root_pane_split`: which split fills the window. Null tears

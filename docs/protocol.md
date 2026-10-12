@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.7.0 — pre-1.0 draft.**
+**Version 0.8.0 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -312,9 +312,9 @@ into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
 | `UnknownLayer` | any `layer` handle that does not exist, **and** the root handle where a non-root one is required |
 | `LayerPermissionDenied` | `destroy_layer` from a non-owner |
 | `UnknownContext`, `RootContextImmutable`, `ContextPermissionDenied`, `NoContextSession` | context messages |
-| `UnknownPane`, `RootPaneImmutable`, `UnknownPaneSplit`, `InvalidPaneSplitChild` | pane messages |
+| `UnknownPane`, `RootPaneImmutable`, `UnknownPaneSplit`, `InvalidPaneSplitChild`, `PaneSplitChildOutOfRange` | pane messages |
 | `NotWindowManager`, `UnknownRole` | role messages |
-| `UnknownSplit`, `InvalidSplitAxis`, `InvalidSplitChild` | layer-split messages |
+| `UnknownSplit`, `InvalidSplitAxis`, `InvalidSplitChild`, `SplitChildOutOfRange` | layer-split messages |
 | `UnknownImage`, `UnknownIcon`, `ImageIsIcon`, `InvalidIconOption`, `UnsupportedImageFormat` | image / icon messages |
 | `MissingImageData` | `load_image` / `update_image` on a MessagePack connection without a `data` member |
 | `UnknownMetadata`, `InvalidMetadataDirection` | metadata messages |
@@ -1347,6 +1347,8 @@ A layout tree over layers within one context.
 | `create_split` | request | `axis`, `resizable?` = true | `{handle}` |
 | `destroy_split` | notification | `split` | — |
 | `set_split_children` | notification | `split`, `children` | — |
+| `replace_split_child` | notification | `split`, `index`, `child` | — |
+| `get_split` | request | `split` | `{axis, resizable, children}` |
 | `set_root_split` | notification | `split?` | — |
 | `move_divider` | notification | `split`, `index`, `delta` | — |
 
@@ -1357,6 +1359,22 @@ A **child** is `{layer?, split?, weight?, fixed?}` and **MUST** name
 exactly one of `layer` or `split`; naming both or neither reports
 `InvalidSplitChild`. `fixed` is a cell count; `weight` shares the
 remainder.
+
+`replace_split_child` puts `child` in slot `index` (0-based) of the
+split's existing list and leaves every other slot alone. `child` names a
+target exactly as above; when it gives neither `weight` nor `fixed` the
+slot **keeps its current size**, whatever `move_divider` has made of it.
+An `index` past the end of the list reports `SplitChildOutOfRange`. This
+is the message for swapping one subtree for another (splitting a pane in
+place, or promoting a sibling when one closes): `set_split_children`
+would reset every proportion in the list.
+
+`get_split` returns the split as the host holds it now: `axis`,
+`resizable`, and `children`, each `{layer?, split?, weight?, fixed?,
+extent}` with exactly one target and exactly one size. `weight` reflects
+any `move_divider` since the client set it. `extent` is the cells the
+child took along the axis at the last layout, 0 if the split has never
+been laid out.
 
 `set_root_split(null)` detaches the tree. When the tree is re-laid-out — a
 window resize or a divider drag — subscribers to `layout` receive the new
@@ -1381,6 +1399,8 @@ gets `NotWindowManager`.
 | `create_pane_split` | request | `axis`, `resizable?` = true | `{split}` |
 | `destroy_pane_split` | notification | `split` | — |
 | `set_pane_split_children` | notification | `split`, `children` | — |
+| `replace_pane_split_child` | notification | `split`, `index`, `child` | — |
+| `get_pane_split` | request | `split` | `{axis, resizable, children}` |
 | `set_root_pane_split` | notification | `split?` | — |
 | `move_pane_divider` | notification | `split`, `index`, `delta` | — |
 | `spawn_in_pane` | request | `pane`, `argv`, `cols?`, `rows?` | `{pid}` |
@@ -1395,7 +1415,10 @@ two sockets that must count as one manager. An unknown role reports
 `create_pane` returns both the pane and the context created inside it.
 Pane split messages mirror section 6.14 with `pane` in place of `layer`;
 their child shape is `{pane?, split?, weight?, fixed?}` and reports
-`InvalidPaneSplitChild`.
+`InvalidPaneSplitChild`. `replace_pane_split_child` reports
+`PaneSplitChildOutOfRange` for a slot past the end, and
+`get_pane_split`'s children are `{pane?, split?, weight?, fixed?,
+extent}`.
 
 `attach_pane` binds the issuing connection to a pane — what a program
 spawned into a pane sends first, from `GLYPHWIRE_PANE`.
