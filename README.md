@@ -128,8 +128,17 @@ glyphwire release and the `git describe` it was built from, e.g. `zoe
 each one's number is a line in `program_versions` at the top of
 `build.zig`, bumped when that program changes in a release, and the
 release's own number is `build.zig.zon`'s `version`. A client can ask the
-host the same with the `get_version` request. CI builds a `glyphwire-linux-x86_64.tar.gz` on every push and attaches
-it to the GitHub Release on a `vX.Y.Z` tag.
+host the same with the `get_version` request.
+
+CI builds `glyphwire-linux-x86_64.tar.gz`, a `.deb` and an Arch
+`.pkg.tar.zst` on every push to `main`, and attaches all three to the GitHub
+Release on a `vX.Y.Z` tag. The binaries need glibc 2.39 or newer (Ubuntu
+24.04, Debian 13, current Arch). Install a downloaded package with:
+
+```sh
+sudo apt install ./glyphwire_<version>-1_amd64.deb          # Ubuntu / Debian
+sudo pacman -U glyphwire-<version>-1-x86_64.pkg.tar.zst     # Arch
+```
 
 ### Host options
 

@@ -10,13 +10,20 @@ name: Linux Package
 # the single place the shipped list lives. The server/client/probe/
 # table-demo tools and the test runner are deliberately left out of it.
 #
+# nfpm then wraps that same staged directory as a .deb and an Arch
+# .pkg.tar.zst (packaging/nfpm.yaml), so all three downloads hold the
+# same binaries.
+#
+# Releases are cut from main, so only main, tags and PRs run this; dev
+# pushes don't.
+#
 # Windows is intentionally not covered yet: the host needs more work
 # before it runs there, and cross-building it wants its own job. When
 # that lands, add a `build-windows` job here alongside `build-linux`.
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
     tags: ["v[0-9]*.[0-9]*.[0-9]*"]
   pull_request:
   workflow_dispatch:
@@ -34,6 +41,12 @@ concurrency:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
+    env:
+      # Shared by the Build and Stage steps so they compile the same
+      # artifacts; see the Build step for what each flag is for.
+      BUILD_FLAGS: -Doptimize=ReleaseSafe -Dcpu=baseline -Dtarget=x86_64-linux-gnu.2.39
+      NFPM_VERSION: 2.47.0
+      NFPM_SHA256: 0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783
     steps:
       - name: Check out glyphwire
         uses: actions/checkout@v4
@@ -71,12 +84,17 @@ jobs:
       # the only safe floor; the cost is nil for the shell/RPC/PTY work
       # and only theoretically visible in gw-view's image decode.
       #
-      # The staging step below repeats these flags exactly: a differing
-      # set would compile a second full set of artifacts rather than
-      # reuse this one, and tar up binaries this step never gated.
+      # `-Dtarget=x86_64-linux-gnu.2.39` pins the glibc the binaries link
+      # against. A native build takes the *builder's* glibc, so the floor
+      # would rise silently each time GitHub moves ubuntu-latest. 2.39 is
+      # Ubuntu 24.04; packaging/nfpm.yaml's libc dependencies match it.
+      #
+      # The staging step below uses the same BUILD_FLAGS: a differing set
+      # would compile a second full set of artifacts rather than reuse
+      # this one, and tar up binaries this step never gated.
       - name: Build (ReleaseSafe)
         working-directory: glyphwire
-        run: zig build package -Doptimize=ReleaseSafe -Dcpu=baseline
+        run: zig build package $BUILD_FLAGS
 
       # The test runner links `host_eng` too, so this is what catches a
       # backend change that compiles for the host but breaks its input
@@ -106,7 +124,7 @@ jobs:
         working-directory: glyphwire
         run: |
           pkg="glyphwire-linux-x86_64"
-          zig build package -Doptimize=ReleaseSafe -Dcpu=baseline --prefix "$PWD/$pkg"
+          zig build package $BUILD_FLAGS --prefix "$PWD/$pkg"
           # The vendored ziglua reaches the Lua C headers by installing
           # liblua.a and its headers into the prefix (libs/ziglua/build.zig
           # hangs its translate-c step off that install), so any build that
@@ -114,22 +132,57 @@ jobs:
           # build artefact, not something the shipped programs read, so the
           # tarball drops them.
           rm -rf "$pkg/include" "$pkg/lib"
-          cp README.md "$pkg/"
+          cp README.md LICENSE.md "$pkg/"
+          cp -r LICENSES "$pkg/"
           tar czf "$pkg.tar.gz" "$pkg"
           tar tzf "$pkg.tar.gz"
+
+      # Pinned release binary, checked against the sha256 from that
+      # release's checksums.txt. Bump NFPM_VERSION and NFPM_SHA256 together.
+      - name: Install nfpm
+        run: |
+          tarball="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLO "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/$tarball"
+          echo "$NFPM_SHA256  $tarball" | sha256sum -c
+          tar xzf "$tarball" nfpm
+          sudo install -m755 nfpm /usr/local/bin/nfpm
+
+      # The package version comes from build.zig.zon. On a tag push the
+      # tag has to agree with it, so a release can't ship packages whose
+      # version disagrees with its name. Branch and PR runs package
+      # whatever version is in the tree.
+      - name: Build .deb and Arch packages
+        working-directory: glyphwire
+        run: |
+          VERSION="$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)"
+          [ -n "$VERSION" ] || { echo "no .version in build.zig.zon"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME does not match build.zig.zon version $VERSION"
+            exit 1
+          fi
+          export VERSION
+          nfpm package -f packaging/nfpm.yaml -p deb -t .
+          nfpm package -f packaging/nfpm.yaml -p archlinux -t .
+          ls -l *.deb *.pkg.tar.zst
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: glyphwire-linux-x86_64
-          path: glyphwire/glyphwire-linux-x86_64.tar.gz
+          path: |
+            glyphwire/glyphwire-linux-x86_64.tar.gz
+            glyphwire/*.deb
+            glyphwire/*.pkg.tar.zst
           if-no-files-found: error
 
-      # Only on a vX.Y.Z tag push: attach the same tarball to the GitHub
-      # Release for that tag (created if it does not exist yet).
-      - name: Attach tarball to GitHub Release
+      # Only on a vX.Y.Z tag push: attach the tarball and both packages to
+      # the GitHub Release for that tag (created if it does not exist yet).
+      - name: Attach packages to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: glyphwire/glyphwire-linux-x86_64.tar.gz
+          files: |
+            glyphwire/glyphwire-linux-x86_64.tar.gz
+            glyphwire/*.deb
+            glyphwire/*.pkg.tar.zst
           fail_on_unmatched_files: true

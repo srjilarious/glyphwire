@@ -1,0 +1,77 @@
+# nfpm config for the .deb and Arch .pkg.tar.zst that the Linux Package
+# workflow attaches to each release. It wraps the staged install prefix
+# (glyphwire-linux-x86_64/, produced by `zig build package --prefix`)
+# rather than building anything, so the package holds exactly what the
+# tarball holds, moved under /usr. Paths are relative to the repo root,
+# which is where the workflow runs nfpm from.
+#
+#   VERSION=0.11.0 nfpm package -f packaging/nfpm.yaml -p deb -t .
+#   VERSION=0.11.0 nfpm package -f packaging/nfpm.yaml -p archlinux -t .
+
+name: glyphwire
+# nfpm's Go-style arch name; it writes amd64 into the .deb and x86_64
+# into the Arch package.
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: 1
+section: x11
+priority: optional
+maintainer: "Jeff DeWall <1356248+srjilarious@users.noreply.github.com>"
+description: Terminal host and display protocol, with zoe, gmux, salacommander and the gw-* tools built on it
+homepage: https://github.com/srjilarious/glyphwire
+license: MPL-2.0 AND GPL-3.0-or-later AND CC-BY-4.0
+
+contents:
+  - src: ./glyphwire-linux-x86_64/bin
+    dst: /usr/bin
+  - src: ./glyphwire-linux-x86_64/share
+    dst: /usr/share
+
+  # Each distro keeps license texts in its own place.
+  - src: ./LICENSE.md
+    dst: /usr/share/licenses/glyphwire/LICENSE.md
+    packager: archlinux
+  - src: ./LICENSES
+    dst: /usr/share/licenses/glyphwire
+    packager: archlinux
+  - src: ./LICENSE.md
+    dst: /usr/share/doc/glyphwire/copyright
+    packager: deb
+  - src: ./LICENSES
+    dst: /usr/share/doc/glyphwire/licenses
+    packager: deb
+
+# The SDL3 backend dlopens its X11, Wayland and GL libraries at runtime
+# instead of linking them, so nothing beyond libc shows up as a link-time
+# dependency. These lists name the ones it needs for a window: GL, plus
+# either the X11 set or the Wayland set. The libc floor matches the
+# -Dtarget glibc pin in the workflow.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.39)
+      - libgl1
+      - libegl1
+    recommends:
+      - libx11-6
+      - libxext6
+      - libxcursor1
+      - libxi6
+      - libxfixes3
+      - libxrandr2
+      - libwayland-client0
+      - libwayland-egl1
+      - libwayland-cursor0
+      - libxkbcommon0
+
+  # nfpm's Arch packager only writes `depend` lines (no optdepends), so
+  # the X11/Wayland libraries are left to the desktop that's already
+  # installed rather than forcing both sets on everyone.
+  archlinux:
+    depends:
+      - glibc>=2.39
+      - libglvnd
+
+archlinux:
+  packager: "Jeff DeWall <1356248+srjilarious@users.noreply.github.com>"
