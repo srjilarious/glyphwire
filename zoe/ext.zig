@@ -80,6 +80,29 @@ pub const Command = struct {
     ref: i32,
 };
 
+/// What became of one name in `config.extensions`, for the extension
+/// list (`zoe/extlist.zig`).
+pub const Enabled = struct {
+    /// Owned.
+    name: []const u8,
+    state: State,
+    /// Why it failed, owned; null unless `state` is `.failed`.
+    err: ?[]const u8 = null,
+    /// The commands it registered, failed or not: an error part-way
+    /// keeps the ones before it.
+    commands: u32 = 0,
+
+    pub const State = enum {
+        loaded,
+        /// Its file raised an error while it ran.
+        failed,
+        /// Neither a user file nor a built-in one.
+        not_found,
+        /// `name = false`.
+        off,
+    };
+};
+
 /// A chord that runs a command, in one of `actions.Scope`'s tables.
 pub const Binding = struct {
     scope: actions.Scope,
@@ -102,6 +125,9 @@ pub const Runtime = struct {
     /// What went wrong loading, one owned line each, for the caller to
     /// log and show.
     problems: std.ArrayList([]u8) = .empty,
+    /// Every name `config.extensions` gave, sorted, with what came of it.
+    /// An invalid name is only a problem, not an entry.
+    enabled: std.ArrayList(Enabled) = .empty,
     /// The extension whose file is running, while one is: only then may
     /// it register commands and bindings.
     loading: ?[]const u8 = null,
@@ -145,6 +171,11 @@ pub const Runtime = struct {
         self.bindings.deinit(self.alloc);
         for (self.problems.items) |p| self.alloc.free(p);
         self.problems.deinit(self.alloc);
+        for (self.enabled.items) |e| {
+            self.alloc.free(e.name);
+            if (e.err) |m| self.alloc.free(m);
+        }
+        self.enabled.deinit(self.alloc);
         self.edited.deinit(self.alloc);
         self.alloc.destroy(self);
     }
@@ -170,10 +201,14 @@ pub const Runtime = struct {
         // Lua's own order for the second is unspecified, so the names are
         // sorted: two extensions claiming one chord should settle the same
         // way every start.
+        // `name = false` ones are kept apart, only to be listed as off.
         var names: std.ArrayList([]const u8) = .empty;
+        var off: std.ArrayList([]const u8) = .empty;
         defer {
             for (names.items) |n| self.alloc.free(n);
             names.deinit(self.alloc);
+            for (off.items) |n| self.alloc.free(n);
+            off.deinit(self.alloc);
         }
         lua.pushNil();
         while (lua.next(-2)) {
@@ -187,24 +222,50 @@ pub const Runtime = struct {
                 self.problem("config.extensions: an entry that is not a name; ignored", .{});
                 continue;
             }
-            if (name_index == -2 and lua.typeOf(-1) == .boolean and !lua.toBoolean(-1)) continue;
+            const turned_off = name_index == -2 and lua.typeOf(-1) == .boolean and !lua.toBoolean(-1);
             const name = self.alloc.dupe(u8, lua.toString(name_index) catch continue) catch return;
-            names.append(self.alloc, name) catch {
+            (if (turned_off) &off else &names).append(self.alloc, name) catch {
                 self.alloc.free(name);
                 return;
             };
         }
-        std.mem.sort([]const u8, names.items, {}, struct {
-            fn lt(_: void, a: []const u8, b: []const u8) bool {
-                return std.mem.lessThan(u8, a, b);
-            }
-        }.lt);
+        sortNames(names.items);
 
         for (names.items, 0..) |name, i| {
             // `{ "a", a = {...} }` names one extension twice.
             if (i > 0 and std.mem.eql(u8, names.items[i - 1], name)) continue;
             self.loadOne(name, user_dir);
         }
+        // Off, unless it was also named to load (`{ "a", a = false }`).
+        for (off.items) |name| {
+            if (self.enabledIndex(name) != null or !validExtensionName(name)) continue;
+            self.note(name, .off, null, 0);
+        }
+        std.mem.sort(Enabled, self.enabled.items, {}, struct {
+            fn lt(_: void, a: Enabled, b: Enabled) bool {
+                return std.mem.lessThan(u8, a.name, b.name);
+            }
+        }.lt);
+    }
+
+    fn enabledIndex(self: *const Runtime, name: []const u8) ?usize {
+        for (self.enabled.items, 0..) |e, i| {
+            if (std.mem.eql(u8, e.name, name)) return i;
+        }
+        return null;
+    }
+
+    /// Records what came of `name`, taking `err` (owned). Best effort,
+    /// like `problem`: the list is a report, not the load.
+    fn note(self: *Runtime, name: []const u8, state: Enabled.State, err: ?[]const u8, commands: u32) void {
+        const owned = self.alloc.dupe(u8, name) catch {
+            if (err) |m| self.alloc.free(m);
+            return;
+        };
+        self.enabled.append(self.alloc, .{ .name = owned, .state = state, .err = err, .commands = commands }) catch {
+            self.alloc.free(owned);
+            if (err) |m| self.alloc.free(m);
+        };
     }
 
     /// One extension, with `config.extensions[name]` (at the top of the
@@ -233,6 +294,7 @@ pub const Runtime = struct {
             }
         } else {
             self.problem("extension \"{s}\": not found", .{name});
+            self.note(name, .not_found, null, 0);
             return;
         }
 
@@ -246,10 +308,11 @@ pub const Runtime = struct {
         }
         self.loading = name;
         defer self.loading = null;
-        if (self.callWithArg(source, chunk_name)) |msg| {
-            defer self.alloc.free(msg);
-            self.problem("extension \"{s}\": {s}", .{ name, msg });
-        }
+        const before = self.commands.items.len;
+        const err = self.callWithArg(source, chunk_name);
+        if (err) |msg| self.problem("extension \"{s}\": {s}", .{ name, msg });
+        const added: u32 = @intCast(self.commands.items.len - before);
+        self.note(name, if (err == null) .loaded else .failed, err, added);
     }
 
     const UserSource = struct { source: [:0]u8, chunk_name: [:0]const u8 };
@@ -395,6 +458,15 @@ pub const Runtime = struct {
         return ed;
     }
 };
+
+/// Byte order, in place.
+pub fn sortNames(names: [][]const u8) void {
+    std.mem.sort([]const u8, names, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+}
 
 /// Extension names are file names, so no `/`, `.` or anything a shell
 /// would make awkward.

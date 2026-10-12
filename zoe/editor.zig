@@ -180,6 +180,9 @@ pub const Outcome = union(enum) {
     lsp_status: ?[]const u8,
     /// `:diag` -- list this buffer's diagnostics.
     diag_list,
+    /// `:extensions` -- the extension list popup. The extensions are
+    /// `zoe/ui.zig`'s, like the language servers.
+    extensions_list,
     /// `:theme [name]` -- switch the colour theme, or (bare) report the
     /// current one. Themes are `zoe/ui.zig`'s, like the language servers:
     /// the editor core paints nothing. Borrows `Editor.cmd_arg`.
@@ -708,6 +711,7 @@ pub const Editor = struct {
             .save,
             .findFile,
             .commandPalette,
+            .listExtensions,
             .toggleTree,
             .toggleHidden,
             .toggleShell,
@@ -3218,6 +3222,7 @@ pub const Editor = struct {
         // so both are just relayed (see `Outcome.lsp_status`).
         if (eq(u8, name, "lsp")) return .{ .lsp_status = arg_opt };
         if (eq(u8, name, "diag") or eq(u8, name, "diagnostics")) return .diag_list;
+        if (eq(u8, name, "extensions")) return .extensions_list;
         if (eq(u8, name, "theme") or eq(u8, name, "colo") or eq(u8, name, "colorscheme")) return .{ .theme = arg_opt };
         if (eq(u8, name, "shell")) return .{ .shell_position = arg_opt };
         if (eq(u8, name, "wq") or eq(u8, name, "x")) return .{ .write_quit = arg_opt };

@@ -70,6 +70,7 @@ pub const role = glyphwire.Color.role;
 const langconf = @import("langconf.zig");
 const actions = @import("actions.zig");
 const ext = @import("ext.zig");
+const extlist = @import("extlist.zig");
 const tabs = @import("tabs.zig");
 const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
@@ -176,6 +177,20 @@ fn paletteStyle(th: *const themes.Stored) palette_mod.Style {
     s.selected_fg = f.selected_fg;
     s.text_fg = f.text_fg;
     s.dim_fg = f.dim_fg;
+    return s;
+}
+
+/// The extension list's look: the palette's colours, centred like a
+/// dialog (`zoe/extlist.zig`).
+fn extListStyle(th: *const themes.Stored) extlist.Style {
+    var s = extlist.default_style;
+    const p = paletteStyle(th);
+    s.frame_style = p.frame_style;
+    s.bg = p.bg;
+    s.selected_bg = p.selected_bg;
+    s.selected_fg = p.selected_fg;
+    s.text_fg = p.text_fg;
+    s.dim_fg = p.dim_fg;
     return s;
 }
 
@@ -870,6 +885,9 @@ pub const Ui = struct {
     /// The Ctrl+Shift+P command palette, floating like the finder (over
     /// it: it's created after). Modal while open, the same way.
     palette: palette_mod.Popup,
+    /// `:extensions`: every extension and what became of it, modal like
+    /// the palette and stacked over it.
+    ext_list: extlist.Popup,
 
     /// The language servers, and everything they have said. The pool is
     /// null when `config.lsp.enabled` is false; it exists but holds no
@@ -1203,6 +1221,8 @@ pub const Ui = struct {
         errdefer finder.deinit();
         var palette = try palette_mod.Popup.init(alloc, client, paletteStyle(&th));
         errdefer palette.deinit();
+        var ext_list = try extlist.Popup.init(client, extListStyle(&th));
+        errdefer ext_list.deinit();
         // The hover popup, floating like the finder's layers and placed
         // against the cursor rather than the pane -- `hoverRect`.
         const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
@@ -1263,6 +1283,7 @@ pub const Ui = struct {
             .status_layer = status_layer,
             .finder = finder,
             .palette = palette,
+            .ext_list = ext_list,
             .hover_layer = hover_layer,
             .hover_panel_patch = hover_panel_patch,
             .completion_layer = completion_layer,
@@ -1780,6 +1801,7 @@ pub const Ui = struct {
         self.tree.deinit();
         self.finder.deinit();
         self.palette.deinit();
+        self.ext_list.deinit();
         if (self.find) |*f| f.deinit(self.alloc);
         if (self.tree_edit) |*te| te.deinit(self.alloc);
         if (self.prev_cwd) |p| self.alloc.free(p);
@@ -2255,6 +2277,7 @@ pub const Ui = struct {
             // up, and `completionKey` takes it first then.
             .findFile => try self.openFinder(),
             .commandPalette => try self.openPalette(),
+            .listExtensions => try self.openExtList(),
             .toggleTree => try self.toggleTree(),
             // Dotfiles and everything `.gitignore` excludes, in one flag --
             // the sidebar, both tree searches and Ctrl+P alike. Global so
@@ -2458,7 +2481,7 @@ pub const Ui = struct {
             // frame it arrived for rather than the one after.
             self.drainLsp();
             if (self.anyGroupDirty() or self.tree_dirty != .none or
-                self.status_dirty or self.finder.dirty or self.palette.dirty or self.hover_dirty or self.completion_dirty or
+                self.status_dirty or self.finder.dirty or self.palette.dirty or self.ext_list.dirty or self.hover_dirty or self.completion_dirty or
                 self.path_menu_dirty or self.tree_edit_dirty or self.tab_tip_dirty or self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
@@ -2565,6 +2588,7 @@ pub const Ui = struct {
                 // against the buffer pane, which just moved.
                 if (self.finder.isOpen()) self.finder.dirty = true;
                 if (self.palette.isOpen()) self.palette.dirty = true;
+                if (self.ext_list.isOpen()) self.ext_list.dirty = true;
                 self.replaceShell();
             },
             // The shell panel's top edge was dragged. It floats over the
@@ -2598,6 +2622,7 @@ pub const Ui = struct {
                 self.status_dirty = true;
                 if (self.finder.isOpen()) self.finder.dirty = true;
                 if (self.palette.isOpen()) self.palette.dirty = true;
+                if (self.ext_list.isOpen()) self.ext_list.dirty = true;
                 self.replaceShell();
             },
             .scroll_offset => |so| {
@@ -2605,6 +2630,7 @@ pub const Ui = struct {
                 // checks below are for other layers, so it falls through).
                 _ = self.finder.scrolled(so);
                 _ = self.palette.scrolled(so);
+                _ = self.ext_list.scrolled(so);
                 if (so.layer == self.tree_layer) self.tree_scroll = .{ .row = so.row, .col = so.col };
                 // A wheel or thumb drag over the buffer pane: the host moved
                 // the virtual offset and told us where. Follow it, and drag
@@ -2703,9 +2729,13 @@ pub const Ui = struct {
                     return;
                 }
 
-                // The Ctrl+P and Ctrl+Shift+P popups are modal: while
-                // one is open it is the only thing reading keys, so
-                // nothing below here runs.
+                // The Ctrl+P and Ctrl+Shift+P popups (and the extension
+                // list) are modal: while one is open it is the only
+                // thing reading keys, so nothing below here runs.
+                if (self.ext_list.isOpen()) {
+                    try self.extListKey(k);
+                    return;
+                }
                 if (self.palette.isOpen()) {
                     try self.paletteKey(k);
                     return;
@@ -2806,6 +2836,7 @@ pub const Ui = struct {
                 // Typed text is the shell's while its panel has focus -- it
                 // has a line editor of its own.
                 if (self.shell.isFocused()) return;
+                if (self.ext_list.isOpen()) return;
                 if (self.palette.isOpen()) {
                     try self.palette.text(t.text);
                     return;
@@ -2835,6 +2866,7 @@ pub const Ui = struct {
             },
             .paste => |t| {
                 if (self.shell.isFocused()) return;
+                if (self.ext_list.isOpen()) return;
                 if (self.palette.isOpen()) {
                     try self.palette.text(t.text);
                     return;
@@ -3049,6 +3081,10 @@ pub const Ui = struct {
         // moves its cursor behind it is a trap. The release that follows
         // lands here with the popup already closed and nothing dragging,
         // so it does nothing.
+        if (self.ext_list.isOpen()) {
+            if (ev.pressed and self.ext_list.click(ev.cell) == .accept) try self.acceptExtList();
+            return;
+        }
         if (self.palette.isOpen()) {
             if (ev.pressed and self.palette.click(ev.cell) == .accept) try self.acceptPalette();
             return;
@@ -3280,8 +3316,8 @@ pub const Ui = struct {
     pub fn trackTabHover(self: *Ui, cell: glyphwire.CellPos) void {
         var over_group: ?*Group = null;
         const over: ?usize = blk: {
-            // A drag and the two popups own the pointer while they last.
-            if (self.drag != null or self.tab_drag != null or self.finder.isOpen() or self.palette.isOpen()) break :blk null;
+            // A drag and the modal popups own the pointer while they last.
+            if (self.drag != null or self.tab_drag != null or self.finder.isOpen() or self.palette.isOpen() or self.ext_list.isOpen()) break :blk null;
             const g = self.groupAt(cell) orelse break :blk null;
             const h = tabAt(g, cell) orelse break :blk null;
             if (h.index >= g.buffers.items.len) break :blk null;
@@ -3524,6 +3560,7 @@ pub const Ui = struct {
             .diag_step => |d| self.stepDiagnostic(d.forward),
             .lsp_status => |arg| self.lspStatus(arg),
             .diag_list => self.diagList(),
+            .extensions_list => try self.openExtList(),
             .theme => |arg| self.themeCommand(arg),
             .shell_position => |arg| self.shellPositionCommand(arg),
         }
@@ -4169,6 +4206,49 @@ pub const Ui = struct {
     }
 
     // ── Extensions ──────────────────────────────────────────────────────
+
+    /// `:extensions`: the built-in extensions, the user directory's, and
+    /// what `startExtensions` made of `config.extensions`. Modal like the
+    /// palette, which it closes.
+    pub fn openExtList(self: *Ui) !void {
+        self.cancelFind();
+        _ = self.closeHover();
+        self.closeCompletion();
+        if (self.finder.isOpen()) self.finder.close();
+        if (self.palette.isOpen()) self.palette.close();
+
+        const dir = ext.userDir(self.alloc, self.environ);
+        defer if (dir) |d| self.alloc.free(d);
+        const user_files = if (dir) |d| try extlist.userFiles(self.alloc, self.io, d) else try self.alloc.alloc([]const u8, 0);
+        defer extlist.freeNames(self.alloc, user_files);
+
+        var built_in: [ext.bundled.len][]const u8 = undefined;
+        for (ext.bundled, 0..) |b, i| built_in[i] = b.name;
+        const enabled: []const ext.Enabled = if (self.extensions) |rt| rt.enabled.items else &.{};
+
+        var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const shown: ?[]const u8 = if (dir) |d| homepath.collapseHome(d, self.environ.get("HOME"), &shown_buf) else null;
+        self.ext_list.open(try extlist.build(self.alloc, &built_in, user_files, dir, shown, enabled));
+    }
+
+    /// A keystroke while the extension list is open. The chord that
+    /// opens it closes it again, the way Ctrl+Shift+P does the palette.
+    fn extListKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        if (self.keymaps.lookup(self.keyScope(), k.key, k.mods) == .listExtensions) return self.ext_list.close();
+        if (self.ext_list.key(k) == .accept) try self.acceptExtList();
+    }
+
+    /// Enter on a row with a user file: open it, in the buffer pane.
+    fn acceptExtList(self: *Ui) !void {
+        const path = self.ext_list.selectedPath() orelse return;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (path.len > buf.len) return;
+        @memcpy(buf[0..path.len], path);
+        self.ext_list.close();
+        try self.openFile(buf[0..path.len]);
+        if (self.focus == .tree) self.setFocus(.buffer);
+        self.status_dirty = true;
+    }
 
     /// Loads the extensions `zoe.conf.lua` lists (`zoe/ext.zig`) and binds
     /// the `keys` that name their commands. Best-effort like the rest of
@@ -4842,6 +4922,7 @@ pub const Ui = struct {
         try c.setLayerBackground(self.tab_tip_layer, if (self.tab_tip_patch == null) role(.popup_bg) else null);
         try self.finder.setStyle(finderStyle(&self.th));
         try self.palette.setStyle(paletteStyle(&self.th));
+        try self.ext_list.setStyle(extListStyle(&self.th));
 
         self.tree_dirty = .full;
         self.status_dirty = true;

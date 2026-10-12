@@ -39,6 +39,7 @@ Ctrl+W, and the completion popup's keys.
 | `save` | Ctrl+S | `:w`, leaving the mode and selection alone |
 | `findFile` | Ctrl+P | Fuzzy file finder |
 | `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key, by name, with its chord in the current mode. Recently run ones list first |
+| `listExtensions` | (unbound; `:extensions`) | Every extension zoe could load, built in or in `~/.config/glyphwire/zoe/extensions/`, and whether it loaded. Enter on one with a user file opens it |
 | `toggleTree` | Ctrl+B, Ctrl+N | Show / hide the file tree. Ctrl+B is VS Code's chord; under gmux it is the prefix, so use Ctrl+N or gmux's Ctrl+B Ctrl+B |
 | `toggleHidden` | Ctrl+H | Dotfiles and `.gitignore`d paths in the tree; dotfiles only in the finder and `/` search |
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
@@ -239,6 +240,7 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:shell [bottom\|top\|left\|right\|float]` | Move the Ctrl+` shell panel (bare: report where it is) |
 | `:lsp`, `:lsp restart` | Language server status / restart |
 | `:diag` | List diagnostics |
+| `:extensions` | List the extensions and whether each loaded |
 
 Files changed outside zoe are noticed within about a second. A buffer with
 no unsaved edits reloads in place, keeping its cursor and scroll; one with

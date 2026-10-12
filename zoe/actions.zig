@@ -39,6 +39,9 @@ pub const Action = enum {
     /// The Ctrl+Shift+P command palette: every action here that
     /// `inPalette` lists, searchable by name (`applib/palette.zig`).
     commandPalette,
+    /// Every extension zoe could load and whether it did, in a popup
+    /// (`zoe/extlist.zig`); `:extensions` too.
+    listExtensions,
     toggleTree,
     /// Dotfiles and `.gitignore`d paths, in the tree and the finder.
     toggleHidden,

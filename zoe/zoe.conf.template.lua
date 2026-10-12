@@ -323,6 +323,7 @@
 --     -- extension is `<config dir>/zoe/extensions/<name>.lua`, or the
 --     -- copy built into zoe when there is no such file. Its commands
 --     -- show up in Ctrl+Shift+P and can be bound in `keys`.
+--     -- `:extensions` lists what zoe found and whether each loaded.
 --     -- docs/zoe-extensions.md describes writing one.
 --     --
 --     -- Built in:

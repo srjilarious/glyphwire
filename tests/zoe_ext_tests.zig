@@ -12,6 +12,7 @@ const zoe = @import("zoe_support");
 const Editor = zoe.Editor;
 const keys = zoe.keys;
 const ext = zoe.ext;
+const extlist = zoe.extlist;
 const actions = zoe.actions;
 const keybind = @import("applib").keybind;
 
@@ -585,4 +586,159 @@ pub fn journalStepWithNoEntriesSaysSoTest(io: std.Io, alloc: std.mem.Allocator) 
     try run(rt, "journalNext");
     try testz.expectTrue(std.mem.startsWith(u8, fake.message.items, "No journal entries in "));
     try testz.expectEqual(fake.opened.items.len, @as(usize, 0));
+}
+
+// ── The extension list ──────────────────────────────────────────────────
+
+fn enabledEntry(rt: *ext.Runtime, name: []const u8) ?ext.Enabled {
+    for (rt.enabled.items) |e| {
+        if (std.mem.eql(u8, e.name, name)) return e;
+    }
+    return null;
+}
+
+pub fn runtimeRecordsWhatCameOfEachNameTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "enabled");
+    defer s.deinit();
+    try s.file("two.lua", "zoe.command(\"a\", function() end) zoe.command(\"b\", function() end)");
+    try s.file("half.lua", "zoe.command(\"c\", function() end) error(\"boom\", 0)");
+    try s.file("quiet.lua", "zoe.command(\"d\", function() end)");
+    var fake = try Fake.init(io, alloc, "");
+    defer fake.deinit();
+    const rt = try start(io, alloc, &fake, "config = { extensions = { \"two\", \"half\", \"gone\", quiet = false, \"../bad\" } }", s.path);
+    defer rt.deinit();
+
+    // Sorted, and the invalid name is only a problem.
+    try testz.expectEqual(rt.enabled.items.len, @as(usize, 4));
+    try testz.expectEqualStr(rt.enabled.items[0].name, "gone");
+    try testz.expectEqualStr(rt.enabled.items[3].name, "two");
+
+    const two = enabledEntry(rt, "two").?;
+    try testz.expectTrue(two.state == .loaded);
+    try testz.expectEqual(two.commands, @as(u32, 2));
+    const half = enabledEntry(rt, "half").?;
+    try testz.expectTrue(half.state == .failed);
+    try testz.expectEqualStr(half.err.?, "boom");
+    try testz.expectEqual(half.commands, @as(u32, 1));
+    try testz.expectTrue(enabledEntry(rt, "gone").?.state == .not_found);
+    try testz.expectTrue(enabledEntry(rt, "quiet").?.state == .off);
+    try testz.expectTrue(rt.find("d") == null);
+}
+
+pub fn listedAndTurnedOffLoadsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "both");
+    defer s.deinit();
+    try s.file("a.lua", "zoe.command(\"cmdA\", function() end)");
+    var fake = try Fake.init(io, alloc, "");
+    defer fake.deinit();
+    const rt = try start(io, alloc, &fake, "config = { extensions = { \"a\", a = false } }", s.path);
+    defer rt.deinit();
+    try testz.expectEqual(rt.enabled.items.len, @as(usize, 1));
+    try testz.expectTrue(rt.enabled.items[0].state == .loaded);
+}
+
+pub fn extensionListMergesItsSourcesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const built_in = [_][]const u8{ "task_journal", "zeta" };
+    const user = [_][]const u8{ "task_journal", "mine", "broken" };
+    const enabled = [_]ext.Enabled{
+        .{ .name = "broken", .state = .failed, .err = "...zoe/extensions/broken.lua:1: oops" },
+        .{ .name = "ghost", .state = .not_found },
+        .{ .name = "task_journal", .state = .loaded, .commands = 6 },
+        .{ .name = "zeta", .state = .off },
+    };
+    var list = try extlist.build(alloc, &built_in, &user, "/cfg/zoe/extensions", "~/zoe/extensions", &enabled);
+    defer list.deinit();
+
+    const names = [_][]const u8{ "broken", "ghost", "mine", "task_journal", "zeta" };
+    try testz.expectEqual(list.entries.items.len, names.len);
+    for (names, list.entries.items) |n, e| try testz.expectEqualStr(e.name, n);
+    try testz.expectEqualStr(list.user_dir.?, "~/zoe/extensions");
+
+    const broken = list.entries.items[0];
+    try testz.expectTrue(broken.origin == .user and broken.status == .failed);
+    try testz.expectEqualStr(broken.err.?, "line 1: oops");
+    try testz.expectEqualStr(broken.path.?, "/cfg/zoe/extensions/broken.lua");
+
+    const ghost = list.entries.items[1];
+    try testz.expectTrue(ghost.origin == .none and ghost.status == .not_found);
+    try testz.expectTrue(ghost.path == null);
+
+    const mine = list.entries.items[2];
+    try testz.expectTrue(mine.origin == .user and mine.status == .not_enabled);
+
+    const tj = list.entries.items[3];
+    try testz.expectTrue(tj.origin == .user_over_built_in and tj.status == .loaded);
+    var buf: [48]u8 = undefined;
+    try testz.expectEqualStr(tj.statusText(&buf), "loaded, 6 commands");
+
+    const zeta = list.entries.items[4];
+    try testz.expectTrue(zeta.origin == .built_in and zeta.status == .off);
+    try testz.expectTrue(zeta.path == null);
+}
+
+pub fn extensionListShortensLuaErrorsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const cases = [_]struct { in: []const u8, out: []const u8 }{
+        .{ .in = "...ions/broken.lua:3: attempt to index a nil value", .out = "line 3: attempt to index a nil value" },
+        .{ .in = "task_journal.lua (built in):12: bad option", .out = "task_journal.lua (built in):12: bad option" },
+        .{ .in = "nope", .out = "nope" },
+        .{ .in = "x.lua:abc", .out = "x.lua:abc" },
+    };
+    for (cases) |c| {
+        const got = try extlist.shortError(alloc, c.in);
+        defer alloc.free(got);
+        try testz.expectEqualStr(got, c.out);
+    }
+}
+
+pub fn extensionListRowsAndCursorTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const built_in = [_][]const u8{ "a", "c", "d" };
+    const user = [_][]const u8{"b"};
+    const enabled = [_]ext.Enabled{
+        .{ .name = "b", .state = .failed, .err = "no" },
+    };
+    var list = try extlist.build(alloc, &built_in, &user, "/x", "/x", &enabled);
+    defer list.deinit();
+
+    // a, b and its error row, c, d.
+    try testz.expectEqual(list.rowCount(), @as(usize, 5));
+    try testz.expectEqual(list.firstRow(2), @as(usize, 3));
+    try testz.expectEqual(list.entryAtRow(2).?, @as(usize, 1));
+    try testz.expectEqual(list.entryAtRow(3).?, @as(usize, 2));
+    try testz.expectTrue(list.entryAtRow(5) == null);
+
+    // Clamped at both ends.
+    list.moveCursor(-1);
+    try testz.expectEqual(list.selected, @as(usize, 0));
+    list.moveCursor(10);
+    try testz.expectEqual(list.selected, @as(usize, 3));
+
+    // Two rows tall: following `b` keeps both its rows in view.
+    list.selected = 1;
+    list.top = 0;
+    list.follow(2);
+    try testz.expectEqual(list.top, @as(usize, 1));
+    list.selected = 3;
+    list.follow(2);
+    try testz.expectEqual(list.top, @as(usize, 3));
+}
+
+pub fn extensionListReadsTheUserDirectoryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "userfiles");
+    defer s.deinit();
+    try s.file("good.lua", "");
+    try s.file("also-good.lua", "");
+    try s.file("notes.txt", "");
+    try s.file("bad.name.lua", "");
+    try s.dir.createDirPath(io, "folder.lua");
+
+    const names = try extlist.userFiles(alloc, io, s.path);
+    defer extlist.freeNames(alloc, names);
+    ext.sortNames(names);
+    try testz.expectEqual(names.len, @as(usize, 2));
+    try testz.expectEqualStr(names[0], "also-good");
+    try testz.expectEqualStr(names[1], "good");
+
+    const none = try extlist.userFiles(alloc, io, "/nonexistent/zoe-ext-test");
+    defer extlist.freeNames(alloc, none);
+    try testz.expectEqual(none.len, @as(usize, 0));
 }

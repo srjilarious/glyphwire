@@ -283,6 +283,7 @@ pub fn main(init: std.process.Init) !void {
             .diag_step,
             .lsp_status,
             .diag_list,
+            .extensions_list,
             .theme,
             .shell_position,
             => {},

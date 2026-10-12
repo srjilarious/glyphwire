@@ -34,6 +34,24 @@ while loading it, such as a missing file, a syntax error or a bad
 option, is logged. The first such problem is also shown in the
 statusline. zoe starts either way.
 
+To see what zoe found, run `:extensions` (or "List Extensions" from the
+palette). It lists every built-in extension and every `.lua` file in
+the user directory, plus any name `config.extensions` gives that matches
+neither. Each row shows where the extension comes from (built in, a
+user file, or a user file replacing a built-in one) and its status:
+
+| Status | Meaning |
+|---|---|
+| loaded, N commands | It ran and registered N commands. |
+| not enabled | It exists, but `config.extensions` doesn't name it. |
+| turned off | `config.extensions` has `name = false`. |
+| failed | It raised an error while loading. The error is on the row below. |
+| not found | `config.extensions` names it, but there is no such file and no built-in one. |
+
+The header shows the directory zoe reads user files from, so a file saved
+somewhere else is easy to spot. Enter (or a click) on an extension with a
+user file opens that file. Escape closes the list.
+
 ## Writing one
 
 The file is a plain Lua chunk. Its options table arrives as `...`, and it
@@ -116,6 +134,10 @@ window.
   buffer exists. `extCommandFor` looks up keys: a mode's own table is read
   before `global`, with extension and built-in bindings checked together.
   The palette lists commands after the actions.
+- `zoe/extlist.zig`: the `:extensions` popup. The runtime records what
+  came of each name in `config.extensions` (`Runtime.enabled`), and
+  `extlist.build` merges that with the built-in names and the user
+  directory's files.
 
 The runtime runs `zoe.conf.lua` a second time, in its own long-lived
 state, to read `config.extensions` with the options intact. zoe's own
