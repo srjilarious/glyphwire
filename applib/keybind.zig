@@ -336,6 +336,17 @@ pub fn ScopedOverride(comptime Scope: type, comptime Action: type) type {
     };
 }
 
+/// A scoped entry naming something that is no `Action`: a command the
+/// program registers at runtime (zoe's Lua extensions), kept by name
+/// until it can be resolved (`luaconf.scopedKeysNamed`).
+pub fn ScopedNamed(comptime Scope: type) type {
+    return struct {
+        scope: Scope,
+        chord: Chord,
+        name: []const u8,
+    };
+}
+
 /// One `Keymap` per mode (`Scope`), looked up most specific first: a
 /// key unbound in a mode's own table falls back to `parent(scope)`'s,
 /// and so on up. That fallback chain is the whole of a tool's modal

@@ -19,8 +19,8 @@
 -- and whatever parsed before it is kept.
 --
 -- zoe.conf.lua carries syntax-highlighting, the colour theme, the
--- editor's display settings and its key bindings. The pane layout is not
--- configurable yet.
+-- editor's display settings, its key bindings and the Lua extensions to
+-- load. The pane layout is not configurable yet.
 
 -- config = {
 --
@@ -278,6 +278,9 @@
 --     -- vim's grammar and not rebindable here, nor are Escape, the `:`
 --     -- line's editing keys, the file tree's keys and the key after
 --     -- Ctrl+W. docs/zoe-keys.md lists every action and its defaults.
+--     --
+--     -- A name may also be a command an extension adds (below), bound
+--     -- the same way: `["ctrl+t"] = "taskToggle"`.
 --     keys = {
 --         global = {
 --             -- ["ctrl+h"] = false,
@@ -288,5 +291,23 @@
 --         insert = {
 --             -- ["ctrl+d"] = "deleteWordForward",
 --         },
+--     },
+--
+--     ---- Extensions ---------------------------------------------------
+--
+--     -- Lua extensions to load, each with its options table (or listed
+--     -- by name alone for none; `name = false` turns one off). An
+--     -- extension is `<config dir>/zoe/extensions/<name>.lua`, or the
+--     -- copy built into zoe when there is no such file. Its commands
+--     -- show up in Ctrl+Shift+P and can be bound in `keys`.
+--     -- docs/zoe-extensions.md describes writing one.
+--     --
+--     -- Built in:
+--     --   task_journal   a todo list and dated journal in Markdown files,
+--     --                  ported from the Task Journal VS Code extension.
+--     --                  Its options are listed at the top of
+--     --                  zoe/extensions/task_journal.lua.
+--     extensions = {
+--         -- task_journal = { tags = { "MGMT", "BUG" } },
 --     },
 -- }

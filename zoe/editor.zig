@@ -943,6 +943,65 @@ pub const Editor = struct {
         try self.insertText(text);
     }
 
+    /// Starts the undo step a Lua extension command's edits go into
+    /// (`zoe/ext.zig`), however many lines it touches. In insert mode
+    /// this ends the typing session so far, the way Ctrl+/ does.
+    pub fn beginScriptEdit(self: *Editor) void {
+        self.buf.undoCheckpoint(self.cursor);
+    }
+
+    /// Ends what `beginScriptEdit` started. In insert mode the typing that
+    /// follows opens a step of its own rather than joining the command's.
+    pub fn endScriptEdit(self: *Editor) void {
+        if (self.mode == .insert) self.buf.undoCheckpoint(self.cursor) else self.buf.closeUndoGroup();
+    }
+
+    /// Replaces 0-based `line`'s text (its newline excluded) with `text`
+    /// -- an extension's `zoe.set_line`. Only the bytes between the common
+    /// prefix and suffix are rewritten, cut on codepoint boundaries, so
+    /// the cursor (and a selection's anchor) stays on the same character
+    /// when the change is elsewhere on the line: cycling `- [ ]` to
+    /// `- [◔]` leaves it on the task's text. One inside the rewritten
+    /// span moves to its end. Undo grouping is the caller's
+    /// (`beginScriptEdit`).
+    pub fn setLineText(self: *Editor, line: usize, text: []const u8) !void {
+        const start = self.buf.lineStart(line);
+        const old = try self.buf.read(self.alloc, start, self.buf.lineEnd(line));
+        defer self.alloc.free(old);
+
+        const common = @min(old.len, text.len);
+        var pre: usize = 0;
+        while (pre < common and old[pre] == text[pre]) pre += 1;
+        while (pre > 0 and (midCodepoint(old, pre) or midCodepoint(text, pre))) pre -= 1;
+        var suf: usize = 0;
+        while (suf < common - pre and old[old.len - 1 - suf] == text[text.len - 1 - suf]) suf += 1;
+        while (suf > 0 and (midCodepoint(old, old.len - suf) or midCodepoint(text, text.len - suf))) suf -= 1;
+
+        const at = start + pre;
+        const removed = old.len - pre - suf;
+        const added = text[pre .. text.len - suf];
+        if (removed == 0 and added.len == 0) return;
+        if (removed > 0) try self.buf.delete(at, removed);
+        if (added.len > 0) try self.buf.insert(at, added);
+
+        const shift = struct {
+            fn f(off: usize, span_at: usize, gone: usize, new_len: usize) usize {
+                if (off >= span_at + gone) return off - gone + new_len;
+                if (off > span_at) return span_at + new_len;
+                return off;
+            }
+        }.f;
+        if (self.select_anchor) |a| self.select_anchor = shift(a, at, removed, added.len);
+        const c = shift(self.cursor, at, removed, added.len);
+        self.moveTo(if (self.mode == .normal) motion.clampNormal(&self.buf, c) else c, true);
+    }
+
+    /// Whether byte `i` of `s` is inside a UTF-8 sequence rather than at
+    /// the start of one (or the end of `s`).
+    fn midCodepoint(s: []const u8, i: usize) bool {
+        return i < s.len and s[i] & 0xC0 == 0x80;
+    }
+
     /// Moves the cursor, refreshing the sticky column for a horizontal
     /// move and preserving it for a vertical one.
     fn moveTo(self: *Editor, offset: usize, horizontal: bool) void {

@@ -21,6 +21,10 @@ config = { keys = {
 Modifiers match exactly (`shift+tab` is not `tab`). `false` in a mode
 table also hides the global binding in that mode.
 
+A Lua extension's commands are bound the same way, by command name
+(`["ctrl+t"] = "taskToggle"`), and an extension may bind its own
+defaults, which `keys` overrides. See [zoe-extensions.md](zoe-extensions.md).
+
 Not rebindable: unmodified letters in normal and visual mode (vim's
 grammar of counts, operators and prefixes, in `zoe/editor.zig`), Escape,
 the `:` / `/` line's editing keys, the file tree's keys, the key after

@@ -201,6 +201,15 @@ pub const Config = struct {
     /// `config.keys`, validated, in the arena: applied over the default
     /// bindings by `actions.Keymaps.apply` (`luaconf.scopedKeys`).
     keys: []const actions.Override = &.{},
+    /// The `keys` entries naming something other than a built-in action:
+    /// commands a Lua extension registers, resolved once the extensions
+    /// have loaded (`ext.Runtime.resolveKeys`). In the arena.
+    command_keys: []const actions.NamedOverride = &.{},
+    /// The config file's text, in the arena, or null with no file. The
+    /// extension runtime (`zoe/ext.zig`) runs it again in a Lua state of
+    /// its own to read `config.extensions`, options and all -- this parse
+    /// keeps nothing but plain values.
+    source: ?[:0]const u8 = null,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -261,6 +270,7 @@ pub fn parseSource(
     cfg_in: Config,
 ) Config {
     var cfg = cfg_in;
+    cfg.source = src;
     var ctx: Apply = .{ .cfg = &cfg, .environ = environ };
     conf.runLogged(gpa, src, &ctx, Apply.apply);
     return cfg;
@@ -309,8 +319,11 @@ const Apply = struct {
         readLsp(lua, a, cfg);
         // Per-mode tables (`global`, `normal`, `visual`, `insert`; see
         // `actions.zig`). `false` binds `.none`, which also hides the
-        // global binding when it is in a mode table.
-        cfg.keys = conf.scopedKeys(lua, a, actions.Scope, actions.Action);
+        // global binding when it is in a mode table. A name that is no
+        // action may be an extension's command, which isn't known yet.
+        var named: std.ArrayList(actions.NamedOverride) = .empty;
+        cfg.keys = conf.scopedKeysNamed(lua, a, actions.Scope, actions.Action, &named);
+        cfg.command_keys = named.toOwnedSlice(a) catch &.{};
     }
 };
 

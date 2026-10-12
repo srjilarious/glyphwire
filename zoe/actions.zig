@@ -268,6 +268,10 @@ pub const insert_defaults = [_]Default{
 /// A null `action` (`false`) binds `.none` in its table.
 pub const Override = keybind.ScopedOverride(Scope, Action);
 
+/// A `keys` entry naming no `Action`: perhaps a Lua extension's command
+/// (`zoe/ext.zig`), which is only known once the extensions load.
+pub const NamedOverride = keybind.ScopedNamed(Scope);
+
 /// Every mode table but `global` falls back to `global`.
 fn parentScope(scope: Scope) ?Scope {
     return if (scope == .global) null else .global;

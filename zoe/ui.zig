@@ -69,6 +69,7 @@ const themes = @import("applib").theme;
 pub const role = glyphwire.Color.role;
 const langconf = @import("langconf.zig");
 const actions = @import("actions.zig");
+const ext = @import("ext.zig");
 const tabs = @import("tabs.zig");
 const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
@@ -1011,6 +1012,9 @@ pub const Ui = struct {
     /// them. Each buffer's `Editor` points here (`Editor.keymaps`), which
     /// is safe because `Ui` lives on the heap and outlives its slots.
     keymaps: actions.Keymaps = .{},
+    /// The Lua extensions `zoe.conf.lua` turned on, and the commands and
+    /// bindings they added (`zoe/ext.zig`). Null with no config file.
+    extensions: ?*ext.Runtime = null,
     /// The `:` and `/` lines' histories, shared by every buffer the same
     /// way `keymaps` is (`Editor.cmd_history`). See `zoe/cmdhistory.zig`.
     cmd_history: cmdhistory.History,
@@ -1337,6 +1341,10 @@ pub const Ui = struct {
         if (start.theme != null and ws_theme == null) {
             self.buf.ed.setStatus("E185: Cannot find color scheme '{s}' (workspace theme ignored)", .{start.theme.?});
         }
+        // Last, so a command can't be bound before the window it acts on
+        // is whole, and a problem loading one has a statusline to say so.
+        self.startExtensions();
+        errdefer if (self.extensions) |rt| rt.deinit();
 
         // The `layout` broadcast goes to *other* connections, and the
         // listener is one -- but reading the bounds back directly avoids
@@ -1738,6 +1746,8 @@ pub const Ui = struct {
         if (self.completion) |*m| m.deinit();
         if (self.path_menu) |*m| m.deinit();
         self.jumps.deinit(self.alloc);
+        // Before anything a command could reach: the Lua state goes first.
+        if (self.extensions) |rt| rt.deinit();
         self.keymaps.deinit(self.alloc);
         self.cmd_history.deinit();
         self.search_history.deinit();
@@ -2739,6 +2749,12 @@ pub const Ui = struct {
                 // behind. The window-level actions are taken here, before
                 // the editor sees the key, so they work in any mode.
                 const scope = self.keyScope();
+                // An extension's command is a binding like any other, and
+                // runs from the tree as well as a buffer.
+                if (self.extCommandFor(scope, k.key, k.mods)) |cmd| {
+                    self.runExtCommand(cmd);
+                    return;
+                }
                 const action = self.keymaps.lookup(scope, k.key, k.mods);
                 if (action) |a| {
                     if (a.isUi() and try self.performUi(a)) return;
@@ -4050,8 +4066,16 @@ pub const Ui = struct {
             if (!a.inPalette()) continue;
             try list.add(@intFromEnum(a), @tagName(a), a.paletteLabel(), self.keymaps.chordFor(scope, a));
         }
+        // Extension commands after the actions, numbered on from them.
+        if (self.extensions) |rt| for (rt.commands.items, 0..) |c, i| {
+            const id: u32 = @intCast(i);
+            try list.add(ext_palette_base + id, c.name, c.label, rt.chordFor(scope, id));
+        };
         try self.palette.open(list);
     }
+
+    /// The first palette id that is an extension command, not an action.
+    const ext_palette_base: u32 = std.enums.values(actions.Action).len;
 
     /// The keymap table a key is looked up in where the keyboard is: the
     /// tree has no mode of its own and reads the global one.
@@ -4065,9 +4089,11 @@ pub const Ui = struct {
     /// editor, and one that doesn't apply where the keyboard is says so
     /// in the statusline rather than doing nothing silently.
     pub fn acceptPalette(self: *Ui) !void {
-        const action = self.palette.selectedAs(actions.Action) orelse return self.palette.close();
+        const id = self.palette.selected() orelse return self.palette.close();
         self.palette.close();
         self.status_dirty = true;
+        if (id >= ext_palette_base) return self.runExtCommand(id - ext_palette_base);
+        const action: actions.Action = @enumFromInt(id);
         if (action.isUi()) {
             if (!try self.performUi(action)) self.paletteNotHere(action);
             return;
@@ -4088,6 +4114,88 @@ pub const Ui = struct {
     pub fn paletteKey(self: *Ui, k: glyphwire.KeyEvent) !void {
         if (self.keymaps.lookup(self.keyScope(), k.key, k.mods) == .commandPalette) return self.palette.close();
         if (try self.palette.key(k) == .accept) try self.acceptPalette();
+    }
+
+    // ── Extensions ──────────────────────────────────────────────────────
+
+    /// Loads the extensions `zoe.conf.lua` lists (`zoe/ext.zig`) and binds
+    /// the `keys` that name their commands. Best-effort like the rest of
+    /// the config: each problem is logged, and the first is put in the
+    /// statusline so a typo isn't silent.
+    fn startExtensions(self: *Ui) void {
+        const cfg = if (self.hl_config) |*c| c else return;
+        const source = cfg.source orelse return;
+        const rt = ext.Runtime.init(self.alloc, self.io, self.environ.get("HOME"), .{
+            .ctx = self,
+            .vtable = &ext_host,
+        }) catch |err| {
+            std.log.warn("zoe: extensions not loaded ({t})", .{err});
+            return;
+        };
+        const dir = ext.userDir(self.alloc, self.environ);
+        defer if (dir) |d| self.alloc.free(d);
+        rt.load(source, dir);
+        rt.resolveKeys(cfg.command_keys, cfg.keys);
+        for (rt.problems.items) |p| std.log.warn("zoe: {s}", .{p});
+        if (rt.problems.items.len > 0) {
+            const more = rt.problems.items.len - 1;
+            if (more == 0)
+                self.buf.ed.setStatus("{s}", .{rt.problems.items[0]})
+            else
+                self.buf.ed.setStatus("{s} (+{d} more in the log)", .{ rt.problems.items[0], more });
+        }
+        self.extensions = rt;
+    }
+
+    /// The extension command a key runs where the keyboard is, if any.
+    /// A scope's own table is read before `global`'s, extension bindings
+    /// and built-in ones together, so a mode can still take a chord back
+    /// from a global command. Never in the `:` or `/` line, which own
+    /// their keys.
+    fn extCommandFor(self: *Ui, scope: actions.Scope, key: []const u8, mods: glyphwire.Mods) ?u32 {
+        const rt = self.extensions orelse return null;
+        if (self.focus == .buffer and (self.buf.ed.mode == .command or self.buf.ed.mode == .search)) return null;
+        if (rt.lookup(scope, key, mods)) |cmd| return cmd;
+        if (scope == .global) return null;
+        if (self.keymaps.table(scope).lookup(key, mods) != null) return null;
+        return rt.lookup(.global, key, mods);
+    }
+
+    /// Runs extension command `cmd`. It may have edited the buffer,
+    /// opened another or said something, so everything it could touch is
+    /// redrawn.
+    fn runExtCommand(self: *Ui, cmd: u32) void {
+        const rt = self.extensions orelse return;
+        rt.run(cmd);
+        self.grp.buffer_dirty = true;
+        self.grp.tabs_dirty = true;
+        self.status_dirty = true;
+    }
+
+    const ext_host: ext.Host.VTable = .{
+        .editor = extEditor,
+        .open = extOpen,
+        .message = extMessage,
+    };
+
+    fn extEditor(ctx: *anyopaque) ?*Editor {
+        const self: *Ui = @ptrCast(@alignCast(ctx));
+        return if (self.focus == .buffer) &self.buf.ed else null;
+    }
+
+    fn extOpen(ctx: *anyopaque, path: []const u8) anyerror!void {
+        const self: *Ui = @ptrCast(@alignCast(ctx));
+        // Opened into the buffer pane even from the tree, the way Enter
+        // on a file there leaves the keyboard -- a command that opens a
+        // file means to work in it.
+        try self.openFile(path);
+        if (self.focus == .tree) self.setFocus(.buffer);
+    }
+
+    fn extMessage(ctx: *anyopaque, text: []const u8) void {
+        const self: *Ui = @ptrCast(@alignCast(ctx));
+        self.buf.ed.setStatus("{s}", .{text});
+        self.status_dirty = true;
     }
 
     // ── Buffers ─────────────────────────────────────────────────────────

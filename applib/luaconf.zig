@@ -246,7 +246,7 @@ pub const Conf = struct {
             return &.{};
         }
         var out: std.ArrayList(keybind.Override(Action)) = .empty;
-        self.readKeyTable(lua, alloc, Action, field, &out, {});
+        self.readKeyTable(lua, alloc, Action, field, &out, {}, {});
         sortOverrides(keybind.Override(Action), out.items);
         return out.toOwnedSlice(alloc) catch &.{};
     }
@@ -261,6 +261,32 @@ pub const Conf = struct {
         alloc: std.mem.Allocator,
         comptime Scope: type,
         comptime Action: type,
+    ) []keybind.ScopedOverride(Scope, Action) {
+        return self.scopedKeysWith(lua, alloc, Scope, Action, {});
+    }
+
+    /// `scopedKeys` for a program whose bindings may also name commands
+    /// it only learns of later (zoe's Lua extensions): a name that is no
+    /// `Action` goes to `named`, unwarned, for the program to resolve
+    /// once it knows them. The names are owned by `alloc`.
+    pub fn scopedKeysNamed(
+        self: Conf,
+        lua: *Lua,
+        alloc: std.mem.Allocator,
+        comptime Scope: type,
+        comptime Action: type,
+        named: *std.ArrayList(keybind.ScopedNamed(Scope)),
+    ) []keybind.ScopedOverride(Scope, Action) {
+        return self.scopedKeysWith(lua, alloc, Scope, Action, named);
+    }
+
+    fn scopedKeysWith(
+        self: Conf,
+        lua: *Lua,
+        alloc: std.mem.Allocator,
+        comptime Scope: type,
+        comptime Action: type,
+        named: anytype,
     ) []keybind.ScopedOverride(Scope, Action) {
         const Out = keybind.ScopedOverride(Scope, Action);
         const t = lua.getField(-1, "keys");
@@ -288,14 +314,16 @@ pub const Conf = struct {
             }
             var label_buf: [64]u8 = undefined;
             const label = std.fmt.bufPrint(&label_buf, "keys.{s}", .{name}) catch "keys";
-            self.readKeyTable(lua, alloc, Action, label, &out, scope);
+            self.readKeyTable(lua, alloc, Action, label, &out, scope, named);
         }
         sortOverrides(Out, out.items);
         return out.toOwnedSlice(alloc) catch &.{};
     }
 
     /// One chord -> action table, on top of the stack, appended to `out`
-    /// (whose items carry `scope` too when they have the field).
+    /// (whose items carry `scope` too when they have the field). A name
+    /// that is no `Action` goes to `named` when that is a list rather
+    /// than `{}` (`scopedKeysNamed`).
     fn readKeyTable(
         self: Conf,
         lua: *Lua,
@@ -304,6 +332,7 @@ pub const Conf = struct {
         label: []const u8,
         out: anytype,
         scope: anytype,
+        named: anytype,
     ) void {
         lua.pushNil();
         while (lua.next(-2)) {
@@ -321,6 +350,11 @@ pub const Conf = struct {
                 .string => blk: {
                     const name = lua.toString(-1) catch continue;
                     break :blk std.meta.stringToEnum(Action, name) orelse {
+                        if (@TypeOf(named) != void) {
+                            const owned = alloc.dupe(u8, name) catch continue;
+                            named.append(alloc, .{ .scope = scope, .chord = chord, .name = owned }) catch alloc.free(owned);
+                            continue;
+                        }
                         self.warn("{s}[\"{s}\"] = \"{s}\": unknown action; ignored", .{ label, text, name });
                         continue;
                     };
