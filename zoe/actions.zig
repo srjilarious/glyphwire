@@ -177,7 +177,7 @@ pub const Scope = enum { global, normal, visual, insert };
 pub const global_defaults = [_]Default{
     .{ .chord = "ctrl+s", .action = .save },
     .{ .chord = "ctrl+p", .action = .findFile },
-    .{ .chord = "ctrl+n", .action = .toggleTree },
+    .{ .chord = "ctrl+b", .action = .toggleTree },
     .{ .chord = "ctrl+h", .action = .toggleHidden },
     .{ .chord = "ctrl+grave_accent", .action = .toggleShell },
     .{ .chord = "ctrl+tab", .action = .nextTab },

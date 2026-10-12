@@ -2720,7 +2720,7 @@ pub const Ui = struct {
                 self.swallow_space_text = false;
                 // The completion popup reads its keys before the bindings
                 // below: with it up, Ctrl+N / Ctrl+P move through it
-                // rather than toggling the sidebar or opening the finder.
+                // rather than opening the finder.
                 if (self.completion != null and self.focus == .buffer and self.buf.ed.mode == .insert) {
                     if (try self.completionKey(k)) return;
                 }
@@ -2925,7 +2925,7 @@ pub const Ui = struct {
 
     pub fn toggleTree(self: *Ui) !void {
         self.tree_visible = !self.tree_visible;
-        // Ctrl+N is also the shortest way *to* the sidebar, so showing it
+        // Ctrl+B is also the shortest way *to* the sidebar, so showing it
         // focuses it: opening a pane you then have to Ctrl+W into is two
         // chords for one intention. Hiding it hands focus back.
         if (self.tree_visible) {

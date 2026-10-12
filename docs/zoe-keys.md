@@ -35,7 +35,7 @@ Ctrl+W, and the completion popup's keys.
 | `save` | Ctrl+S | `:w`, leaving the mode and selection alone |
 | `findFile` | Ctrl+P | Fuzzy file finder |
 | `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key, by name, with its chord in the current mode. Recently run ones list first |
-| `toggleTree` | Ctrl+N | Show / hide the file tree |
+| `toggleTree` | Ctrl+B | Show / hide the file tree (VS Code's chord) |
 | `toggleHidden` | Ctrl+H | Dotfiles and `.gitignore`d paths in the tree; dotfiles only in the finder and `/` search |
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
 | `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |
@@ -331,7 +331,7 @@ rebindable keys, and the Ctrl+Shift+P command palette.
 - **Home row.** Movement and editing never leave it; no wrist on a
   modifier for every motion.
 - **Free keyspace.** Normal mode has the whole keyboard unmodified, so
-  window chords (Ctrl+W, Ctrl+N, Ctrl+P) never compete with editing ones.
+  window chords (Ctrl+W, Ctrl+B, Ctrl+P) never compete with editing ones.
   zoe already relies on this: Ctrl+H, Ctrl+L, Ctrl+D, Ctrl+U all mean
   something non-VSCode.
 

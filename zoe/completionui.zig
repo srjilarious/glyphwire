@@ -272,8 +272,8 @@ pub fn acceptCompletion(self: *Ui) !void {
 
 /// A key while the popup is up. Returns true when the popup took it.
 ///
-/// Up/Down and Ctrl+N/Ctrl+P move (taken before the global Ctrl+N and
-/// Ctrl+P chords, which only apply with the popup closed), Tab and Enter
+/// Up/Down and Ctrl+N/Ctrl+P move (taken before the global Ctrl+P
+/// chord, which only applies with the popup closed), Tab and Enter
 /// accept, Escape closes only the popup so a second one leaves insert
 /// mode. Left/Right/Home/End close it and then move as usual.
 pub fn completionKey(self: *Ui, k: glyphwire.KeyEvent) !bool {

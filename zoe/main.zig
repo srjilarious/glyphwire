@@ -38,7 +38,7 @@ const workspace = zoe.workspace;
 //     \\group (:close) and w cycles focus. Ctrl+L/K/J and the Ctrl+arrows
 //     \\move focus that way, Ctrl+Left out to the tree (in insert mode
 //     \\Ctrl+Left/Right jump by word instead, and Ctrl+Home/End go to the
-//     \\start and end of the file). Ctrl+N toggles
+//     \\start and end of the file). Ctrl+B toggles
 //     \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
 //     \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
 //     \\or hides dotfiles and anything .gitignore excludes in the tree; in
@@ -93,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
         \\group (:close) and w cycles focus. Ctrl+L/K/J and the Ctrl+arrows
         \\move focus that way, Ctrl+Left out to the tree (in insert mode
         \\Ctrl+Left/Right jump by word instead, and Ctrl+Home/End go to the
-        \\start and end of the file). Ctrl+N toggles
+        \\start and end of the file). Ctrl+B toggles
         \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
         \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
         \\or hides dotfiles and anything .gitignore excludes in the tree; in
