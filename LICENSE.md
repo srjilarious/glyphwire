@@ -78,7 +78,7 @@ development tool and is not installed.
 
 ### Not ours
 
-`libs/`, `vendor/`, `host_eng/libs/`, `read/libs/`, `md/libs/`, and `assets/` hold third-party code
+`libs/`, `vendor/`, `host_eng/libs/`, `md/libs/`, and `assets/` hold third-party code
 and data under their own licenses, unchanged. See
 [`THIRD-PARTY.md`](THIRD-PARTY.md). Files in those directories carry no
 glyphwire SPDX header.

@@ -25,6 +25,14 @@ Fetched by the Zig package manager (see `build.zig.zon`) or vendored under
 
 All are permissive and compatible with both MPL-2.0 and GPL-3.0-or-later.
 
+[gw-yomi](https://github.com/srjilarious/gw-yomi), gw-read's reading core
+(shared with the wns-reader Android app), is glyphwire's own author's
+code under GPL-3.0-or-later, the same license as gw-read. It compiles in
+the [SQLite](https://www.sqlite.org/) amalgamation (public domain) and
+[stb_image / stb_image_write](https://github.com/nothings/stb) (public
+domain, or MIT), and its `cjk_normalize_table.zig` is generated from the
+Unicode Character Database ([Unicode License v3](https://www.unicode.org/license.txt)).
+
 ### Tree-sitter grammars
 
 Compiled to standalone `parser.so` files that `zoe` `dlopen`s at runtime;
@@ -72,15 +80,6 @@ the system at runtime; glyphwire doesn't bundle it.
 `scripts/fetch-oxygen.sh`, `scripts/fetch-devicons.sh` and
 `scripts/fetch-icon-themes.sh` are the provenance record for the fetched
 sets; they refetch each theme from upstream.
-
-## Generated data
-
-Tables generated from someone else's data and committed as Zig source.
-The generator is glyphwire's; the facts in the table are the source's.
-
-| File | Generator | Source | License |
-|---|---|---|---|
-| `read/cjk_normalize_table.zig` | `scripts/gen-cjk-normalize.py` | Unicode Character Database (NFKC/NFKD decompositions, `EquivalentUnifiedIdeograph.txt`) | [Unicode License v3](https://www.unicode.org/license.txt) |
 
 ## Copyleft icons and embedding the host
 

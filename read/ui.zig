@@ -44,17 +44,17 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 
-const archive_mod = @import("archive.zig");
+const archive_mod = @import("gw_yomi").archive;
 const cache_mod = @import("cache.zig");
 const config_mod = @import("config.zig");
 const actions = @import("actions.zig");
 const mokuro = @import("mokuro.zig");
 const place = @import("place.zig");
-const dict_mod = @import("dict.zig");
+const dict_mod = @import("gw_yomi").dict;
 const ai = @import("ai.zig");
-const ai_cache = @import("ai_cache.zig");
+const ai_cache = @import("gw_yomi").ai_cache;
 const anki = @import("anki.zig");
-const crop = @import("crop.zig");
+const crop = @import("gw_yomi").crop;
 const state_mod = @import("state.zig");
 const zoom = @import("glyphwire").zoom;
 

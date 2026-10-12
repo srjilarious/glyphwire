@@ -5,8 +5,8 @@
 //! a Lua script that assigns a global `config` table, the same shape and
 //! the same loader skeleton `ls.conf.lua` and `zoe.conf.lua` use.
 //!
-//! Split into the `read_support` module (like `read/pages.zig` and
-//! `read/zoom.zig`) so `tests/read_tests.zig` can exercise the parse
+//! Split into the `read_support` module (like `read/state.zig` and
+//! `read/place.zig`) so `tests/read_tests.zig` can exercise the parse
 //! without a running client.
 //!
 //! See `read/read.conf.template.lua` for the annotated reference copy.
@@ -357,7 +357,7 @@ const Apply = struct {
         if (conf.string(lua, "dictionary")) |v| cfg.dictionary = self.own(v, "");
         if (conf.string(lua, "frequency_dictionary")) |v| cfg.frequency_dictionary = self.own(v, "");
         if (conf.string(lua, "frequency_order")) |v| {
-            if (parseFrequencyOrder(v)) |o| cfg.frequency_order = o else conf.warn("`frequency_order` = '{s}' is not 'rank'/'count'; ignored", .{v});
+            if (FrequencyOrder.parse(v)) |o| cfg.frequency_order = o else conf.warn("`frequency_order` = '{s}' is not 'rank'/'count'; ignored", .{v});
         }
         if (conf.string(lua, "dictionary_title_scale")) |v| {
             if (parseTitleScale(v)) |s| cfg.dictionary_title_scale = s else conf.warn("`dictionary_title_scale` = '{s}' is not '1x'/'1.5x'/'2x'/'3x'; ignored", .{v});
@@ -477,28 +477,8 @@ pub fn parseMode(name: []const u8) ?zoom.Mode {
 }
 
 /// Which way a frequency dictionary's numbers run -- see
-/// `ReadConfig.frequency_order`.
-pub const FrequencyOrder = enum {
-    /// Lower is more common (JPDB, Innocent Corpus, BCCWJ rank files).
-    rank,
-    /// Higher is more common (a raw corpus occurrence count).
-    count,
-
-    /// Whether `a` names a more common word than `b` under this order.
-    pub fn moreCommon(self: FrequencyOrder, a: i64, b: i64) bool {
-        return switch (self) {
-            .rank => a < b,
-            .count => a > b,
-        };
-    }
-};
-
-/// The `frequency_order` key's accepted spellings.
-pub fn parseFrequencyOrder(text: []const u8) ?FrequencyOrder {
-    if (std.mem.eql(u8, text, "rank")) return .rank;
-    if (std.mem.eql(u8, text, "count")) return .count;
-    return null;
-}
+/// `ReadConfig.frequency_order`. gw-yomi's, since its ranking takes it.
+pub const FrequencyOrder = @import("gw_yomi").dict.FrequencyOrder;
 
 /// The `dictionary_title_scale` key's accepted spellings -- config-file
 /// friendly ("1x"/"1.5x"/"2x"/"3x"), not necessarily `core.TextScale`'s wire

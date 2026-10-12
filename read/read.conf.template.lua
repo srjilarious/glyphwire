@@ -223,7 +223,7 @@
 --     ai_provider = "openai",
 --
 --     -- Empty means the provider's default: "gpt-5" for openai,
---     -- "claude-opus-5" for anthropic and claude_code, "qwen2.5" for
+--     -- "claude-opus-5-5" for anthropic and claude_code, "qwen2.5" for
 --     -- ollama. claude_code also takes the CLI's aliases ("sonnet").
 --     ai_model = "",
 --

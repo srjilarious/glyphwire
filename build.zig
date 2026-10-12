@@ -21,7 +21,7 @@ const program_versions = [_]struct { name: []const u8, version: []const u8 }{
     .{ .name = "gw-ls", .version = "0.8.0" },
     .{ .name = "gw-hist", .version = "0.8.0" },
     .{ .name = "gw-grep", .version = "0.8.0" },
-    .{ .name = "gw-read", .version = "0.8.0" },
+    .{ .name = "gw-read", .version = "0.9.0" },
     .{ .name = "gw-view", .version = "0.8.0" },
     .{ .name = "gwmd", .version = "0.8.0" },
     .{ .name = "glyphwire-notify", .version = "0.8.0" },
@@ -165,36 +165,13 @@ pub fn build(b: *std.Build) void {
     read_support_mod.addImport("glyphwire", glyphwire_mod);
     read_support_mod.addImport("applib", applib_mod);
 
-    // SQLite, vendored as the public-domain amalgamation (`read/libs/
-    // sqlite/`) rather than pulled in as a package dependency -- it's a
-    // single C file + header, so there's no build.zig to be broken by the
-    // pin the way third-party Zig bindings have been (see the port
-    // cheat-sheet in memory). `read/dict.zig` builds a persistent on-disk
-    // term index from a Yomitan dictionary directory the first time it's
-    // opened, then queries it directly instead of re-parsing every term
-    // bank's JSON into memory on every load.
-    const sqlite_translate = b.addTranslateC(.{
-        .root_source_file = b.path("read/libs/sqlite/sqlite3.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    read_support_mod.addImport("sqlite_c", sqlite_translate.createModule());
-    read_support_mod.addCSourceFile(.{
-        .file = b.path("read/libs/sqlite/sqlite3.c"),
-        .flags = &.{"-fno-sanitize=undefined"},
-    });
-    read_support_mod.addIncludePath(b.path("read/libs/sqlite"));
-
-    // stb_image + stb_image_write for the Anki card crop (`read/crop.zig`),
-    // compiled `static` in gw-read's own C unit rather than through zstbi's
-    // module -- see the comment in `read/libs/stb/image_io.c` for why. The
-    // headers are borrowed from the zstbi package the host already fetches.
-    const read_stb_dep = b.dependency("zstbi", .{ .target = target });
-    read_support_mod.addCSourceFile(.{
-        .file = b.path("read/libs/stb/image_io.c"),
-        .flags = &.{"-fno-sanitize=undefined"},
-    });
-    read_support_mod.addIncludePath(read_stb_dep.path("libs/stbi"));
+    // gw-yomi: the reading core (archives, mokuro, Yomitan dictionaries,
+    // the Anki crop and note, the AI prompt and reply) gw-read shares with
+    // the wns-reader Android app. SQLite and stb_image are compiled into
+    // its module; `read/support.zig` re-exports its pieces under the names
+    // gw-read has always used.
+    const gw_yomi_dep = b.dependency("gw_yomi", .{ .target = target, .optimize = optimize });
+    read_support_mod.addImport("gw_yomi", gw_yomi_dep.module("gw_yomi"));
 
     // The Markdown parser is the vendored zmd fork under `md/libs/zmd/`
     // (MIT, third-party; see its README for what glyphwire added to it).

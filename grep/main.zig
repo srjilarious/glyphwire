@@ -231,7 +231,7 @@ fn checkExit(io: std.Io, term: std.process.Child.Term) !void {
     switch (term) {
         // 1 is ripgrep's "no matches", which is not an error here. 127 is
         // a failed execve in the forked child -- the same "not really
-        // installed" signal `read/archive.zig` keys on.
+        // installed" signal gw-yomi's `archive.zig` keys on.
         .exited => |code| if (code == 127) {
             cli.fail(io, "gw-grep: could not run `rg` - is ripgrep installed and on your PATH?\n", .{});
         } else if (code > 1) {

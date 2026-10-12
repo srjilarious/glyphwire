@@ -94,6 +94,13 @@
             .hash = "N-V-__8AANjenwCy_cXlIbU8nqBzGxMlEHVokLZJYrmIXtoz",
             .lazy = true,
         },
+        // gw-read's reading core, shared with the wns-reader Android app:
+        // archives, mokuro, Yomitan dictionaries (with SQLite compiled
+        // in), the Anki crop and note, the AI prompt and reply.
+        .gw_yomi = .{
+            .url = "git+https://github.com/srjilarious/gw-yomi?ref=v0.1.0#594a4d44c53130ab4d35f0d26563de7ec034c263",
+            .hash = "gw_yomi-0.1.0-Z0hhavqcBQBXAl1xui4e1Z98rKe0PULCUzUXgIKQdmXg",
+        },
     },
     .paths = .{
         "build.zig",
