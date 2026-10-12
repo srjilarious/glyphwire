@@ -286,9 +286,10 @@ pub const App = struct {
 
         self.syncWindowFocus(eng);
         self.window_sizing.syncWindowSize(eng, deltaTimeMs);
-        // After syncWindowSize so a font change (which alters cell_w/cell_h
-        // and then resizes the window) is only reconciled against the
-        // framebuffer on the *next* frame, once both have settled.
+        // After syncWindowSize: a font change commits its own grid for the
+        // current framebuffer, and only when it had to grow the window
+        // (the minimum grid no longer fit) is there anything left for the
+        // *next* frame's syncWindowSize to reconcile.
         self.window_sizing.handleFontZoom(eng);
         // The context switcher's chord and, while it is open, every key
         // press: first, so nothing below -- selection shortcuts included

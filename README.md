@@ -153,7 +153,8 @@ Every config file is Lua, named `*.conf.lua`, and read from
 | `salacommander.conf.lua` | Key bindings | `salacommander/salacommander.conf.template.lua` |
 
 `assets/*.conf.example.lua` are working setups to copy from. At runtime,
-`Ctrl+-` / `Ctrl++` change the font size and `Ctrl+0` resets it.
+`Ctrl+-` / `Ctrl++` change the font size and `Ctrl+0` resets it. The window
+keeps its size and the grid gains or loses cells to match.
 
 ## Repository layout
 

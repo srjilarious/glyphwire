@@ -629,8 +629,8 @@ pub const Ui = struct {
     pushed_tab_bar: [2]usize = .{ std.math.maxInt(usize), 0 },
 
     /// Session cell height in px, for natural-sizing tree icons to the
-    /// row height. Read once at startup; a runtime font-zoom isn't
-    /// announced to clients, so it can lag until the next launch.
+    /// row height. Re-read on every `resize`, which a font-size step
+    /// always sends.
     cell_px_h: u32 = 0,
     /// The tree pane's scroll offset, mirrored from `scroll_offset`
     /// notifications so a click can be resolved to the right entry.
@@ -1567,6 +1567,11 @@ pub const Ui = struct {
             // scrollbar keeps measuring the small grid. Only `layout`
             // carries the true, unclamped rect.
             .resize => {
+                // A font-size step arrives as a resize too, so the tree
+                // icons' row height is re-read here, not only at startup.
+                if (self.client.getCellMetrics()) |m| {
+                    self.cell_px_h = m.h;
+                } else |_| {}
                 self.buf.full_redraw = true;
                 self.buffer_dirty = true;
                 self.markTreeDirty(.full);
