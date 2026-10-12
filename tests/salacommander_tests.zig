@@ -2107,3 +2107,57 @@ pub fn configReadsMenuKeysTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(actions.menuPick(&km, .chmod, .{ .alt = true, .shift = true }), actions.Action.sudoChmod);
     try testz.expectEqual(actions.menuPick(&km, .chmod, .{ .super = true }), actions.Action.chmod);
 }
+
+/// Polls `pollExit` for `pid` for up to two seconds.
+fn awaitExit(io: std.Io, pid: std.posix.pid_t) ?std.process.Child.Term {
+    for (0..200) |_| {
+        if (sala.ui.pollExit(pid)) |term| return term;
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    return null;
+}
+
+/// A launched program is reaped without blocking the loop: `pollExit`
+/// says null while it runs, then hands back its exit code.
+pub fn pollExitReportsTheExitCodeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // testz's Io has a failing allocator, and spawning needs a real one
+    // (see e2e_tests.zig).
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "sh", "-c", "exit 3" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const term = awaitExit(io, child.id.?) orelse {
+        _ = child.wait(io) catch {};
+        return error.ChildNeverExited;
+    };
+    try testz.expectTrue(term == .exited);
+    try testz.expectEqual(term.exited, 3);
+}
+
+/// One still running is left alone; a signal that ends it is told
+/// apart from an exit code, which is what makes the bar say "was killed".
+pub fn pollExitWaitsForNothingAndSeesSignalsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "sleep", "10" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const pid = child.id.?;
+    try testz.expectTrue(sala.ui.pollExit(pid) == null);
+    try std.posix.kill(pid, .TERM);
+    const term = awaitExit(io, pid) orelse {
+        _ = child.wait(io) catch {};
+        return error.ChildNeverExited;
+    };
+    try testz.expectTrue(term == .signal);
+    try testz.expectEqual(term.signal, std.posix.SIG.TERM);
+}

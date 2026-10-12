@@ -276,9 +276,57 @@ const Drag = struct {
     target: ?drag_mod.Target = null,
 };
 
+/// A program `runInSessionAs` started that hasn't been reaped yet. It
+/// runs in a context of its own while this one goes on handling events;
+/// `reapLaunched` picks its exit up on a later turn of the loop.
+const Launched = struct {
+    pid: std.posix.pid_t,
+    /// What the bar calls it. Owned.
+    name: []u8,
+    /// sudoedit's stderr, read for the bar once it exits. Owned: closed
+    /// with the entry.
+    complaint: ?sudo.Complaint,
+    /// Where to put the cursor once it exits. `land.path` is owned.
+    land: ?Landing,
+
+    fn deinit(self: Launched, alloc: std.mem.Allocator, io: std.Io) void {
+        alloc.free(self.name);
+        if (self.complaint) |c| c.close(io);
+        if (self.land) |l| alloc.free(l.path);
+    }
+};
+
+/// Shift+F4's new file, which only exists once the editor has saved it:
+/// when the editor exits, pane `pane` lands on `path` if it is still
+/// showing that file's directory.
+const Landing = struct {
+    pane: usize,
+    path: []const u8,
+};
+
+/// How long the loop waits for an event while a launched program is
+/// still running, so one that exits with nothing else happening is
+/// still noticed (and the panes reread) without a keystroke.
+const reap_poll_ms = 250;
+
 /// How often a drag held over a pane's header or footer row scrolls it
 /// a row.
 const autoscroll_ms = 60;
+
+/// `pid`'s exit status if it has exited (and is now reaped), null while
+/// it's still running. Never waits. A pid waitpid no longer knows
+/// (ECHILD) counts as gone, with nothing to say about how. See
+/// `Ui.reapLaunched`.
+pub fn pollExit(pid: std.posix.pid_t) ?std.process.Child.Term {
+    var status: c_int = 0;
+    const r = std.c.waitpid(pid, &status, std.c.W.NOHANG);
+    if (r == 0) return null;
+    if (r < 0) return .{ .unknown = 0 };
+    const st: u32 = @bitCast(status);
+    if (std.c.W.IFEXITED(st)) return .{ .exited = std.c.W.EXITSTATUS(st) };
+    if (std.c.W.IFSIGNALED(st)) return .{ .signal = std.c.W.TERMSIG(st) };
+    return .{ .unknown = st };
+}
 
 pub const Ui = struct {
     alloc: std.mem.Allocator,
@@ -394,6 +442,9 @@ pub const Ui = struct {
     /// keystroke costs one 20 KB frame or a hundred small round trips,
     /// and over `--ssh` neither is visible from the outside.
     profile: bool = false,
+    /// Programs started from here (an `open_actions` reader, the F4
+    /// editor) that are still running. Quitting leaves them be.
+    launched: std.ArrayList(Launched) = .empty,
     quit: bool = false,
 
     pub const InitOptions = struct {
@@ -582,6 +633,10 @@ pub const Ui = struct {
         self.menu_keymap.deinit(alloc);
         self.cfg.deinit(alloc);
         if (self.message) |m| alloc.free(m);
+        // Anything still running keeps its own context and outlives us;
+        // only the bookkeeping goes.
+        for (self.launched.items) |l| l.deinit(alloc, self.io);
+        self.launched.deinit(alloc);
         self.client.destroyContext(self.context) catch {};
         alloc.destroy(self);
     }
@@ -590,12 +645,17 @@ pub const Ui = struct {
 
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
+            try self.reapLaunched();
             try self.flush();
             // A drag parked on a header or footer row scrolls that pane
             // for as long as it stays there, so the loop wakes on a timer
-            // then rather than waiting for the pointer to move.
+            // then rather than waiting for the pointer to move. A
+            // launched program still running wakes it too, more slowly,
+            // to notice the exit.
             const timeout: std.Io.Timeout = if (self.autoScrollStep() != null)
                 .{ .duration = .{ .raw = .fromMilliseconds(autoscroll_ms), .clock = .awake } }
+            else if (self.launched.items.len > 0)
+                .{ .duration = .{ .raw = .fromMilliseconds(reap_poll_ms), .clock = .awake } }
             else
                 .none;
             const first = try self.listener.next(timeout) orelse {
@@ -1065,15 +1125,17 @@ pub const Ui = struct {
         try self.runInSession(argv, self.startDir(path));
     }
 
-    /// Runs a glyphwire client and waits for it. The child inherits
-    /// `GLYPHWIRE_SOCK`, so it opens its own context, which the host
-    /// stacks over ours and hands the keyboard to; we're just blocked
-    /// until it exits. Its stdio is dropped -- this pane's stdout is the
-    /// shell's screen, sitting under our context, and writing there would
-    /// show up as damage once we're gone. It starts in `cwd` (see
-    /// `startDir`), not wherever salacommander was started.
+    /// Starts a glyphwire client without waiting for it. The child
+    /// inherits `GLYPHWIRE_SOCK`, so it opens its own context, which the
+    /// host stacks over ours and hands the keyboard to; switching back
+    /// here finds the file manager still answering, and `reapLaunched`
+    /// rereads the panes once the child exits. Its stdio is dropped --
+    /// this pane's stdout is the shell's screen, sitting under our
+    /// context, and writing there would show up as damage once we're
+    /// gone. It starts in `cwd` (see `startDir`), not wherever
+    /// salacommander was started.
     fn runInSession(self: *Ui, argv: []const []const u8, cwd: []const u8) !void {
-        return self.runInSessionAs(argv, argv[0], null, cwd);
+        return self.runInSessionAs(argv, argv[0], null, cwd, null);
     }
 
     /// Where a program opened on `path` starts: the file's own directory,
@@ -1090,49 +1152,99 @@ pub const Ui = struct {
     }
 
     /// `runInSession`, named `name` in the bar, with stderr kept in
-    /// `complaint` (when given) so a failure can say why.
-    fn runInSessionAs(self: *Ui, argv: []const []const u8, name: []const u8, complaint: ?sudo.Complaint, cwd: []const u8) !void {
-        var child = std.process.spawn(self.io, .{
+    /// `complaint` (when given) so a failure can say why, and `land`
+    /// (when given) to put the cursor on once it exits. Takes
+    /// `complaint` over, closing it when the child is reaped or failed
+    /// to start; `land` is copied.
+    fn runInSessionAs(self: *Ui, argv: []const []const u8, name: []const u8, complaint: ?sudo.Complaint, cwd: []const u8, land: ?Landing) !void {
+        // Everything the entry needs is in hand before the child starts:
+        // one that's running with nothing tracking it would never be
+        // reaped.
+        var entry = self.newLaunched(name, complaint, land) catch |err| {
+            if (complaint) |c| c.close(self.io);
+            return err;
+        };
+        const child = std.process.spawn(self.io, .{
             .argv = argv,
             .cwd = .{ .path = cwd },
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = if (complaint) |c| c.stdio() else .ignore,
+            // A group of its own, like the shell panel's: a Ctrl+C the
+            // shell that started us sends our group, or the host's
+            // SIGHUP when our pane closes, is not for a program that has
+            // a context of its own and outlives us.
+            .pgid = 0,
         }) catch |err| {
-            try self.setMessage("{s}: {t}", .{ name, err });
-            return;
+            entry.deinit(self.alloc, self.io);
+            return self.setMessage("{s}: {t}", .{ name, err });
         };
-        const term = child.wait(self.io) catch |err| {
-            try self.setMessage("{s}: {t}", .{ name, err });
-            try self.resync();
-            return;
-        };
-        try self.resync();
-        if (term.success()) return;
-        var why_buf: [512]u8 = undefined;
-        const why = if (complaint) |c| c.last(self.io, &why_buf) else "";
-        if (why.len > 0) return self.setMessage("{s}: {s}", .{ name, why });
-        switch (term) {
-            .exited => |code| try self.setMessage("{s} exited with {d}", .{ name, code }),
-            else => try self.setMessage("{s} was killed", .{name}),
+        entry.pid = child.id.?;
+        self.launched.appendAssumeCapacity(entry);
+    }
+
+    /// A `launched` entry for a child not yet started (its `pid` is
+    /// filled in once it is), with room reserved for it in the list.
+    /// Owns copies of `name` and `land`, and takes `complaint` over only
+    /// on success.
+    fn newLaunched(self: *Ui, name: []const u8, complaint: ?sudo.Complaint, land: ?Landing) !Launched {
+        try self.launched.ensureUnusedCapacity(self.alloc, 1);
+        const owned_name = try self.alloc.dupe(u8, name);
+        errdefer self.alloc.free(owned_name);
+        const owned_land: ?Landing = if (land) |l| .{ .pane = l.pane, .path = try self.alloc.dupe(u8, l.path) } else null;
+        return .{ .pid = 0, .name = owned_name, .complaint = complaint, .land = owned_land };
+    }
+
+    /// Collects every launched program that has exited, without waiting
+    /// on one that hasn't: rereads both panes (it may well have changed
+    /// what's in them), lands Shift+F4's cursor, and says in the bar why
+    /// one failed. Held off while something borrows from a listing -- a
+    /// rename field, a press or a drag -- which a reread would pull out
+    /// from under it; the exit keeps until they're done.
+    fn reapLaunched(self: *Ui) !void {
+        if (self.launched.items.len == 0) return;
+        if (self.name_edit != null or self.press != null or self.drag != null) return;
+        var reloaded = false;
+        var i: usize = 0;
+        while (i < self.launched.items.len) {
+            const term = pollExit(self.launched.items[i].pid) orelse {
+                i += 1;
+                continue;
+            };
+            const done = self.launched.orderedRemove(i);
+            defer done.deinit(self.alloc, self.io);
+            if (!reloaded) {
+                try self.reloadBoth();
+                reloaded = true;
+            }
+            if (done.land) |l| self.landOn(l);
+            try self.reportExit(done, term);
         }
     }
 
-    /// Takes the screen back after a child had it. A resize that happened
-    /// while we weren't drawing may have arrived as an event we haven't
-    /// read yet, so re-read the size instead of trusting what we last
-    /// saw, and reread both directories: the child may well have changed
-    /// what's in them.
-    fn resync(self: *Ui) !void {
-        if (self.client.getSize()) |size| {
-            self.win = .{ .cols = size.cols, .rows = size.rows };
-        } else |_| {}
-        if (self.client.getCellMetrics()) |m| {
-            self.cell = .{ .w = m.w, .h = m.h };
-        } else |_| {}
-        try self.readBounds();
-        try self.reloadBoth();
-        self.markAllDirty();
+    /// A launched program's exit, in the bar when it went wrong: what it
+    /// last said on stderr if that was kept (sudoedit), else its status.
+    fn reportExit(self: *Ui, done: Launched, term: std.process.Child.Term) !void {
+        if (term.success()) return;
+        var why_buf: [512]u8 = undefined;
+        const why = if (done.complaint) |c| c.last(self.io, &why_buf) else "";
+        if (why.len > 0) return self.setMessage("{s}: {s}", .{ done.name, why });
+        switch (term) {
+            .exited => |code| try self.setMessage("{s} exited with {d}", .{ done.name, code }),
+            .unknown => {},
+            else => try self.setMessage("{s} was killed", .{done.name}),
+        }
+    }
+
+    /// `land`'s pane onto its file, if the pane still shows the file's
+    /// directory and the file is there now.
+    fn landOn(self: *Ui, land: Landing) void {
+        const p = &self.panes[land.pane];
+        if (!std.mem.eql(u8, std.fs.path.dirname(land.path) orelse "", p.path)) return;
+        if (p.rowOf(std.fs.path.basename(land.path))) |row| {
+            p.setCursor(row);
+            self.markDirty(land.pane, .full);
+        }
     }
 
     /// Hands a file to the desktop's opener, detached (`setsid -f`) so
@@ -1165,8 +1277,8 @@ pub const Ui = struct {
         if ((e.link_target_kind orelse e.kind) == .directory) {
             return self.setMessage("{s} is a directory", .{e.name});
         }
-        // `runInSession` rereads both panes when the editor exits, which
-        // frees the listing `e` points into.
+        // Copied: `e` borrows from the listing, and Super+F4 puts sudo's
+        // password dialog up before the editor starts.
         const path = try self.alloc.dupe(u8, e.abs_path);
         defer self.alloc.free(path);
         const name = std.fs.path.basename(path);
@@ -1180,7 +1292,7 @@ pub const Ui = struct {
             else => return self.refuseUnreadable(path, err),
         };
         if (binary) return self.setMessage("{s} is not a text file", .{name});
-        try self.openInEditor(path, as_root);
+        try self.openInEditor(path, as_root, null);
     }
 
     /// Shift+F4: asks for a name and opens it in the `editor` without
@@ -1203,23 +1315,21 @@ pub const Ui = struct {
         if (std.Io.Dir.cwd().statFile(self.io, path, .{})) |st| {
             if (st.kind == .directory) return self.setMessage("{s} is a directory", .{typed});
         } else |_| {}
-        try self.openInEditor(path, as_root);
-
-        // Saved into this pane's directory: land on it.
-        if (std.mem.eql(u8, std.fs.path.dirname(path) orelse "", p.path)) {
-            if (p.rowOf(std.fs.path.basename(path))) |row| p.setCursor(row);
-        }
+        // Saved into this pane's directory: land on it once the editor
+        // exits (`reapLaunched`), which is when the file is there.
+        try self.openInEditor(path, as_root, .{ .pane = self.active, .path = path });
     }
 
-    /// `path` in the configured `editor`, or through sudoedit.
-    fn openInEditor(self: *Ui, path: []const u8, as_root: bool) !void {
+    /// `path` in the configured `editor`, or through sudoedit, landing
+    /// on `land` when it exits (see `runInSessionAs`).
+    fn openInEditor(self: *Ui, path: []const u8, as_root: bool, land: ?Landing) !void {
         const template = self.cfg.editorCommand();
-        if (as_root) return self.editAsRoot(template, path);
+        if (as_root) return self.editAsRoot(template, path, land);
         var argv_buf: [openaction.max_args][]const u8 = undefined;
         const argv = openaction.buildArgv(&argv_buf, template, path) catch |err| {
             return self.setMessage("editor \"{s}\": {t}", .{ template, err });
         };
-        try self.runInSession(argv, self.startDir(path));
+        try self.runInSessionAs(argv, argv[0], null, self.startDir(path), land);
     }
 
     /// sudoedit: sudo copies `path` somewhere you can write, runs the
@@ -1227,16 +1337,15 @@ pub const Ui = struct {
     /// changed. Safer than an editor running as root, and a missing file
     /// is created on save. sudo's refusals ("editing files in a writable
     /// directory is not permitted") land in the bar.
-    fn editAsRoot(self: *Ui, template: []const u8, path: []const u8) !void {
+    fn editAsRoot(self: *Ui, template: []const u8, path: []const u8, land: ?Landing) !void {
         if (!try self.sudoAuthorize()) return;
         var arena: std.heap.ArenaAllocator = .init(self.alloc);
         defer arena.deinit();
         const argv = sudo.editArgv(arena.allocator(), self.environ, template, path) catch |err| {
             return self.setMessage("editor \"{s}\": {t}", .{ template, err });
         };
-        const complaint = sudo.Complaint.open();
-        defer complaint.close(self.io);
-        try self.runInSessionAs(argv, "sudoedit", complaint, self.startDir(path));
+        // `runInSessionAs` keeps it until sudoedit exits, and closes it.
+        try self.runInSessionAs(argv, "sudoedit", sudo.Complaint.open(), self.startDir(path), land);
     }
 
     // ── F3: find ────────────────────────────────────────────────────────
@@ -2748,8 +2857,7 @@ pub const Ui = struct {
     }
 
     /// Asks the server where the split tree put the panes, for when no
-    /// `layout` is on its way: startup, and taking the screen back from a
-    /// child (`resync`).
+    /// `layout` is on its way: startup.
     fn readBounds(self: *Ui) !void {
         for (self.pane_layers, 0..) |l, i| {
             const cell = try self.client.getLayerCellPosition(l);
