@@ -186,10 +186,15 @@ pub fn render(batch: *Batch, layer: glyphwire.LayerHandle, l: Layout, ed: *const
     });
 }
 
-/// One field: its text on a darker ground, scrolled to keep the caret
-/// in view, with the caret drawn as an inverted cell when it has the
-/// keyboard. Prefilled (`fresh`) text is shown selected; a pattern that
-/// matches nothing (`failed`) in the error colour.
+/// Blanks for the unfilled end of a field: `pad` would fill it, but an
+/// underline is never drawn under `pad`'s cells, so they are written.
+const field_blanks: [max_field_cols]u8 = @splat(' ');
+
+/// One field: its text on the panel, underlined across the field's
+/// whole width -- in the accent colour when it has the keyboard, dim
+/// when not -- and scrolled to keep the caret in view, which is drawn
+/// as an inverted cell. Prefilled (`fresh`) text is shown selected; a
+/// pattern that matches nothing (`failed`) in the error colour.
 fn renderField(
     batch: *Batch,
     layer: glyphwire.LayerHandle,
@@ -203,17 +208,28 @@ fn renderField(
     const text = line.text();
     const start = scrollStart(text, line.caret, l.field_cols);
     const shown = text[start..];
-    const fg = if (failed) role(.message_error) else role(.popup_fg);
-    const bg = if (fresh and focused) role(.selection_bg) else role(.bg_dark);
+    const rule = if (focused) role(.accent) else role(.fg_dim);
     try batch.writeText(shown, .{
         .layer = layer,
         .row = row,
         .col = l.field_col,
-        .fg = fg,
-        .bg = bg,
+        .fg = if (failed) role(.message_error) else role(.popup_fg),
+        .bg = if (fresh and focused) role(.selection_bg) else null,
         .max_cols = l.field_cols,
-        .pad = true,
+        .underline = .single,
+        .underline_color = rule,
     });
+    const used = @min(lineedit.cellWidth(shown), l.field_cols);
+    if (used < l.field_cols) {
+        try batch.writeText(field_blanks[0 .. l.field_cols - used], .{
+            .layer = layer,
+            .row = row,
+            .col = l.field_col + used,
+            .underline = .single,
+            .underline_color = rule,
+            .selectable = false,
+        });
+    }
     if (!focused) return;
     const caret_col = lineedit.displayCol(text, line.caret) - lineedit.displayCol(text, start);
     if (caret_col >= l.field_cols) return;
@@ -224,6 +240,8 @@ fn renderField(
         .col = l.field_col + caret_col,
         .fg = role(.cursor_fg),
         .bg = role(.cursor_bg),
+        .underline = .single,
+        .underline_color = rule,
     });
 }
 
