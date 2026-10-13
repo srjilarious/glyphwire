@@ -271,6 +271,8 @@ pub const Buffer = struct {
     gap: GapBuffer,
     line_starts: std.ArrayList(usize) = .empty,
     /// Set by every mutation, cleared by `markClean`. `:q` consults it.
+    /// Undo and redo recompute it instead: landing back on the save
+    /// point (`clean_depth`) clears it.
     dirty: bool = false,
     /// Bumped by every mutation and never reset. A renderer diffs it
     /// against its last value to tell an edit (repaint everything) from a
@@ -299,6 +301,13 @@ pub const Buffer = struct {
     /// the whole session is one `u`.
     undo_open: ?UndoGroup = null,
     undo_phase: UndoPhase = .normal,
+    /// How many groups `undo_stack` held when the text last matched the
+    /// file -- at load (0) or at the last `markClean`. Undoing or redoing
+    /// back to exactly that depth makes the buffer clean again. Null once
+    /// that state can no longer be reached: an edit made after undoing
+    /// past it discards the redo history that led back, and trimming the
+    /// stack's oldest group can drop it off the far end.
+    clean_depth: ?usize = 0,
 
     /// The lines closed folds start on, ascending (`zoe/fold.zig`). The
     /// buffer knows nothing about folding; it keeps these here only
@@ -342,8 +351,14 @@ pub const Buffer = struct {
         return self.gap.byteAt(i);
     }
 
+    /// The text is what is on disk now. The open undo group is closed
+    /// first so the save point falls between two `u` steps -- a save in
+    /// the middle of an insert session splits it, and one `u` lands back
+    /// on exactly the saved text.
     pub fn markClean(self: *Buffer) void {
+        self.closeUndoGroup();
         self.dirty = false;
+        self.clean_depth = self.undo_stack.items.len;
     }
 
     /// Rebuilds `line_starts` from scratch -- once, when the text is
@@ -630,8 +645,21 @@ pub const Buffer = struct {
         if (stack.items.len >= max_undo_groups) {
             var oldest = stack.orderedRemove(0);
             oldest.deinit(self.alloc);
+            // The undo stack's oldest group leads out of depth 0, so every
+            // depth above it slides down one and depth 0 is gone. The redo
+            // stack's oldest is its far end; the check below covers that.
+            if (stack == &self.undo_stack) {
+                if (self.clean_depth) |d| self.clean_depth = if (d == 0) null else d - 1;
+            }
         }
-        stack.append(self.alloc, g) catch g.deinit(self.alloc);
+        stack.append(self.alloc, g) catch {
+            g.deinit(self.alloc);
+            // A group that never landed leaves the depths miscounted.
+            self.clean_depth = null;
+        };
+        if (self.clean_depth) |d| {
+            if (d > self.undo_stack.items.len + self.redo_stack.items.len) self.clean_depth = null;
+        }
     }
 
     /// True while a group is open, so the editor can tell "this mutation
@@ -659,6 +687,7 @@ pub const Buffer = struct {
             var group = popped;
             defer group.deinit(self.alloc);
             try self.replay(&group, .undoing);
+            self.settleDirty();
             return group.cursor;
         }
         return null;
@@ -672,6 +701,7 @@ pub const Buffer = struct {
             var group = popped;
             defer group.deinit(self.alloc);
             try self.replay(&group, .redoing);
+            self.settleDirty();
             return group.cursor;
         }
         return null;
@@ -684,6 +714,14 @@ pub const Buffer = struct {
         self.undo_open = null;
         self.dropUndoStack(&self.undo_stack);
         self.dropUndoStack(&self.redo_stack);
+        self.clean_depth = null;
+    }
+
+    /// After an undo or redo: clean exactly when it landed on the save
+    /// point. The replayed group was closed, so `undo_stack`'s length is
+    /// the whole of where the history stands.
+    fn settleDirty(self: *Buffer) void {
+        self.dirty = self.clean_depth != self.undo_stack.items.len;
     }
 
     /// Applies `group`'s records backwards, each one inverted, with a
@@ -716,8 +754,14 @@ pub const Buffer = struct {
     fn recordUndo(self: *Buffer, at: usize, removed: []const u8, inserted: usize) void {
         if (self.undo_open == null) self.undo_open = .{ .cursor = at };
         // An ordinary edit invalidates the redo history. A replay is what
-        // *rebuilds* the opposite stack, so it must leave both alone.
-        if (self.undo_phase == .normal) self.dropUndoStack(&self.redo_stack);
+        // *rebuilds* the opposite stack, so it must leave both alone. A
+        // save point out in the redo history goes with it.
+        if (self.undo_phase == .normal and self.redo_stack.items.len > 0) {
+            if (self.clean_depth) |d| {
+                if (d > self.undo_stack.items.len) self.clean_depth = null;
+            }
+            self.dropUndoStack(&self.redo_stack);
+        }
 
         self.undo_open.?.recs.append(self.alloc, .{
             .at = at,

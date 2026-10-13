@@ -3697,6 +3697,107 @@ pub fn anEditAfterUndoDiscardsTheRedoStackTest(_: std.Io, alloc: std.mem.Allocat
     try testz.expectFalse(ed.buf.canRedo());
 }
 
+pub fn undoBackToTheLoadedTextIsCleanTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "xx");
+    try testz.expectTrue(ed.buf.dirty);
+    _ = try keys.feed(&ed, "u");
+    try testz.expectTrue(ed.buf.dirty);
+    _ = try keys.feed(&ed, "u");
+    try testz.expectFalse(ed.buf.dirty);
+    // Redoing away from it is a change again, and undoing returns.
+    _ = try keys.feed(&ed, "<c-r>");
+    try testz.expectTrue(ed.buf.dirty);
+    _ = try keys.feed(&ed, "u");
+    try testz.expectFalse(ed.buf.dirty);
+}
+
+pub fn undoBackToAnEmptyUnsavedBufferIsCleanTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "ihello<esc>");
+    try testz.expectTrue(ed.buf.dirty);
+    _ = try keys.feed(&ed, "u");
+    try expectText(alloc, &ed.buf, "");
+    try testz.expectFalse(ed.buf.dirty);
+}
+
+pub fn undoAndRedoBackToTheSavePointIsCleanTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abcd", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "x");
+    ed.markSaved();
+    _ = try keys.feed(&ed, "x");
+    try testz.expectTrue(ed.buf.dirty);
+    _ = try keys.feed(&ed, "u");
+    try expectText(alloc, &ed.buf, "bcd");
+    try testz.expectFalse(ed.buf.dirty);
+    // Past the save point the text differs from the file again.
+    _ = try keys.feed(&ed, "u");
+    try testz.expectTrue(ed.buf.dirty);
+    _ = try keys.feed(&ed, "<c-r>");
+    try testz.expectFalse(ed.buf.dirty);
+}
+
+pub fn anEditAfterUndoingPastTheSavePointLosesItTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abcd", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "x");
+    ed.markSaved();
+    _ = try keys.feed(&ed, "u");
+    // Same depth as the save point, different text: the redo history
+    // that led back to it is gone, so nothing is clean until a save.
+    _ = try keys.feed(&ed, "$x");
+    try testz.expectTrue(ed.buf.dirty);
+    _ = try keys.feed(&ed, "u");
+    try expectText(alloc, &ed.buf, "abcd");
+    try testz.expectTrue(ed.buf.dirty);
+    _ = try keys.feed(&ed, "<c-r>");
+    try testz.expectTrue(ed.buf.dirty);
+}
+
+pub fn aSaveMidInsertSplitsTheUndoStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "ihello");
+    ed.markSaved();
+    _ = try keys.feed(&ed, "XY<esc>");
+    try testz.expectTrue(ed.buf.dirty);
+    _ = try keys.feed(&ed, "u");
+    try expectText(alloc, &ed.buf, "helloabc");
+    try testz.expectFalse(ed.buf.dirty);
+    _ = try keys.feed(&ed, "u");
+    try expectText(alloc, &ed.buf, "abc");
+    try testz.expectTrue(ed.buf.dirty);
+}
+
+pub fn trimmingTheOldestUndoStepShiftsTheSavePointTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "");
+    defer buf.deinit();
+    // Save after the first step, then push enough steps that the oldest
+    // falls off: the save point slides down with the rest, until it is
+    // the one that falls off.
+    buf.undoCheckpoint(0);
+    try buf.insert(0, "a");
+    buf.markClean();
+    var i: usize = 0;
+    while (i < 511) : (i += 1) {
+        buf.undoCheckpoint(0);
+        try buf.insert(0, "b");
+    }
+    buf.closeUndoGroup();
+    try testz.expectEqual(buf.clean_depth.?, 1);
+    buf.undoCheckpoint(0);
+    try buf.insert(0, "c");
+    buf.closeUndoGroup();
+    try testz.expectEqual(buf.clean_depth.?, 0);
+    buf.undoCheckpoint(0);
+    try buf.insert(0, "d");
+    buf.closeUndoGroup();
+    try testz.expectTrue(buf.clean_depth == null);
+}
+
 pub fn undoTakesACountTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try expectEdit(alloc, "abcdef", "xxx2u", "bcdef");
 }
