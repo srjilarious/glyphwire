@@ -985,6 +985,7 @@ pub const Ui = struct {
     /// cells) while it is showing -- what a click is tested against.
     /// Redrawn with the statusline, which every input repaints.
     find_bar_layer: glyphwire.LayerHandle,
+    find_bar_patch: ?glyphwire.NinePatchHandle,
     find_bar: ?FindBarPlace = null,
     /// The newest outstanding completion request, and where the word it is
     /// for starts -- a reply for a word the cursor has since left is
@@ -1259,10 +1260,15 @@ pub const Ui = struct {
         try client.setLayerShadow(path_menu_layer, glyphwire.Shadow.dialog);
         // The Ctrl+F / Ctrl+H find widget, over the buffer's top-right
         // corner (`zoe/findbar.zig`).
+        // On the hover popup's panel, flat where the theme has none.
         const find_bar_layer = try client.createLayer(findbar.fixed_cols + findbar.max_field_cols, 2, 0);
         try client.setLayerVisible(find_bar_layer, false);
-        try client.setLayerBackground(find_bar_layer, role(.popup_bg));
         try client.setLayerShadow(find_bar_layer, glyphwire.Shadow.dialog);
+        const find_bar_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(find_bar_layer, 0, 0, 2, findbar.fixed_cols + findbar.max_field_cols, th.panelStyle()) catch |err| blk: {
+            std.log.warn("zoe: no '{s}' nine-patch for the find widget ({t}); drawing it flat", .{ th.panelStyle(), err });
+            break :blk null;
+        };
+        if (find_bar_patch == null) try client.setLayerBackground(find_bar_layer, role(.popup_bg));
         // The tab tooltip, last so it sits over everything: it hangs from
         // the tab strip over the top of the buffer and, for a long path,
         // over the file tree.
@@ -1308,6 +1314,7 @@ pub const Ui = struct {
             .completion_layer = completion_layer,
             .path_menu_layer = path_menu_layer,
             .find_bar_layer = find_bar_layer,
+            .find_bar_patch = find_bar_patch,
             .tab_tip_layer = tab_tip_layer,
             .tab_tip_patch = tab_tip_patch,
             .diags = diag.Store.init(alloc),
@@ -4199,6 +4206,7 @@ pub const Ui = struct {
         const place: FindBarPlace = .{ .row = b.row, .col = b.col + b.cols - l.cols - 1, .layout = l };
         try batch.setLayerSize(self.find_bar_layer, l.cols, l.rows);
         try batch.setLayerCellPosition(self.find_bar_layer, place.row, place.col);
+        if (self.find_bar_patch) |np| try batch.updateNinePatch(self.find_bar_layer, np, .{ .rows = l.rows, .cols = l.cols });
         try findbar.render(batch, self.find_bar_layer, l, ed);
         try batch.setLayerVisible(self.find_bar_layer, true);
         self.find_bar = place;
@@ -5024,10 +5032,12 @@ pub const Ui = struct {
         if (frame_changed) {
             self.hover_panel_patch = try self.swapPanelPatch(self.hover_layer, self.hover_panel_patch, 1, hover_max_cols);
             self.tab_tip_patch = try self.swapPanelPatch(self.tab_tip_layer, self.tab_tip_patch, tabs.tip_rows, tab_tip_initial_cols);
+            self.find_bar_patch = try self.swapPanelPatch(self.find_bar_layer, self.find_bar_patch, 2, findbar.fixed_cols + findbar.max_field_cols);
             self.shell.setFrameStyle(self.th.panelStyle());
         }
         try c.setLayerBackground(self.hover_layer, if (self.hover_panel_patch == null) role(.popup_bg) else null);
         try c.setLayerBackground(self.tab_tip_layer, if (self.tab_tip_patch == null) role(.popup_bg) else null);
+        try c.setLayerBackground(self.find_bar_layer, if (self.find_bar_patch == null) role(.popup_bg) else null);
         try self.finder.setStyle(finderStyle(&self.th));
         try self.palette.setStyle(paletteStyle(&self.th));
         try self.ext_list.setStyle(extListStyle(&self.th));

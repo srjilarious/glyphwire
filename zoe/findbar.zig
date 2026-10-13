@@ -11,8 +11,9 @@
 //!     │ [replace text       ] ⇄ All                         │
 //!     └──────────────────────────────────────────────────────┘
 //!
-//! (no border is drawn: the box is a raised layer with a shadow). The
-//! second row is only there with replace showing. `layout` and `hit`
+//! on the theme's panel nine-patch (`panel_style`, the hover popup's),
+//! whose frame takes the first and last columns. The second row is only
+//! there with replace showing. `layout` and `hit`
 //! are pure, so `tests/zoe_tests.zig` covers them without a client.
 
 const std = @import("std");
@@ -141,14 +142,20 @@ pub fn countText(out: []u8, index: usize, total: usize, cap: usize) []const u8 {
 pub const count_cap: usize = 9999;
 
 /// Draws the widget for `ed` (which is in `Mode.find`) into `layer`,
-/// already sized and placed to `l`.
+/// already sized and placed to `l`. Everything but the fields and a lit
+/// toggle is drawn without a background, so the layer's panel (a
+/// nine-patch, or flat `popup_bg` where the theme has none) shows
+/// through; the first and last columns are left to its frame.
 pub fn render(batch: *Batch, layer: glyphwire.LayerHandle, l: Layout, ed: *const editor.Editor) !void {
     const counted = ed.findCount(count_cap);
     var count_buf: [32]u8 = undefined;
     const count = countText(&count_buf, counted.index, counted.total, count_cap);
 
+    // A resize keeps whatever the old cells held, and a shorter count
+    // or a replace row going away would otherwise leave it behind.
+    try batch.clearArea(.{ .layer = layer });
+
     // The find row.
-    try batch.writeText("", .{ .layer = layer, .row = 0, .col = 0, .bg = role(.popup_bg), .max_cols = l.cols, .pad = true });
     try renderField(batch, layer, l, 0, &ed.cmdline, ed.find_field == .find, ed.find_fresh, ed.search_failed);
     try toggle(batch, layer, l.case_col, "Aa", ed.find_case, true);
     try toggle(batch, layer, l.word_col, "ab", ed.find_word, true);
@@ -158,7 +165,6 @@ pub fn render(batch: *Batch, layer: glyphwire.LayerHandle, l: Layout, ed: *const
         .row = 0,
         .col = l.count_col,
         .fg = if (counted.total == 0 and !ed.cmdline.isEmpty()) role(.message_error) else role(.popup_fg),
-        .bg = role(.popup_bg),
         .max_cols = count_cols,
     });
     try batch.writeText("\u{2191} \u{2193} \u{00d7}", .{
@@ -166,19 +172,16 @@ pub fn render(batch: *Batch, layer: glyphwire.LayerHandle, l: Layout, ed: *const
         .row = 0,
         .col = l.prev_col,
         .fg = role(.popup_fg),
-        .bg = role(.popup_bg),
         .selectable = false,
     });
 
     if (l.rows < 2) return;
-    try batch.writeText("", .{ .layer = layer, .row = 1, .col = 0, .bg = role(.popup_bg), .max_cols = l.cols, .pad = true });
     try renderField(batch, layer, l, 1, &ed.find_replace, ed.find_field == .replace, false, false);
     try batch.writeText("\u{21c4} All", .{
         .layer = layer,
         .row = 1,
         .col = l.replace_one_col,
         .fg = role(.popup_fg),
-        .bg = role(.popup_bg),
         .selectable = false,
     });
 }
@@ -231,7 +234,8 @@ fn toggle(batch: *Batch, layer: glyphwire.LayerHandle, col: usize, label: []cons
         .row = 0,
         .col = col,
         .fg = if (on) role(.accent) else if (available) role(.popup_fg) else role(.fg_dim),
-        .bg = if (on) role(.popup_selected_bg) else role(.popup_bg),
+        // Off, the panel shows through.
+        .bg = if (on) role(.popup_selected_bg) else null,
         .selectable = false,
     });
 }
