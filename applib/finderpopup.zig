@@ -174,6 +174,11 @@ pub const Popup = struct {
     list_layer: glyphwire.LayerHandle,
     /// Null when the host has no `style.frame_style`.
     frame_patch: ?glyphwire.NinePatchHandle,
+    /// The name `frame_patch` was made from, copied: callers pass a
+    /// `frame_style` borrowed from their `theme.Stored`, which a theme
+    /// change overwrites before `setStyle` gets to compare against it.
+    frame_name_buf: [glyphwire.theme.Stored.max_name_len]u8 = undefined,
+    frame_name_len: usize = 0,
 
     /// Non-null exactly while the popup is open.
     finder: ?Finder = null,
@@ -220,7 +225,7 @@ pub const Popup = struct {
         try client.setLayerScrollMode(list_layer, .client);
         try client.setLayerScrollbars(list_layer, true, false);
 
-        return .{
+        var popup: Popup = .{
             .alloc = alloc,
             .client = client,
             .style = style,
@@ -229,6 +234,13 @@ pub const Popup = struct {
             .list_layer = list_layer,
             .frame_patch = frame_patch,
         };
+        popup.rememberFrameName(style.frame_style);
+        return popup;
+    }
+
+    fn rememberFrameName(self: *Popup, name: []const u8) void {
+        self.frame_name_len = @min(name.len, self.frame_name_buf.len);
+        @memcpy(self.frame_name_buf[0..self.frame_name_len], name[0..self.frame_name_len]);
     }
 
     /// Restyles the popup in place (zoe's `:theme`). A different
@@ -237,10 +249,11 @@ pub const Popup = struct {
     /// reported to a request, and the popup then falls back to drawing
     /// flat exactly as `init` does. Repaints on the next `render`.
     pub fn setStyle(self: *Popup, style: Style) !void {
-        const frame_changed = !std.mem.eql(u8, style.frame_style, self.style.frame_style);
+        const frame_changed = !std.mem.eql(u8, style.frame_style, self.frame_name_buf[0..self.frame_name_len]);
         self.style = style;
         self.dirty = true;
         if (frame_changed) {
+            self.rememberFrameName(style.frame_style);
             if (self.frame_patch) |p| try self.client.destroyNinePatch(self.frame_layer, p);
             self.frame_patch = self.client.createNinePatch(
                 self.frame_layer,

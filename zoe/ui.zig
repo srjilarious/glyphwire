@@ -2075,6 +2075,9 @@ pub const Ui = struct {
                 self.buf.full_redraw = true;
                 self.grp.buffer_dirty = true;
             },
+            // Only sent while this context follows the window theme, so
+            // the host's copy is the one to take.
+            .theme => try self.themeChanged(try self.client.getTheme()),
             .mouse_move => |m| {
                 if (!self.shell.isOpen()) try self.handleMouseDrag(m);
                 // The strip is never under the shell panel, so hovering a

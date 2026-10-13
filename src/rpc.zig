@@ -201,6 +201,12 @@ pub fn shutdownNotification(alloc: std.mem.Allocator, grace_ms: u32) ![]u8 {
     return notification(alloc, "shutdown", protocol.ShutdownParams{ .grace_ms = grace_ms });
 }
 
+/// `theme` -- the window theme changed to `name`; see
+/// `protocol.ThemeChangedParams`.
+pub fn themeNotification(alloc: std.mem.Allocator, name: []const u8, dark: bool, panel_style: []const u8) ![]u8 {
+    return notification(alloc, "theme", protocol.ThemeChangedParams{ .name = name, .dark = dark, .panel_style = panel_style });
+}
+
 /// `context` -- the visible context changed to `context` (its handle),
 /// whose root layer is `cols` x `rows`. Sent by `create_context` /
 /// `activate_context` / `destroy_context` and by the disconnect-cull

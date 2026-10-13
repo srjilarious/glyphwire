@@ -12,6 +12,7 @@ const shadow_mod = @import("shadow.zig");
 const scroll = @import("scroll.zig");
 const selection = @import("selection.zig");
 const preedit_mod = @import("preedit.zig");
+const modal_list = @import("modal_list.zig");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
@@ -37,14 +38,6 @@ const hud_bg = host_eng.Color.from(12, 14, 20, 232);
 const hud_head = host_eng.Color.from(255, 220, 120, 255);
 const hud_fg = host_eng.Color.from(210, 215, 225, 255);
 
-// Context switcher overlay (Super+F12) -- see `drawSwitcher`.
-const switcher_bg = host_eng.Color.from(24, 27, 36, 245);
-const switcher_border = host_eng.Color.from(90, 104, 140, 255);
-const switcher_head = host_eng.Color.from(255, 220, 120, 255);
-const switcher_fg = host_eng.Color.from(225, 228, 235, 255);
-const switcher_dim = host_eng.Color.from(135, 140, 155, 255);
-const switcher_sel_bg = host_eng.Color.from(58, 78, 120, 255);
-const switcher_border_px = 1;
 
 // ── Static quad batches ───────────────────────────────────────────────
 //
@@ -384,16 +377,11 @@ pub const DeferredScaledGlyph = struct {
     }
 };
 
-/// The divider band between two split children. Deliberately lighter than
-/// the window scrollbar's track: a divider reads as a seam between panes,
-/// not as chrome hanging off the edge of the window.
-const divider_color = host_eng.Color.from(58, 58, 66, 255);
-
-/// The band between two whole *panes* -- one program's surface against
-/// another's. Brighter than `divider_color`, which separates two parts of
-/// a single program's own layout: the seam between programs is the more
-/// significant boundary and should read that way.
-const pane_divider_color = host_eng.Color.from(84, 84, 96, 255);
+// The divider band between two split children is the context theme's
+// `divider` role, and the band between two whole *panes* -- one program's
+// surface against another's -- the window theme's brighter `pane_divider`:
+// the seam between programs is the more significant boundary and should
+// read that way.
 
 /// The ghost band shown while a divider is being dragged, before the
 /// drag ends and the layout actually moves (see `panes.Panes`).
@@ -1739,7 +1727,7 @@ pub const Renderer = struct {
 
         // Over everything a program drew, dividers and scrollbar included:
         // it is a modal the host owns.
-        self.drawSwitcher(eng);
+        self.drawListDialog(eng);
 
         // `--screenshot`: everything for this frame is drawn but not yet
         // swapped, so GL_BACK holds exactly what's about to be shown. The
@@ -1777,7 +1765,7 @@ pub const Renderer = struct {
         // *floats* (a popup, the Ctrl+` shell panel) then covers them the
         // way it covers everything else it is laid over. Drawn in the
         // chrome pass, zoe's tree divider ran straight down the panel.
-        self.drawLayerDividers(eng, ctx_handle);
+        self.drawLayerDividers(eng, ctx_handle, themeColor(&ctx.theme, .divider));
 
         // The caret follows `ctx.caret_layer` when a client set one --
         // otherwise the root cursor. Drawn here, on top of root's content
@@ -1803,7 +1791,7 @@ pub const Renderer = struct {
             // a popup created later has to cover the bars of whatever it
             // floats over, the same as it covers that layer's cells.
             drawLayerScrollbars(eng, layer, origin);
-            drawResizeEdge(eng, layer, origin);
+            drawResizeEdge(eng, layer, origin, themeColor(&ctx.theme, .pane_divider));
             if (focused and ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin, shape, caretColor(&ctx.theme));
         }
     }
@@ -1812,14 +1800,14 @@ pub const Renderer = struct {
     /// own first row (`geometry.resizeEdgeBand`). Drawn with the layer,
     /// like its scrollbars, so a popup over the layer covers it too --
     /// matching `Panes.edgeAt`, which won't grab an edge it can't see.
-    fn drawResizeEdge(eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin) void {
+    fn drawResizeEdge(eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin, color: host_eng.Color) void {
         if (layer.resize_edge != .top) return;
         const r = geometry.resizeEdgeBand(geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows()));
         eng.renderer.begin(eng.projMat);
         defer eng.renderer.end();
         eng.renderer.drawFilledRect(
             host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-            pane_divider_color,
+            color,
         );
     }
 
@@ -1833,7 +1821,7 @@ pub const Renderer = struct {
     /// the cache down to the context being composited and draws those
     /// where they are. The cache is refreshed each frame by the mouse
     /// handler, which runs before any of this.
-    fn drawLayerDividers(self: *Renderer, eng: *Engine, ctx_handle: glyphwire.ContextHandle) void {
+    fn drawLayerDividers(self: *Renderer, eng: *Engine, ctx_handle: glyphwire.ContextHandle, color: host_eng.Color) void {
         // `render` holds `ctx_mutex` around this whole pass, which is what
         // `syncLocked` wants. Refreshing here rather than relying on the
         // mouse handler keeps the bands right in a session that has never
@@ -1853,76 +1841,137 @@ pub const Renderer = struct {
             const r = geometry.cellRectPx(d.rect);
             eng.renderer.drawFilledRect(
                 host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-                divider_color,
+                color,
             );
         }
     }
 
-    /// Paints the context switcher (`host/switcher.zig`) while it is open:
-    /// a box centered on the pane it was opened from, one row per context
-    /// in that pane's stack (top first), the selected row highlighted.
+    /// Paints whichever modal list dialog is open (`host/modal_list.zig`:
+    /// the context switcher or the theme switcher), centred on the pane
+    /// it was opened from. Looks like zoe's file finder: the window
+    /// theme's `panel_style` nine-patch one cell out round the content,
+    /// standing off the screen on `Shadow.dialog`, a title bar in the
+    /// finder header colours, and the selected row in the list cursor's.
     /// Cell-aligned like `drawPreedit`, so its text sits on the same grid
-    /// as the content around it. A list longer than the pane scrolls to
-    /// keep the selection in view.
-    fn drawSwitcher(self: *Renderer, eng: *Engine) void {
-        const sw = &self.app.switcher;
-        if (!sw.open) return;
-        const rows = sw.rows();
-        if (rows.len == 0) return;
+    /// as the content around it.
+    ///
+    /// Immediate mode, so the draw order is the engine's per-`end`
+    /// order: textured quads (shadow, then frame), then flat fills (title
+    /// bar, selection), then text.
+    fn drawListDialog(self: *Renderer, eng: *Engine) void {
+        const view = self.app.switcher.view() orelse self.app.theme_switcher.view() orelse return;
 
-        const pane_rect = blk: {
-            const server = self.app.server;
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
-            const pane = server.session.panePtr(sw.pane) orelse return;
-            break :blk pane.rect;
-        };
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
 
-        const head = "Switch to";
-        const foot = "Enter switch  Esc close";
-        const current_tag = "  (current)";
+        const pane = server.session.panePtr(view.pane) orelse return;
+        const area: modal_list.Rect = .{ .row = pane.rect.row, .col = pane.rect.col, .rows = pane.rect.rows, .cols = pane.rect.cols };
+        const lay = modal_list.layout(area, view) orelse return;
 
-        // Width: the longest line plus a cell of margin each side, never
-        // wider than the pane.
-        var want: usize = glyphwire.stringWidth(foot);
-        for (rows, 0..) |e, i| {
-            var w = 4 + glyphwire.stringWidth(e.title());
-            if (i == 0) w += current_tag.len;
-            want = @max(want, w);
-        }
-        const cols = @min(want + 2, pane_rect.cols);
-        // Height: header, entries, footer -- entries trimmed to fit.
-        if (pane_rect.rows < 4 or cols < 8) return;
-        const visible = @min(rows.len, pane_rect.rows - 2);
-        const first = if (sw.selected >= visible) sw.selected - visible + 1 else 0;
-        const height = visible + 2;
-
-        const col0 = pane_rect.col + (pane_rect.cols - cols) / 2;
-        const row0 = pane_rect.row + (pane_rect.rows - height) / 3;
-        const box = geometry.cellRectPx(.{ .row = row0, .col = col0, .rows = height, .cols = cols });
+        // The window theme's, not the pane program's: the dialog is the
+        // host's, and the theme switcher's preview should show on it.
+        const th = &server.session.theme;
+        const header_bg = themeColor(th, .finder_header_bg);
+        const header_fg = themeColor(th, .finder_header_fg);
+        const sel_bg = themeColor(th, .list_cursor_bg);
+        const sel_fg = themeColor(th, .list_cursor_fg);
+        const text_fg = themeColor(th, .popup_fg);
+        const dim_fg = themeColor(th, .fg_dim);
 
         eng.renderer.begin(eng.projMat);
         defer eng.renderer.end();
 
-        const bp: f32 = switcher_border_px;
-        eng.renderer.drawFilledRect(host_eng.RectF{ .l = box.x - bp, .t = box.y - bp, .r = box.x + box.w + bp, .b = box.y + box.h + bp }, switcher_border);
-        eng.renderer.drawFilledRect(host_eng.RectF{ .l = box.x, .t = box.y, .r = box.x + box.w, .b = box.y + box.h }, switcher_bg);
+        const frame = geometry.cellRectPx(.{ .row = lay.frame.row, .col = lay.frame.col, .rows = lay.frame.rows, .cols = lay.frame.cols });
+        const fx: i32 = @intFromFloat(frame.x);
+        const fy: i32 = @intFromFloat(frame.y);
+        const fw: i32 = @intFromFloat(frame.w);
+        const fh: i32 = @intFromFloat(frame.h);
+        self.drawShadowImmediate(eng, glyphwire.Shadow.dialog, fx, fy, fw, fh);
+        if (!self.drawNinePatchImmediate(eng, th.panelStyle(), fx, fy, fw, fh)) {
+            // No such nine-patch: a flat panel in the popup colour.
+            eng.renderer.drawFilledRect(host_eng.RectF{ .l = frame.x, .t = frame.y, .r = frame.x + frame.w, .b = frame.y + frame.h }, themeColor(th, .popup_bg));
+        }
 
-        const inner = cols - 2;
-        _ = drawCellText(eng, head, col0 + 1, row0, inner, switcher_head);
-        for (rows[first .. first + visible], first..) |e, i| {
-            const r = row0 + 1 + (i - first);
-            if (i == sw.selected) {
-                const sel = geometry.cellRectPx(.{ .row = r, .col = col0, .rows = 1, .cols = cols });
-                eng.renderer.drawFilledRect(host_eng.RectF{ .l = sel.x, .t = sel.y, .r = sel.x + sel.w, .b = sel.y + sel.h }, switcher_sel_bg);
-            }
+        const c = lay.content;
+        const inner = c.cols -| 2;
+        fillCells(eng, .{ .row = c.row, .col = c.col, .rows = 1, .cols = c.cols }, header_bg);
+        _ = drawCellText(eng, view.title, c.col + 1, c.row, inner, header_fg);
+
+        for (view.rows[lay.first .. lay.first + lay.visible], lay.first..) |row, i| {
+            const r = c.row + 1 + (i - lay.first);
+            const selected = i == view.selected;
+            if (selected) fillCells(eng, .{ .row = r, .col = c.col, .rows = 1, .cols = c.cols }, sel_bg);
             var num_buf: [4]u8 = undefined;
             const num = if (i < 9) std.fmt.bufPrint(&num_buf, "{d}", .{i + 1}) catch " " else " ";
-            _ = drawCellText(eng, num, col0 + 1, r, inner, switcher_dim);
-            const used = drawCellText(eng, e.title(), col0 + 4, r, inner -| 3, switcher_fg);
-            if (i == 0) _ = drawCellText(eng, current_tag, col0 + 4 + used, r, inner -| (3 + used), switcher_dim);
+            _ = drawCellText(eng, num, c.col + 1, r, inner, if (selected) sel_fg else dim_fg);
+            const text_cols = inner -| modal_list.number_cols;
+            const used = drawCellText(eng, row.text, c.col + 1 + modal_list.number_cols, r, text_cols, if (selected) sel_fg else text_fg);
+            _ = drawCellText(eng, row.tag, c.col + 1 + modal_list.number_cols + used, r, text_cols -| used, if (selected) sel_fg else dim_fg);
         }
-        _ = drawCellText(eng, foot, col0 + 1, row0 + height - 1, inner, switcher_dim);
+        _ = drawCellText(eng, view.foot, c.col + 1, c.row + c.rows - 1, inner, dim_fg);
+    }
+
+    fn fillCells(eng: *Engine, rect: glyphwire.CellRect, color: host_eng.Color) void {
+        const px = geometry.cellRectPx(rect);
+        eng.renderer.drawFilledRect(host_eng.RectF{ .l = px.x, .t = px.y, .r = px.x + px.w, .b = px.y + px.h }, color);
+    }
+
+    /// `emitShadow` for an immediate-mode overlay: the same cached
+    /// texture and split, queued on the renderer's sprite batch.
+    fn drawShadowImmediate(self: *Renderer, eng: *Engine, sh: glyphwire.Shadow, x0: i32, y0: i32, w: i32, h: i32) void {
+        const out = shadow_mod.outset(sh);
+        const dw = w + 2 * out;
+        const dh = h + 2 * out;
+        if (dw <= 0 or dh <= 0) return;
+        const tex = self.shadowTexture(eng, sh) orelse return;
+        const g = shadow_mod.geometry(sh);
+        const left = x0 + sh.x - out;
+        const top = y0 + sh.y - out;
+        const side: f32 = @floatFromInt(g.side);
+        for (glyphwire.ninePatchQuads(g.style(), @intCast(dw), @intCast(dh))) |q| {
+            if (q.dst_w == 0 or q.dst_h == 0 or q.src_w == 0 or q.src_h == 0) continue;
+            eng.renderer.draw(tex, host_eng.RectF.fromPosSize(
+                left + @as(i32, @intCast(q.dst_x)),
+                top + @as(i32, @intCast(q.dst_y)),
+                @intCast(q.dst_w),
+                @intCast(q.dst_h),
+            ), .{
+                .l = @as(f32, @floatFromInt(q.src_x)) / side,
+                .t = @as(f32, @floatFromInt(q.src_y)) / side,
+                .r = @as(f32, @floatFromInt(q.src_x + q.src_w)) / side,
+                .b = @as(f32, @floatFromInt(q.src_y + q.src_h)) / side,
+            });
+        }
+    }
+
+    /// `emitNinePatch` for an immediate-mode overlay: the root context's
+    /// nine-patch style `name` over the `w x h` pixel rect at `(x0, y0)`.
+    /// False when there is no such style (or its image won't load), so
+    /// the caller can draw something flat instead. Call under `ctx_mutex`.
+    fn drawNinePatchImmediate(self: *Renderer, eng: *Engine, name: []const u8, x0: i32, y0: i32, w: i32, h: i32) bool {
+        if (w <= 0 or h <= 0) return false;
+        const root = self.app.server.session.rootContext();
+        const style = root.ninePatchStyle(name) orelse return false;
+        const entry = self.imageEntryIn(glyphwire.root_context_handle, style.image) orelse return false;
+        const tex = self.textureForImage(eng, glyphwire.root_context_handle, style.image) orelse return false;
+        const tex_w: f32 = @floatFromInt(entry.width);
+        const tex_h: f32 = @floatFromInt(entry.height);
+        for (glyphwire.ninePatchQuads(style, @intCast(w), @intCast(h))) |q| {
+            if (q.dst_w == 0 or q.dst_h == 0 or q.src_w == 0 or q.src_h == 0) continue;
+            eng.renderer.draw(tex, host_eng.RectF.fromPosSize(
+                x0 + @as(i32, @intCast(q.dst_x)),
+                y0 + @as(i32, @intCast(q.dst_y)),
+                @intCast(q.dst_w),
+                @intCast(q.dst_h),
+            ), .{
+                .l = @as(f32, @floatFromInt(q.src_x)) / tex_w,
+                .t = @as(f32, @floatFromInt(q.src_y)) / tex_h,
+                .r = @as(f32, @floatFromInt(q.src_x + q.src_w)) / tex_w,
+                .b = @as(f32, @floatFromInt(q.src_y + q.src_h)) / tex_h,
+            });
+        }
+        return true;
     }
 
     /// Paints the profiler overlay in the top-right corner while the HUD
@@ -2132,6 +2181,12 @@ pub const Renderer = struct {
         return host_eng.Color.from(c.r, c.g, c.b, 255);
     }
 
+    /// `th`'s colour for role `r`, for the host's own chrome.
+    fn themeColor(th: *const glyphwire.theme.Stored, r: glyphwire.theme.Role) host_eng.Color {
+        const c = th.theme.roleColor(r);
+        return host_eng.Color.from(c.r, c.g, c.b, c.a);
+    }
+
     fn drawCaret(eng: *Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, crow: usize, ccol: usize, view_offset: usize, shape: CursorShape, color: host_eng.Color) void {
         const cx = origin_x + @as(i32, @intCast(ccol)) * geometry.cell_w;
         const cy = origin_y + @as(i32, @intCast(crow)) * geometry.cell_h;
@@ -2270,17 +2325,19 @@ pub const Renderer = struct {
     /// `drawLayerDividers`.
     fn renderDividers(self: *Renderer, eng: *Engine) void {
         const server = self.app.server;
-        {
+        // The window theme's: a band between panes belongs to no program.
+        const color = blk: {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
             self.app.panes.syncLocked();
-        }
+            break :blk themeColor(&server.session.theme, .pane_divider);
+        };
         for (self.app.panes.bands.items) |d| {
             if (d.level != .pane) continue;
             const r = geometry.cellRectPx(d.rect);
             eng.renderer.drawFilledRect(
                 host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-                pane_divider_color,
+                color,
             );
         }
         // The drag ghost, over the top: the real dividers above are still

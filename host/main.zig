@@ -299,8 +299,9 @@ pub fn main(init: std.process.Init) !void {
     // `theme.lua`: the window's theme -- the colours every program's
     // slot and role references resolve to unless it sets its own. Set on
     // the root context before the server wraps it, so the session starts
-    // from it.
-    ctx.theme.set(themeconf.loadShared(arena, alloc, io, init.environ_map).resolveOrDefault(arena, .{}));
+    // from it. Its `themes` are kept for the theme switcher's list.
+    const shared_themes = themeconf.loadShared(arena, alloc, io, init.environ_map);
+    ctx.theme.set(shared_themes.resolveOrDefault(arena, .{}));
     const icons_dir = try std.fs.path.join(arena, &.{ asset_dir, "icons" });
     icons.loadIconsFromDir(io, alloc, &ctx, icons_dir, "", true);
     // The file-type icon set (`file/*`, aliased `oxygen/*`) comes from
@@ -444,6 +445,8 @@ pub fn main(init: std.process.Init) !void {
         .size = font_cfg.size,
     }, host_cfg.cursor, host_cfg.profile, host_cfg.key_repeat);
     app.switcher.chord = host_cfg.context_switcher;
+    app.theme_switcher.chord = host_cfg.theme_switcher;
+    try app.theme_switcher.setThemes(arena, shared_themes.customs);
 
     // `spawn_in_pane`: a window manager asks the *host* to start programs,
     // because only the host knows what env a child needs in order to find

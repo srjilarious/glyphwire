@@ -157,16 +157,8 @@ pub fn loadConfig(
 
     if (luaStrField(lua, arena, "icon_theme")) |v| cfg.icon_theme = v;
 
-    // A string names the chord; `false` turns the switcher off.
-    if (luaBoolField(lua, "context_switcher_key")) |v| {
-        if (!v) cfg.context_switcher = null;
-    } else if (luaStrField(lua, arena, "context_switcher_key")) |v| {
-        if (config.parseChord(v)) |chord| {
-            cfg.context_switcher = chord;
-        } else {
-            std.log.warn("glyphwire-host: host.conf.lua context_switcher_key '{s}' not a chord; keeping the default", .{v});
-        }
-    }
+    readChordField(lua, arena, "context_switcher_key", &cfg.context_switcher);
+    readChordField(lua, arena, "theme_switcher_key", &cfg.theme_switcher);
 
     const clamped = config.clampFontSize(cfg.font.size);
     if (clamped != cfg.font.size) {
@@ -237,4 +229,19 @@ pub fn loadConfig(
     }
 
     return cfg;
+}
+
+/// A chord key (`context_switcher_key`, `theme_switcher_key`): a string
+/// names the chord, `false` turns its dialog off, and anything else
+/// keeps `out` as it was.
+fn readChordField(lua: *Lua, arena: std.mem.Allocator, comptime name: [:0]const u8, out: *?config.Chord) void {
+    if (luaBoolField(lua, name)) |v| {
+        if (!v) out.* = null;
+    } else if (luaStrField(lua, arena, name)) |v| {
+        if (config.parseChord(v)) |chord| {
+            out.* = chord;
+        } else {
+            std.log.warn("glyphwire-host: host.conf.lua " ++ name ++ " '{s}' not a chord; keeping the default", .{v});
+        }
+    }
 }

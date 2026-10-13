@@ -517,6 +517,34 @@ pub fn setBgOverWireKeepsTextTest(io: std.Io, alloc: std.mem.Allocator) !void {
     ), error.MissingField);
 }
 
+/// `set_fg` is `set_bg` for the text colour: the region's foreground
+/// changes and nothing else does.
+pub fn setFgOverWireKeepsTextAndBackgroundTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"row":2,"col":0,"text":"row two","fg":{"r":9,"g":9,"b":9},"bg":{"r":1,"g":2,"b":3}}}
+    );
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_fg","params":{"row":2,"col":4,"rows":1,"cols":3,"fg":{"role":"list_cursor_fg"}}}
+    );
+    try testz.expectEqualStr("t", ctx.root.cell(2, 4).grapheme());
+    try testz.expectTrue(ctx.root.cell(2, 4).style.fg.eql(glyphwire.Color.role(.list_cursor_fg)));
+    try testz.expectTrue(ctx.root.cell(2, 6).style.fg.eql(glyphwire.Color.role(.list_cursor_fg)));
+    try testz.expectEqual(ctx.root.cell(2, 4).style.bg.color.b, 3);
+    // Outside the region: the old colour, and a blank cell stays blank.
+    try testz.expectEqual(ctx.root.cell(2, 3).style.fg.r, 9);
+    try testz.expectTrue(ctx.root.cell(2, 7).style.fg.eql(ctx.root.cell(9, 0).style.fg));
+
+    // `fg` is required, as `set_bg`'s `bg` is.
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_fg","params":{"row":1}}
+    ), error.MissingField);
+}
+
 pub fn clearBgAndLayerBackgroundOverWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);

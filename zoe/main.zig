@@ -269,6 +269,9 @@ fn runUi(
         // The window gaining or losing the keyboard: zoe paints its own
         // cursor, so it has to be told to hollow it out (see `syncCaret`).
         "focus",
+        // The window theme changed under a zoe that follows it: the
+        // popups' nine-patch frame and the capture table catch up.
+        "theme",
     }) catch return false;
     defer listener.deinit();
 

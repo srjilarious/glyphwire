@@ -702,6 +702,50 @@ pub const Server = struct {
         return changed;
     }
 
+    /// Replaces the window theme (`core.Session.setTheme`) and sends a
+    /// `theme` notification to every `"theme"` subscriber whose context
+    /// follows it. glyphwire-host's theme switcher. A context with its
+    /// own theme hears nothing: nothing it drew changed.
+    pub fn setWindowTheme(self: *Server, alloc: std.mem.Allocator, t: core.theme.Theme) !void {
+        var followers: std.ArrayList(core.ContextHandle) = .empty;
+        defer followers.deinit(alloc);
+        var name_buf: [core.theme.Stored.max_name_len]u8 = undefined;
+        var panel_buf: [core.theme.Stored.max_name_len]u8 = undefined;
+        var name: []const u8 = "";
+        var panel: []const u8 = "";
+        var dark = true;
+        {
+            self.ctx_mutex.lockUncancelable(self.io);
+            defer self.ctx_mutex.unlock(self.io);
+            self.session.setTheme(t);
+            var it = self.session.contexts.iterator();
+            while (it.next()) |e| {
+                if (!e.value_ptr.*.theme_own) try followers.append(alloc, e.key_ptr.*);
+            }
+            // Copied out from under the lock: the stored strings are what
+            // the session keeps, `t`'s may be borrowed.
+            const st = &self.session.theme;
+            name = name_buf[0..st.name().len];
+            @memcpy(name_buf[0..name.len], st.name());
+            panel = panel_buf[0..st.panelStyle().len];
+            @memcpy(panel_buf[0..panel.len], st.panelStyle());
+            dark = st.theme.dark;
+        }
+
+        const body = try rpc.themeNotification(alloc, name, dark, panel);
+        defer alloc.free(body);
+
+        self.registry_mutex.lockUncancelable(self.io);
+        defer self.registry_mutex.unlock(self.io);
+        for (self.connections.items) |conn| {
+            if (!conn.subscriptions.has("theme")) continue;
+            if (std.mem.indexOfScalar(core.ContextHandle, followers.items, conn.active_ctx) == null) continue;
+            conn.send(self.io, body) catch |err| {
+                std.log.err("glyphwire theme notification to a connection failed: {t}", .{err});
+            };
+        }
+    }
+
     /// Re-lays-out the pane tree and tells everyone what moved. Called
     /// after any pane-tree edit (`HandleResult.panes_changed`), after the
     /// window resizes, and after a pane cull.

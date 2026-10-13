@@ -591,6 +591,14 @@ pub const FocusParams = struct { focused: bool };
 /// been backgrounded"; `cols`/`rows` save it a follow-up `get_property`.
 pub const ContextParams = struct { context: u32, cols: usize, rows: usize };
 
+/// `theme` params: the window theme changed (glyphwire-host's theme
+/// switcher). Sent only to connections whose context follows the window
+/// theme -- one that set its own with `set_theme` is unaffected. Every
+/// colour reference already on screen recolours by itself; this is for
+/// what a client resolved on its own: `panel_style` (a nine-patch can't
+/// be recoloured) and blends it computed. `get_theme` has the rest.
+pub const ThemeChangedParams = struct { name: []const u8, dark: bool, panel_style: []const u8 };
+
 // ─── Selection & clipboard ───────────────────────────────────────────────
 
 /// One end of a selection on the wire -- mirrors `core.SelectionPoint`.

@@ -266,6 +266,19 @@ pub const Role = enum(u8) {
     text_literal,
     text_uri,
     text_reference,
+
+    // Appended after the first release of the table (the order is
+    // append-only, see above).
+    /// glyphwire-host's chrome: the band between two split layers inside
+    /// one program, and the brighter one between two gmux panes.
+    divider,
+    pane_divider,
+    /// Text on `list_cursor_bg` / `list_cursor_inactive_bg`. Opt-in: a
+    /// list whose rows carry their own meaning in colour (file kinds,
+    /// syntax) may keep that instead, but on a light theme the focused
+    /// cursor is a saturated fill that only this reads well on.
+    list_cursor_fg,
+    list_cursor_inactive_fg,
 };
 
 pub const role_count = std.enums.values(Role).len;
@@ -780,6 +793,15 @@ pub fn derive(p: Palette, dark: bool) Theme {
     set(&t, .title_inactive_fg, R.r(.fg_dim));
     set(&t, .list_cursor_bg, R.c(header));
     set(&t, .list_cursor_inactive_bg, R.c(mix(bg, rgb(p.bg_hi), 0.7)));
+    // `header` is a dimmed blue on a dark theme and the full accent on a
+    // light one, where only the background colour reads on it.
+    set(&t, .list_cursor_fg, if (dark) R.r(.fg_strong) else R.r(.bg));
+    set(&t, .list_cursor_inactive_fg, R.r(.fg));
+    // Half way to `fg_dim` separates two parts of one program; most of
+    // the way marks a whole other pane. Lands on the host's old fixed
+    // greys for `default`.
+    set(&t, .divider, R.c(mix(bg, rgb(p.fg_dim), 0.5)));
+    set(&t, .pane_divider, R.c(mix(bg, rgb(p.fg_dim), 0.85)));
     set(&t, .keybar_bg, R.r(.bg_dark));
     set(&t, .keybar_key, R.r(.fg));
     set(&t, .keybar_label_bg, R.c(mix(rgb(p.cyan), bg, 0.3)));
@@ -1111,6 +1133,8 @@ const default_ui: []const RolePair = &.{
     .{ .finder_header_fg, 0xebf0fa },
     .{ .finder_selected_bg, 0x4678c8 },
     .{ .finder_selected_fg, 0xf5faff },
+    .{ .divider, 0x3a3a42 },
+    .{ .pane_divider, 0x545460 },
 };
 
 pub const builtins = [_]Spec{

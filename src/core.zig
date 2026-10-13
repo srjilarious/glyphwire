@@ -3911,6 +3911,28 @@ pub const Layer = struct {
         self.render_gen +%= 1;
     }
 
+    /// `fillBg` for the foreground: repaints only the text colour of the
+    /// cells in `[row, row+rows) x [col, col+cols)` (clamped the same
+    /// way), leaving grapheme, background, metadata, icons and the rest
+    /// alone -- `set_fg`. The other half of moving a highlight whose row
+    /// text changes colour with it (a light theme's `list_cursor_fg`):
+    /// the row the cursor lands on takes one `set_fg` over its band, and
+    /// the row it left one per run of its own colours, still a fraction
+    /// of resending the text.
+    pub fn fillFg(self: *Layer, row: usize, col: usize, rows: usize, cols: usize, fg: Color) void {
+        if (row >= self.height or col >= self.width or rows == 0 or cols == 0) return;
+
+        const row_end = @min(row + rows, self.height);
+        const col_end = @min(col + cols, self.width);
+
+        var r = row;
+        while (r < row_end) : (r += 1) {
+            for (self.liveRow(r)[col..col_end]) |*cell_ptr| cell_ptr.style.fg = fg;
+        }
+        self.revision += 1;
+        self.render_gen +%= 1;
+    }
+
     /// Repaints only the *underline* of the cells in
     /// `[row, row+rows) x [col, col+cols)` (clamped like `fillBg`), leaving
     /// everything else on them alone -- `set_underline`, and `fillBg`'s

@@ -14,6 +14,69 @@ const config = hs.config;
 const system_font = hs.system_font;
 const key_repeat = hs.key_repeat;
 const redraw = hs.redraw;
+const modal_list = hs.modal_list;
+
+// ─── modal_list ───────────────────────────────────────────────────────
+
+pub fn modalListLayoutCentresAndFramesTheListTest(_: std.Io, _: std.mem.Allocator) !void {
+    const rows = [_]modal_list.Row{ .{ .text = "shell", .tag = "  (current)" }, .{ .text = "zoe main.zig" } };
+    const view: modal_list.View = .{ .pane = 0, .title = "Switch to", .foot = "Enter switch  Esc close", .rows = &rows, .selected = 1 };
+    const lay = modal_list.layout(.{ .row = 0, .col = 0, .rows = 30, .cols = 80 }, view).?;
+    // Title, both rows, footer; the frame one cell out all round.
+    try testz.expectEqual(lay.content.rows, 4);
+    try testz.expectEqual(lay.visible, 2);
+    try testz.expectEqual(lay.first, 0);
+    try testz.expectEqual(lay.frame.rows, lay.content.rows + 2);
+    try testz.expectEqual(lay.frame.cols, lay.content.cols + 2);
+    try testz.expectEqual(lay.content.row, lay.frame.row + 1);
+    // Wide enough for the longest line (the footer) plus a margin.
+    try testz.expectEqual(lay.content.cols, "Enter switch  Esc close".len + 2);
+    // Centred across.
+    try testz.expectEqual(lay.frame.col, (80 - lay.frame.cols) / 2);
+}
+
+pub fn modalListLayoutScrollsToTheSelectionTest(_: std.Io, _: std.mem.Allocator) !void {
+    var rows: [20]modal_list.Row = undefined;
+    for (&rows) |*r| r.* = .{ .text = "theme" };
+    const view: modal_list.View = .{ .pane = 0, .title = "Theme", .foot = "", .rows = &rows, .selected = 15 };
+    // A 10-row pane fits 6 entries.
+    const lay = modal_list.layout(.{ .row = 5, .col = 40, .rows = 10, .cols = 40 }, view).?;
+    try testz.expectEqual(lay.visible, 6);
+    try testz.expectEqual(lay.first, 10);
+    // Inside the pane.
+    try testz.expectTrue(lay.frame.row >= 5 and lay.frame.row + lay.frame.rows <= 15);
+    try testz.expectTrue(lay.frame.col >= 40 and lay.frame.col + lay.frame.cols <= 80);
+    // Too small for a frame at all.
+    try testz.expectTrue(modal_list.layout(.{ .rows = 4, .cols = 40 }, view) == null);
+}
+
+pub fn modalListWrapMoveWrapsBothWaysTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(modal_list.wrapMove(0, 5, -1), 4);
+    try testz.expectEqual(modal_list.wrapMove(4, 5, 1), 0);
+    try testz.expectEqual(modal_list.wrapMove(2, 5, 1), 3);
+    try testz.expectEqual(modal_list.wrapMove(0, 0, 1), 0);
+}
+
+pub fn themeNamesPutsConfigThemesFirstOnceTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const customs = [_]glyphwire.theme.Custom{
+        .{ .name = "mine", .base = "nord" },
+        // Shadows the built-in: listed once, here.
+        .{ .name = "dracula", .base = "dracula" },
+        // Defined twice: once.
+        .{ .name = "mine", .base = "monokai" },
+        // A base that never reaches a built-in can't be picked.
+        .{ .name = "broken", .base = "nowhere" },
+    };
+    const names = try modal_list.themeNames(alloc, &customs);
+    defer alloc.free(names);
+    try testz.expectEqualStr(names[0], "mine");
+    try testz.expectEqualStr(names[1], "dracula");
+    try testz.expectEqual(names.len, 2 + glyphwire.theme.builtins.len - 1);
+    for (names, 0..) |n, i| {
+        try testz.expectFalse(std.mem.eql(u8, n, "broken"));
+        for (names[i + 1 ..]) |other| try testz.expectFalse(std.mem.eql(u8, n, other));
+    }
+}
 
 // ─── geometry.resizeEdge* ─────────────────────────────────────────────
 

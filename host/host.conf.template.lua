@@ -103,6 +103,16 @@
 --     -- themselves; pick another here if this one never arrives.
 --     context_switcher_key = "super+f12",
 --
+--     ---- Theme switcher -----------------------------------------------
+--
+--     -- The chord that opens the theme switcher: every built-in theme
+--     -- and every `themes` entry in theme.lua. Moving the selection
+--     -- previews it on the whole window; Enter keeps it, Escape puts
+--     -- back the one you started with. Only for this session -- theme.lua
+--     -- still decides the next one. A program whose own config names a
+--     -- `theme` keeps it. Same chord syntax as above; false turns it off.
+--     theme_switcher_key = "super+f10",
+--
 --     ---- Grid --------------------------------------------------------
 --
 --     -- Initial grid size in cells. The window opens this many cells

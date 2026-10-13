@@ -88,6 +88,8 @@ const bg_title_active = role(.title_bg);
 const bg_title_inactive = role(.title_inactive_bg);
 const bg_cursor = role(.list_cursor_bg);
 const bg_cursor_inactive = role(.list_cursor_inactive_bg);
+const fg_cursor = role(.list_cursor_fg);
+const fg_cursor_inactive = role(.list_cursor_inactive_fg);
 const bg_bar = role(.keybar_bg);
 /// The Ctrl+` shell panel: darker than a pane, so it reads as a terminal
 /// dropped over the file manager rather than as part of it.
@@ -122,6 +124,7 @@ const fg_dialog = role(.dialog_fg);
 // its paths run longer.
 const finder_style: finderpopup.Style = .{
     .selected_bg = bg_cursor,
+    .selected_fg = fg_cursor,
     .text_fg = fg_file,
     .dim_fg = fg_detail,
     .dir_fg = fg_dir,
@@ -472,8 +475,20 @@ pub const Ui = struct {
                 try self.typeToFind(t.text);
             },
             .shutdown => self.quit = true,
+            .theme => try self.themeChanged(),
             else => {},
         }
+    }
+
+    /// The window theme changed under a salacommander that follows it
+    /// (the event only comes then). Every colour drawn is a role, so the
+    /// panes recolour on the host by themselves; the F3 popup's frame is
+    /// a nine-patch picked by name and has to be swapped.
+    fn themeChanged(self: *Ui) !void {
+        self.th = try self.client.getTheme();
+        var style = finder_style;
+        style.frame_style = self.th.panelStyle();
+        try self.finder.setStyle(style);
     }
 
     fn handleResize(self: *Ui, r: glyphwire.ResizeEvent) !void {
@@ -657,8 +672,8 @@ pub const Ui = struct {
     /// and the row it landed on.
     ///
     /// A navigation key only moves the highlight, so it earns `.bg` --
-    /// two backgrounds and the footer. The two mark toggles also change
-    /// the rows' text (the foreground colour, and a `*` in column 0), so
+    /// two rows' colours and the footer. The two mark toggles also change
+    /// the rows' text (a `*` in column 0), so
     /// they earn `.rows`. Either way a move that *scrolls* is still
     /// correct: `renderPaneRows` notices `top` moved and shifts the band,
     /// or gives up and repaints the pane.
@@ -1626,7 +1641,7 @@ pub const Ui = struct {
             if (r < p.top or r >= end) continue;
             if (r >= exposed_from and r < exposed_to) continue; // already drawn
             if (level == .bg) {
-                try self.setRowBg(&b, i, r);
+                try self.setRowColors(&b, i, r, cols);
             } else {
                 try self.writeListRow(&b, i, r, w, cols);
             }
@@ -1782,7 +1797,7 @@ pub const Ui = struct {
     /// on screen, so the pattern doesn't crawl as the pane scrolls. A
     /// two-row entry is one stripe.
     ///
-    /// Split out of `writeRow` because `setRowBg` needs the same answer
+    /// Split out of `writeRow` because `setRowColors` needs the same answer
     /// without the text -- the two have to agree or a highlight move
     /// would leave the wrong stripe behind.
     fn rowBg(p: *const Pane, row: usize, active_pane: bool) glyphwire.Color {
@@ -1790,20 +1805,42 @@ pub const Ui = struct {
         return if (row % 2 == 1) bg_row_alt else bg_pane;
     }
 
-    /// One listing row's background and nothing else -- a single `set_bg`
-    /// over the row's band. This is the whole point of the `.bg` dirty
-    /// level: the row's text, colours and icon are already on the host
-    /// and correct, because nothing but the highlight moved.
-    fn setRowBg(self: *Ui, b: *Batch, i: usize, row: usize) !void {
+    /// A listing row's text colours: `name` for the name column, `detail`
+    /// for everything else on the row (size, date, the permissions line,
+    /// the mark's `*`). The cursor row is all `list_cursor_fg`, which is
+    /// what reads on a light theme's saturated cursor; a marked row is
+    /// all the mark colour. Shared by `writeRow` and `setRowColors` for
+    /// the same reason `rowBg` is.
+    const RowFg = struct { name: glyphwire.Color, detail: glyphwire.Color };
+
+    fn rowFg(p: *const Pane, row: usize, active_pane: bool) RowFg {
+        if (row == p.cursor) {
+            const c = if (active_pane) fg_cursor else fg_cursor_inactive;
+            return .{ .name = c, .detail = c };
+        }
+        if (p.isMarked(row)) return .{ .name = fg_marked, .detail = fg_marked };
+        const name = if (p.entryAt(row)) |e| entryColor(e.*) else fg_dir;
+        return .{ .name = name, .detail = fg_detail };
+    }
+
+    /// One listing row's colours and nothing else: a `set_bg` over the
+    /// row's band, a `set_fg` over it in the detail colour, and one more
+    /// over the name column when that differs. This is the whole point
+    /// of the `.bg` dirty level: the row's text and icon are already on
+    /// the host and correct, because nothing but the highlight moved --
+    /// a few hundred bytes against resending the row.
+    fn setRowColors(self: *Ui, b: *Batch, i: usize, row: usize, cols: Columns) !void {
         const p = &self.panes[i];
         const rh = p.view.rowHeight();
-        try b.setBg(.{
-            .layer = self.pane_layers[i],
-            .row = list_top + (row - p.top) * rh,
-            .rows = rh,
-            .cols = self.paneWidth(i),
-            .bg = rowBg(p, row, i == self.active),
-        });
+        const layer = self.pane_layers[i];
+        const y = list_top + (row - p.top) * rh;
+        const w = self.paneWidth(i);
+        const fg = rowFg(p, row, i == self.active);
+        try b.setBg(.{ .layer = layer, .row = y, .rows = rh, .cols = w, .bg = rowBg(p, row, i == self.active) });
+        try b.setFg(.{ .layer = layer, .row = y, .rows = rh, .cols = w, .fg = fg.detail });
+        if (!fg.name.eql(fg.detail)) {
+            try b.setFg(.{ .layer = layer, .row = y, .col = cols.name_col, .rows = 1, .cols = cols.name_w, .fg = fg.name });
+        }
     }
 
     fn writeRow(b: *Batch, layer: glyphwire.LayerHandle, p: *const Pane, row: usize, y: usize, w: usize, cols: Columns, active_pane: bool) !void {
@@ -1814,10 +1851,11 @@ pub const Ui = struct {
 
         const entry = p.entryAt(row);
         const name = if (entry) |e| e.name else "..";
-        const fg = if (marked) fg_marked else if (entry) |e| entryColor(e.*) else fg_dir;
-        const detail_fg = if (marked) fg_marked else fg_detail;
+        const colors = rowFg(p, row, active_pane);
+        const fg = colors.name;
+        const detail_fg = colors.detail;
 
-        if (marked) try b.writeTextOpts("*", .{ .layer = layer, .row = y, .col = 0, .fg = fg_marked, .bg = bg });
+        if (marked) try b.writeTextOpts("*", .{ .layer = layer, .row = y, .col = 0, .fg = detail_fg, .bg = bg });
 
         var nbuf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
         const name_text = gridlayout.truncateToCols(&nbuf, name, cols.name_w);
@@ -2003,11 +2041,12 @@ fn errorText(err: anyerror) []const u8 {
 pub const PaneDirty = enum {
     /// Nothing changed; nothing is sent.
     none,
-    /// Only the *background* of the row the cursor left and the row it
+    /// Only the *colours* of the row the cursor left and the row it
     /// landed on, plus the footer: the highlight moved and nothing else
-    /// did, so their text is already right on the host. Two `set_bg`
-    /// messages, a few hundred bytes -- the cheapest a cursor move can
-    /// be, and what every navigation key earns.
+    /// did, so their text is already right on the host. A `set_bg` and
+    /// one or two `set_fg`s per row (`setRowColors`; the cursor row's
+    /// text is `list_cursor_fg`), a few hundred bytes -- the cheapest a
+    /// cursor move can be, and what every navigation key earns.
     bg,
     /// The row the cursor left and the row it landed on redrawn in full,
     /// plus the footer (its selection summary follows the cursor). What a
