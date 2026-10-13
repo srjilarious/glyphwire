@@ -14,6 +14,9 @@
 //!
 //!  - `sh.setenv(name, value)` / `sh.unsetenv(name)` -- change this
 //!    shell's environment *and* every child it launches afterwards.
+//!    `value` has `~`, `$NAME` and `${NAME}` expanded first, as in a
+//!    shell rc file; `sh.setenv(name, value, { raw = true })` stores it
+//!    as written, and `sh.expand(s)` applies the expansion on its own.
 //!    `sh.getenv(name)` reads the live view (anything a script set this
 //!    session included); `sh.cwd()` and `sh.realpath(path)` are the two
 //!    path helpers Lua's stdlib doesn't provide.
@@ -46,6 +49,7 @@ const std = @import("std");
 const ziglua = @import("ziglua");
 const Lua = ziglua.Lua;
 const config = @import("config.zig");
+const wordsplit = @import("applib").wordsplit;
 
 const script_ext = ".lua";
 
@@ -607,6 +611,8 @@ fn installShTable(lua: *Lua) void {
     lua.setField(-2, "unsetenv");
     lua.pushFunction(ziglua.wrap(shGetenv));
     lua.setField(-2, "getenv");
+    lua.pushFunction(ziglua.wrap(shExpand));
+    lua.setField(-2, "expand");
     lua.pushFunction(ziglua.wrap(shCwd));
     lua.setField(-2, "cwd");
     lua.pushFunction(ziglua.wrap(shChdir));
@@ -635,6 +641,9 @@ fn overrideTableFn(lua: *Lua, table: [:0]const u8, field: [:0]const u8, f: ziglu
 
 // ─── C-ABI Lua callbacks ─────────────────────────────────────────────
 
+/// `sh.setenv(name, value [, opts])`. `value` is expanded first (see
+/// `expandValue`) unless `opts.raw` is true, so `sh.setenv("PATH",
+/// "~/bin:$PATH")` does what the same line does in a shell rc file.
 fn shSetenv(lua: *Lua) i32 {
     const e = g_engine orelse return 0;
     const name = lua.checkString(1);
@@ -643,8 +652,99 @@ fn shSetenv(lua: *Lua) i32 {
         lua.raiseErrorStr("sh.setenv: invalid variable name", .{});
     if (std.mem.indexOfScalar(u8, value, 0) != null)
         lua.raiseErrorStr("sh.setenv: value must not contain a NUL byte", .{});
-    e.hooks.setenv(e.hooks.ctx, name, value);
+
+    var raw = false;
+    if (lua.typeOf(3) == .table) {
+        _ = lua.getField(3, "raw");
+        raw = lua.toBoolean(-1);
+        lua.pop(1);
+    }
+    if (raw) {
+        e.hooks.setenv(e.hooks.ctx, name, value);
+        return 0;
+    }
+
+    // An expanded value can't pick up a NUL: nothing in the environment
+    // holds one.
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(e.alloc);
+    expandValue(e.alloc, &out, value, e.hooks) catch return 0;
+    e.hooks.setenv(e.hooks.ctx, name, out.items);
     return 0;
+}
+
+/// `sh.expand(s)` -- `s` with the same expansion `sh.setenv` applies,
+/// for building a value by hand or passing a path to something else.
+fn shExpand(lua: *Lua) i32 {
+    const e = g_engine orelse return 0;
+    const s = lua.checkString(1);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(e.alloc);
+    expandValue(e.alloc, &out, s, e.hooks) catch {
+        lua.pushNil();
+        return 1;
+    };
+    _ = lua.pushString(out.items);
+    return 1;
+}
+
+/// Expands an environment value the way a shell expands the right-hand
+/// side of `NAME=value`, appending the result to `out`:
+///
+///   * `$NAME` and `${NAME}` become the live value from `hooks.getenv`;
+///     an unset name is empty. A `$` that doesn't start one of those
+///     shapes (`$`, `$5`, `${bad name}`) stays literal.
+///   * a `~` at the start or right after a `:`, followed by `/`, `:` or
+///     the end, becomes `$HOME` (bash does the same for assignments, so
+///     `~/bin:~/go/bin:$PATH` works). `~user` is not supported, and with
+///     no `HOME` the `~` stays.
+///
+/// There is no quoting or backslash escaping: the value is already a Lua
+/// string, not a shell word. A value that needs a literal `$name` goes
+/// through `sh.setenv`'s `{ raw = true }` instead.
+fn expandValue(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    value: []const u8,
+    hooks: HostHooks,
+) std.mem.Allocator.Error!void {
+    var i: usize = 0;
+    while (i < value.len) {
+        const c = value[i];
+
+        if (c == '~' and (i == 0 or value[i - 1] == ':') and
+            (i + 1 == value.len or value[i + 1] == '/' or value[i + 1] == ':'))
+        {
+            if (hooks.getenv(hooks.ctx, "HOME")) |home| {
+                try out.appendSlice(alloc, home);
+                i += 1;
+                continue;
+            }
+        }
+
+        if (c == '$' and i + 1 < value.len) {
+            if (value[i + 1] == '{') {
+                if (std.mem.indexOfScalarPos(u8, value, i + 2, '}')) |close| {
+                    const name = value[i + 2 .. close];
+                    if (name.len > 0 and wordsplit.nameEnd(name, 0) == name.len) {
+                        if (hooks.getenv(hooks.ctx, name)) |v| try out.appendSlice(alloc, v);
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            } else {
+                const name_end = wordsplit.nameEnd(value, i + 1);
+                if (name_end > i + 1) {
+                    if (hooks.getenv(hooks.ctx, value[i + 1 .. name_end])) |v| try out.appendSlice(alloc, v);
+                    i = name_end;
+                    continue;
+                }
+            }
+        }
+
+        try out.append(alloc, c);
+        i += 1;
+    }
 }
 
 fn shUnsetenv(lua: *Lua) i32 {

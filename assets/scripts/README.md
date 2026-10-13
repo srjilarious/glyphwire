@@ -43,9 +43,11 @@ shadow the real `cd`; a `ls.lua` does shadow `/usr/bin/ls`.
 
 | call | effect |
 |---|---|
-| `sh.setenv(name, value)` | set a variable for this shell **and every command it launches afterwards** |
+| `sh.setenv(name, value)` | set a variable for this shell **and every command it launches afterwards**. A leading `~` (or one after a `:`), `$NAME` and `${NAME}` in `value` are expanded first, so `sh.setenv("PATH", "~/bin:$PATH")` works; an unset name is empty |
+| `sh.setenv(name, value, { raw = true })` | the same, but `value` is stored exactly as written |
 | `sh.unsetenv(name)` | remove one |
 | `sh.getenv(name)` | the shell's live value (script-set values included), or `nil` |
+| `sh.expand(s)` | `s` with `sh.setenv`'s expansion applied |
 | `sh.cwd()` | absolute working directory |
 | `sh.realpath(path)` | canonical absolute path, or `nil` if it doesn't resolve on disk |
 | `sh.chdir(path)` | change this shell's working directory; `true`/`false` |

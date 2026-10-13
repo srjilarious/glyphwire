@@ -182,9 +182,15 @@
 --
 -- The `sh` table:
 --   sh.setenv(name, value)   set a variable for this shell and every
---                            command it launches afterwards
+--                            command it launches afterwards. A
+--                            leading ~ (or one after a ':'), $NAME
+--                            and ${NAME} are expanded first, so
+--                            sh.setenv("PATH", "~/bin:$PATH") works
+--   sh.setenv(name, value, { raw = true })
+--                            the same, but stores value as written
 --   sh.unsetenv(name)        remove one
 --   sh.getenv(name)          the shell's live value, or nil
+--   sh.expand(s)             s with sh.setenv's expansion applied
 --   sh.cwd()                 absolute working directory
 --   sh.realpath(path)        canonical absolute path, or nil if it
 --                            doesn't resolve on disk

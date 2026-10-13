@@ -196,6 +196,68 @@ pub fn shSetenvReachesTheHostTest(io: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqualStr("yes", host.env.get("GW_TEST").?);
 }
 
+pub fn shSetenvExpandsTildeAndVariablesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    tSetenv(&host, "HOME", "/home/u");
+    tSetenv(&host, "PATH", "/usr/bin");
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    // A `~` after each `:` expands too, as in a bash assignment.
+    try eng.runConf("sh.setenv('PATH', '~/bin:~/go/bin:$PATH')");
+    try testz.expectEqual(eng.conf_err, null);
+    try testz.expectEqualStr("/home/u/bin:/home/u/go/bin:/usr/bin", host.env.get("PATH").?);
+
+    try eng.runConf("sh.setenv('GW_BRACED', '${HOME}x/~')");
+    try testz.expectEqualStr("/home/ux/~", host.env.get("GW_BRACED").?);
+
+    // An unset variable is empty; `~user` and a mid-word `~` stay.
+    try eng.runConf("sh.setenv('GW_MIX', 'a$GW_UNSET-b ~user a~')");
+    try testz.expectEqualStr("a-b ~user a~", host.env.get("GW_MIX").?);
+}
+
+pub fn shSetenvKeepsDollarsThatAreNotVariablesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf("sh.setenv('GW_DOLLARS', 'cost $5 ${bad name} ${open $')");
+    try testz.expectEqual(eng.conf_err, null);
+    try testz.expectEqualStr("cost $5 ${bad name} ${open $", host.env.get("GW_DOLLARS").?);
+}
+
+pub fn shSetenvRawStoresTheValueAsWrittenTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    tSetenv(&host, "HOME", "/home/u");
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf("sh.setenv('GW_RAW', '~/x:$HOME', { raw = true })");
+    try testz.expectEqual(eng.conf_err, null);
+    try testz.expectEqualStr("~/x:$HOME", host.env.get("GW_RAW").?);
+
+    // `raw = false` is the same as no options.
+    try eng.runConf("sh.setenv('GW_RAW', '~/x', { raw = false })");
+    try testz.expectEqualStr("/home/u/x", host.env.get("GW_RAW").?);
+}
+
+pub fn shExpandReturnsTheExpandedStringTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var host = TestHost{ .alloc = alloc };
+    defer host.deinit();
+    tSetenv(&host, "HOME", "/home/u");
+    tSetenv(&host, "GW_NAME", "zoe");
+    const eng = try newEngine(io, &host);
+    defer eng.deinit();
+
+    try eng.runConf("defcmd('exp', function() print(sh.expand('~/.config/$GW_NAME')) end)");
+    try testz.expectEqual(eng.conf_err, null);
+    _ = eng.runCommand("exp", &.{});
+    try testz.expectEqualStr("/home/u/.config/zoe\n", host.output());
+}
+
 pub fn shGetenvSeesHostValuesTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var host = TestHost{ .alloc = alloc };
     defer host.deinit();
