@@ -6222,3 +6222,300 @@ pub fn editorConfigTogglesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectTrue(dflt.auto_close);
     try testz.expectTrue(dflt.fold_column);
 }
+
+// ─── :s and ranges ──────────────────────────────────────────────────────
+
+const substitute = zoe.substitute;
+
+pub fn substituteRangeAddressesTest(_: std.Io, _: std.mem.Allocator) !void {
+    const ctx: substitute.Context = .{ .current = 4, .last = 9, .visual = .{ .first = 2, .last = 6 } };
+
+    var p = substitute.parseRange("%s/a/b/", ctx);
+    try testz.expectEqual(p.range.?.first, 0);
+    try testz.expectEqual(p.range.?.last, 9);
+    try testz.expectTrue(p.explicit);
+    try testz.expectEqualStr(p.rest, "s/a/b/");
+
+    p = substitute.parseRange("3,$s", ctx);
+    try testz.expectEqual(p.range.?.first, 2);
+    try testz.expectEqual(p.range.?.last, 9);
+
+    p = substitute.parseRange(".,+2", ctx);
+    try testz.expectEqual(p.range.?.first, 4);
+    try testz.expectEqual(p.range.?.last, 6);
+    try testz.expectEqualStr(p.rest, "");
+
+    p = substitute.parseRange("'<,'>s", ctx);
+    try testz.expectEqual(p.range.?.first, 2);
+    try testz.expectEqual(p.range.?.last, 6);
+    try testz.expectTrue(p.explicit);
+
+    // Backwards is turned round; offsets stack; a bare `-` is one.
+    p = substitute.parseRange("$-1,2", ctx);
+    try testz.expectEqual(p.range.?.first, 1);
+    try testz.expectEqual(p.range.?.last, 8);
+    p = substitute.parseRange("-", ctx);
+    try testz.expectEqual(p.range.?.first, 3);
+    try testz.expectFalse(p.explicit);
+
+    // No address: no range, the whole line is the command.
+    p = substitute.parseRange("set wrap", ctx);
+    try testz.expectEqual(p.range, null);
+    try testz.expectEqualStr(p.rest, "set wrap");
+}
+
+pub fn substituteRangeErrorsAreKeptNotReturnedTest(_: std.Io, _: std.mem.Allocator) !void {
+    const ctx: substitute.Context = .{ .current = 0, .last = 4 };
+    var p = substitute.parseRange("1,99s/a/b/", ctx);
+    try testz.expectEqual(p.err.?, .invalid_range);
+    try testz.expectEqualStr(p.rest, "s/a/b/");
+    p = substitute.parseRange("'<,'>s/a/b/", ctx);
+    try testz.expectEqual(p.err.?, .mark_not_set);
+}
+
+pub fn substituteCommandNameTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqualStr(substitute.commandArg("s/a/b/").?, "/a/b/");
+    try testz.expectEqualStr(substitute.commandArg("substitute#a#b#").?, "#a#b#");
+    try testz.expectEqualStr(substitute.commandArg(" s/a/b/").?, "/a/b/");
+    try testz.expectEqualStr(substitute.commandArg("s").?, "");
+    try testz.expectEqual(substitute.commandArg("set"), null);
+    try testz.expectEqual(substitute.commandArg("sp"), null);
+    try testz.expectEqual(substitute.commandArg("split"), null);
+    try testz.expectEqual(substitute.commandArg("shell"), null);
+}
+
+pub fn substituteParsesEscapesAndFlagsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var c = try substitute.parse(alloc, "/a\\/b\\n/x\\/y/gI");
+    defer c.deinit(alloc);
+    try testz.expectEqualStr(c.pat, "a/b\n");
+    try testz.expectEqualStr(c.rep, "x\\/y");
+    try testz.expectTrue(c.global);
+    try testz.expectEqual(c.case, .exact);
+
+    // No closing delimiter: the replacement runs to the end, or is empty.
+    var d = try substitute.parse(alloc, "#foo#bar");
+    defer d.deinit(alloc);
+    try testz.expectEqualStr(d.rep, "bar");
+    var e = try substitute.parse(alloc, "/foo");
+    defer e.deinit(alloc);
+    try testz.expectEqualStr(e.rep, "");
+
+    try testz.expectError(substitute.parse(alloc, "/a/b/gc"), error.TrailingCharacters);
+    try testz.expectError(substitute.parse(alloc, "xaxbx"), error.BadDelimiter);
+}
+
+pub fn substituteExpandsAmpersandAndEscapesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try substitute.expand(alloc, &out, "[&] \\& \\\\ \\/ \\r\\t \\q", '/', "hit");
+    try testz.expectEqualStr(out.items, "[hit] & \\ / \n\t \\q");
+}
+
+pub fn editorSubstituteCurrentLineFirstMatchTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "aa aa\naa", ":s/aa/b/<cr>", "b aa\naa");
+    try expectEdit(alloc, "aa aa\naa", ":s/aa/b/g<cr>", "b b\naa");
+    try expectEdit(alloc, "aa aa\naa", ":%s/aa/b/g<cr>", "b b\nb");
+    // `&` is the match; smartcase finds both cases.
+    try expectEdit(alloc, "Foo foo", ":s/foo/<lt>&>/g<cr>", "<Foo> <foo>");
+}
+
+pub fn editorSubstituteRangesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "x\nx\nx\nx", ":2,3s/x/y/<cr>", "x\ny\ny\nx");
+    try expectEdit(alloc, "x\nx\nx\nx", "j:.,$s/x/y/<cr>", "x\ny\ny\ny");
+    // From visual mode the line starts with `'<,'>`.
+    try expectEdit(alloc, "x\nx\nx\nx", "jVj:s/x/y/<cr>", "x\ny\ny\nx");
+}
+
+pub fn editorSubstituteNewlinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // `\r` splits a line; `\n` in the pattern joins them.
+    try expectEdit(alloc, "a,b,c", ":s/,/\\r/g<cr>", "a\nb\nc");
+    try expectEdit(alloc, "a\nb\nc", ":%s/\\n/+/g<cr>", "a+b+c");
+}
+
+pub fn editorSubstituteIsOneUndoStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "a\na\na", ":%s/a/b/<cr>u", "a\na\na");
+}
+
+pub fn editorSubstituteReportsAndRepeatsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one two\none\nthree", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, ":%s/one/1/<cr>");
+    try testz.expectEqualStr(ed.status.items, "2 substitutions on 2 lines");
+    // The cursor ends on the last line changed.
+    try testz.expectEqual(ed.buf.lineAt(ed.cursor), 1);
+
+    _ = try keys.feed(&ed, ":s/nope/x/<cr>");
+    try testz.expectEqualStr(ed.status.items, "E486: Pattern not found: nope");
+
+    // A bare `:s` repeats the last one; an empty pattern is the search's.
+    try ed.loadText("one\none", null);
+    _ = try keys.feed(&ed, ":%s/one/1/<cr>");
+    try ed.loadText("one\none", null);
+    _ = try keys.feed(&ed, "j:s<cr>");
+    try expectText(alloc, &ed.buf, "one\n1");
+    _ = try keys.feed(&ed, "/one<cr>:%s//2/<cr>");
+    try expectText(alloc, &ed.buf, "2\n1");
+}
+
+pub fn editorSubstituteRangeErrorsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "a\nb", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, ":1,9s/a/b/<cr>");
+    try testz.expectEqualStr(ed.status.items, "E16: Invalid range");
+    _ = try keys.feed(&ed, ":'<lt>,'>s/a/b/<cr>");
+    try testz.expectEqualStr(ed.status.items, "E20: Mark not set");
+    // A plain out-of-range line jump still clamps, as before.
+    _ = try keys.feed(&ed, ":99<cr>");
+    try testz.expectEqual(ed.buf.lineAt(ed.cursor), 1);
+    try expectText(alloc, &ed.buf, "a\nb");
+}
+
+// ─── Find widget ────────────────────────────────────────────────────────
+
+pub fn findWidgetFindsIncrementallyAndStepsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "cat dog cat dog cat", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "<c-f>");
+    try testz.expectEqual(ed.mode, .find);
+    _ = try keys.feed(&ed, "dog");
+    try testz.expectEqual(ed.cursor, 4);
+    var n = ed.findCount(100);
+    try testz.expectEqual(n.index, 1);
+    try testz.expectEqual(n.total, 2);
+    _ = try keys.feed(&ed, "<cr>");
+    try testz.expectEqual(ed.cursor, 12);
+    // Round the end and back.
+    _ = try keys.feed(&ed, "<cr>");
+    try testz.expectEqual(ed.cursor, 4);
+    _ = try keys.feed(&ed, "<s-cr>");
+    try testz.expectEqual(ed.cursor, 12);
+    n = ed.findCount(100);
+    try testz.expectEqual(n.index, 2);
+
+    // Escape keeps the match and the pattern, so `n` carries on.
+    _ = try keys.feed(&ed, "<esc>");
+    try testz.expectEqual(ed.mode, .normal);
+    try testz.expectEqual(ed.cursor, 12);
+    _ = try keys.feed(&ed, "n");
+    try testz.expectEqual(ed.cursor, 4);
+}
+
+pub fn findWidgetPrefillIsReplacedByTypingTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "alpha beta", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "/alpha<cr><c-f>");
+    try testz.expectEqualStr(ed.cmdline.text(), "alpha");
+    try testz.expectTrue(ed.find_fresh);
+    _ = try keys.feed(&ed, "be");
+    try testz.expectEqualStr(ed.cmdline.text(), "be");
+    try testz.expectEqual(ed.cursor, 6);
+
+    // A word selected on one line is what to find.
+    _ = try keys.feed(&ed, "<esc>0ve<c-f>");
+    try testz.expectEqualStr(ed.cmdline.text(), "alpha");
+    try testz.expectEqual(ed.cursor, 0);
+}
+
+pub fn findWidgetTogglesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "Cat cat category", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "<c-f>cat");
+    try testz.expectEqual(ed.findCount(100).total, 3);
+    _ = try keys.feed(&ed, "<a-c>");
+    try testz.expectTrue(ed.find_case);
+    try testz.expectEqual(ed.findCount(100).total, 2);
+    _ = try keys.feed(&ed, "<a-w>");
+    try testz.expectEqual(ed.findCount(100).total, 1);
+    // The text a host may send with the Alt chord is dropped.
+    _ = try keys.feed(&ed, "<a-c>c");
+    try testz.expectEqualStr(ed.cmdline.text(), "cat");
+    try testz.expectFalse(ed.find_case);
+    // The toggles go with the pattern when the widget closes.
+    _ = try keys.feed(&ed, "<esc>");
+    try testz.expectTrue(ed.search_word);
+}
+
+pub fn findWidgetReplaceOneAndAllTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "a b a b a", null);
+    defer ed.deinit();
+    // Ctrl+H opens on the replace field; Tab goes back to find.
+    _ = try keys.feed(&ed, "<c-h>");
+    try testz.expectEqual(ed.find_field, .replace);
+    try testz.expectTrue(ed.find_show_replace);
+    _ = try keys.feed(&ed, "<tab>a<tab>aa");
+    try testz.expectEqualStr(ed.cmdline.text(), "a");
+    try testz.expectEqualStr(ed.find_replace.text(), "aa");
+
+    // On a match, Enter replaces it and moves past the replacement.
+    _ = try keys.feed(&ed, "<cr>");
+    try expectText(alloc, &ed.buf, "aa b a b a");
+    try testz.expectEqual(ed.cursor, 5);
+    // Replace all takes the first replacement's two `a`s as well.
+    _ = try keys.feed(&ed, "<c-a-cr>");
+    try expectText(alloc, &ed.buf, "aaaa b aa b aa");
+    try testz.expectEqualStr(ed.status.items, "Replaced 4 occurrences");
+    // Replace all is one undo step.
+    _ = try keys.feed(&ed, "<esc>u");
+    try expectText(alloc, &ed.buf, "aa b a b a");
+}
+
+pub fn findWidgetInSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x\nx\nx\nx", null);
+    defer ed.deinit();
+    // Over a selection of several lines the widget finds inside it.
+    _ = try keys.feed(&ed, "jVj<c-h>");
+    try testz.expectTrue(ed.find_in_selection);
+    _ = try keys.feed(&ed, "<tab>x<tab>y<c-a-cr>");
+    try expectText(alloc, &ed.buf, "x\ny\ny\nx");
+    // Alt+L widens it back to the buffer.
+    _ = try keys.feed(&ed, "<a-l><c-a-cr>");
+    try expectText(alloc, &ed.buf, "y\ny\ny\ny");
+}
+
+pub fn findWidgetFromInsertModeReturnsThereTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one two", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i<c-f>two<esc>");
+    try testz.expectEqual(ed.mode, .insert);
+    try testz.expectEqual(ed.cursor, 4);
+}
+
+pub fn findBarLayoutAndHitTest(_: std.Io, _: std.mem.Allocator) !void {
+    const findbar = zoe.findbar;
+    try testz.expectEqual(findbar.layout(20, false), null);
+    const l = findbar.layout(200, true).?;
+    try testz.expectEqual(l.field_cols, findbar.max_field_cols);
+    try testz.expectEqual(l.cols, findbar.fixed_cols + findbar.max_field_cols);
+    try testz.expectEqual(l.rows, 2);
+    try testz.expectEqual(findbar.hit(l, 0, 1).?, .find_field);
+    try testz.expectEqual(findbar.hit(l, 1, 1).?, .replace_field);
+    try testz.expectEqual(findbar.hit(l, 0, l.case_col).?, .case);
+    try testz.expectEqual(findbar.hit(l, 0, l.word_col + 1).?, .word);
+    try testz.expectEqual(findbar.hit(l, 0, l.close_col).?, .close);
+    try testz.expectEqual(findbar.hit(l, 1, l.replace_all_col + 2).?, .replace_all);
+    try testz.expectEqual(findbar.hit(l, 0, l.count_col), null);
+    // Without replace the second row isn't there.
+    const one = findbar.layout(200, false).?;
+    try testz.expectEqual(findbar.hit(one, 1, 1), null);
+    // The rightmost part ends inside the widget.
+    try testz.expectTrue(l.close_col < l.cols);
+}
+
+pub fn findBarFieldScrollsToTheCaretTest(_: std.Io, _: std.mem.Allocator) !void {
+    const findbar = zoe.findbar;
+    try testz.expectEqual(findbar.scrollStart("abcdef", 3, 10), 0);
+    try testz.expectEqual(findbar.scrollStart("abcdefghij", 10, 4), 7);
+    var buf: [32]u8 = undefined;
+    try testz.expectEqualStr(findbar.countText(&buf, 2, 7, 100), "2 of 7");
+    try testz.expectEqualStr(findbar.countText(&buf, 0, 7, 100), "? of 7");
+    try testz.expectEqualStr(findbar.countText(&buf, 1, 100, 100), "1 of 100+");
+    try testz.expectEqualStr(findbar.countText(&buf, 0, 0, 100), "No results");
+}
+
+pub fn keymapCtrlHIsReplaceAndAltHIsHiddenTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
+    defer km.deinit(alloc);
+    try testz.expectEqual(km.lookup(.normal, "h", .{ .ctrl = true }).?, .replace);
+    try testz.expectEqual(km.lookup(.insert, "f", .{ .ctrl = true }).?, .find);
+    try testz.expectEqual(km.lookup(.normal, "h", .{ .alt = true }).?, .toggleHidden);
+}

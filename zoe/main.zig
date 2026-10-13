@@ -40,7 +40,7 @@ const workspace = zoe.workspace;
 //     \\Ctrl+Left/Right jump by word instead, and Ctrl+Home/End go to the
 //     \\start and end of the file). Ctrl+B (or Ctrl+N, e.g. under gmux) toggles
 //     \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
-//     \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
+//     \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Alt+H shows
 //     \\or hides dotfiles and anything .gitignore excludes in the tree; in
 //     \\its / search and Ctrl+P it reveals dotfiles only, so .zig-cache and
 //     \\.venv stay out. Git worktrees inside the folder are searched anyway,
@@ -95,13 +95,21 @@ pub fn main(init: std.process.Init) !void {
         \\Ctrl+Left/Right jump by word instead, and Ctrl+Home/End go to the
         \\start and end of the file). Ctrl+B (or Ctrl+N, e.g. under gmux) toggles
         \\the file tree and focuses it; Ctrl+Tab / Ctrl+Shift+Tab walk the open
-        \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Ctrl+H shows
+        \\buffers (also :bn / :bp, closed with :bd or a tab's ×). Alt+H shows
         \\or hides dotfiles and anything .gitignore excludes in the tree; in
         \\its / search and Ctrl+P it reveals dotfiles only, so .zig-cache and
         \\.venv stay out. Git worktrees inside the folder are searched anyway,
         \\as are zoe.conf.lua's unignore globs. A tab shows a red ✘ when its file
         \\is deleted on disk; file_watch = "poll" | "inotify" | "off" in
         \\zoe.conf.lua picks how zoe notices.
+        \\
+        \\Ctrl+F opens a VS Code style find box over the buffer and Ctrl+H the
+        \\same with a replace row: Enter / Shift+Enter step, Enter in the
+        \\replace field replaces one, Ctrl+Alt+Enter replaces all, and Alt+C,
+        \\Alt+W, Alt+L toggle match case, whole word and in selection.
+        \\:[range]s/pat/rep/[giI] substitutes, with ranges like %, 5,$, .,+3
+        \\and '<,'> (what : from visual mode starts with). Both are literal
+        \\text, like / search.
         \\
         \\In the file tree, j/k/arrows and Page Up/Page Down move and Enter or
         \\Space opens. f jumps to the next name starting with what you type; /

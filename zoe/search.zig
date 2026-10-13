@@ -125,7 +125,7 @@ pub fn backward(buf: *const Buffer, pat: []const u8, opts: Opts, from: usize, wr
 }
 
 /// The last match starting at or after `from` and before `limit`.
-fn lastIn(buf: *const Buffer, pat: []const u8, opts: Opts, from: usize, limit: usize) ?usize {
+pub fn lastIn(buf: *const Buffer, pat: []const u8, opts: Opts, from: usize, limit: usize) ?usize {
     const stop = @min(limit, buf.len());
     if (stop <= from) return null;
     var i = stop;

@@ -8,7 +8,7 @@
 //! of them without code:
 //!
 //!     config = { keys = {
-//!         global = { ["ctrl+h"] = false, ["alt+h"] = "toggleHidden" },
+//!         global = { ["alt+h"] = false, ["ctrl+shift+h"] = "toggleHidden" },
 //!         insert = { ["ctrl+d"] = "deleteWordForward" },
 //!     } }
 //!
@@ -125,6 +125,12 @@ pub const Action = enum {
     foldAll,
     unfoldAll,
 
+    /// VS Code's find widget over the buffer (`Mode.find`): `find`
+    /// opens it with the find field, `replace` with the replace row too.
+    /// Pressed with the widget open they move to that field.
+    find,
+    replace,
+
     /// Insert mode's typing keys. Over a selection they replace it.
     newline,
     insertTab,
@@ -172,6 +178,7 @@ pub const Action = enum {
             .unfold => "Unfold",
             .foldAll => "Fold All",
             .unfoldAll => "Unfold All",
+            .replace => "Find and Replace",
             .paste => "Paste from Clipboard",
             .cut => "Cut to Clipboard",
             else => null,
@@ -203,7 +210,10 @@ pub const global_defaults = [_]Default{
     // A second chord for the same thing: gmux's prefix is Ctrl+B, and
     // the session hands it to gmux before zoe ever sees it.
     .{ .chord = "ctrl+n", .action = .toggleTree },
-    .{ .chord = "ctrl+h", .action = .toggleHidden },
+    // Ctrl+H is VS Code's replace; hidden files moved off it to Alt+H.
+    .{ .chord = "alt+h", .action = .toggleHidden },
+    .{ .chord = "ctrl+f", .action = .find },
+    .{ .chord = "ctrl+h", .action = .replace },
     .{ .chord = "ctrl+grave_accent", .action = .toggleShell },
     .{ .chord = "ctrl+tab", .action = .nextTab },
     .{ .chord = "ctrl+shift+tab", .action = .prevTab },
@@ -212,8 +222,8 @@ pub const global_defaults = [_]Default{
     .{ .chord = "ctrl+F4", .action = .closeTab },
     .{ .chord = "ctrl+shift+n", .action = .newBuffer },
     .{ .chord = "ctrl+w", .action = .windowPrefix },
-    // `h` is deliberately absent: Ctrl+H is hidden files, and focusing
-    // left is already Ctrl+Left and Ctrl+W h.
+    // `h` is deliberately absent: Ctrl+H is replace, and focusing left
+    // is already Ctrl+Left and Ctrl+W h.
     .{ .chord = "ctrl+left", .action = .focusLeft },
     .{ .chord = "ctrl+right", .action = .focusRight },
     .{ .chord = "ctrl+l", .action = .focusRight },

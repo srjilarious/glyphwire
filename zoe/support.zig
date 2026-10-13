@@ -34,6 +34,8 @@ pub const hangup = @import("hangup.zig");
 pub const ext = @import("ext.zig");
 pub const extlist = @import("extlist.zig");
 pub const fold = @import("fold.zig");
+pub const substitute = @import("substitute.zig");
+pub const findbar = @import("findbar.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const GapBuffer = buffer.GapBuffer;

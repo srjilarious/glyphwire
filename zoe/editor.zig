@@ -32,6 +32,7 @@ const search = @import("search.zig");
 const cmdhistory = @import("cmdhistory.zig");
 const actions = @import("actions.zig");
 const fold = @import("fold.zig");
+const substitute = @import("substitute.zig");
 
 const Buffer = buffer.Buffer;
 const Pos = buffer.Pos;
@@ -56,7 +57,31 @@ const Pos = buffer.Pos;
 /// VSCode's kind, and vim's select mode: it covers `[anchor, cursor)`
 /// rather than the cell under the cursor, typing replaces it, and an
 /// unshifted motion drops it back into insert mode.
-pub const Mode = enum { normal, insert, command, visual, visual_line, search, select };
+/// `find` is the Ctrl+F / Ctrl+H widget: the `/` line's incremental
+/// search with VS Code's keys, a replace field, and toggles. Its own mode
+/// because it outlives a single search -- Enter steps to the next match
+/// and stays open -- and because its keys are a field's, not the buffer's.
+pub const Mode = enum { normal, insert, command, visual, visual_line, search, select, find };
+
+/// Which of the find widget's two fields has the keyboard.
+pub const FindField = enum { find, replace };
+
+/// The find widget's controls, for a click on one (`Editor.findCommand`).
+pub const FindCommand = enum {
+    focus_find,
+    focus_replace,
+    toggle_case,
+    toggle_word,
+    toggle_selection,
+    prev,
+    next,
+    close,
+    replace_one,
+    replace_all,
+};
+
+/// A byte range of the buffer, `[lo, hi)`.
+pub const Span = struct { lo: usize, hi: usize };
 
 /// Ceiling on `tab_width`, so an expanding Tab can build its run of
 /// spaces on the stack and a nonsense `:set tabwidth=9999` can't make one
@@ -393,6 +418,41 @@ pub const Editor = struct {
     /// The pattern on the open `/` line matches nothing, so the prompt
     /// draws in the error colour while you keep typing.
     search_failed: bool = false,
+    /// The stored pattern is case-sensitive whatever smartcase would
+    /// say -- set when the find widget's Match Case was on as it closed,
+    /// cleared by a `/`, `?`, `*` or `#`.
+    search_exact: bool = false,
+
+    /// The last `:s`, for a bare `:s` to repeat. Its pattern is the one
+    /// actually used (an empty `:s//x/` stores the search pattern it
+    /// borrowed). Owned.
+    last_sub: ?substitute.Command = null,
+
+    /// The find widget (`Mode.find`). Its find field is `cmdline`, which
+    /// the `:` and `/` lines can't be using while it is open; the replace
+    /// field is its own, and like the toggles it is kept from one opening
+    /// to the next, as VS Code does.
+    find_replace: @import("applib").LineEdit = .{},
+    find_field: FindField = .find,
+    /// The replace row is showing: Ctrl+H opens the widget with it,
+    /// Ctrl+F without.
+    find_show_replace: bool = false,
+    /// Alt+C: match case exactly instead of smartcase.
+    find_case: bool = false,
+    /// Alt+W: whole words only.
+    find_word: bool = false,
+    /// The selection the widget was opened over, kept as it changes size
+    /// under replacements. Alt+L limits finding and replacing to it.
+    find_scope: ?Span = null,
+    find_in_selection: bool = false,
+    /// The find field holds text the widget put there (the last pattern,
+    /// or the selection), drawn selected: the first typed character
+    /// replaces it, as typing into VS Code's prefilled field does.
+    find_fresh: bool = false,
+    /// The letter of the Alt chord just taken as a toggle. The host may
+    /// send the same keystroke as text too, and that text must not land
+    /// in the field.
+    find_swallow: ?u8 = null,
 
     /// `r` was typed and is waiting for the character to replace with.
     /// The count came with it (`3rx`), so it is stashed here too.
@@ -442,6 +502,8 @@ pub const Editor = struct {
         self.status.deinit(self.alloc);
         self.yank.deinit(self.alloc);
         self.search_pat.deinit(self.alloc);
+        if (self.last_sub) |*s| s.deinit(self.alloc);
+        self.find_replace.deinit(self.alloc);
         self.pair_closers.deinit(self.alloc);
         self.hidden.deinit(self.alloc);
         if (self.path) |p| self.alloc.free(p);
@@ -491,6 +553,8 @@ pub const Editor = struct {
         self.search_match = null;
         self.search_hl = false;
         self.search_origin = 0;
+        self.find_scope = null;
+        self.find_in_selection = false;
         self.pair_closers.clearRetainingCapacity();
         self.autoindent_at = null;
         self.hidden_key = null;
@@ -545,6 +609,10 @@ pub const Editor = struct {
                     _ = try self.cmdline.insert(self.alloc, rest);
                     if (self.search_history) |h| h.endBrowse();
                     self.incrementalSearch();
+                    return self.takeYankPending();
+                },
+                .find => {
+                    try self.findText(rest);
                     return self.takeYankPending();
                 },
                 .normal, .visual, .visual_line => {
@@ -659,6 +727,10 @@ pub const Editor = struct {
                     .moved, .ignored, .cancel => return .none,
                 }
             },
+            .find => {
+                try self.findKey(key, mods);
+                return .none;
+            },
         }
     }
 
@@ -680,7 +752,7 @@ pub const Editor = struct {
             .normal => .normal,
             .visual, .visual_line => .visual,
             .insert, .select => .insert,
-            .command, .search => .global,
+            .command, .search, .find => .global,
         };
     }
 
@@ -691,7 +763,7 @@ pub const Editor = struct {
     pub fn runAction(self: *Editor, action: actions.Action) !Outcome {
         switch (self.mode) {
             .normal, .visual, .visual_line, .insert, .select => {},
-            .command, .search => return .none,
+            .command, .search, .find => return .none,
         }
         self.yank_pending = false;
         defer self.settleUndo();
@@ -777,7 +849,7 @@ pub const Editor = struct {
                     },
                     .visual, .visual_line, .select => try self.visualShift(right, n),
                     .insert => try self.shiftCaretLine(right),
-                    .command, .search => {},
+                    .command, .search, .find => {},
                 }
             },
 
@@ -819,6 +891,11 @@ pub const Editor = struct {
                     .unfoldAll => self.openAllFolds(),
                     else => unreachable,
                 }
+            },
+
+            .find, .replace => {
+                self.resetPending();
+                try self.openFind(action == .replace);
             },
 
             // The typing keys only type in insert mode; over a select-mode
@@ -1006,6 +1083,7 @@ pub const Editor = struct {
                 self.cmdline.clear();
             },
             .search => self.leaveSearch(.restore),
+            .find => self.leaveFind(),
             .visual, .visual_line => self.exitVisual(),
             // Straight to normal mode, the way Escape leaves insert mode.
             .select => {
@@ -2755,11 +2833,12 @@ pub const Editor = struct {
                 self.undo_join_next = true;
                 return Outcome{ .paste = .{ .after = false } };
             },
-            // `:` from visual mode just enters the command line (no
-            // `'<,'>` range support yet).
+            // `:` from visual mode starts the line with the selection's
+            // range, so `:s` acts on the selected lines.
             ':' => {
                 self.exitVisual();
                 self.startCommandLine();
+                try self.cmdline.setText(self.alloc, "'<,'>");
             },
             else => {},
         }
@@ -2984,6 +3063,7 @@ pub const Editor = struct {
             self.search_pat.clearRetainingCapacity();
             try self.search_pat.appendSlice(self.alloc, typed);
             self.search_word = false;
+            self.search_exact = false;
         }
         const dir = self.search_dir;
         const origin = self.search_origin;
@@ -3024,6 +3104,7 @@ pub const Editor = struct {
         self.search_pat.clearRetainingCapacity();
         try self.search_pat.appendSlice(self.alloc, text);
         self.search_word = true;
+        self.search_exact = false;
         self.search_hl = true;
         // From the start of the word, so `*` on the middle of one doesn't
         // find the same occurrence it is standing on.
@@ -3083,15 +3164,17 @@ pub const Editor = struct {
     /// when `*` / `#` set it. `ui.zig` needs this to paint the same
     /// matches the cursor jumps between.
     pub fn searchOpts(self: *const Editor) search.Opts {
-        return search.optsFor(self.search_pat.items, self.search_word);
+        var o = search.optsFor(self.search_pat.items, self.search_word);
+        if (self.search_exact) o.ignore_case = false;
+        return o;
     }
 
     /// The pattern `ui.zig` should highlight, or null when there is
     /// nothing to show: no search yet, or `:noh` since the last one.
-    /// While the prompt is open it is the half-typed line, so the
-    /// highlight grows as you type.
+    /// While the prompt or the find widget is open it is the half-typed
+    /// line, so the highlight grows as you type.
     pub fn highlightPattern(self: *const Editor) ?[]const u8 {
-        if (self.mode == .search) {
+        if (self.mode == .search or self.mode == .find) {
             const typed = self.cmdline.text();
             return if (typed.len == 0) null else typed;
         }
@@ -3100,10 +3183,20 @@ pub const Editor = struct {
     }
 
     /// `searchOpts` for whatever `highlightPattern` returned -- the
-    /// half-typed line is never whole-word.
+    /// half-typed `/` line is never whole-word; the find widget's
+    /// toggles say for its own.
     pub fn highlightOpts(self: *const Editor) search.Opts {
         if (self.mode == .search) return search.optsFor(self.cmdline.text(), false);
+        if (self.mode == .find) return self.findOpts();
         return self.searchOpts();
+    }
+
+    /// Where matches may be highlighted: the find widget's selection
+    /// while Alt+L is on, else anywhere (null).
+    pub fn highlightScope(self: *const Editor) ?Span {
+        if (self.mode != .find) return null;
+        if (!self.find_in_selection) return null;
+        return self.find_scope;
     }
 
     /// The character the `/` prompt is drawn with, for the status line.
@@ -3151,6 +3244,28 @@ pub const Editor = struct {
         // `:w` to a bad path) is still there to fix with Up -- vim does
         // the same.
         if (self.cmd_history) |h| try h.record(line);
+
+        // A line range in front of `:s` (`:%s`, `:'<,'>s`, `:5,$s`), or
+        // standing alone as a jump to its last line (`:'<,'>`). A range
+        // in front of anything else is left to the forms below, which
+        // read `:42` and `:+3` their own way.
+        const parsed = substitute.parseRange(line, self.rangeContext());
+        const sub_arg = substitute.commandArg(parsed.rest);
+        if (sub_arg != null or (parsed.explicit and parsed.rest.len == 0)) {
+            if (parsed.err) |e| {
+                switch (e) {
+                    .invalid_range => self.setStatus("E16: Invalid range", .{}),
+                    .mark_not_set => self.setStatus("E20: Mark not set", .{}),
+                }
+                return .none;
+            }
+            if (sub_arg) |arg| {
+                try self.substituteCommand(parsed.range, arg);
+            } else {
+                self.moveTo(motion.gotoLine(&self.buf, parsed.range.?.last), true);
+            }
+            return .none;
+        }
 
         // `:42` -- jump to a line.
         if (allDigits(line)) {
@@ -3421,6 +3536,571 @@ pub const Editor = struct {
             return false;
         }
         return true;
+    }
+
+    // ── :s ──────────────────────────────────────────────────────────────
+
+    /// What a `:` range's addresses mean right now: the cursor's line,
+    /// the last line, and the last visual selection's lines for `'<` and
+    /// `'>`. That selection's ends are clamped, since the text may have
+    /// shrunk under them since.
+    fn rangeContext(self: *const Editor) substitute.Context {
+        const visual: ?substitute.LineRange = if (self.last_visual) |v| blk: {
+            const end = self.buf.len();
+            break :blk .{
+                .first = self.buf.lineAt(@min(@min(v.anchor, v.cursor), end)),
+                .last = self.buf.lineAt(@min(@max(v.anchor, v.cursor), end)),
+            };
+        } else null;
+        return .{
+            .current = self.buf.lineAt(self.cursor),
+            .last = self.buf.lineCount() - 1,
+            .visual = visual,
+        };
+    }
+
+    /// `:[range]s/pat/rep/[flags]`, and a bare `:[range]s` repeating the
+    /// last one. No range is the cursor's line. The whole command is one
+    /// undo step, and the cursor ends on the last line it changed, as in
+    /// vim. See `substitute.zig` for what the pattern and replacement
+    /// mean.
+    fn substituteCommand(self: *Editor, range: ?substitute.LineRange, arg: []const u8) !void {
+        var cmd: substitute.Command = if (arg.len == 0) blk: {
+            // A bare `:s` keeps the pattern and replacement but, as in
+            // vim, not the flags.
+            const last = self.last_sub orelse {
+                self.setStatus("E35: No previous regular expression", .{});
+                return;
+            };
+            break :blk .{
+                .pat = try self.alloc.dupe(u8, last.pat),
+                .rep = try self.alloc.dupe(u8, last.rep),
+                .delim = last.delim,
+            };
+        } else substitute.parse(self.alloc, arg) catch |err| switch (err) {
+            error.BadDelimiter => {
+                self.setStatus("E146: Regular expressions can't be delimited by letters", .{});
+                return;
+            },
+            error.TrailingCharacters => {
+                self.setStatus("E488: Trailing characters: {s}", .{arg});
+                return;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        var cmd_owned = true;
+        defer if (cmd_owned) cmd.deinit(self.alloc);
+
+        // An empty pattern is the last search's, whole-word if that was
+        // a `*`.
+        var whole_word = false;
+        if (cmd.pat.len == 0) {
+            if (self.search_pat.items.len == 0) {
+                self.setStatus("E35: No previous regular expression", .{});
+                return;
+            }
+            self.alloc.free(cmd.pat);
+            // Emptied first, so a failed dupe leaves `deinit` nothing
+            // to free twice.
+            cmd.pat = &.{};
+            cmd.pat = try self.alloc.dupe(u8, self.search_pat.items);
+            whole_word = self.search_word;
+        }
+
+        const r = range orelse blk: {
+            const here = self.buf.lineAt(self.cursor);
+            break :blk substitute.LineRange{ .first = here, .last = here };
+        };
+        const opts = cmd.opts(cmd.pat, whole_word);
+        const matches = try substitute.collect(self.alloc, &self.buf, cmd.pat, opts, r, cmd.global);
+        defer self.alloc.free(matches);
+
+        // The pattern is the one `n` repeats from now on, found or not,
+        // as vim's `:s` leaves it in the search register.
+        self.search_pat.clearRetainingCapacity();
+        try self.search_pat.appendSlice(self.alloc, cmd.pat);
+        self.search_word = whole_word;
+        self.search_exact = cmd.case == .exact;
+        self.search_hl = true;
+
+        if (matches.len == 0) {
+            self.setStatus("E486: Pattern not found: {s}", .{cmd.pat});
+        } else {
+            var lines: usize = 0;
+            var prev_line: ?usize = null;
+            for (matches) |m| {
+                const l = self.buf.lineAt(m.at);
+                if (prev_line != l) lines += 1;
+                prev_line = l;
+            }
+
+            self.resetPending();
+            self.buf.undoCheckpoint(self.cursor);
+            const last_at = try self.replaceMatches(matches, .{ .template = .{ .rep = cmd.rep, .delim = cmd.delim } });
+            self.search_match = null;
+            self.moveTo(motion.gotoLine(&self.buf, self.buf.lineAt(last_at)), true);
+            self.setStatus("{d} substitution{s} on {d} line{s}", .{
+                matches.len, if (matches.len == 1) "" else "s",
+                lines,       if (lines == 1) "" else "s",
+            });
+        }
+
+        if (self.last_sub) |*s| s.deinit(self.alloc);
+        self.last_sub = cmd;
+        cmd_owned = false;
+    }
+
+    /// What `replaceMatches` puts in place of each match.
+    const Replacement = union(enum) {
+        /// The same text every time -- the find widget's.
+        literal: []const u8,
+        /// A `:s` replacement, `&` and all (`substitute.expand`).
+        template: struct { rep: []const u8, delim: u8 },
+    };
+
+    /// Replaces each of `matches` (in buffer order, non-overlapping) and
+    /// returns where the last one's replacement now starts. They are
+    /// applied bottom-up, so each match's offset is still good when its
+    /// turn comes. The cursor, the selection anchor and the find
+    /// widget's scope follow the text around them. Undo grouping is the
+    /// caller's.
+    fn replaceMatches(self: *Editor, matches: []const substitute.Match, with: Replacement) !usize {
+        var piece: std.ArrayList(u8) = .empty;
+        defer piece.deinit(self.alloc);
+        // The total growth before the last match, to find where it ends
+        // up once everything above it has changed too.
+        var growth_before_last: i64 = 0;
+
+        var i = matches.len;
+        while (i > 0) {
+            i -= 1;
+            const m = matches[i];
+            const text: []const u8 = switch (with) {
+                .literal => |l| l,
+                .template => |t| blk: {
+                    piece.clearRetainingCapacity();
+                    const matched = try self.buf.read(self.alloc, m.at, m.at + m.len);
+                    defer self.alloc.free(matched);
+                    try substitute.expand(self.alloc, &piece, t.rep, t.delim, matched);
+                    break :blk piece.items;
+                },
+            };
+            try self.buf.delete(m.at, m.len);
+            try self.buf.insert(m.at, text);
+
+            if (i + 1 < matches.len) growth_before_last += @as(i64, @intCast(text.len)) - @as(i64, @intCast(m.len));
+            self.cursor = shiftPast(self.cursor, m.at, m.len, text.len);
+            if (self.select_anchor) |a| self.select_anchor = shiftPast(a, m.at, m.len, text.len);
+            if (self.find_scope) |*s| {
+                s.lo = shiftPast(s.lo, m.at, m.len, text.len);
+                // The scope's end grows with a replacement that ends on it.
+                s.hi = if (s.hi >= m.at + m.len) s.hi - m.len + text.len else shiftPast(s.hi, m.at, m.len, text.len);
+            }
+        }
+        const last = matches[matches.len - 1].at;
+        return @intCast(@as(i64, @intCast(last)) + growth_before_last);
+    }
+
+    /// Where offset `off` lands once the `gone` bytes at `at` are
+    /// replaced by `added`: after the span it moves by the difference,
+    /// inside it to the span's start.
+    fn shiftPast(off: usize, at: usize, gone: usize, added: usize) usize {
+        if (off >= at + gone) return off - gone + added;
+        if (off > at) return at;
+        return off;
+    }
+
+    // ── Find widget ─────────────────────────────────────────────────────
+    //
+    // Ctrl+F / Ctrl+H. The find field is `cmdline`, and finding is the
+    // `/` line's: incremental from where the widget opened, literal, the
+    // same highlight. What differs is that it stays open -- Enter and
+    // Shift+Enter step through the matches -- and that it can replace.
+    // `zoe/ui.zig` draws it in a box over the buffer's top-right corner;
+    // everything it shows comes from here (`findCount` for the "3 of 12").
+    //
+    // Closing it (Escape) leaves the cursor on the match and the pattern
+    // as the one `n` / `N` repeat, with the widget's toggles.
+
+    /// Ctrl+F (`replace` false) / Ctrl+H. Opened over a selection on
+    /// one line, the selection is what to find; over a longer one it is
+    /// where to find (Alt+L, on). Otherwise the field starts with the
+    /// last search pattern. Either way the text starts out selected.
+    fn openFind(self: *Editor, replace: bool) !void {
+        if (self.mode == .find) {
+            // Already open: the chord moves to its field.
+            if (replace) {
+                self.find_show_replace = true;
+                self.find_field = .replace;
+            } else {
+                self.find_field = .find;
+                self.find_fresh = !self.cmdline.isEmpty();
+            }
+            return;
+        }
+
+        var seed: ?[]u8 = null;
+        defer if (seed) |s| self.alloc.free(s);
+        self.find_scope = null;
+        self.find_in_selection = false;
+        var origin = self.cursor;
+        if (self.selectionSpan()) |span| {
+            const one_line = !span.linewise and self.buf.lineAt(span.lo) == self.buf.lineAt(span.hi -| 1);
+            if (one_line) {
+                seed = try self.buf.read(self.alloc, span.lo, span.hi);
+                origin = span.lo;
+            } else {
+                self.find_scope = .{ .lo = span.lo, .hi = span.hi };
+                self.find_in_selection = true;
+            }
+        }
+        if (self.hasSelection()) self.exitVisual();
+
+        self.search_return = self.mode;
+        self.search_origin = origin;
+        self.search_match = null;
+        self.search_failed = false;
+        self.mode = .find;
+        self.find_field = if (replace) .replace else .find;
+        self.find_show_replace = replace;
+        self.find_swallow = null;
+        try self.cmdline.setText(self.alloc, seed orelse self.search_pat.items);
+        self.find_fresh = !self.cmdline.isEmpty();
+        if (self.search_history) |h| h.endBrowse();
+        self.findIncremental();
+    }
+
+    /// Escape: back to the mode the widget was opened from, on the
+    /// current match, with the pattern kept for `n` and the highlight.
+    fn leaveFind(self: *Editor) void {
+        self.commitFind() catch {};
+        self.mode = self.search_return;
+        self.find_fresh = false;
+        self.find_swallow = null;
+        self.cmdline.clear();
+        if (self.mode == .normal) self.moveTo(motion.clampNormal(&self.buf, self.cursor), true);
+    }
+
+    /// The field as the stored search, so `n`, `N` and the highlight
+    /// carry on from it once the widget closes. Recorded in the `/`
+    /// history too: it is a search.
+    fn commitFind(self: *Editor) !void {
+        const pat = self.cmdline.text();
+        if (pat.len == 0) return;
+        if (self.search_history) |h| try h.record(pat);
+        self.search_pat.clearRetainingCapacity();
+        try self.search_pat.appendSlice(self.alloc, pat);
+        self.search_word = self.find_word;
+        self.search_exact = self.find_case;
+        self.search_dir = .forward;
+        self.search_hl = true;
+    }
+
+    /// How the find field is compared: smartcase, or exact with Alt+C;
+    /// whole words with Alt+W.
+    pub fn findOpts(self: *const Editor) search.Opts {
+        var o = search.optsFor(self.cmdline.text(), self.find_word);
+        if (self.find_case) o.ignore_case = false;
+        return o;
+    }
+
+    /// Where the widget looks: the selection with Alt+L, else the buffer.
+    fn findSpan(self: *const Editor) Span {
+        const end = self.buf.len();
+        if (self.find_in_selection) {
+            if (self.find_scope) |s| return .{ .lo = @min(s.lo, end), .hi = @min(s.hi, end) };
+        }
+        return .{ .lo = 0, .hi = end };
+    }
+
+    /// The match nearest `from` in `dir` inside the widget's span,
+    /// wrapping round it. `inclusive` lets a match starting at `from`
+    /// count, which typing wants (the match under the cursor stays put)
+    /// and Enter doesn't (it moves on).
+    fn findNear(self: *const Editor, from: usize, dir: SearchDir, inclusive: bool) ?search.Hit {
+        const pat = self.cmdline.text();
+        if (pat.len == 0) return null;
+        const opts = self.findOpts();
+        const span = self.findSpan();
+        if (span.hi < span.lo + pat.len) return null;
+        // Matches must fit, so they can only start this far in.
+        const starts_end = span.hi - pat.len + 1;
+        const buf = &self.buf;
+        switch (dir) {
+            .forward => {
+                const start = std.math.clamp(if (inclusive) from else from + 1, span.lo, starts_end);
+                if (search.firstIn(buf, pat, opts, start, starts_end)) |at| return .{ .at = at };
+                if (search.firstIn(buf, pat, opts, span.lo, start)) |at| return .{ .at = at, .wrapped = true };
+            },
+            .backward => {
+                const stop = std.math.clamp(if (inclusive) from + 1 else from, span.lo, starts_end);
+                if (search.lastIn(buf, pat, opts, span.lo, stop)) |at| return .{ .at = at };
+                if (search.lastIn(buf, pat, opts, stop, starts_end)) |at| return .{ .at = at, .wrapped = true };
+            },
+        }
+        return null;
+    }
+
+    /// Re-runs the find from where the widget opened, after the field
+    /// changed or a toggle flipped.
+    fn findIncremental(self: *Editor) void {
+        if (self.cmdline.isEmpty()) {
+            self.search_match = null;
+            self.search_failed = false;
+            self.moveTo(self.search_origin, true);
+            return;
+        }
+        if (self.findNear(self.search_origin, .forward, true)) |h| {
+            self.search_failed = false;
+            self.search_match = h.at;
+            self.moveTo(h.at, true);
+        } else {
+            self.search_failed = true;
+            self.search_match = null;
+            self.moveTo(self.search_origin, true);
+        }
+    }
+
+    /// Enter / Shift+Enter in the find field: the next or previous match.
+    fn findStep(self: *Editor, dir: SearchDir) void {
+        const from = self.search_match orelse self.cursor;
+        const hit = self.findNear(from, dir, false) orelse {
+            self.search_failed = !self.cmdline.isEmpty();
+            return;
+        };
+        self.search_failed = false;
+        self.search_match = hit.at;
+        self.moveTo(hit.at, true);
+        // The origin follows, so editing the field after stepping keeps
+        // the match it is on rather than going back to where it began.
+        self.search_origin = hit.at;
+    }
+
+    /// Enter in the replace field: the match the cursor is on becomes
+    /// the replacement and the next match is found. Off a match it only
+    /// finds one, so a first press shows what the next would replace,
+    /// as VS Code does.
+    fn findReplaceOne(self: *Editor) !void {
+        const pat = self.cmdline.text();
+        if (pat.len == 0) return;
+        const span = self.findSpan();
+        if (self.search_match) |at| {
+            if (at >= span.lo and at + pat.len <= span.hi and search.matchAt(&self.buf, pat, self.findOpts(), at)) {
+                self.buf.undoCheckpoint(self.cursor);
+                const rep = self.find_replace.text();
+                _ = try self.replaceMatches(&.{.{ .at = at, .len = pat.len }}, .{ .literal = rep });
+                // On from the end of the replacement, never inside it:
+                // replacing `a` with `aa` must not find its own `a`.
+                const after = at + rep.len;
+                self.search_match = null;
+                self.moveTo(after, true);
+                if (self.findNear(after, .forward, true)) |h| {
+                    self.search_match = h.at;
+                    self.search_origin = h.at;
+                    self.moveTo(h.at, true);
+                } else {
+                    self.search_failed = true;
+                    self.search_origin = after;
+                }
+                return;
+            }
+        }
+        self.findStep(.forward);
+    }
+
+    /// Ctrl+Alt+Enter: every match in the widget's span, as one undo
+    /// step.
+    fn findReplaceAll(self: *Editor) !void {
+        const pat = self.cmdline.text();
+        if (pat.len == 0) return;
+        const span = self.findSpan();
+        const matches = try substitute.collectSpan(self.alloc, &self.buf, pat, self.findOpts(), span.lo, span.hi);
+        defer self.alloc.free(matches);
+        if (matches.len == 0) {
+            self.setStatus("No results", .{});
+            return;
+        }
+        self.buf.undoCheckpoint(self.cursor);
+        _ = try self.replaceMatches(matches, .{ .literal = self.find_replace.text() });
+        self.search_match = null;
+        self.search_failed = true;
+        self.search_origin = self.cursor;
+        self.setStatus("Replaced {d} occurrence{s}", .{ matches.len, if (matches.len == 1) "" else "s" });
+    }
+
+    /// The current match's place among all of them in the span (1-based;
+    /// 0 when the cursor isn't on one) and how many there are, counting
+    /// no further than `cap`. What the widget's "3 of 12" shows.
+    pub fn findCount(self: *const Editor, cap: usize) struct { index: usize, total: usize } {
+        const pat = self.cmdline.text();
+        if (pat.len == 0) return .{ .index = 0, .total = 0 };
+        const opts = self.findOpts();
+        const span = self.findSpan();
+        if (span.hi < span.lo + pat.len) return .{ .index = 0, .total = 0 };
+        const starts_end = span.hi - pat.len + 1;
+        var total: usize = 0;
+        var index: usize = 0;
+        var from = span.lo;
+        while (total < cap) {
+            const at = search.firstIn(&self.buf, pat, opts, from, starts_end) orelse break;
+            total += 1;
+            if (self.search_match == at) index = total;
+            from = at + pat.len;
+        }
+        return .{ .index = index, .total = total };
+    }
+
+    /// Closes the find widget, as Escape does. A no-op when it isn't
+    /// open -- for the host, which closes it on a click in the buffer.
+    pub fn closeFind(self: *Editor) void {
+        if (self.mode != .find) return;
+        self.leaveFind();
+        self.buf.closeUndoGroup();
+    }
+
+    /// One of the widget's controls, run the way its key would. The
+    /// host calls this for a click on it (`zoe/findbar.zig`).
+    pub fn findCommand(self: *Editor, cmd: FindCommand) !void {
+        if (self.mode != .find) return;
+        defer self.settleUndo();
+        self.find_swallow = null;
+        switch (cmd) {
+            .focus_find => {
+                self.find_field = .find;
+                self.find_fresh = false;
+            },
+            .focus_replace => {
+                self.find_field = .replace;
+                self.find_fresh = false;
+            },
+            .toggle_case => {
+                self.find_case = !self.find_case;
+                self.findIncremental();
+            },
+            .toggle_word => {
+                self.find_word = !self.find_word;
+                self.findIncremental();
+            },
+            .toggle_selection => {
+                if (self.find_scope == null) {
+                    self.setStatus("No selection to find in", .{});
+                    return;
+                }
+                self.find_in_selection = !self.find_in_selection;
+                self.findIncremental();
+            },
+            .prev => self.findStep(.backward),
+            .next => self.findStep(.forward),
+            .close => self.leaveFind(),
+            .replace_one => try self.findReplaceOne(),
+            .replace_all => try self.findReplaceAll(),
+        }
+    }
+
+    /// The field with the keyboard.
+    pub fn findLine(self: *Editor) *@import("applib").LineEdit {
+        return if (self.find_field == .find) &self.cmdline else &self.find_replace;
+    }
+
+    /// Typed text in the widget: into the field with the keyboard, over
+    /// its prefilled text if that hasn't been touched yet.
+    fn findText(self: *Editor, text: []const u8) !void {
+        if (self.find_swallow) |c| {
+            self.find_swallow = null;
+            if (text.len == 1 and std.ascii.toLower(text[0]) == c) return;
+        }
+        const line = self.findLine();
+        if (self.find_fresh and self.find_field == .find) line.clear();
+        self.find_fresh = false;
+        _ = try line.insert(self.alloc, text);
+        if (self.find_field == .find) {
+            if (self.search_history) |h| h.endBrowse();
+            self.findIncremental();
+        }
+    }
+
+    /// A named key in the widget. The fields' editing keys are
+    /// `LineEdit`'s; these are the widget's own:
+    ///
+    ///  - Enter / Shift+Enter       next / previous match (find field),
+    ///                              replace this one (replace field)
+    ///  - Ctrl+Alt+Enter            replace all
+    ///  - F3 / Shift+F3             next / previous, from either field
+    ///  - Tab / Shift+Tab           the other field, with replace showing
+    ///  - Alt+C / Alt+W / Alt+L     match case, whole word, in selection
+    ///  - Up / Down                 the `/` history (find field)
+    ///  - Ctrl+F / Ctrl+H           whatever `find` / `replace` are bound to
+    fn findKey(self: *Editor, key: []const u8, mods: Mods) !void {
+        const eq = std.mem.eql;
+        self.find_swallow = null;
+
+        if (self.lookupKey(key, mods)) |a| switch (a) {
+            .find, .replace => return self.openFind(a == .replace),
+            else => {},
+        };
+
+        if (mods.alt and !mods.ctrl and key.len == 1) {
+            const c = std.ascii.toLower(key[0]);
+            const toggle: ?FindCommand = switch (c) {
+                'c' => .toggle_case,
+                'w' => .toggle_word,
+                'l' => .toggle_selection,
+                else => null,
+            };
+            if (toggle) |t| {
+                try self.findCommand(t);
+                self.find_swallow = c;
+                return;
+            }
+        }
+
+        if (eq(u8, key, "enter") or eq(u8, key, "kp_enter")) {
+            if (mods.ctrl and mods.alt) return self.findReplaceAll();
+            if (self.find_field == .replace and !mods.shift) return self.findReplaceOne();
+            self.findStep(if (mods.shift) .backward else .forward);
+            return;
+        }
+        if (eq(u8, key, "F3")) {
+            self.findStep(if (mods.shift) .backward else .forward);
+            return;
+        }
+        if (eq(u8, key, "tab") and !mods.ctrl and !mods.alt) {
+            if (self.find_show_replace) {
+                self.find_field = if (self.find_field == .find) .replace else .find;
+                self.find_fresh = false;
+            }
+            return;
+        }
+        if (self.find_field == .find) {
+            if (try self.browseHistory(self.search_history, key, mods)) {
+                self.find_fresh = false;
+                self.findIncremental();
+                return;
+            }
+        }
+
+        const line = self.findLine();
+        // A key that edits the prefilled text replaces it, the way a
+        // typed character does; one that moves the caret keeps it.
+        if (self.find_fresh and self.find_field == .find and
+            (eq(u8, key, "backspace") or eq(u8, key, "delete")))
+        {
+            line.clear();
+            self.find_fresh = false;
+            self.findIncremental();
+            return;
+        }
+        switch (line.handleKey(key, mods)) {
+            .edited => {
+                self.find_fresh = false;
+                if (self.find_field == .find) {
+                    if (self.search_history) |h| h.endBrowse();
+                    self.findIncremental();
+                }
+            },
+            .moved => self.find_fresh = false,
+            .submit, .ignored, .cancel => {},
+        }
     }
 };
 

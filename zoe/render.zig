@@ -103,6 +103,9 @@ pub fn render(self: *Ui) !void {
     if (self.completion_dirty or (self.completion != null and focused_buffer_dirty))
         try self.renderCompletion(&batch);
     if (self.path_menu_dirty) try self.renderPathMenu(&batch);
+    // With the statusline, which every input repaints, and with the
+    // buffer, whose pane it is placed against.
+    if (self.status_dirty or focused_buffer_dirty) try self.renderFindBar(&batch);
     if (self.tab_tip_dirty) try self.renderTabTip(&batch);
     self.prof.addNet(.paint, t_build, nested_before);
 
@@ -1076,12 +1079,17 @@ pub fn paintMatchRow(
     const pat = self.buf.ed.highlightPattern() orelse return;
     const line = rv.line;
     const opts = self.buf.ed.highlightOpts();
+    // The find widget's Alt+L: only the matches it would find.
+    const scope = self.buf.ed.highlightScope();
     const ls = self.buf.ed.buf.lineStart(line);
     const line_end = self.buf.ed.buf.lineEnd(line);
 
     var at = ls;
     while (search.firstIn(&self.buf.ed.buf, pat, opts, at, line_end)) |hit| {
         at = hit + 1;
+        if (scope) |s| {
+            if (hit < s.lo or hit + pat.len > s.hi) continue;
+        }
         // A match running off the end of its line is clipped to it:
         // the rest belongs to the row below, which paints its own.
         const hi = @min(hit + pat.len, line_end);
@@ -2169,6 +2177,7 @@ pub fn modeName(mode: editor.Mode) []const u8 {
         .visual_line => "V-LINE",
         .search => "SEARCH",
         .select => "SELECT",
+        .find => "FIND",
     };
 }
 

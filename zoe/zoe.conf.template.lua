@@ -306,8 +306,8 @@
 --     -- the same way: `["ctrl+t"] = "taskToggle"`.
 --     keys = {
 --         global = {
---             -- ["ctrl+h"] = false,
---             -- ["alt+h"]  = "toggleHidden",
+--             -- ["ctrl+h"] = "toggleHidden",  -- hidden files back on Ctrl+H,
+--             -- ["alt+h"]  = "replace",       -- replace onto Alt+H
 --         },
 --         normal = {},
 --         visual = {},

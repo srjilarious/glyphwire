@@ -13,7 +13,7 @@ own (`normal`, `visual`, `insert`), then `global`. `zoe.conf.lua`'s
 
 ```lua
 config = { keys = {
-    global = { ["ctrl+h"] = false, ["alt+h"] = "toggleHidden" },
+    global = { ["alt+h"] = false, ["ctrl+shift+h"] = "toggleHidden" },
     insert = { ["ctrl+d"] = "deleteWordForward" },
 } }
 ```
@@ -27,8 +27,8 @@ defaults, which `keys` overrides. See [zoe-extensions.md](zoe-extensions.md).
 
 Not rebindable: unmodified letters in normal and visual mode (vim's
 grammar of counts, operators and prefixes, in `zoe/editor.zig`), Escape,
-the `:` / `/` line's editing keys, the file tree's keys, the key after
-Ctrl+W, and the completion popup's keys.
+the `:` / `/` line's editing keys, the find widget's own keys, the file
+tree's keys, the key after Ctrl+W, and the completion popup's keys.
 
 ## Actions and their default keys
 
@@ -41,7 +41,7 @@ Ctrl+W, and the completion popup's keys.
 | `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key, by name, with its chord in the current mode. Recently run ones list first |
 | `listExtensions` | (unbound; `:extensions`) | Every extension zoe could load, built in or in `~/.config/glyphwire/zoe/extensions/`, and whether it loaded. Enter on one with a user file opens it |
 | `toggleTree` | Ctrl+B, Ctrl+N | Show / hide the file tree. Ctrl+B is VS Code's chord; under gmux it is the prefix, so use Ctrl+N or gmux's Ctrl+B Ctrl+B |
-| `toggleHidden` | Ctrl+H | Dotfiles and `.gitignore`d paths in the tree; dotfiles only in the finder and `/` search |
+| `toggleHidden` | Alt+H | Dotfiles and `.gitignore`d paths in the tree; dotfiles only in the finder and `/` search. Was Ctrl+H, which is now replace |
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
 | `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |
 | `closeTab` | Ctrl+F4, Ctrl+W x | Close the shown tab (`:bd`); refused on a modified buffer |
@@ -94,6 +94,7 @@ The `select…` actions start a selection if there isn't one:
 | `fold` / `unfold` | Ctrl+Shift+[ / Ctrl+Shift+] | Close the innermost open fold around the cursor (again: the one around that) / open the closed fold on the cursor's line. `zc` / `zo` |
 | `toggleFold` | (unbound; `za`) | Open the fold on the cursor's line if closed, else close the one the cursor is in |
 | `foldAll` / `unfoldAll` | (unbound; `zM` / `zR`) | Every fold closed / open. VS Code's Ctrl+K Ctrl+0 / Ctrl+J aren't the defaults because Ctrl+K is focus-up |
+| `find` / `replace` | Ctrl+F / Ctrl+H | The find widget, without / with its replace row (see Find and replace below) |
 
 Each edit is one undo step, including in insert mode, where it is separate
 from the typing around it. The fold actions change no text.
@@ -148,6 +149,38 @@ Paste never auto-indents or pairs anything.
 With the completion popup up: Up / Down or Ctrl+N / Ctrl+P move, PageUp /
 PageDown page, Tab or Enter accept, Escape closes.
 
+### Find and replace (Ctrl+F / Ctrl+H)
+
+VS Code's find widget, in a box over the buffer's top-right corner, from
+any mode. Finding is the `/` line's: literal text, smartcase, the cursor
+on the nearest match as you type, every match highlighted, and "3 of 12"
+beside the field. Ctrl+F opens it with the find field, Ctrl+H with the
+replace row too; pressed again while it is open they move to that field.
+
+The find field starts with the last search pattern, selected so typing
+replaces it. Opened over a selection on one line, it starts with the
+selected text instead; over a selection of several lines, it finds and
+replaces only inside that selection (In Selection, on).
+
+| Key | Action |
+|---|---|
+| Enter / Shift+Enter, F3 / Shift+F3 | Next / previous match (wraps) |
+| Enter (replace field) | Replace the current match and go to the next |
+| Ctrl+Alt+Enter | Replace every match, one undo step |
+| Tab / Shift+Tab | The other field, with the replace row showing |
+| Alt+C | Match case exactly (off: smartcase) |
+| Alt+W | Whole words only |
+| Alt+L | In Selection on / off (only when opened over one) |
+| Up / Down | Search history (find field) |
+| Escape | Close, leaving the cursor on the match |
+
+The toggles, the arrows, `×`, and the replace row's `⇄` (replace one) and
+`All` respond to a click too; a click in the buffer closes the widget.
+The replacement is literal text: `&` and backslashes are just characters
+here, unlike `:s`. Closing it keeps the pattern and toggles as the search
+`n` / `N` repeat, so the highlight stays until `:noh`. The replace text
+and the toggles are remembered for the next time it opens.
+
 ## vim keys (normal and visual mode, not rebindable)
 
 ### Normal mode
@@ -194,7 +227,7 @@ All normal-mode motions move the free end. Then:
 | `>` `<` | Indent / dedent, selection kept (count = levels) |
 | `p` `P` | Replace the selection with the clipboard |
 | `/` `?` `n` `N` `*` `#` | Search, extending the selection |
-| `:` | Command line (no `'<,'>` range support) |
+| `:` | Command line, started with `'<,'>` (the selected lines) |
 | `v` / `V` | Switch kind, or leave if already that kind |
 
 ### Command line (`:`)
@@ -220,6 +253,9 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | Command | Action |
 |---|---|
 | `:{n}` `:$` `:.` `:+n` `:-n` `:{n}{motion}` | Jump to a line / run a motion |
+| `:[range]s/pat/rep/[flags]` | Substitute (see below) |
+| `:[range]s` | Repeat the last substitution on `range`, without its flags |
+| `:{a},{b}` `:'<,'>` | Jump to the range's last line |
 | `:w [path]` | Write (with a path: save as) |
 | `:q` `:q!` `:wq` `:x` `:wq!` `:x!` | Quit / write and quit |
 | `:e path` | Open in a new tab (or focus it) |
@@ -245,6 +281,22 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:diag` | List diagnostics |
 | `:extensions` | List the extensions and whether each loaded |
 
+**`:s`.** With no range it works on the cursor's line. A range is two
+addresses joined by `,`, or `%` for the whole file. An address is a line
+number, `.` (the cursor's line), `$` (the last), or `'<` / `'>` (the
+first and last line of the last visual selection), each optionally
+followed by `+n` / `-n`; `+n` alone is relative to `.`. A backwards range
+is turned round. Patterns are literal, like `/` (no regex): `\/` (or `\`
+before whatever delimiter you used) is the delimiter, `\\` a backslash,
+`\n` a line break (so `:%s/\n/ /` joins lines) and `\t` a tab; anything
+else is matched as typed. An empty pattern (`:s//x/`) is the last
+search's. In the replacement `&` is the matched text, `\&` a literal `&`,
+`\r` or `\n` a line break and `\t` a tab. Flags: `g` every match on a
+line, `i` ignore case, `I` match case (default smartcase). The whole
+command is one undo step, the cursor ends on the last line changed, the
+status line says how many substitutions on how many lines, and the
+pattern becomes the one `n` repeats.
+
 Files changed outside zoe are noticed within about a second. A buffer with
 no unsaved edits reloads in place, keeping its cursor and scroll; one with
 edits is left alone and the status line shows `W11` once per change, so
@@ -256,7 +308,7 @@ a stat a second), `"inotify"` (Linux, within about 50 ms, idle otherwise)
 or `"off"`.
 
 Ctrl+P and the tree's `/` search skip dotfiles and `.gitignore`d paths.
-Ctrl+H brings the dotfiles back but not the ignored paths, so `.zig-cache/`
+Alt+H brings the dotfiles back but not the ignored paths, so `.zig-cache/`
 and `.venv/` never bury a search. Git worktrees that live inside the
 folder (say under an ignored `.claude/worktrees/`) are searched anyway,
 under their own `.gitignore`; `unignore = { "vendor/lib" }` in
@@ -374,7 +426,8 @@ groups or the shell panel.
 - **In-line find**: `f` `F` `t` `T` `;` `,`.
 - **`%`** bracket match, **`{` `}`** paragraph motions, **`H` `M` `L`**, **`zz` `zt` `zb`**.
 - **Marks** (`m` / `'`), **macros** (`q` / `@`), **named registers** (`"a`).
-- **`:s` substitute** and `'<,'>` ranges.
+- **Regex** in `/` and `:s` (both are literal), `:s`'s `c` flag, `;` and
+  `/pat/` range addresses, `:g`.
 - **`gu` / `gU`** case operators, **`>` / `<`** over word or paragraph motions.
 - **Manual folds** (`zf`), and `zA` / `zO` / `zC`.
 
@@ -384,7 +437,7 @@ groups or the shell panel.
 - **Ctrl+C / Ctrl+X / Ctrl+V** unshifted (glyphwire's host owns Ctrl+Shift+C/V
   as its terminal-style copy and paste). Rebindable now for X and V; C is
   the host's.
-- **Ctrl+F / Ctrl+H** find and replace (Ctrl+H is hidden files by default).
+- **Ctrl+Shift+H / Ctrl+Shift+F** replace and find across files.
 - **Ctrl+G** go to line, **F12** definition.
 - **Ctrl+Shift+K** delete line, **Ctrl+Enter / Ctrl+Shift+Enter** insert line below / above.
 - **Ctrl+D** add next occurrence / multi-cursor (Ctrl+D is half-page down in normal mode).
@@ -392,7 +445,7 @@ groups or the shell panel.
 Closed since the first version of this list: Shift+arrow selection, Ctrl+Z
 / Ctrl+Y, Ctrl+Backspace / Ctrl+Delete, Ctrl+/, Ctrl+S, Shift+Alt+Up/Down,
 rebindable keys, the Ctrl+Shift+P command palette, auto-indent, bracket
-pairing, and folding.
+pairing, folding, and Ctrl+F / Ctrl+H find and replace.
 
 ## Modal versus Ctrl/Alt-heavy
 
@@ -406,8 +459,8 @@ pairing, and folding.
   modifier for every motion.
 - **Free keyspace.** Normal mode has the whole keyboard unmodified, so
   window chords (Ctrl+W, Ctrl+B, Ctrl+P) never compete with editing ones.
-  zoe already relies on this: Ctrl+H, Ctrl+L, Ctrl+D, Ctrl+U all mean
-  something non-VSCode.
+  zoe already relies on this: Ctrl+L, Ctrl+D, Ctrl+U all mean something
+  non-VSCode.
 
 ### What the chord side gives you
 
@@ -422,8 +475,7 @@ pairing, and folding.
 
 ### Costs specific to zoe
 
-- **Keyspace collisions.** The VSCode set wants Ctrl+H (replace), Ctrl+L
-  (select line), Ctrl+D (next occurrence), Ctrl+P (finder, the same),
+- **Keyspace collisions.** The VSCode set wants Ctrl+L (select line), Ctrl+D (next occurrence), Ctrl+P (finder, the same),
   Ctrl+N (new file), Ctrl+W (close tab), Ctrl+Tab
   (the same). With `keys` these are now a config choice rather than a
   code change, but the defaults still favour vim.

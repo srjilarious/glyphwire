@@ -71,6 +71,11 @@ const langconf = @import("langconf.zig");
 const actions = @import("actions.zig");
 const ext = @import("ext.zig");
 const extlist = @import("extlist.zig");
+const findbar = @import("findbar.zig");
+
+/// Where the find widget is on screen: its top-left window cell and its
+/// layout (`zoe/findbar.zig`).
+pub const FindBarPlace = struct { row: usize, col: usize, layout: findbar.Layout };
 const tabs = @import("tabs.zig");
 const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
@@ -586,12 +591,15 @@ const EdSnapshot = struct {
             a.fold_column == b.fold_column and a.folds_gen == b.folds_gen;
     }
 
-    /// Zero when nothing is highlighted, otherwise a hash of the pattern
-    /// and the one option that isn't derived from it.
+    /// Zero when nothing is highlighted, otherwise a hash of the pattern,
+    /// its options (the find widget can flip case without changing the
+    /// pattern) and the span it is highlighted in.
     fn matchHash(ed: *const Editor) u64 {
         const pat = ed.highlightPattern() orelse return 0;
-        var h = std.hash.Wyhash.init(@intFromBool(ed.highlightOpts().whole_word));
+        const opts = ed.highlightOpts();
+        var h = std.hash.Wyhash.init(@as(u64, @intFromBool(opts.whole_word)) | @as(u64, @intFromBool(opts.ignore_case)) << 1);
         h.update(pat);
+        if (ed.highlightScope()) |s| h.update(std.mem.asBytes(&s));
         return h.final();
     }
 };
@@ -973,6 +981,11 @@ pub const Ui = struct {
     path_menu: ?pathmenu.Menu = null,
     path_menu_layer: glyphwire.LayerHandle,
     path_menu_dirty: bool = false,
+    /// The find widget's layer, and where it was last drawn (window
+    /// cells) while it is showing -- what a click is tested against.
+    /// Redrawn with the statusline, which every input repaints.
+    find_bar_layer: glyphwire.LayerHandle,
+    find_bar: ?FindBarPlace = null,
     /// The newest outstanding completion request, and where the word it is
     /// for starts -- a reply for a word the cursor has since left is
     /// dropped, the same staleness rule hover has.
@@ -1244,6 +1257,12 @@ pub const Ui = struct {
         try client.setLayerVisible(path_menu_layer, false);
         try client.setLayerBackground(path_menu_layer, role(.popup_bg));
         try client.setLayerShadow(path_menu_layer, glyphwire.Shadow.dialog);
+        // The Ctrl+F / Ctrl+H find widget, over the buffer's top-right
+        // corner (`zoe/findbar.zig`).
+        const find_bar_layer = try client.createLayer(findbar.fixed_cols + findbar.max_field_cols, 2, 0);
+        try client.setLayerVisible(find_bar_layer, false);
+        try client.setLayerBackground(find_bar_layer, role(.popup_bg));
+        try client.setLayerShadow(find_bar_layer, glyphwire.Shadow.dialog);
         // The tab tooltip, last so it sits over everything: it hangs from
         // the tab strip over the top of the buffer and, for a long path,
         // over the file tree.
@@ -1288,6 +1307,7 @@ pub const Ui = struct {
             .hover_panel_patch = hover_panel_patch,
             .completion_layer = completion_layer,
             .path_menu_layer = path_menu_layer,
+            .find_bar_layer = find_bar_layer,
             .tab_tip_layer = tab_tip_layer,
             .tab_tip_patch = tab_tip_patch,
             .diags = diag.Store.init(alloc),
@@ -1501,7 +1521,7 @@ pub const Ui = struct {
         const typing = switch (self.buf.ed.mode) {
             // The `/` line is typed into, like the `:` line, so it wants
             // the typing cadence rather than the normal-mode one.
-            .insert, .command, .search => true,
+            .insert, .command, .search, .find => true,
             .normal, .visual, .visual_line, .select => false,
         };
         const cfg = self.hl_config orelse return if (typing) .{
@@ -2893,7 +2913,7 @@ pub const Ui = struct {
                     const typed = switch (self.buf.ed.mode) {
                         // Over a select-mode selection a paste is typing
                         // too: it replaces the selection.
-                        .insert, .command, .search, .select => true,
+                        .insert, .command, .search, .select, .find => true,
                         .normal, .visual, .visual_line => false,
                     };
                     if (typed) {
@@ -3113,6 +3133,14 @@ pub const Ui = struct {
         }
 
         if (ev.pressed) {
+            // The find widget floats over the buffer, so it is asked
+            // first; a press anywhere else in the buffer closes it, the
+            // way Escape would, before moving the cursor there.
+            if (try self.findBarClick(ev.cell)) return;
+            if (self.buf.ed.mode == .find and self.cellInBuffer(ev.cell) != null) {
+                self.buf.ed.closeFind();
+                self.grp.buffer_dirty = true;
+            }
             // A press anywhere in a group -- its strip or its pane -- gives
             // it the keyboard first, so what follows acts on that group.
             if (self.groupAt(ev.cell)) |g| {
@@ -4153,6 +4181,57 @@ pub const Ui = struct {
         if (try self.finder.key(k) == .accept) try self.acceptFinder();
     }
 
+    // ── Find widget (findbar.zig) ───────────────────────────────────────
+
+    /// Shows the focused buffer's find widget over its top-right corner
+    /// while it is in `Mode.find`, and hides it otherwise. Cheap enough
+    /// to run with every statusline repaint, which is every input.
+    pub fn renderFindBar(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
+        const ed = &self.buf.ed;
+        const b = self.grp.buffer_bounds;
+        const open = self.focus == .buffer and ed.mode == .find;
+        const fits = if (open) findbar.layout(b.cols, ed.find_show_replace) else null;
+        const l = (if (fits) |x| (if (b.rows >= x.rows) x else null) else null) orelse {
+            if (self.find_bar != null) try batch.setLayerVisible(self.find_bar_layer, false);
+            self.find_bar = null;
+            return;
+        };
+        const place: FindBarPlace = .{ .row = b.row, .col = b.col + b.cols - l.cols - 1, .layout = l };
+        try batch.setLayerSize(self.find_bar_layer, l.cols, l.rows);
+        try batch.setLayerCellPosition(self.find_bar_layer, place.row, place.col);
+        try findbar.render(batch, self.find_bar_layer, l, ed);
+        try batch.setLayerVisible(self.find_bar_layer, true);
+        self.find_bar = place;
+    }
+
+    /// A press on the find widget: a toggle, a button, or a field to
+    /// type into. Returns whether `cell` was on the widget at all, so
+    /// the click doesn't also land in the buffer under it.
+    pub fn findBarClick(self: *Ui, cell: glyphwire.CellPos) !bool {
+        const fb = self.find_bar orelse return false;
+        if (cell.row < fb.row or cell.row >= fb.row + fb.layout.rows) return false;
+        if (cell.col < fb.col or cell.col >= fb.col + fb.layout.cols) return false;
+        const zone = findbar.hit(fb.layout, cell.row - fb.row, cell.col - fb.col) orelse return true;
+        const cmd: editor.FindCommand = switch (zone) {
+            .find_field => .focus_find,
+            .replace_field => .focus_replace,
+            .case => .toggle_case,
+            .word => .toggle_word,
+            .selection => .toggle_selection,
+            .prev => .prev,
+            .next => .next,
+            .close => .close,
+            .replace_one => .replace_one,
+            .replace_all => .replace_all,
+        };
+        try self.buf.ed.findCommand(cmd);
+        self.buf.full_redraw = true;
+        self.grp.buffer_dirty = true;
+        self.grp.tabs_dirty = true;
+        self.status_dirty = true;
+        return true;
+    }
+
     // ── Command palette ─────────────────────────────────────────────────
 
     /// Ctrl+Shift+P. Lists every action `inPalette` admits, each with the
@@ -4305,7 +4384,7 @@ pub const Ui = struct {
     /// their keys.
     fn extCommandFor(self: *Ui, scope: actions.Scope, key: []const u8, mods: glyphwire.Mods) ?u32 {
         const rt = self.extensions orelse return null;
-        if (self.focus == .buffer and (self.buf.ed.mode == .command or self.buf.ed.mode == .search)) return null;
+        if (self.focus == .buffer and (self.buf.ed.mode == .command or self.buf.ed.mode == .search or self.buf.ed.mode == .find)) return null;
         if (rt.lookup(scope, key, mods)) |cmd| return cmd;
         if (scope == .global) return null;
         if (self.keymaps.table(scope).lookup(key, mods) != null) return null;
