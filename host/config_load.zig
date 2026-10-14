@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
-const host_eng = @import("host_eng");
+const luaconf = @import("luaconf");
 
 const config = @import("config.zig");
 const geometry = @import("geometry.zig");
@@ -14,95 +14,38 @@ const HostConfig = config.HostConfig;
 
 /// `host.conf.lua` is a Lua script, so this file needs a Lua state -- but
 /// nothing about parsing a config file belongs to the graphics engine, so
-/// it drives `ziglua` directly (`runConfigScript` below) instead of going
-/// through an engine scripting subsystem. It still reaches `ziglua`
-/// through the engine facade (`host_eng.ziglua`) rather than importing the
-/// module by name: `host_eng` and `glyphwire` are each given a `ziglua`
-/// import in `build.zig`, and linking two Lua C libraries into one binary
-/// would collide. Going through the facade names the one Lua this binary
-/// actually links.
-const Lua = host_eng.ziglua.Lua;
+/// it goes through `luaconf` like every other program's config instead of
+/// an engine scripting subsystem. `luaconf`'s `ziglua` is the same module
+/// `host_eng` links, so this binary still carries one Lua C library.
+const Lua = luaconf.Lua;
 
-/// Owned path to glyphwire's config directory (holds `host.conf.lua`).
-/// Shared with glyphwire-shell and glyphwire-ls -- see
-/// `glyphwire.configDirPath`.
-const configDirPath = glyphwire.configDirPath;
+const conf: luaconf.Conf = .{ .prog = "glyphwire-host", .name = config.host_conf_name };
 
-/// Reads a string field named `key` from the `config` table on the Lua
-/// stack top and returns a process-lifetime (`arena`) copy of it, or null
-/// when the field is absent or not a string. The table stays on the stack;
-/// only the field value pushed here is popped.
-fn luaStrField(lua: *Lua, arena: std.mem.Allocator, key: [:0]const u8) ?[:0]const u8 {
-    _ = lua.getField(-1, key);
-    defer lua.pop(1);
-    if (!lua.isString(-1)) return null;
-    const s = lua.toString(-1) catch return null;
-    return std.mem.concatWithSentinel(arena, u8, &.{s}, 0) catch null;
-}
-
-/// Like `luaStrField`, for a numeric field.
-fn luaNumField(lua: *Lua, key: [:0]const u8) ?f32 {
-    _ = lua.getField(-1, key);
-    defer lua.pop(1);
-    if (!lua.isNumber(-1)) return null;
-    const n = lua.toNumber(-1) catch return null;
-    return @floatCast(n);
-}
-
-/// Like `luaStrField`, for a boolean field. Absent or non-boolean -> null.
-fn luaBoolField(lua: *Lua, key: [:0]const u8) ?bool {
-    _ = lua.getField(-1, key);
-    defer lua.pop(1);
-    if (!lua.isBoolean(-1)) return null;
-    return lua.toBoolean(-1);
-}
-
-/// Like `luaNumField`, for a non-negative whole-number field (`grid_cols`,
-/// `grid_rows`, `scrollback_rows`). Absent, non-number, negative, or
-/// non-integral -> null (the caller keeps the default).
-fn luaUintField(lua: *Lua, key: [:0]const u8) ?usize {
-    _ = lua.getField(-1, key);
-    defer lua.pop(1);
-    if (!lua.isNumber(-1)) return null;
-    const n = lua.toNumber(-1) catch return null;
-    if (n < 0 or n != @floor(n)) return null;
-    return @intFromFloat(n);
-}
-
-/// Compiles and runs `code` in `lua`. On a compile or runtime error Lua
-/// leaves its message on the stack top; log it and pop before returning so
-/// the caller can fall back to defaults with the state still clean.
-fn runConfigScript(lua: *Lua, code: [:0]const u8) !void {
-    lua.loadString(code) catch {
-        std.log.err("glyphwire-host: {s}", .{lua.toString(-1) catch "?"});
-        lua.pop(1);
-        return error.SyntaxError;
-    };
-    lua.protectedCall(.{ .args = 0, .results = 0, .msg_handler = 0 }) catch {
-        std.log.err("glyphwire-host: {s}", .{lua.toString(-1) catch "?"});
-        lua.pop(1);
-        return error.ScriptError;
-    };
+/// A string field from the `config` table, as a process-lifetime
+/// (`arena`) null-terminated copy.
+fn strField(lua: *Lua, arena: std.mem.Allocator, key: [:0]const u8) ?[:0]const u8 {
+    const s = conf.string(lua, key) orelse return null;
+    return arena.dupeSentinel(u8, s, 0) catch null;
 }
 
 /// Resolves everything `host.conf.lua` controls for this run: starts from
 /// the `*_default` constants and overlays whatever the global `config`
-/// table in `~/.config/glyphwire/host.conf.lua` (see `configDirPath`)
-/// sets -- font fields (`font_face`, `font_face_name`, `font_fallback`,
-/// `font_size`), caret fields (`cursor_shape`, `cursor_blink`,
-/// `cursor_blink_ms`), key repeat (`key_repeat_delay_ms`,
-/// `key_repeat_interval_ms`), and grid fields (`grid_cols`, `grid_rows`,
-/// `scrollback_rows`), any subset.
+/// table in `~/.config/glyphwire/host.conf.lua` (see
+/// `glyphwire.configDirPath`) sets -- font fields (`font_face`,
+/// `font_face_name`, `font_fallback`, `font_size`), caret fields
+/// (`cursor_shape`, `cursor_blink`, `cursor_blink_ms`), key repeat
+/// (`key_repeat_delay_ms`, `key_repeat_interval_ms`), and grid fields
+/// (`grid_cols`, `grid_rows`, `scrollback_rows`), any subset.
 /// A missing file (or no config home at all) is the normal case and is
-/// silent; a file that fails to read/parse, or a `config` that isn't a
-/// table, logs a warning and the defaults stand.
+/// silent; a file that fails to read/parse logs a warning and the
+/// defaults stand.
 /// `font_size` is clamped to `[min_font_size, max_font_size]`,
 /// `cursor_blink_ms` to `[cursor_blink_ms_min, cursor_blink_ms_max]`,
 /// `grid_cols` / `grid_rows` up to `min_grid_*`, and `scrollback_rows`
-/// down to `scrollback_rows_max` (see the `config.clamp*` helpers). A
-/// `--grid-cols` / `--grid-rows` flag still wins over `grid_cols` /
-/// `grid_rows` (applied later, in `main`). `gpa` is used only for transient
-/// work (the config path, the source buffer, the Lua state); returned
+/// down to `scrollback_rows_max` (the same bounds as the `config.clamp*`
+/// helpers). A `--grid-cols` / `--grid-rows` flag still wins over
+/// `grid_cols` / `grid_rows` (applied later, in `main`). `gpa` is used
+/// only for transient work (the source buffer, the Lua state); returned
 /// strings are `arena`-allocated so they outlive this call.
 pub fn loadConfig(
     arena: std.mem.Allocator,
@@ -111,141 +54,78 @@ pub fn loadConfig(
     environ_map: *const std.process.Environ.Map,
 ) HostConfig {
     var cfg: HostConfig = .{};
-
-    const config_dir = configDirPath(gpa, environ_map) catch |err| switch (err) {
-        // No $GLYPHWIRE_CONFIG_DIR / $XDG_CONFIG_HOME / $HOME -- nowhere to
-        // read a config from; run on defaults, same as a missing file.
-        error.NoConfigHome => return cfg,
-        error.OutOfMemory => return cfg,
-    };
-    defer gpa.free(config_dir);
-
-    const path = std.fs.path.join(gpa, &.{ config_dir, config.host_conf_name }) catch return cfg;
-    defer gpa.free(path);
-
-    const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(256 * 1024)) catch |err| {
-        if (err != error.FileNotFound)
-            std.log.warn("glyphwire-host: couldn't read {s} ({t}); using defaults", .{ path, err });
-        return cfg;
-    };
+    const src = conf.read(gpa, io, environ_map) orelse return cfg;
     defer gpa.free(src);
-    const src_z = std.mem.concatWithSentinel(gpa, u8, &.{src}, 0) catch return cfg;
-    defer gpa.free(src_z);
-
-    const lua = Lua.init(gpa) catch |err| {
-        std.log.warn("glyphwire-host: Lua init failed ({t}); using defaults", .{err});
-        return cfg;
-    };
-    defer lua.deinit();
-    lua.openLibs();
-
-    runConfigScript(lua, src_z) catch |err| {
-        std.log.warn("glyphwire-host: {s} failed to run ({t}); using defaults", .{ config.host_conf_name, err });
-        return cfg;
-    };
-
-    _ = lua.getGlobal("config") catch return cfg;
-    defer lua.pop(1);
-    if (!lua.isTable(-1)) {
-        std.log.warn("glyphwire-host: {s} defines no `config` table; using defaults", .{config.host_conf_name});
-        return cfg;
-    }
-
-    if (luaStrField(lua, arena, "font_face")) |v| cfg.font.face = v;
-    if (luaStrField(lua, arena, "font_face_name")) |v| cfg.font.face_name = v;
-    if (luaStrField(lua, arena, "font_fallback")) |v| cfg.font.fallback = v;
-    if (luaNumField(lua, "font_size")) |v| cfg.font.size = v;
-
-    if (luaStrField(lua, arena, "icon_theme")) |v| cfg.icon_theme = v;
-
-    readChordField(lua, arena, "context_switcher_key", &cfg.context_switcher);
-    readChordField(lua, arena, "theme_switcher_key", &cfg.theme_switcher);
-
-    if (luaStrField(lua, arena, "pane_divider_style")) |v| {
-        if (dividers.preset(v)) |style| {
-            cfg.pane_divider = style;
-        } else {
-            std.log.warn("glyphwire-host: host.conf.lua pane_divider_style '{s}' unknown (single, heavy, double, block); keeping the default", .{v});
-        }
-    }
-    readDividerChars(lua, arena, &cfg.pane_divider);
-
-    if (luaNumField(lua, "drop_target_opacity")) |v| {
-        cfg.drop_target_opacity = config.clampDropTargetOpacity(v);
-        if (cfg.drop_target_opacity != v)
-            std.log.warn("glyphwire-host: host.conf.lua drop_target_opacity {d} out of range; clamped to {d}", .{ v, cfg.drop_target_opacity });
-    }
-
-    const clamped = config.clampFontSize(cfg.font.size);
-    if (clamped != cfg.font.size) {
-        std.log.warn("glyphwire-host: host.conf.lua font_size {d} out of range; clamped to {d}", .{ cfg.font.size, clamped });
-        cfg.font.size = clamped;
-    }
-
-    if (luaStrField(lua, arena, "cursor_shape")) |v| {
-        if (config.cursorShapeFromStr(v)) |shape| {
-            cfg.cursor.shape = shape;
-        } else {
-            std.log.warn("glyphwire-host: host.conf.lua cursor_shape '{s}' unknown; keeping '{t}'", .{ v, cfg.cursor.shape });
-        }
-    }
-    if (luaBoolField(lua, "cursor_blink")) |v| cfg.cursor.blink = v;
-    if (luaNumField(lua, "cursor_blink_ms")) |v| {
-        cfg.cursor.blink_ms = config.clampBlinkMs(@as(f64, v));
-        if (cfg.cursor.blink_ms != v)
-            std.log.warn("glyphwire-host: host.conf.lua cursor_blink_ms {d} out of range; clamped to {d}", .{ v, cfg.cursor.blink_ms });
-    }
-
-    if (luaNumField(lua, "key_repeat_delay_ms")) |v| {
-        const c = key_repeat.clampDelayMs(@as(f64, v));
-        if (c != @as(f64, v))
-            std.log.warn("glyphwire-host: host.conf.lua key_repeat_delay_ms {d} out of range; clamped to {d}", .{ v, c });
-        cfg.key_repeat.delay_ms = c;
-    }
-    if (luaNumField(lua, "key_repeat_interval_ms")) |v| {
-        const c = key_repeat.clampIntervalMs(@as(f64, v));
-        if (c != @as(f64, v))
-            std.log.warn("glyphwire-host: host.conf.lua key_repeat_interval_ms {d} out of range; clamped to {d}", .{ v, c });
-        cfg.key_repeat.interval_ms = c;
-    }
-
-    if (luaBoolField(lua, "profile")) |v| cfg.profile.enabled = v;
-    if (luaBoolField(lua, "profile_hud")) |v| cfg.profile.hud = v;
-    if (luaBoolField(lua, "profile_force_redraw")) |v| cfg.profile.force_redraw = v;
-    if (luaNumField(lua, "profile_window_ms")) |v| {
-        const c = config.clampProfileWindowMs(@as(f64, v));
-        if (c != @as(f64, v))
-            std.log.warn("glyphwire-host: host.conf.lua profile_window_ms {d} out of range; clamped to {d}", .{ v, c });
-        cfg.profile.window_ms = c;
-    }
-    if (luaNumField(lua, "profile_log_ms")) |v| {
-        const c = config.clampProfileLogMs(@as(f64, v));
-        if (c != @as(f64, v) and v > 0)
-            std.log.warn("glyphwire-host: host.conf.lua profile_log_ms {d} out of range; clamped to {d}", .{ v, c });
-        cfg.profile.log_interval_ms = c;
-    }
-
-    if (luaUintField(lua, "grid_cols")) |v| {
-        const c = config.clampGridCols(v);
-        if (c != v)
-            std.log.warn("glyphwire-host: host.conf.lua grid_cols {d} below minimum {d}; clamped", .{ v, geometry.min_grid_cols });
-        cfg.grid.cols = c;
-    }
-    if (luaUintField(lua, "grid_rows")) |v| {
-        const r = config.clampGridRows(v);
-        if (r != v)
-            std.log.warn("glyphwire-host: host.conf.lua grid_rows {d} below minimum {d}; clamped", .{ v, geometry.min_grid_rows });
-        cfg.grid.rows = r;
-    }
-    if (luaUintField(lua, "scrollback_rows")) |v| {
-        const s = config.clampScrollback(v);
-        if (s != v)
-            std.log.warn("glyphwire-host: host.conf.lua scrollback_rows {d} above maximum {d}; clamped", .{ v, config.scrollback_rows_max });
-        cfg.grid.scrollback = s;
-    }
-
+    var ctx: Apply = .{ .arena = arena, .cfg = &cfg };
+    conf.runLogged(gpa, src, &ctx, Apply.apply);
     return cfg;
 }
+
+const Apply = struct {
+    arena: std.mem.Allocator,
+    cfg: *HostConfig,
+
+    fn apply(self: *Apply, lua: *Lua) void {
+        const cfg = self.cfg;
+        const arena = self.arena;
+
+        if (strField(lua, arena, "font_face")) |v| cfg.font.face = v;
+        if (strField(lua, arena, "font_face_name")) |v| cfg.font.face_name = v;
+        if (strField(lua, arena, "font_fallback")) |v| cfg.font.fallback = v;
+        if (conf.number(lua, f32, "font_size", .{ .min = config.min_font_size, .max = config.max_font_size })) |v| cfg.font.size = v;
+
+        if (strField(lua, arena, "icon_theme")) |v| cfg.icon_theme = v;
+
+        readChordField(lua, arena, "context_switcher_key", &cfg.context_switcher);
+        readChordField(lua, arena, "theme_switcher_key", &cfg.theme_switcher);
+
+        if (conf.string(lua, "pane_divider_style")) |v| {
+            if (dividers.preset(v)) |style| {
+                cfg.pane_divider = style;
+            } else {
+                conf.warn("pane_divider_style '{s}' unknown (single, heavy, double, block); keeping the default", .{v});
+            }
+        }
+        readDividerChars(lua, arena, &cfg.pane_divider);
+
+        if (conf.number(lua, f32, "drop_target_opacity", .{ .min = config.drop_target_opacity_min, .max = 1.0 })) |v|
+            cfg.drop_target_opacity = v;
+
+        if (conf.string(lua, "cursor_shape")) |v| {
+            if (config.cursorShapeFromStr(v)) |shape| {
+                cfg.cursor.shape = shape;
+            } else {
+                conf.warn("cursor_shape '{s}' unknown; keeping '{t}'", .{ v, cfg.cursor.shape });
+            }
+        }
+        if (conf.boolean(lua, "cursor_blink")) |v| cfg.cursor.blink = v;
+        if (conf.number(lua, f64, "cursor_blink_ms", .{ .min = config.cursor_blink_ms_min, .max = config.cursor_blink_ms_max })) |v|
+            cfg.cursor.blink_ms = v;
+
+        if (conf.number(lua, f64, "key_repeat_delay_ms", .{ .min = key_repeat.delay_ms_min, .max = key_repeat.delay_ms_max })) |v|
+            cfg.key_repeat.delay_ms = v;
+        if (conf.number(lua, f64, "key_repeat_interval_ms", .{ .min = key_repeat.interval_ms_min, .max = key_repeat.interval_ms_max })) |v|
+            cfg.key_repeat.interval_ms = v;
+
+        if (conf.boolean(lua, "profile")) |v| cfg.profile.enabled = v;
+        if (conf.boolean(lua, "profile_hud")) |v| cfg.profile.hud = v;
+        if (conf.boolean(lua, "profile_force_redraw")) |v| cfg.profile.force_redraw = v;
+        if (conf.number(lua, f64, "profile_window_ms", .{ .min = config.profile_window_ms_min, .max = config.profile_window_ms_max })) |v|
+            cfg.profile.window_ms = v;
+        // 0 or below means "no periodic summary", so it can't be a plain
+        // range: only a positive value is clamped (and warned about).
+        if (conf.number(lua, f64, "profile_log_ms", .{})) |v| {
+            const c = config.clampProfileLogMs(v);
+            if (c != v and v > 0)
+                conf.warn("profile_log_ms {d} out of range; clamped to {d}", .{ v, c });
+            cfg.profile.log_interval_ms = c;
+        }
+
+        if (conf.uint(lua, usize, "grid_cols", .{ .min = geometry.min_grid_cols })) |v| cfg.grid.cols = v;
+        if (conf.uint(lua, usize, "grid_rows", .{ .min = geometry.min_grid_rows })) |v| cfg.grid.rows = v;
+        if (conf.uint(lua, usize, "scrollback_rows", .{ .max = config.scrollback_rows_max })) |v| cfg.grid.scrollback = v;
+    }
+};
 
 /// `pane_divider_chars`: a table of glyph overrides keyed by
 /// `dividers.Glyphs`' field names (`h`, `v`, `cross`, `t_down`, ...). Any
@@ -260,11 +140,11 @@ fn readDividerChars(lua: *Lua, arena: std.mem.Allocator, out: *dividers.Style) v
         .block => dividers.single,
     };
     inline for (@typeInfo(dividers.Glyphs).@"struct".field_names) |name| {
-        if (luaStrField(lua, arena, name)) |v| {
+        if (strField(lua, arena, name)) |v| {
             if (glyphwire.stringWidth(v) == 1) {
                 @field(glyphs, name) = v;
             } else {
-                std.log.warn("glyphwire-host: host.conf.lua pane_divider_chars." ++ name ++ " '{s}' isn't one cell wide; keeping the preset's", .{v});
+                conf.warn("pane_divider_chars." ++ name ++ " '{s}' isn't one cell wide; keeping the preset's", .{v});
             }
         }
     }
@@ -275,13 +155,24 @@ fn readDividerChars(lua: *Lua, arena: std.mem.Allocator, out: *dividers.Style) v
 /// names the chord, `false` turns its dialog off, and anything else
 /// keeps `out` as it was.
 fn readChordField(lua: *Lua, arena: std.mem.Allocator, comptime name: [:0]const u8, out: *?config.Chord) void {
-    if (luaBoolField(lua, name)) |v| {
-        if (!v) out.* = null;
-    } else if (luaStrField(lua, arena, name)) |v| {
-        if (config.parseChord(v)) |chord| {
-            out.* = chord;
-        } else {
-            std.log.warn("glyphwire-host: host.conf.lua " ++ name ++ " '{s}' not a chord; keeping the default", .{v});
-        }
+    switch (lua.getField(-1, name)) {
+        .boolean => {
+            if (!lua.toBoolean(-1)) out.* = null;
+            lua.pop(1);
+        },
+        .string => {
+            lua.pop(1);
+            const v = strField(lua, arena, name) orelse return;
+            if (config.parseChord(v)) |chord| {
+                out.* = chord;
+            } else {
+                conf.warn(name ++ " '{s}' not a chord; keeping the default", .{v});
+            }
+        },
+        .nil => lua.pop(1),
+        else => {
+            lua.pop(1);
+            conf.warn(name ++ " must be a chord or false; ignored", .{});
+        },
     }
 }

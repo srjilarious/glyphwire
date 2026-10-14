@@ -9,12 +9,11 @@
 //! Ctrl-B, `gw-shell`, and 2000 rows.
 
 const std = @import("std");
-const ziglua = @import("ziglua");
-const glyphwire = @import("glyphwire");
+const luaconf = @import("luaconf");
 
-const Lua = ziglua.Lua;
+const Lua = luaconf.Lua;
 
-const conf_name = "gmux.conf.lua";
+const conf: luaconf.Conf = .{ .prog = "gmux", .name = "gmux.conf.lua" };
 
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
@@ -43,84 +42,31 @@ pub const Config = struct {
 /// Reads `gmux.conf.lua` from glyphwire's config dir and returns the merged
 /// config. A missing file / missing config home is the normal case:
 /// defaults, no error, nothing logged. Any parse problem is logged and
-/// whatever parsed before it is kept.
+/// the defaults stand.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ.Map) Config {
     // Allocate through `cfg.arena`, never through a separate local: an
     // `ArenaAllocator` holds its block list by value, so allocating via one
     // copy and calling `deinit` on another frees nothing.
     var cfg = Config{ .arena = std.heap.ArenaAllocator.init(gpa) };
-
-    const src = readConf(&cfg.arena, io, environ) orelse return cfg;
-
-    const lua = Lua.init(gpa) catch {
-        std.log.warn("gmux: could not create Lua interpreter for {s}; using defaults", .{conf_name});
-        return cfg;
-    };
-    defer lua.deinit();
-    lua.openLibs();
-
-    lua.doString(src) catch {
-        const msg = lua.toString(-1) catch conf_name ++ ": unknown Lua error";
-        std.log.warn("gmux: {s}: {s}; using what parsed", .{ conf_name, msg });
-        return cfg;
-    };
-
-    _ = lua.getGlobal("config") catch return cfg;
-    defer lua.pop(1);
-    if (lua.typeOf(-1) != .table) {
-        if (lua.typeOf(-1) != .nil)
-            std.log.warn("gmux: {s} `config` is not a table; using defaults", .{conf_name});
-        return cfg;
-    }
-
-    cfg.prefix_key = readPrefixKey(lua, cfg.prefix_key);
-    cfg.shell = readShell(lua, cfg.arena.allocator());
-    cfg.scrollback_rows = readScrollbackRows(lua, cfg.scrollback_rows);
+    const src = conf.read(cfg.arena.allocator(), io, environ) orelse return cfg;
+    conf.runLogged(gpa, src, &cfg, apply);
     return cfg;
 }
 
+fn apply(cfg: *Config, lua: *Lua) void {
+    cfg.prefix_key = readPrefixKey(lua, cfg.prefix_key);
+    if (conf.string(lua, "shell")) |s| cfg.shell = cfg.arena.allocator().dupe(u8, s) catch null;
+    if (conf.uint(lua, usize, "scrollback_rows", .{})) |v| cfg.scrollback_rows = v;
+}
+
 /// `config.prefix_key = "a"` -- a single lowercase ASCII letter. Anything
-/// else (absent, longer, uppercase, punctuation) leaves the default and
-/// warns, since a silently-ignored typo here is otherwise invisible.
+/// else (longer, uppercase, punctuation) leaves the default and warns,
+/// since a silently-ignored typo here is otherwise invisible.
 fn readPrefixKey(lua: *Lua, current: u8) u8 {
-    const t = lua.getField(-1, "prefix_key");
-    defer lua.pop(1);
-    if (t != .string) return current;
-    const s = lua.toString(-1) catch return current;
+    const s = conf.string(lua, "prefix_key") orelse return current;
     if (s.len == 1 and s[0] >= 'a' and s[0] <= 'z') return s[0];
-    std.log.warn("gmux: {s} prefix_key must be one lowercase letter; using default", .{conf_name});
+    conf.warn("prefix_key must be one lowercase letter; using default", .{});
     return current;
-}
-
-/// `config.shell = "/usr/bin/fish"` -- overrides `$SHELL` for every pane.
-fn readShell(lua: *Lua, a: std.mem.Allocator) ?[]const u8 {
-    const t = lua.getField(-1, "shell");
-    defer lua.pop(1);
-    if (t != .string) return null;
-    const s = lua.toString(-1) catch return null;
-    return a.dupe(u8, s) catch null;
-}
-
-/// `config.scrollback_rows = 5000`. A number >= 0 replaces the default;
-/// anything else (absent, negative, non-number) leaves it.
-fn readScrollbackRows(lua: *Lua, current: usize) usize {
-    const t = lua.getField(-1, "scrollback_rows");
-    defer lua.pop(1);
-    if (t != .number) return current;
-    const n = lua.toNumber(-1) catch return current;
-    if (n < 0) return current;
-    return @intFromFloat(n);
-}
-
-fn readConf(arena: *std.heap.ArenaAllocator, io: std.Io, environ: *const std.process.Environ.Map) ?[:0]const u8 {
-    const a = arena.allocator();
-    const dir = glyphwire.configDirPath(a, environ) catch return null;
-    const path = std.fs.path.join(a, &.{ dir, conf_name }) catch return null;
-    return std.Io.Dir.cwd().readFileAllocOptions(io, path, a, .limited(256 * 1024), .of(u8), 0) catch |err| {
-        if (err != error.FileNotFound)
-            std.log.warn("gmux: couldn't read {s} ({t}); using defaults", .{ path, err });
-        return null;
-    };
 }
 
 /// The command to run in a fresh pane: `config.shell`, else `gw-shell`.

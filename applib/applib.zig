@@ -53,6 +53,11 @@
 //!   `theme`      the built-in colour themes and resolving a config's
 //!                own (zoe, gw-grep); the Lua half is the separate
 //!                `themeconf` module, see applib/themeconf.zig
+//!
+//! Three Lua-dependent pieces sit in this directory but are separate
+//! build modules, so a program without Lua doesn't link it: `luaconf`
+//! (reading and running a `*.conf.lua`, typed field readers; every
+//! program with a config), `themeconf` and `dividerconf`.
 
 pub const lineedit = @import("lineedit.zig");
 pub const interrupt = @import("interrupt.zig");

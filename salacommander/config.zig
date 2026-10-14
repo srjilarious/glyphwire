@@ -14,8 +14,8 @@
 //! command F4 runs, with the same template rules.
 
 const std = @import("std");
-const ziglua = @import("ziglua");
-const Lua = ziglua.Lua;
+const luaconf = @import("luaconf");
+const Lua = luaconf.Lua;
 const pane_mod = @import("pane.zig");
 const actions = @import("actions.zig");
 const openaction = @import("openaction.zig");
@@ -23,6 +23,7 @@ const glyphwire = @import("glyphwire");
 const dividerconf = @import("dividerconf");
 
 pub const conf_name = "salacommander.conf.lua";
+const conf: luaconf.Conf = .{ .prog = "salacommander", .name = conf_name };
 
 pub const KeyOverride = struct {
     /// Owned.
@@ -100,6 +101,7 @@ pub const Config = struct {
 
 pub const icon_px_min: u32 = 8;
 pub const icon_px_max: u32 = 128;
+const icon_px: luaconf.Range(u32) = .{ .min = icon_px_min, .max = icon_px_max };
 
 pub const LoadResult = struct {
     config: Config = .{},
@@ -117,78 +119,46 @@ pub const LoadResult = struct {
 /// value of the wrong type keeps the default and is logged.
 pub fn load(alloc: std.mem.Allocator, source: [:0]const u8) LoadResult {
     var result: LoadResult = .{};
-
-    const lua = Lua.init(alloc) catch {
-        result.err = alloc.dupe(u8, conf_name ++ ": could not create Lua interpreter") catch null;
-        return result;
-    };
-    defer lua.deinit();
-    lua.openLibs();
-
-    lua.doString(source) catch {
-        const msg = lua.toString(-1) catch conf_name ++ ": unknown Lua error";
-        result.err = alloc.dupe(u8, msg) catch null;
-        return result;
-    };
-
-    _ = lua.getGlobal("config") catch return result;
-    defer lua.pop(1);
-    if (!lua.isTable(-1)) {
-        if (!lua.isNil(-1)) std.log.warn("salacommander: {s} `config` is not a table; using defaults", .{conf_name});
-        return result;
-    }
-
-    if (stringField(lua, "view")) |v| {
-        if (std.meta.stringToEnum(pane_mod.ViewMode, v)) |mode| {
-            result.config.view = mode;
-        } else {
-            std.log.warn("salacommander: {s} `view` must be \"small\" or \"large\"; ignored", .{conf_name});
-        }
-    }
-    if (boolField(lua, "show_hidden")) |v| result.config.show_hidden = v;
-    if (uintField(lua, "large_icon_px")) |v| result.config.large_icon_px = std.math.clamp(v, icon_px_min, icon_px_max);
-    if (uintField(lua, "small_icon_px")) |v| result.config.small_icon_px = std.math.clamp(v, icon_px_min, icon_px_max);
-    if (uintField(lua, "page_lines")) |v| {
-        // A number >= 1 replaces the default; 0 is not "a screenful", it
-        // is nothing, so it keeps the default -- the rule zoe's
-        // `page_lines` already follows.
-        if (v >= 1) {
-            result.config.page_lines = v;
-        } else {
-            std.log.warn("salacommander: {s} `page_lines` must be at least 1; ignored", .{conf_name});
-        }
-    }
-    result.config.keys = readKeys(alloc, lua) catch &.{};
-    result.config.open_actions = readOpenActions(alloc, lua) catch &.{};
-    result.config.divider_style = dividerconf.read(lua, conf_name);
-    if (stringField(lua, "editor")) |v| {
-        if (std.mem.trim(u8, v, " ").len == 0) {
-            std.log.warn("salacommander: {s} `editor` is empty; ignored", .{conf_name});
-        } else {
-            result.config.editor = alloc.dupe(u8, v) catch null;
-        }
-    }
-
+    var ctx: Apply = .{ .alloc = alloc, .cfg = &result.config };
+    result.err = conf.run(alloc, source, &ctx, Apply.apply);
     return result;
 }
+
+const Apply = struct {
+    alloc: std.mem.Allocator,
+    cfg: *Config,
+
+    fn apply(self: *Apply, lua: *Lua) void {
+        const cfg = self.cfg;
+        if (conf.enumValue(lua, pane_mod.ViewMode, "view")) |v| cfg.view = v;
+        if (conf.boolean(lua, "show_hidden")) |v| cfg.show_hidden = v;
+        if (conf.uint(lua, u32, "large_icon_px", icon_px)) |v| cfg.large_icon_px = v;
+        if (conf.uint(lua, u32, "small_icon_px", icon_px)) |v| cfg.small_icon_px = v;
+        // 0 is not "a screenful", it is nothing, so the floor is 1 -- the
+        // rule zoe's `page_lines` follows too.
+        if (conf.uint(lua, usize, "page_lines", .{ .min = 1 })) |v| cfg.page_lines = v;
+        cfg.keys = readKeys(self.alloc, lua) catch &.{};
+        cfg.open_actions = readOpenActions(self.alloc, lua) catch &.{};
+        cfg.divider_style = dividerconf.read(lua, conf_name);
+        if (conf.string(lua, "editor")) |v| {
+            if (std.mem.trim(u8, v, " ").len == 0) {
+                conf.warn("`editor` is empty; ignored", .{});
+            } else {
+                cfg.editor = self.alloc.dupe(u8, v) catch null;
+            }
+        }
+    }
+};
 
 /// `load`, reading the file from glyphwire's config directory. A missing
 /// file is the normal case: defaults, nothing logged.
 pub fn loadFromDir(alloc: std.mem.Allocator, io: std.Io, config_dir: []const u8) Config {
-    const path = std.fs.path.join(alloc, &.{ config_dir, conf_name }) catch return .{};
-    defer alloc.free(path);
-
-    const src = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(64 * 1024)) catch |err| {
-        if (err != error.FileNotFound) std.log.warn("salacommander: couldn't read {s} ({t}); using defaults", .{ path, err });
-        return .{};
-    };
+    const src = conf.readIn(alloc, io, config_dir) catch return .{};
     defer alloc.free(src);
-    const src_z = std.mem.concatWithSentinel(alloc, u8, &.{src}, 0) catch return .{};
-    defer alloc.free(src_z);
 
-    var result = load(alloc, src_z);
+    var result = load(alloc, src);
     if (result.err) |e| {
-        std.log.warn("salacommander: {s}: {s}; using what parsed", .{ conf_name, e });
+        conf.logRunError(e);
         alloc.free(e);
         result.err = null;
     }
@@ -203,12 +173,12 @@ pub fn applyKeys(alloc: std.mem.Allocator, keymap: *actions.Keymap, overrides: [
     for (overrides) |o| {
         if (o.action) |name| {
             keymap.bindNamed(alloc, o.chord, name) catch |err| {
-                std.log.warn("salacommander: {s} keys[\"{s}\"] = \"{s}\": {t}; ignored", .{ conf_name, o.chord, name, err });
+                conf.warn("keys[\"{s}\"] = \"{s}\": {t}; ignored", .{ o.chord, name, err });
                 skipped += 1;
             };
         } else {
             keymap.unbindText(o.chord) catch |err| {
-                std.log.warn("salacommander: {s} keys[\"{s}\"] = false: {t}; ignored", .{ conf_name, o.chord, err });
+                conf.warn("keys[\"{s}\"] = false: {t}; ignored", .{ o.chord, err });
                 skipped += 1;
             };
         }
@@ -222,7 +192,7 @@ fn readKeys(alloc: std.mem.Allocator, lua: *Lua) ![]KeyOverride {
     _ = lua.getField(-1, "keys");
     defer lua.pop(1);
     if (!lua.isTable(-1)) {
-        if (!lua.isNil(-1)) std.log.warn("salacommander: {s} `keys` is not a table; ignored", .{conf_name});
+        if (!lua.isNil(-1)) conf.warn("`keys` is not a table; ignored", .{});
         return &.{};
     }
 
@@ -242,18 +212,18 @@ fn readKeys(alloc: std.mem.Allocator, lua: *Lua) ![]KeyOverride {
         // `next`.
         defer lua.pop(1);
         if (lua.typeOf(-2) != .string) {
-            std.log.warn("salacommander: {s} `keys` entry with a non-string key; ignored", .{conf_name});
+            conf.warn("`keys` entry with a non-string key; ignored", .{});
             continue;
         }
         const chord = lua.toString(-2) catch continue;
         const action: ?[]const u8 = switch (lua.typeOf(-1)) {
             .string => lua.toString(-1) catch continue,
             .boolean => if (lua.toBoolean(-1)) {
-                std.log.warn("salacommander: {s} keys[\"{s}\"] = true means nothing; use an action name or false", .{ conf_name, chord });
+                conf.warn("keys[\"{s}\"] = true means nothing; use an action name or false", .{ chord });
                 continue;
             } else null,
             else => {
-                std.log.warn("salacommander: {s} keys[\"{s}\"] must be an action name or false; ignored", .{ conf_name, chord });
+                conf.warn("keys[\"{s}\"] must be an action name or false; ignored", .{ chord });
                 continue;
             },
         };
@@ -281,7 +251,7 @@ fn readOpenActions(alloc: std.mem.Allocator, lua: *Lua) ![]OpenAction {
     _ = lua.getField(-1, "open_actions");
     defer lua.pop(1);
     if (!lua.isTable(-1)) {
-        if (!lua.isNil(-1)) std.log.warn("salacommander: {s} `open_actions` is not a table; ignored", .{conf_name});
+        if (!lua.isNil(-1)) conf.warn("`open_actions` is not a table; ignored", .{});
         return &.{};
     }
 
@@ -300,23 +270,23 @@ fn readOpenActions(alloc: std.mem.Allocator, lua: *Lua) ![]OpenAction {
         // see `readKeys` on why a number key would break `next`.
         defer lua.pop(1);
         if (lua.typeOf(-2) != .string) {
-            std.log.warn("salacommander: {s} `open_actions` entry with a non-string key; ignored", .{conf_name});
+            conf.warn("`open_actions` entry with a non-string key; ignored", .{});
             continue;
         }
         const raw = lua.toString(-2) catch continue;
         const command: ?[]const u8 = switch (lua.typeOf(-1)) {
             .string => lua.toString(-1) catch continue,
             .boolean => if (lua.toBoolean(-1)) {
-                std.log.warn("salacommander: {s} open_actions[\"{s}\"] = true means nothing; use a command or false", .{ conf_name, raw });
+                conf.warn("open_actions[\"{s}\"] = true means nothing; use a command or false", .{ raw });
                 continue;
             } else null,
             else => {
-                std.log.warn("salacommander: {s} open_actions[\"{s}\"] must be a command or false; ignored", .{ conf_name, raw });
+                conf.warn("open_actions[\"{s}\"] must be a command or false; ignored", .{ raw });
                 continue;
             },
         };
         const ext = (normalizeExt(alloc, raw) catch continue) orelse {
-            std.log.warn("salacommander: {s} open_actions[\"{s}\"] is not a file extension; ignored", .{ conf_name, raw });
+            conf.warn("open_actions[\"{s}\"] is not a file extension; ignored", .{ raw });
             continue;
         };
         errdefer alloc.free(ext);
@@ -346,38 +316,4 @@ fn normalizeExt(alloc: std.mem.Allocator, raw: []const u8) !?[]u8 {
     const out = try alloc.alloc(u8, key.len);
     for (key, out) |c, *o| o.* = std.ascii.toLower(c);
     return out;
-}
-
-fn stringField(lua: *Lua, key: [:0]const u8) ?[]const u8 {
-    _ = lua.getField(-1, key);
-    defer lua.pop(1);
-    if (lua.typeOf(-1) != .string) {
-        if (!lua.isNil(-1)) std.log.warn("salacommander: {s} `{s}` is not a string; ignored", .{ conf_name, key });
-        return null;
-    }
-    // The string stays alive while `config` does, which outlives the
-    // caller's use of it (the whole `load`).
-    return lua.toString(-1) catch null;
-}
-
-fn boolField(lua: *Lua, key: [:0]const u8) ?bool {
-    _ = lua.getField(-1, key);
-    defer lua.pop(1);
-    if (!lua.isBoolean(-1)) {
-        if (!lua.isNil(-1)) std.log.warn("salacommander: {s} `{s}` is not true/false; ignored", .{ conf_name, key });
-        return null;
-    }
-    return lua.toBoolean(-1);
-}
-
-fn uintField(lua: *Lua, key: [:0]const u8) ?u32 {
-    _ = lua.getField(-1, key);
-    defer lua.pop(1);
-    if (!lua.isNumber(-1)) {
-        if (!lua.isNil(-1)) std.log.warn("salacommander: {s} `{s}` is not a number; ignored", .{ conf_name, key });
-        return null;
-    }
-    const n = lua.toNumber(-1) catch return null;
-    if (n < 0 or n != @floor(n) or n > @as(f64, std.math.maxInt(u32))) return null;
-    return @intFromFloat(n);
 }

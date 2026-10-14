@@ -3060,9 +3060,11 @@ pub fn tabTooltipDelayIsConfigurableTest(_: std.Io, alloc: std.mem.Allocator) !v
         try testz.expectEqual(cfg.tab_tooltip_delay_ms, 0);
     }
     {
+        // Below the 0 floor clamps to it, like every out-of-range config
+        // number.
         var cfg = try parseConf(alloc, "config = { tab_tooltip_delay_ms = -5 }");
         defer cfg.deinit();
-        try testz.expectEqual(cfg.tab_tooltip_delay_ms, 400);
+        try testz.expectEqual(cfg.tab_tooltip_delay_ms, 0);
     }
 }
 

@@ -5846,20 +5846,7 @@ const Prompt = struct {
     /// other than a missing file is logged here and reported as
     /// `error.ReadFailed`.
     fn readConfSource(self: *Prompt, config_dir: []const u8) ConfReadError![:0]u8 {
-        const alloc = self.client.alloc;
-        const io = self.client.io;
-
-        const path = try std.fs.path.join(alloc, &.{ config_dir, "shell.conf.lua" });
-        defer alloc.free(path);
-
-        return std.Io.Dir.cwd().readFileAllocOptions(io, path, alloc, .limited(1 << 20), .of(u8), 0) catch |err| switch (err) {
-            error.FileNotFound => error.FileNotFound,
-            error.OutOfMemory => error.OutOfMemory,
-            else => {
-                std.log.warn("shell.conf.lua: could not read {s}: {t}", .{ path, err });
-                return error.ReadFailed;
-            },
-        };
+        return config.conf.readIn(self.client.alloc, self.client.io, config_dir);
     }
 
     /// Reads `shell.conf.lua` and runs it through the persistent

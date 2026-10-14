@@ -82,6 +82,14 @@ pub fn build(b: *std.Build) void {
     });
     themeconf_mod.addImport("glyphwire", glyphwire_mod);
 
+    // applib/luaconf.zig: the shared skeleton of every `*.conf.lua`
+    // loader (read the file, run it, typed `config` field readers). Its
+    // own module for the same ziglua reason as `themeconf`.
+    const luaconf_mod = b.addModule("luaconf", .{
+        .root_source_file = b.path("applib/luaconf.zig"),
+    });
+    luaconf_mod.addImport("glyphwire", glyphwire_mod);
+
     // applib/dividerconf.zig: a program's own `divider_style` /
     // `divider_chars` over the host's (`set_divider_style`). Its own
     // module for the same ziglua reason as `themeconf`.
@@ -271,6 +279,14 @@ pub fn build(b: *std.Build) void {
     themeconf_mod.addImport("ziglua", ziglua_mod);
     // applib/dividerconf.zig is the eighth.
     dividerconf_mod.addImport("ziglua", ziglua_mod);
+    // applib/luaconf.zig, which every config loader above builds on.
+    luaconf_mod.addImport("ziglua", ziglua_mod);
+    shell_support_mod.addImport("luaconf", luaconf_mod);
+    ls_support_mod.addImport("luaconf", luaconf_mod);
+    zoe_support_mod.addImport("luaconf", luaconf_mod);
+    gmux_support_mod.addImport("luaconf", luaconf_mod);
+    read_support_mod.addImport("luaconf", luaconf_mod);
+    salacommander_support_mod.addImport("luaconf", luaconf_mod);
     // The programs whose own config can override the window's theme.
     shell_support_mod.addImport("themeconf", themeconf_mod);
     read_support_mod.addImport("themeconf", themeconf_mod);
@@ -305,6 +321,7 @@ pub fn build(b: *std.Build) void {
     tests_mod.addImport("grep_support", grep_support_mod);
     tests_mod.addImport("themeconf", themeconf_mod);
     tests_mod.addImport("dividerconf", dividerconf_mod);
+    tests_mod.addImport("luaconf", luaconf_mod);
     tests_mod.addImport("host_support", host_support_mod);
     tests_mod.addImport("zoe_support", zoe_support_mod);
     tests_mod.addImport("gmux_support", gmux_support_mod);
@@ -510,6 +527,7 @@ pub fn build(b: *std.Build) void {
     host_exe.root_module.addImport("host_eng", host_eng_mod);
     // `theme.lua`: the window's theme.
     host_exe.root_module.addImport("themeconf", themeconf_mod);
+    host_exe.root_module.addImport("luaconf", luaconf_mod);
     b.installArtifact(host_exe);
 
     const run_host = b.addRunArtifact(host_exe);

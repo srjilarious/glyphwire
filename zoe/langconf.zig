@@ -20,7 +20,7 @@
 //! matching how `ls/config.zig` sits in `ls_support`.
 
 const std = @import("std");
-const ziglua = @import("ziglua");
+const luaconf = @import("luaconf");
 const glyphwire = @import("glyphwire");
 const syntax = @import("applib").syntax;
 const themes = @import("applib").theme;
@@ -31,9 +31,10 @@ const actions = @import("actions.zig");
 const editor = @import("editor.zig");
 const lsp = @import("lsp.zig");
 
-const Lua = ziglua.Lua;
+const Lua = luaconf.Lua;
 
 const conf_name = "zoe.conf.lua";
+const conf: luaconf.Conf = .{ .prog = "zoe", .name = conf_name };
 
 /// One typematic repeat cadence, as asked of glyphwire-host with
 /// `set_key_repeat`: the hold before a key starts repeating, then the
@@ -217,7 +218,7 @@ pub fn load(
 ) Config {
     var cfg = defaults(gpa);
     cfg.shared_themes = themeconf.loadShared(cfg.arena.allocator(), gpa, io, environ);
-    const src = readConf(&cfg.arena, io, environ) orelse return cfg;
+    const src = conf.read(cfg.arena.allocator(), io, environ) orelse return cfg;
     return parseSource(gpa, src, environ, cfg);
 }
 
@@ -235,97 +236,45 @@ pub fn parseSource(
     cfg_in: Config,
 ) Config {
     var cfg = cfg_in;
-    const a = cfg.arena.allocator();
-
-    const lua = Lua.init(gpa) catch {
-        std.log.warn("zoe: could not create Lua interpreter for {s}; using defaults", .{conf_name});
-        return cfg;
-    };
-    defer lua.deinit();
-    lua.openLibs();
-
-    lua.doString(src) catch {
-        const msg = lua.toString(-1) catch conf_name ++ ": unknown Lua error";
-        std.log.warn("zoe: {s}: {s}; using what parsed", .{ conf_name, msg });
-        return cfg;
-    };
-
-    _ = lua.getGlobal("config") catch return cfg;
-    defer lua.pop(1);
-    if (lua.typeOf(-1) != .table) {
-        if (lua.typeOf(-1) != .nil)
-            std.log.warn("zoe: {s} `config` is not a table; using defaults", .{conf_name});
-        return cfg;
-    }
-
-    cfg.themes = themeconf.read(lua, a, conf_name);
-    cfg.divider_style = dividerconf.read(lua, conf_name);
-    cfg.grammar_dirs = readGrammarDirs(lua, a, environ);
-    cfg.langs = readLangs(lua, a);
-    cfg.injections = readInjections(lua);
-    cfg.page_lines = readPageLines(lua, "page_lines", cfg.page_lines);
-    cfg.tree_page_lines = readPageLines(lua, "tree_page_lines", cfg.tree_page_lines);
-    cfg.key_repeat_delay_ms = readMs(lua, "key_repeat_delay_ms", 0, cfg.key_repeat_delay_ms);
-    cfg.key_repeat_interval_ms = readMs(lua, "key_repeat_interval_ms", 1, cfg.key_repeat_interval_ms);
-    cfg.key_repeat_insert_delay_ms = readMs(lua, "key_repeat_insert_delay_ms", 0, cfg.key_repeat_insert_delay_ms);
-    cfg.key_repeat_insert_interval_ms = readMs(lua, "key_repeat_insert_interval_ms", 1, cfg.key_repeat_insert_interval_ms);
-    cfg.line_numbers = readLineNumbers(lua, cfg.line_numbers);
-    cfg.tab_width = readTabWidth(lua, cfg.tab_width);
-    cfg.expand_tab = readFlag(lua, "expand_tab", cfg.expand_tab);
-    cfg.show_whitespace = readFlag(lua, "show_whitespace", cfg.show_whitespace);
-    cfg.wrap = readFlag(lua, "wrap", cfg.wrap);
-    cfg.tab_tooltip_delay_ms = readMs(lua, "tab_tooltip_delay_ms", 0, cfg.tab_tooltip_delay_ms);
-    readLsp(lua, a, &cfg);
-    cfg.keys = readKeys(lua, a);
+    var ctx: Apply = .{ .cfg = &cfg, .environ = environ };
+    conf.runLogged(gpa, src, &ctx, Apply.apply);
     return cfg;
 }
 
-/// One millisecond-valued config field: a number >= `min` replaces
-/// `current`, anything else (absent, out of range, non-number) leaves it.
-/// `min` is 0 for the repeat delay, where zero is a meaningful setting
-/// ("no initial hold"), and 1 for the interval, where it isn't.
-fn readMs(lua: *Lua, comptime name: [:0]const u8, min: f64, current: f64) f64 {
-    const t = lua.getField(-1, name);
-    defer lua.pop(1);
-    if (t != .number) return current;
-    const n = lua.toNumber(-1) catch return current;
-    if (n < min) return current;
-    return n;
-}
+const Apply = struct {
+    cfg: *Config,
+    environ: *const std.process.Environ.Map,
 
-/// `config.page_lines = 15` / `config.tree_page_lines = 15`. A number
-/// >= 1 replaces the default; anything else (absent, zero, negative,
-/// non-number) leaves it -- which for `tree_page_lines` is how the
-/// viewport-sized default is spelled.
-fn readPageLines(lua: *Lua, comptime name: [:0]const u8, current: usize) usize {
-    const t = lua.getField(-1, name);
-    defer lua.pop(1);
-    if (t != .number) return current;
-    const n = lua.toNumber(-1) catch return current;
-    if (n < 1) return current;
-    return @intFromFloat(n);
-}
-
-/// `config.tab_width = 8`. A number in 1..`editor.max_tab_width`
-/// replaces the default; anything else (absent, zero, huge, non-number)
-/// leaves it.
-fn readTabWidth(lua: *Lua, current: usize) usize {
-    const t = lua.getField(-1, "tab_width");
-    defer lua.pop(1);
-    if (t != .number) return current;
-    const n = lua.toNumber(-1) catch return current;
-    if (n < 1 or n > @as(f64, @floatFromInt(editor.max_tab_width))) return current;
-    return @intFromFloat(n);
-}
-
-/// A plain `config.<name> = true|false`. A non-boolean (including
-/// absent) leaves `current`.
-fn readFlag(lua: *Lua, comptime name: [:0]const u8, current: bool) bool {
-    const t = lua.getField(-1, name);
-    defer lua.pop(1);
-    if (t != .boolean) return current;
-    return lua.toBoolean(-1);
-}
+    fn apply(self: *Apply, lua: *Lua) void {
+        const cfg = self.cfg;
+        const a = cfg.arena.allocator();
+        cfg.themes = themeconf.read(lua, a, conf_name);
+        cfg.divider_style = dividerconf.read(lua, conf_name);
+        cfg.grammar_dirs = readGrammarDirs(lua, a, self.environ);
+        cfg.langs = readLangs(lua, a);
+        if (conf.boolean(lua, "injections")) |v| cfg.injections = v;
+        // `page_lines` must move at least a line; `tree_page_lines` may be
+        // 0, which is how its viewport-sized default is spelled.
+        if (conf.uint(lua, usize, "page_lines", .{ .min = 1 })) |v| cfg.page_lines = v;
+        if (conf.uint(lua, usize, "tree_page_lines", .{})) |v| cfg.tree_page_lines = v;
+        // A repeat delay of 0 is meaningful ("no initial hold"); an
+        // interval of 0 isn't.
+        const delay: luaconf.Range(f64) = .{ .min = 0 };
+        const interval: luaconf.Range(f64) = .{ .min = 1 };
+        if (conf.number(lua, f64, "key_repeat_delay_ms", delay)) |v| cfg.key_repeat_delay_ms = v;
+        if (conf.number(lua, f64, "key_repeat_interval_ms", interval)) |v| cfg.key_repeat_interval_ms = v;
+        if (conf.number(lua, f64, "key_repeat_insert_delay_ms", delay)) |v| cfg.key_repeat_insert_delay_ms = v;
+        if (conf.number(lua, f64, "key_repeat_insert_interval_ms", interval)) |v| cfg.key_repeat_insert_interval_ms = v;
+        cfg.line_numbers = readLineNumbers(lua, cfg.line_numbers);
+        if (conf.uint(lua, usize, "tab_width", .{ .min = 1, .max = editor.max_tab_width })) |v| cfg.tab_width = v;
+        if (conf.boolean(lua, "expand_tab")) |v| cfg.expand_tab = v;
+        if (conf.boolean(lua, "show_whitespace")) |v| cfg.show_whitespace = v;
+        if (conf.boolean(lua, "wrap")) |v| cfg.wrap = v;
+        if (conf.number(lua, f64, "tab_tooltip_delay_ms", delay)) |v| cfg.tab_tooltip_delay_ms = v;
+        readLsp(lua, a, cfg);
+        cfg.keys = readKeys(lua, a);
+    }
+};
 
 /// `config.line_numbers`: `false` -> off, `true` -> absolute,
 /// `"off"` / `"absolute"` / `"relative"` -> that style. Absent, or a
@@ -345,16 +294,6 @@ fn readLineNumbers(lua: *Lua, current: editor.LineNumbers) editor.LineNumbers {
         },
         else => return current,
     }
-}
-
-/// `config.injections = false` turns embedded-language highlighting off.
-/// Anything other than an explicit `false` (absent, `nil`, `true`, a
-/// non-boolean) leaves it on.
-fn readInjections(lua: *Lua) bool {
-    const t = lua.getField(-1, "injections");
-    defer lua.pop(1);
-    if (t != .boolean) return true;
-    return lua.toBoolean(-1);
 }
 
 /// `config.grammar_dirs = { "~/x", ... }`, `~` expanded against $HOME.
@@ -465,7 +404,7 @@ fn readKeys(lua: *Lua, a: std.mem.Allocator) []const actions.Override {
     const t = lua.getField(-1, "keys");
     defer lua.pop(1);
     if (t != .table) {
-        if (t != .nil) std.log.warn("zoe: {s} `keys` is not a table; ignored", .{conf_name});
+        if (t != .nil) conf.warn("`keys` is not a table; ignored", .{});
         return &.{};
     }
 
@@ -479,11 +418,11 @@ fn readKeys(lua: *Lua, a: std.mem.Allocator) []const actions.Override {
         if (lua.typeOf(-2) != .string) continue;
         const name = lua.toString(-2) catch continue;
         const scope = std.meta.stringToEnum(actions.Scope, name) orelse {
-            std.log.warn("zoe: {s} keys.{s}: not a key table (global, normal, visual, insert); ignored", .{ conf_name, name });
+            conf.warn("keys.{s}: not a key table (global, normal, visual, insert); ignored", .{ name });
             continue;
         };
         if (lua.typeOf(-1) != .table) {
-            std.log.warn("zoe: {s} keys.{s} is not a table; ignored", .{ conf_name, name });
+            conf.warn("keys.{s} is not a table; ignored", .{ name });
             continue;
         }
         readKeyTable(lua, a, scope, name, &out);
@@ -509,23 +448,23 @@ fn readKeyTable(lua: *Lua, a: std.mem.Allocator, scope: actions.Scope, scope_nam
         if (lua.typeOf(-2) != .string) continue;
         const text = lua.toString(-2) catch continue;
         const chord = keybind.Chord.parse(text) catch |err| {
-            std.log.warn("zoe: {s} keys.{s}[\"{s}\"]: {t}; ignored", .{ conf_name, scope_name, text, err });
+            conf.warn("keys.{s}[\"{s}\"]: {t}; ignored", .{ scope_name, text, err });
             continue;
         };
         const action: actions.Action = switch (lua.typeOf(-1)) {
             .string => blk: {
                 const name = lua.toString(-1) catch continue;
                 break :blk std.meta.stringToEnum(actions.Action, name) orelse {
-                    std.log.warn("zoe: {s} keys.{s}[\"{s}\"] = \"{s}\": unknown action; ignored", .{ conf_name, scope_name, text, name });
+                    conf.warn("keys.{s}[\"{s}\"] = \"{s}\": unknown action; ignored", .{ scope_name, text, name });
                     continue;
                 };
             },
             .boolean => if (lua.toBoolean(-1)) {
-                std.log.warn("zoe: {s} keys.{s}[\"{s}\"] = true means nothing; use an action name or false", .{ conf_name, scope_name, text });
+                conf.warn("keys.{s}[\"{s}\"] = true means nothing; use an action name or false", .{ scope_name, text });
                 continue;
             } else .none,
             else => {
-                std.log.warn("zoe: {s} keys.{s}[\"{s}\"] must be an action name or false; ignored", .{ conf_name, scope_name, text });
+                conf.warn("keys.{s}[\"{s}\"] must be an action name or false; ignored", .{ scope_name, text });
                 continue;
             },
         };
@@ -547,7 +486,7 @@ fn readLsp(lua: *Lua, a: std.mem.Allocator, cfg: *Config) void {
     }
     defer lua.pop(1);
 
-    cfg.lsp_enabled = readFlag(lua, "enabled", cfg.lsp_enabled);
+    if (conf.boolean(lua, "enabled")) |v| cfg.lsp_enabled = v;
 
     if (lua.getField(-1, "servers") != .table) {
         lua.pop(1);
@@ -592,9 +531,9 @@ fn readLsp(lua: *Lua, a: std.mem.Allocator, cfg: *Config) void {
             .cmd = &.{},
         };
 
-        if (readStringList(lua, a, "languages")) |langs| entry.languages = langs;
-        if (readStringList(lua, a, "cmd")) |cmd| entry.cmd = cmd;
-        entry.enabled = readFlag(lua, "enabled", entry.enabled);
+        if (conf.stringList(lua, a, "languages")) |langs| entry.languages = langs;
+        if (conf.stringList(lua, a, "cmd")) |cmd| entry.cmd = cmd;
+        if (conf.boolean(lua, "enabled")) |v| entry.enabled = v;
         {
             // Bracketed by the stack height rather than a counted `pop`:
             // `luaValueToJson` walks a table with `next`, which leaves a key
@@ -622,28 +561,6 @@ fn readLsp(lua: *Lua, a: std.mem.Allocator, cfg: *Config) void {
     }
 
     cfg.lsp_servers = out.toOwnedSlice(a) catch &default_lsp_servers;
-}
-
-/// A table of strings at `config.<...>.<name>`, duped into `a`. Null when
-/// the field is absent or isn't a table, so a caller can tell "not
-/// mentioned" (keep the default) from "mentioned as empty" (an entry that
-/// won't start). A non-string element is skipped.
-fn readStringList(lua: *Lua, a: std.mem.Allocator, comptime name: [:0]const u8) ?[]const []const u8 {
-    if (lua.getField(-1, name) != .table) {
-        lua.pop(1);
-        return null;
-    }
-    defer lua.pop(1);
-    var out: std.ArrayList([]const u8) = .empty;
-    const n = lua.rawLen(-1);
-    var i: usize = 1;
-    while (i <= n) : (i += 1) {
-        defer lua.pop(1);
-        if (lua.rawGetIndex(-1, @intCast(i)) != .string) continue;
-        const s = lua.toString(-1) catch continue;
-        out.append(a, a.dupe(u8, s) catch continue) catch continue;
-    }
-    return out.toOwnedSlice(a) catch null;
 }
 
 /// Serializes the Lua value on top of the stack as JSON into `out`, for a
@@ -732,21 +649,6 @@ fn appendJsonString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8
     const quoted = try std.json.Stringify.valueAlloc(a, s, .{});
     defer a.free(quoted);
     try out.appendSlice(a, quoted);
-}
-
-fn readConf(
-    arena: *std.heap.ArenaAllocator,
-    io: std.Io,
-    environ: *const std.process.Environ.Map,
-) ?[:0]const u8 {
-    const a = arena.allocator();
-    const dir = glyphwire.configDirPath(a, environ) catch return null;
-    const path = std.fs.path.join(a, &.{ dir, conf_name }) catch return null;
-    return std.Io.Dir.cwd().readFileAllocOptions(io, path, a, .limited(256 * 1024), .of(u8), 0) catch |err| {
-        if (err != error.FileNotFound)
-            std.log.warn("zoe: couldn't read {s} ({t}); using defaults", .{ path, err });
-        return null;
-    };
 }
 
 fn expandTilde(

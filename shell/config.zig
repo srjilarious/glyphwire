@@ -19,8 +19,14 @@
 const std = @import("std");
 const ziglua = @import("ziglua");
 const themeconf = @import("themeconf");
+const luaconf = @import("luaconf");
 const Lua = ziglua.Lua;
 const openaction = @import("openaction.zig");
+
+/// `shell.conf.lua` isn't a `config` table but a script of calls
+/// (`alias(...)`, `prompt{...}`) run through the session-long
+/// `script_engine`, so only `luaconf`'s file reading applies to it.
+pub const conf: luaconf.Conf = .{ .prog = "gw-shell", .name = "shell.conf.lua" };
 
 /// One `alias(name, value)` call collected from a shell.conf.lua run. Both
 /// fields are owned by the enclosing `ShellConfig`.

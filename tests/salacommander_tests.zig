@@ -811,8 +811,9 @@ pub fn configReadsSettingsAndKeysTest(_: std.Io, alloc: std.mem.Allocator) !void
 }
 
 /// `page_lines` is how far PageUp/PageDown move, defaulting to 6. A
-/// number >= 1 replaces it; 0 is nothing, not "a screenful", so it keeps
-/// the default -- the rule zoe's `page_lines` already follows.
+/// number >= 1 replaces it; 0 is nothing, not "a screenful", so it is
+/// clamped up to 1 -- the rule zoe's `page_lines` follows too. A value
+/// that isn't a whole number keeps the default.
 pub fn configReadsPageLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var def = config.load(alloc, "config = {}");
     defer def.deinit(alloc);
@@ -822,8 +823,11 @@ pub fn configReadsPageLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     defer set.deinit(alloc);
     try testz.expectEqual(set.config.page_lines, 20);
 
+    var zero = config.load(alloc, "config = { page_lines = 0 }");
+    defer zero.deinit(alloc);
+    try testz.expectEqual(zero.config.page_lines, 1);
+
     for ([_][:0]const u8{
-        "config = { page_lines = 0 }",
         "config = { page_lines = -3 }",
         "config = { page_lines = 1.5 }",
         "config = { page_lines = \"lots\" }",
