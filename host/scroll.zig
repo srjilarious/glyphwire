@@ -338,9 +338,14 @@ pub const Scroll = struct {
                 // Wheel *up* shows earlier content, which is a *smaller*
                 // offset -- the opposite sign from the root layer's
                 // scrollback, where a bigger offset means further back.
+                //
+                // A layer that only scrolls sideways (a tab strip) takes
+                // a plain wheel as horizontal too: wheel down moves right,
+                // the way shift+wheel does, rather than doing nothing.
+                const sideways = hit.sideways_only and delta_x == 0;
                 self.app.server.reportScrollOffsetIn(self.app.alloc, hit.context, hit.layer, null, .{
-                    .row = -delta,
-                    .col = delta_x,
+                    .row = if (sideways) 0 else -delta,
+                    .col = if (sideways) -delta else delta_x,
                 }) catch |err| {
                     std.log.err("glyphwire-host: reportScrollOffset(wheel) failed: {t}", .{err});
                 };

@@ -91,6 +91,7 @@ const cmdhistory = @import("cmdhistory.zig");
 const pathmenu = @import("pathmenu.zig");
 const pathcomplete = @import("applib").pathcomplete;
 const fsops = @import("applib").fsops;
+const tabstrip = @import("applib").tabstrip;
 const buffer_mod = @import("buffer.zig");
 const shellpanel = @import("applib").shellpanel;
 
@@ -742,14 +743,21 @@ pub const Group = struct {
     buffer_bounds: Bounds = .{},
 
     /// The tab strip's horizontal scroll, in strip columns, and the tab
-    /// spans the last layout produced (also strip coordinates -- subtract
-    /// `tab_scroll` for screen columns). `renderTabs` refills the spans;
-    /// a click reads them back through `tabs.hit`.
+    /// spans the last layout produced (also strip coordinates --
+    /// `tab_win` turns them into screen columns). `renderTabs` refills
+    /// the spans; a click reads them back through `tabs.hit`.
     tab_scroll: usize = 0,
     tab_spans: std.ArrayList(tabs.Span) = .empty,
     /// The strip's total width, so a scroll can be clamped without
     /// re-running the layout.
     tab_total: usize = 0,
+    /// Where the tabs show in the strip's row: between the scroll
+    /// arrows while it overflows (`tabstrip.window`).
+    tab_win: tabstrip.Window = .{ .arrows = false, .left = 0, .cols = 0 },
+    /// What the strip last scrolled the shown tab into view for: an
+    /// arrow or the wheel can scroll it away, and it stays put until
+    /// the shown tab or the strip changes.
+    tab_follow: tabstrip.Follow = .{},
     /// The `(width, scroll)` last pushed to the tabs layer as its content
     /// extent and offset, so a still strip is silent on the wire.
     pushed_tab_bar: [2]usize = .{ std.math.maxInt(usize), 0 },
@@ -2311,6 +2319,7 @@ pub const Ui = struct {
             // it works from either pane: which files exist is a
             // session-wide question, not a sidebar-local one.
             .toggleHidden => try self.toggleHidden(),
+            .revealInTree => try self.revealInTree(),
             .toggleShell => self.toggleShell(),
             .nextTab => self.stepBuffer(true),
             .prevTab => self.stepBuffer(false),
@@ -2477,6 +2486,7 @@ pub const Ui = struct {
     pub const treeText = treepane.treeText;
     pub const treeMove = treepane.treeMove;
     pub const treeGoto = treepane.treeGoto;
+    pub const revealInTree = treepane.revealInTree;
     pub const scrollTreeToCursor = treepane.scrollTreeToCursor;
     pub const scrollTreeToRow = treepane.scrollTreeToRow;
     pub const treeScrollTop = treepane.treeScrollTop;
@@ -2679,7 +2689,7 @@ pub const Ui = struct {
                 // scrolls whatever is under the pointer.
                 for (self.group_list.items) |g| {
                     if (so.layer == g.buffer_layer) self.scrollGroupTo(g, so.row, so.col);
-                    // A shift+wheel or thumb drag over a tab strip. Only
+                    // A wheel (plain or shifted) over a tab strip. Only
                     // the column matters -- the strip is one row tall --
                     // and the offset is recorded as already pushed so
                     // `syncTabScrollbar` doesn't echo it straight back.
@@ -3034,16 +3044,21 @@ pub const Ui = struct {
     }
 
     pub fn toggleTree(self: *Ui) !void {
-        self.tree_visible = !self.tree_visible;
         // Ctrl+B is also the shortest way *to* the sidebar, so showing it
         // focuses it: opening a pane you then have to Ctrl+W into is two
         // chords for one intention. Hiding it hands focus back.
-        if (self.tree_visible) {
+        if (!self.tree_visible) {
             self.focus = .tree;
         } else if (self.focus == .tree) {
             self.focus = .buffer;
             self.cancelFind();
         }
+        try self.setTreeVisible(!self.tree_visible);
+    }
+
+    /// Shows or hides the sidebar, leaving the keyboard to the caller.
+    pub fn setTreeVisible(self: *Ui, visible: bool) !void {
+        self.tree_visible = visible;
         // Dropping the layer from the split reclaims its columns but
         // leaves the layer itself mapped, and the host draws every mapped
         // layer's scrollbars in a pass of their own, over the top of
@@ -3153,6 +3168,11 @@ pub const Ui = struct {
             if (self.groupAt(ev.cell)) |g| {
                 if (g != self.grp) self.focusGroup(g);
             }
+            if (stripSpotAt(self.grp, ev.cell)) |spot| switch (spot) {
+                .back => return stepStrip(self.grp, false),
+                .forward => return stepStrip(self.grp, true),
+                .strip, .past => {},
+            };
             if (tabAt(self.grp, ev.cell)) |h| {
                 if (h.close) {
                     try self.closeBuffer(h.index, false);
@@ -3280,11 +3300,8 @@ pub const Ui = struct {
         self.buf.ed.status.clearRetainingCapacity();
         self.status_dirty = true;
         const to = self.groupAt(cell) orelse return;
-        const strip = to.tabs_bounds;
-        const on_strip = cell.row >= strip.row and cell.row < strip.row + strip.rows and
-            cell.col >= strip.col and cell.col < strip.col + strip.cols;
-        if (on_strip) {
-            const index = tabs.dropIndex(to.tab_spans.items, cell.col - strip.col + to.tab_scroll);
+        if (dropStripCol(to, cell)) |col| {
+            const index = tabs.dropIndex(to.tab_spans.items, col);
             try self.moveTab(slot, to, index);
         } else if (to != self.grp) {
             try self.moveTab(slot, to, null);
@@ -3298,12 +3315,9 @@ pub const Ui = struct {
     /// pane, the whole pane. Null where the drop does nothing.
     pub fn tabDropTarget(self: *const Ui, cell: glyphwire.CellPos) ?DropShown {
         const to = self.groupAt(cell) orelse return null;
-        const strip = to.tabs_bounds;
-        const on_strip = cell.row >= strip.row and cell.row < strip.row + strip.rows and
-            cell.col >= strip.col and cell.col < strip.col + strip.cols;
-        if (on_strip) {
+        if (dropStripCol(to, cell)) |col| {
             const spans = to.tab_spans.items;
-            const index = tabs.dropIndex(spans, cell.col - strip.col + to.tab_scroll);
+            const index = tabs.dropIndex(spans, col);
             // The left edge of the tab it would go in front of, or the
             // right edge of the last one for the end.
             const at: usize = if (index < spans.len)
@@ -3312,7 +3326,11 @@ pub const Ui = struct {
                 spans[spans.len - 1].end
             else
                 0;
-            return .{ .layer = to.tabs_layer, .target = .{ .insert = .{ .row = 0, .col = at -| to.tab_scroll, .rows = strip.rows } } };
+            // A gap scrolled out of view is marked at the edge it's past.
+            const win = to.tab_win;
+            const shown_at = win.paneCol(to.tab_scroll, at) orelse
+                if (at < to.tab_scroll) win.left else win.left + win.cols;
+            return .{ .layer = to.tabs_layer, .target = .{ .insert = .{ .row = 0, .col = shown_at, .rows = to.tabs_bounds.rows } } };
         }
         if (to != self.grp) return .{ .layer = to.buffer_layer, .target = .layer };
         return null;
@@ -3338,15 +3356,48 @@ pub const Ui = struct {
         return motion.prevCodepoint(&self.buf.ed.buf, end);
     }
 
-    /// The tab under a root-grid cell, or null when the cell isn't in
-    /// the strip. Screen columns are strip columns less the scroll, so
-    /// the spans `renderTabs` recorded answer this directly.
-    pub fn tabAt(g: *const Group, cell: glyphwire.CellPos) ?tabs.Hit {
+    /// What is under a root-grid cell of `g`'s strip, or null when the
+    /// cell isn't in the strip.
+    pub fn stripSpotAt(g: *const Group, cell: glyphwire.CellPos) ?tabstrip.Spot {
         const b = g.tabs_bounds;
         if (b.cols == 0 or b.rows == 0) return null;
         if (cell.row < b.row or cell.row >= b.row + b.rows) return null;
         if (cell.col < b.col or cell.col >= b.col + b.cols) return null;
-        return tabs.hit(g.tab_spans.items, cell.col - b.col + g.tab_scroll);
+        return g.tab_win.at(g.tab_scroll, cell.col - b.col);
+    }
+
+    /// The tab under a root-grid cell, or null when the cell isn't on
+    /// one. `stripSpotAt` turns the screen column into a strip column,
+    /// which the spans `renderTabs` recorded answer directly.
+    pub fn tabAt(g: *const Group, cell: glyphwire.CellPos) ?tabs.Hit {
+        return switch (stripSpotAt(g, cell) orelse return null) {
+            .strip => |col| tabs.hit(g.tab_spans.items, col),
+            .back, .forward, .past => null,
+        };
+    }
+
+    /// The strip column a tab dropped on `cell` is placed by, or null
+    /// off the strip. An arrow counts as the visible edge next to it, so
+    /// a drop there lands at the first or last tab in view.
+    fn dropStripCol(g: *const Group, cell: glyphwire.CellPos) ?usize {
+        return switch (stripSpotAt(g, cell) orelse return null) {
+            .strip => |col| col,
+            .back => g.tab_scroll,
+            .forward => g.tab_scroll + g.tab_win.cols,
+            .past => g.tab_total,
+        };
+    }
+
+    /// A click on one of `g`'s strip arrows: scrolls the next tab hidden
+    /// that way into view. The shown tab stays shown.
+    fn stepStrip(g: *Group, forward: bool) void {
+        const next = if (forward)
+            tabstrip.stepForward(g.tab_spans.items, g.tab_scroll, g.tab_win, g.tab_total)
+        else
+            tabstrip.stepBack(g.tab_spans.items, g.tab_scroll);
+        if (next == g.tab_scroll) return;
+        g.tab_scroll = next;
+        g.tabs_dirty = true;
     }
 
     /// The group whose strip or pane is under `cell`, if any.

@@ -23,8 +23,8 @@
 //!     ` label │ label │ label `
 //!
 //! with no close box, so tabs stay narrow. A strip wider than the pane
-//! slides left just far enough to show the active tab (`scrollFor`); it
-//! keeps no scroll state of its own.
+//! scrolls between two arrows, with the wheel or a click on an arrow,
+//! the same way zoe's does (`applib.tabstrip`).
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -139,15 +139,6 @@ pub fn layout(labels: []const []const u8, out: []Span) usize {
         if (i + 1 < labels.len) col += glyphwire.stringWidth(separator);
     }
     return col;
-}
-
-/// How far the strip slides left in a `cols`-wide pane so the active tab
-/// is fully shown: not at all while it fits, else just enough to bring
-/// its right edge in. A tab wider than the pane shows its left edge,
-/// where the label starts.
-pub fn scrollFor(active: Span, cols: usize) usize {
-    if (active.end <= cols) return 0;
-    return @min(active.end - cols, active.start);
 }
 
 /// The tab under strip column `col`, or null for a separator or the

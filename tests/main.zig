@@ -50,6 +50,7 @@ const all_tests = blk: {
         testz.Group{ .name = "Lua Config Tests", .tag = "luaconf", .mod = @import("./luaconf_tests.zig") },
         testz.Group{ .name = "CLI Tests", .tag = "cli", .mod = @import("./cli_tests.zig") },
         testz.Group{ .name = "Split Tree Tests", .tag = "splittree", .mod = @import("./splittree_tests.zig") },
+        testz.Group{ .name = "Tab Strip Tests", .tag = "tabstrip", .mod = @import("./tabstrip_tests.zig") },
         testz.Group{ .name = "Walk Tests", .tag = "walk", .mod = @import("./walk_tests.zig") },
         testz.Group{ .name = "List Cursor Tests", .tag = "listcursor", .mod = @import("./listcursor_tests.zig") },
         testz.Group{ .name = "Line Edit Tests", .tag = "lineedit", .mod = @import("./lineedit_tests.zig") },

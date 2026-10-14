@@ -18,6 +18,7 @@ const tree_mod = @import("tree.zig");
 const homepath = @import("applib").homepath;
 const syntax = @import("applib").syntax;
 const tabs = @import("tabs.zig");
+const tabstrip = @import("applib").tabstrip;
 const lsp = @import("lsp.zig");
 const selection_diff = @import("selection_diff.zig");
 const diag = @import("diag.zig");
@@ -1016,7 +1017,7 @@ pub fn renderTabTip(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     // The window's full width: the statusline spans it.
     const area: tabs.TipArea = .{
         .strip_row = g.tabs_bounds.row,
-        .strip_col = g.tabs_bounds.col,
+        .strip_col = g.tabs_bounds.col + g.tab_win.left,
         .scroll = g.tab_scroll,
         .area_col = self.status_bounds.col,
         .area_cols = self.status_bounds.cols,
@@ -1926,14 +1927,18 @@ pub fn renderTabs(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         });
     }
 
-    self.grp.tab_total = try tabs.layout(self.alloc, labels.items, &self.grp.tab_spans);
-    if (self.grp.active < self.grp.tab_spans.items.len) {
-        self.grp.tab_scroll = tabs.scrollToShow(
-            self.grp.tab_spans.items[self.grp.active],
-            b.cols,
-            self.grp.tab_scroll,
-            self.grp.tab_total,
-        );
+    const g = self.grp;
+    g.tab_total = try tabs.layout(self.alloc, labels.items, &g.tab_spans);
+    g.tab_win = tabstrip.window(g.tab_total, b.cols);
+    // The shown tab is scrolled into view when it, or the strip, has
+    // changed; otherwise the strip keeps the scroll an arrow or the
+    // wheel gave it.
+    const follow = g.tab_follow.changed(g.active, g.tab_spans.items.len, g.tab_total, b.cols);
+    if (follow and g.active < g.tab_spans.items.len) {
+        const span = g.tab_spans.items[g.active];
+        g.tab_scroll = tabstrip.scrollToShow(span.start, span.end, g.tab_win, g.tab_scroll, g.tab_total);
+    } else {
+        g.tab_scroll = g.tab_win.clamp(g.tab_scroll, g.tab_total);
     }
     try self.syncTabScrollbar(batch);
 
@@ -1979,6 +1984,11 @@ pub fn renderTabs(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
             try self.writeStripRun(batch, span.end, tabs.separator, role(.fg_dim), role(.tab_bar_bg));
         }
     }
+    try tabstrip.drawArrows(batch, g.tabs_layer, 0, g.tab_win, g.tab_scroll, g.tab_total, .{
+        .fg = role(.fg),
+        .fg_dim = role(.fg_dim),
+        .bg = role(.tab_bar_bg),
+    });
 }
 
 /// Writes one run of the tab strip, positioned in strip columns and
@@ -1994,8 +2004,9 @@ pub fn writeStripRun(
     bg: Color,
 ) !void {
     const width = glyphwire.stringWidth(text);
+    const win = self.grp.tab_win;
     const view_lo = self.grp.tab_scroll;
-    const view_hi = self.grp.tab_scroll + self.grp.tabs_bounds.cols;
+    const view_hi = self.grp.tab_scroll + win.cols;
     const lo = @max(start, view_lo);
     const hi = @min(start + width, view_hi);
     if (lo >= hi) return;
@@ -2004,7 +2015,7 @@ pub fn writeStripRun(
     // default `Opts` is the plain codepoint-width walk this wants.
     const from = display.byteAtCol(text, lo - start, .{});
     const to = display.byteAtCol(text, hi - start, .{});
-    try writeAt(batch, self.grp.tabs_layer, 0, lo - view_lo, text[from..to], fg, bg);
+    try writeAt(batch, self.grp.tabs_layer, 0, win.left + lo - view_lo, text[from..to], fg, bg);
 }
 
 /// Keeps the tabs layer's virtual extent and offset in step with the
@@ -2013,15 +2024,11 @@ pub fn writeStripRun(
 /// lets the host turn a shift+wheel or a drag over it into the
 /// `scroll_offset` `handleEvent` follows. Silent when nothing moved.
 pub fn syncTabScrollbar(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
-    const now: [2]usize = .{ self.grp.tab_total, self.grp.tab_scroll };
+    const now: [2]usize = .{ self.grp.tab_win.extent(self.grp.tab_total), self.grp.tab_scroll };
     if (std.mem.eql(usize, &now, &self.grp.pushed_tab_bar)) return;
 
     if (now[0] != self.grp.pushed_tab_bar[0]) {
-        try batch.setLayerContentExtent(
-            self.grp.tabs_layer,
-            @max(self.grp.tab_total, self.grp.tabs_bounds.cols),
-            1,
-        );
+        try batch.setLayerContentExtent(self.grp.tabs_layer, now[0], 1);
     }
     try batch.setLayerScrollOffset(self.grp.tabs_layer, 0, self.grp.tab_scroll);
     self.grp.pushed_tab_bar = now;

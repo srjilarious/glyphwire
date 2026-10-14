@@ -1155,12 +1155,6 @@ pub fn tabStripLayoutAndHitsTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqual(tabs.hit(&spans, 5), null); // the separator
     try testz.expectEqual(tabs.hit(&spans, 7), 1);
     try testz.expectEqual(tabs.hit(&spans, total), null);
-
-    // It fits: no slide. It doesn't: just enough for the right edge, but
-    // never past the tab's own left edge.
-    try testz.expectEqual(tabs.scrollFor(spans[2], 20), 0);
-    try testz.expectEqual(tabs.scrollFor(spans[2], 12), total - 12);
-    try testz.expectEqual(tabs.scrollFor(spans[2], 3), spans[2].start);
 }
 
 /// Panes move in and out of a set by value, each keeping its own

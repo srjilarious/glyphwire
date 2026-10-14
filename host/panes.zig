@@ -46,6 +46,11 @@ pub const PaneHit = struct {
     /// False when it only has a scrollback ring (a terminal pane) -- a
     /// wheel moves its `view_scroll` through `Server.reportLayerScrollIn`.
     scrolls_viewport: bool,
+    /// True when the viewport slack is all sideways: wider content than
+    /// the viewport, but no taller -- a one-row tab strip. The wheel's
+    /// vertical turn then scrolls it horizontally, since there is no
+    /// other way for it to go.
+    sideways_only: bool = false,
 };
 
 /// The topmost visible, scrollable layer whose viewport contains
@@ -82,6 +87,7 @@ pub fn scrollablePaneAt(
             .layer = handle,
             .rect = rect,
             .scrolls_viewport = slack,
+            .sideways_only = slack and layer.maxScroll().row == 0,
         };
     }
     return null;

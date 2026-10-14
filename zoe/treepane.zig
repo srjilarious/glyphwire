@@ -198,6 +198,35 @@ pub fn treeGoto(self: *Ui, index: usize) void {
     self.markTreeDirty(.selection);
 }
 
+/// Ctrl+Shift+E: finds the focused group's file in the sidebar. The tree
+/// is shown if it was hidden, the folders down to the file are opened,
+/// and the cursor lands on it and is scrolled into view. The keyboard
+/// stays where it was -- in the editor, or in the tree if it was there
+/// -- so this can be a glance at where a file lives as well as a way to
+/// act on it.
+pub fn revealInTree(self: *Ui) !void {
+    const abs = self.slotAbs(self.buf) orelse {
+        self.buf.ed.setStatus("No file to reveal: the buffer has no name", .{});
+        self.status_dirty = true;
+        return;
+    };
+    // A search's candidates and an edit field's row are indices into the
+    // listing the reveal is about to open folders in.
+    self.cancelFind();
+    self.cancelTreeEdit();
+    const index = (try self.tree.revealPath(self.io, abs)) orelse {
+        // Outside every root, or hidden while hidden files are.
+        self.buf.ed.setStatus("\"{s}\" isn't in the file tree", .{abs});
+        self.status_dirty = true;
+        return;
+    };
+    if (!self.tree_visible) try self.setTreeVisible(true);
+    // Opened folders added rows, so the whole tree repaints, not just
+    // the highlight `treeGoto` marks.
+    self.markTreeDirty(.full);
+    self.treeGoto(index);
+}
+
 /// Keeps the tree's cursor inside the host-scrolled viewport by
 /// queueing a new `scroll_offset`, since the host has no idea zoe has
 /// a cursor. Queued rather than sent so it rides out in the same

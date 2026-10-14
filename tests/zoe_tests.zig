@@ -3127,22 +3127,6 @@ pub fn tabDropIndexSplitsEachTabAtItsMiddleTest(_: std.Io, alloc: std.mem.Alloca
     try testz.expectEqual(tabs.dropIndex(&.{}, 5), 0);
 }
 
-pub fn tabScrollFollowsTheActiveTabTest(_: std.Io, _: std.mem.Allocator) !void {
-    const span = tabs.Span{ .start = 30, .end = 42, .close = 40 };
-
-    // A strip that fits the pane never scrolls.
-    try testz.expectEqual(tabs.scrollToShow(span, 60, 0, 50), 0);
-
-    // Off the right edge: scrolls just far enough to show the whole tab.
-    try testz.expectEqual(tabs.scrollToShow(span, 20, 0, 80), 22);
-    // Off the left edge: scrolls back to the tab's leading space.
-    try testz.expectEqual(tabs.scrollToShow(span, 20, 35, 80), 30);
-    // Already fully visible: left where it was.
-    try testz.expectEqual(tabs.scrollToShow(span, 20, 25, 80), 25);
-    // Never past the end of the strip.
-    try testz.expectEqual(tabs.scrollToShow(.{ .start = 78, .end = 80, .close = 79 }, 20, 0, 80), 60);
-}
-
 pub fn tabLabelIsTheBasenameTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqualStr(tabs.labelFor("src/zoe/ui.zig"), "ui.zig");
     try testz.expectEqualStr(tabs.labelFor("ui.zig"), "ui.zig");

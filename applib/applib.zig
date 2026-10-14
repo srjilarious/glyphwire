@@ -32,6 +32,8 @@
 //!                Tab, zoe's `:` line)
 //!   `fsops`      make a directory / file, rename in place
 //!                (salacommander, zoe's sidebar)
+//!   `tabstrip`   a tab strip's scroll arrows and window (zoe,
+//!                salacommander)
 //!   `trash`      the freedesktop.org trash: move an entry to it
 //!                (salacommander's F8; here so zoe's sidebar can offer
 //!                the same when it grows a delete)
@@ -106,6 +108,7 @@ pub const listcursor = @import("listcursor");
 pub const fsops = @import("fsops.zig");
 pub const trash = @import("trash.zig");
 pub const pathcomplete = @import("pathcomplete.zig");
+pub const tabstrip = @import("tabstrip.zig");
 pub const syntax = @import("syntax.zig");
 pub const theme = @import("glyphwire").theme;
 

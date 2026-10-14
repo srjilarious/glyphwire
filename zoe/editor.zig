@@ -788,6 +788,7 @@ pub const Editor = struct {
             .listExtensions,
             .toggleTree,
             .toggleHidden,
+            .revealInTree,
             .toggleShell,
             .nextTab,
             .prevTab,

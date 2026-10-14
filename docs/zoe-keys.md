@@ -41,6 +41,7 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 | `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key, by name, with its chord in the current mode. Recently run ones list first |
 | `listExtensions` | (unbound; `:extensions`) | Every extension zoe could load, built in or in `~/.config/glyphwire/zoe/extensions/`, and whether it loaded. Enter on one with a user file opens it |
 | `toggleTree` | Ctrl+B, Ctrl+N | Show / hide the file tree. Ctrl+B is VS Code's chord; under gmux it is the prefix, so use Ctrl+N or gmux's Ctrl+B Ctrl+B |
+| `revealInTree` | Ctrl+Shift+E | Find the focused group's file in the tree: shows the tree if hidden, opens the folders down to it and puts the cursor on it. The keyboard stays where it was |
 | `toggleHidden` | Alt+H | Dotfiles and `.gitignore`d paths in the tree; dotfiles only in the finder and `/` search. Was Ctrl+H, which is now replace |
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
 | `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |
@@ -408,8 +409,9 @@ folder.
 Click to place the cursor and focus a group; drag to select (enters
 visual mode); double-click selects a word (vim's `iw` run: identifier,
 punctuation or blanks) and triple-click a line (`V`), and dragging on
-from either grows the selection a word or line at a time; wheel and scrollbar thumb scroll any group; Shift+wheel
-scrolls a tab strip; click a tab to switch, its `×` (or a middle click anywhere on it) to close; drag a tab
+from either grows the selection a word or line at a time; wheel and scrollbar thumb scroll any group; the wheel
+(plain or Shift) over a tab strip scrolls it sideways, and a strip too wide for its group shows a `‹` / `›` at
+each end that scrolls it one tab per click; click a tab to switch, its `×` (or a middle click anywhere on it) to close; drag a tab
 onto another group's strip (dropped in front of the tab under the pointer)
 or pane (added at the end) to move it there, or along its own strip to
 reorder it, with a bar marking the gap it would land in on a strip and a

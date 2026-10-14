@@ -90,6 +90,7 @@ const Dialog = dialog_mod.Dialog;
 const Button = dialog_mod.Button;
 const LineEdit = dialog_mod.LineEdit;
 const lineedit = @import("applib").lineedit;
+const tabstrip = @import("applib").tabstrip;
 const Color = glyphwire.Color;
 const Batch = glyphwire.Client.Batch;
 const lsfmt = @import("applib").format;
@@ -356,6 +357,11 @@ pub const Ui = struct {
 
     context: glyphwire.ContextHandle,
     pane_layers: [2]glyphwire.LayerHandle,
+    /// Each pane's tab strip, a one-row layer laid over the pane's own
+    /// top row while it has two or more tabs (`stripRows`). A layer of
+    /// its own so it can scroll sideways: the host turns a wheel over it
+    /// into a `scroll_offset`, where over the pane it scrolls the list.
+    strip_layers: [2]glyphwire.LayerHandle,
     bar_layer: glyphwire.LayerHandle,
     dialog_layer: glyphwire.LayerHandle,
     /// Ctrl+`: a `gw-shell` drawing into a layer docked along an edge or
@@ -443,6 +449,13 @@ pub const Ui = struct {
     /// The last `content_extent`/offset sent per pane, so an unchanged one
     /// isn't re-sent (and a host-driven scroll isn't echoed back).
     pushed_scroll: [2][2]usize = .{ .{ std.math.maxInt(usize), 0 }, .{ std.math.maxInt(usize), 0 } },
+    /// Each strip's sideways scroll, in strip columns.
+    strip_scroll: [2]usize = .{ 0, 0 },
+    /// What each strip last scrolled its shown tab into view for: an
+    /// arrow or the wheel can scroll it away until that changes.
+    strip_follow: [2]tabstrip.Follow = .{ .{}, .{} },
+    /// The `(extent, scroll)` last pushed to each strip's layer.
+    pushed_strip: [2][2]usize = .{ .{ std.math.maxInt(usize), 0 }, .{ std.math.maxInt(usize), 0 } },
     /// The row the last plain left click landed on, or null after a click
     /// that must not start a double (a Ctrl+click or right-click mark).
     /// The host counts the clicks (`MouseButtonEvent.clicks`); this only
@@ -532,6 +545,10 @@ pub const Ui = struct {
 
         const left_layer = try client.createLayer(size.cols, size.rows, 0);
         const right_layer = try client.createLayer(size.cols, size.rows, 0);
+        // Right after the panes, so they draw over them and under
+        // everything else. Placed per frame by `writeStrip`.
+        const left_strip = try client.createLayer(size.cols, 1, 0);
+        const right_strip = try client.createLayer(size.cols, 1, 0);
         const bar_layer = try client.createLayer(size.cols, 1, 0);
         // The Ctrl+` shell panel. `gw-shell --embed` draws its prompt and
         // its commands' output here, so it carries scrollback of its own
@@ -562,6 +579,14 @@ pub const Ui = struct {
             try client.setLayerBackground(l, bg_pane);
             try client.setLayerScrollMode(l, .client);
             try client.setLayerScrollbars(l, true, false);
+        }
+        for ([_]glyphwire.LayerHandle{ left_strip, right_strip }) |l| {
+            try client.setLayerBackground(l, bg_tab_bar);
+            // Scrolls sideways with no bar of its own, like zoe's strip:
+            // the extent alone makes the host route the wheel to it.
+            try client.setLayerScrollMode(l, .client);
+            try client.setLayerScrollbars(l, false, false);
+            try client.setLayerVisible(l, false);
         }
         try client.setLayerBackground(bar_layer, bg_bar);
         // Opaque, and darker than the panes: the shell's own writes leave
@@ -598,6 +623,7 @@ pub const Ui = struct {
             .profile = opts.profile,
             .context = context,
             .pane_layers = .{ left_layer, right_layer },
+            .strip_layers = .{ left_strip, right_strip },
             .bar_layer = bar_layer,
             .dialog_layer = dialog_layer,
             .drag_layer = drag_layer,
@@ -711,6 +737,13 @@ pub const Ui = struct {
             .scroll_offset => |so| {
                 // A wheel or thumb drag over a popup's list.
                 if (self.finder.scrolled(so) or self.palette.scrolled(so) or self.history_popup.scrolled(so)) return;
+                // A wheel over a tab strip slides it; the shown tab stays.
+                for (self.strip_layers, 0..) |l, i| {
+                    if (so.layer != l or so.col == self.strip_scroll[i]) continue;
+                    self.strip_scroll[i] = so.col;
+                    self.pushed_strip[i][1] = so.col;
+                    self.markDirty(i, .full);
+                }
                 for (self.pane_layers, 0..) |l, i| {
                     if (so.layer != l) continue;
                     self.clearFind();
@@ -984,6 +1017,8 @@ pub const Ui = struct {
                 // Tabs and all: each side's strip goes with its pane.
                 std.mem.swap(Pane, &self.panes[0], &self.panes[1]);
                 std.mem.swap(tabs_mod.TabSet(Pane), &self.tab_sets[0], &self.tab_sets[1]);
+                std.mem.swap(usize, &self.strip_scroll[0], &self.strip_scroll[1]);
+                std.mem.swap(tabstrip.Follow, &self.strip_follow[0], &self.strip_follow[1]);
                 self.shown_serial[0] += 1;
                 self.shown_serial[1] += 1;
                 self.pane_dirty = .{ .full, .full };
@@ -1145,58 +1180,105 @@ pub const Ui = struct {
         self.markDirty(i, .full);
     }
 
-    /// Pane `i`'s strip laid out, in a slice the caller frees, and how
-    /// far it slides left to show the active tab.
-    fn stripLayout(self: *Ui, i: usize) !struct { spans: []tabs_mod.Span, scroll: usize } {
+    /// Pane `i`'s strip laid out, in a slice the caller frees, with its
+    /// total width and where it shows in the pane (`tabstrip.window`).
+    fn stripLayout(self: *Ui, i: usize) !struct { spans: []tabs_mod.Span, total: usize, win: tabstrip.Window } {
         const set = &self.tab_sets[i];
         const n = set.count();
         const labels = try self.alloc.alloc([]const u8, n);
         defer self.alloc.free(labels);
         for (labels, 0..) |*l, k| l.* = tabs_mod.labelFor(set.at(&self.panes[i], k).path);
         const spans = try self.alloc.alloc(tabs_mod.Span, n);
-        _ = tabs_mod.layout(labels, spans);
-        return .{ .spans = spans, .scroll = tabs_mod.scrollFor(spans[set.active], self.paneWidth(i)) };
+        const total = tabs_mod.layout(labels, spans);
+        return .{ .spans = spans, .total = total, .win = tabstrip.window(total, self.paneWidth(i)) };
     }
 
-    /// The tab under pane-local column `col` of pane `i`'s strip.
-    fn tabAt(self: *Ui, i: usize, col: usize) !?usize {
+    /// What is under pane-local column `col` of pane `i`'s strip, and
+    /// the tab there if it's on one.
+    fn stripSpotAt(self: *Ui, i: usize, col: usize) !struct { spot: tabstrip.Spot, tab: ?usize } {
         const l = try self.stripLayout(i);
         defer self.alloc.free(l.spans);
-        return tabs_mod.hit(l.spans, col + l.scroll);
+        const spot = l.win.at(self.strip_scroll[i], col);
+        const tab = switch (spot) {
+            .strip => |c| tabs_mod.hit(l.spans, c),
+            .back, .forward, .past => null,
+        };
+        return .{ .spot = spot, .tab = tab };
     }
 
-    /// Pane `i`'s strip, on the row over its title. The shown tab wears
-    /// the title's colours, so it reads as one piece with the path under
-    /// it; the rest sit a shade down. A tab slid partly off the left edge
-    /// shows as `…`.
+    /// A click on one of pane `i`'s strip arrows: the next tab hidden
+    /// that way slides into view. The shown tab stays shown.
+    fn stepStrip(self: *Ui, i: usize, forward: bool) !void {
+        const l = try self.stripLayout(i);
+        defer self.alloc.free(l.spans);
+        const scroll = self.strip_scroll[i];
+        const next = if (forward)
+            tabstrip.stepForward(l.spans, scroll, l.win, l.total)
+        else
+            tabstrip.stepBack(l.spans, scroll);
+        if (next == scroll) return;
+        self.strip_scroll[i] = next;
+        self.markDirty(i, .full);
+    }
+
+    /// Pane `i`'s strip, on its own layer over the pane's top row. The
+    /// shown tab wears the title's colours, so it reads as one piece with
+    /// the path under it; the rest sit a shade down. A tab slid partly
+    /// off the left edge shows as `…`. While the strip overflows the pane
+    /// it scrolls between two arrows (`applib.tabstrip`), and it keeps
+    /// the scroll an arrow or the wheel gave it until the shown tab or
+    /// the strip changes.
     fn writeStrip(self: *Ui, b: *Batch, i: usize) !void {
-        const layer = self.pane_layers[i];
+        const layer = self.strip_layers[i];
         const w = self.paneWidth(i);
         const set = &self.tab_sets[i];
         const l = try self.stripLayout(i);
         defer self.alloc.free(l.spans);
+        const win = l.win;
+
+        if (self.strip_follow[i].changed(set.active, l.spans.len, l.total, w)) {
+            const a = l.spans[set.active];
+            self.strip_scroll[i] = tabstrip.scrollToShow(a.start, a.end, win, self.strip_scroll[i], l.total);
+        } else {
+            self.strip_scroll[i] = win.clamp(self.strip_scroll[i], l.total);
+        }
+        const scroll = self.strip_scroll[i];
+
+        try b.setLayerSize(layer, w, 1);
+        try b.setLayerCellPosition(layer, self.pane_bounds[i].row, self.paneCol(i));
+        const pushed = [2]usize{ win.extent(l.total), scroll };
+        if (pushed[0] != self.pushed_strip[i][0]) try b.setLayerContentExtent(layer, pushed[0], 1);
+        if (!std.mem.eql(usize, &pushed, &self.pushed_strip[i])) try b.setLayerScrollOffset(layer, 0, scroll);
+        self.pushed_strip[i] = pushed;
 
         try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = bg_tab_bar });
         const lit = i == self.active;
+        // Strip columns `[scroll, scroll + win.cols)` show at pane
+        // columns `win.left` on.
+        const view_end = scroll + win.cols;
         for (l.spans, 0..) |span, k| {
-            if (span.end <= l.scroll) continue;
-            if (span.start >= l.scroll + w) break;
+            if (span.end <= scroll) continue;
+            if (span.start >= view_end) break;
             const shown = k == set.active;
             const bg = if (!shown) bg_tab else if (lit) bg_title_active else bg_title_inactive;
             const fg = if (!shown) fg_detail else if (lit) fg_title_active else fg_title_inactive;
             const label = tabs_mod.labelFor(set.at(&self.panes[i], k).path);
-            if (span.start < l.scroll) {
-                try b.clearArea(.{ .layer = layer, .row = 0, .col = 0, .rows = 1, .cols = span.end - l.scroll, .bg = bg });
-                try b.writeText("…", .{ .layer = layer, .row = 0, .col = 0, .fg = fg, .bg = bg });
+            if (span.start < scroll) {
+                const cols = @min(span.end, view_end) - scroll;
+                try b.clearArea(.{ .layer = layer, .row = 0, .col = win.left, .rows = 1, .cols = cols, .bg = bg });
+                try b.writeText("…", .{ .layer = layer, .row = 0, .col = win.left, .fg = fg, .bg = bg });
             } else {
-                const col = span.start - l.scroll;
-                try b.clearArea(.{ .layer = layer, .row = 0, .col = col, .rows = 1, .cols = @min(span.end - span.start, w - col), .bg = bg });
-                try b.writeText(label, .{ .layer = layer, .row = 0, .col = col + 1, .fg = fg, .bg = bg, .max_cols = w -| (col + 1) });
+                const col = span.start - scroll + win.left;
+                const room = win.left + win.cols - col;
+                try b.clearArea(.{ .layer = layer, .row = 0, .col = col, .rows = 1, .cols = @min(span.end - span.start, room), .bg = bg });
+                try b.writeText(label, .{ .layer = layer, .row = 0, .col = col + 1, .fg = fg, .bg = bg, .max_cols = room -| 1 });
             }
-            if (k + 1 < l.spans.len and span.end >= l.scroll and span.end < l.scroll + w) {
-                try b.writeText(tabs_mod.separator, .{ .layer = layer, .row = 0, .col = span.end - l.scroll, .fg = fg_detail, .bg = bg_tab_bar });
+            if (k + 1 < l.spans.len and span.end >= scroll and span.end < view_end) {
+                try b.writeText(tabs_mod.separator, .{ .layer = layer, .row = 0, .col = span.end - scroll + win.left, .fg = fg_detail, .bg = bg_tab_bar });
             }
         }
+        try tabstrip.drawArrows(b, layer, 0, win, scroll, l.total, .{ .fg = fg_title_inactive, .fg_dim = fg_detail, .bg = bg_tab_bar });
+        try b.setLayerVisible(layer, true);
     }
 
     /// Ctrl+`: show the shell panel (starting it the first time) or hide
@@ -1868,7 +1950,16 @@ pub const Ui = struct {
         // The tab strip: a left click shows the tab, a middle click
         // closes it. A middle click anywhere else does nothing.
         if (m.cell.row < self.stripRows(i)) {
-            const k = try self.tabAt(i, m.cell.col - self.paneCol(i)) orelse return;
+            const at = try self.stripSpotAt(i, m.cell.col - self.paneCol(i));
+            switch (at.spot) {
+                .back, .forward => {
+                    if (left) try self.stepStrip(i, at.spot == .forward);
+                    return;
+                },
+                .past => return,
+                .strip => {},
+            }
+            const k = at.tab orelse return;
             if (left) try self.showTab(i, k);
             if (middle) try self.closeTab(i, k);
             self.bar_dirty = true;
@@ -3258,7 +3349,11 @@ pub const Ui = struct {
         defer b.deinit();
         try b.clearArea(.{ .layer = layer, .bg = bg_pane });
 
-        if (self.stripRows(i) > 0) try self.writeStrip(&b, i);
+        if (self.stripRows(i) > 0) {
+            try self.writeStrip(&b, i);
+        } else {
+            try b.setLayerVisible(self.strip_layers[i], false);
+        }
 
         // Title: the directory, `~`-shortened and cut from the left so the
         // end of a long path (the part that changes) stays visible --

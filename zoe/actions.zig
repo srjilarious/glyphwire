@@ -45,6 +45,10 @@ pub const Action = enum {
     toggleTree,
     /// Dotfiles and `.gitignore`d paths, in the tree and the finder.
     toggleHidden,
+    /// The focused group's file found in the sidebar: the tree shown if
+    /// it was hidden, its folders opened down to the file and the cursor
+    /// put on it. The keyboard stays where it was.
+    revealInTree,
     toggleShell,
     nextTab,
     prevTab,
@@ -163,6 +167,7 @@ pub const Action = enum {
             .toggleHidden => "Toggle Hidden Files",
             .toggleShell => "Toggle Shell Panel",
             .toggleTree => "Toggle File Tree",
+            .revealInTree => "Reveal Active File in Tree",
             .focusLeft => "Focus Group Left",
             .focusRight => "Focus Group Right",
             .focusUp => "Focus Group Above",
@@ -212,6 +217,7 @@ pub const global_defaults = [_]Default{
     .{ .chord = "ctrl+n", .action = .toggleTree },
     // Ctrl+H is VS Code's replace; hidden files moved off it to Alt+H.
     .{ .chord = "alt+h", .action = .toggleHidden },
+    .{ .chord = "ctrl+shift+e", .action = .revealInTree },
     .{ .chord = "ctrl+f", .action = .find },
     .{ .chord = "ctrl+h", .action = .replace },
     .{ .chord = "ctrl+grave_accent", .action = .toggleShell },
