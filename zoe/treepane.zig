@@ -220,11 +220,19 @@ pub fn revealInTree(self: *Ui) !void {
         self.status_dirty = true;
         return;
     };
-    if (!self.tree_visible) try self.setTreeVisible(true);
-    // Opened folders added rows, so the whole tree repaints, not just
-    // the highlight `treeGoto` marks.
-    self.markTreeDirty(.full);
+    // A hidden tree's pane only gets its rows from the `layout` its
+    // showing triggers, so the scroll waits for that.
+    if (!self.tree_visible) {
+        try self.setTreeVisible(true);
+        self.tree_reveal_pending = true;
+    }
+    // Opened folders added rows: the layer's grid grows to hold them
+    // before the cursor is scrolled to (the host clamps the offset to
+    // the grid), and the whole tree repaints, not just the highlight
+    // `treeGoto` marks.
+    try self.syncContentSizes();
     self.treeGoto(index);
+    self.markTreeDirty(.full);
 }
 
 /// Keeps the tree's cursor inside the host-scrolled viewport by

@@ -1756,8 +1756,7 @@ pub fn renderTree(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
             }
         }
         const entry = self.treeRowEntry(r);
-        const selected = !editing and self.focus == .tree and r == self.tree.cursor;
-        const bg = if (selected) role(.selection_bg) else role(.sidebar_bg);
+        const bg = if (!editing and r == self.tree.cursor) treeCursorBg(self.focus == .tree) else role(.sidebar_bg);
 
         line.clearRetainingCapacity();
         if (entry) |e| {
@@ -1807,7 +1806,15 @@ pub fn renderTree(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         }
     }
 
-    self.tree_painted = .{ .row = self.tree.cursor, .focused = !editing and self.focus == .tree };
+    self.tree_painted = .{ .row = self.tree.cursor, .focused = self.focus == .tree, .shown = !editing };
+}
+
+/// The tree cursor's row: the selection colour while the tree has the
+/// keyboard, and the dim unfocused-list cursor while it doesn't, so the
+/// entry `revealInTree` (or the last visit) left it on still reads as
+/// the selected one from the editor.
+fn treeCursorBg(focused: bool) Color {
+    return if (focused) role(.selection_bg) else role(.list_cursor_inactive_bg);
 }
 
 /// The name field's row: the icon the entry has (or will have), the
@@ -1887,15 +1894,13 @@ pub fn renderTreeSelection(self: *Ui, batch: *glyphwire.client.Client.Batch) !vo
     const focused = self.focus == .tree;
     const cols = self.treeContentCols();
     const was = self.tree_painted;
-    if (was.focused == focused and was.row == self.tree.cursor) return;
+    if (was.shown and was.focused == focused and was.row == self.tree.cursor) return;
 
-    if (was.focused) {
+    if (was.shown and was.row != self.tree.cursor) {
         try batch.setBg(.{ .layer = self.tree_layer, .row = was.row, .rows = 1, .cols = cols, .bg = role(.sidebar_bg) });
     }
-    if (focused) {
-        try batch.setBg(.{ .layer = self.tree_layer, .row = self.tree.cursor, .rows = 1, .cols = cols, .bg = role(.selection_bg) });
-    }
-    self.tree_painted = .{ .row = self.tree.cursor, .focused = focused };
+    try batch.setBg(.{ .layer = self.tree_layer, .row = self.tree.cursor, .rows = 1, .cols = cols, .bg = treeCursorBg(focused) });
+    self.tree_painted = .{ .row = self.tree.cursor, .focused = focused, .shown = true };
 }
 
 pub fn iconFor(e: tree_mod.Entry) []const u8 {

@@ -847,10 +847,15 @@ pub const Ui = struct {
     /// render batch, so a held-down `j` interleaved scrolls and repaints
     /// instead of sending one coherent frame per key.
     tree_scroll_pending: ?glyphwire.CellPos = null,
-    /// The row `set_bg` last painted as the selected one, and whether it
-    /// was painted focused. `renderTreeSelection` needs both to know what
-    /// to paint back to the pane colour.
-    tree_painted: struct { row: usize = 0, focused: bool = false } = .{},
+    /// The row `set_bg` last painted as the cursor, in which colour
+    /// (focused or not), and whether it is painted at all -- not while a
+    /// name field stands in for it. `renderTreeSelection` needs all three
+    /// to know what to paint back to the pane colour.
+    /// Set by `revealInTree` when it had to show the tree: its pane has
+    /// no rows until the `layout` that follows, which then scrolls the
+    /// revealed entry into view.
+    tree_reveal_pending: bool = false,
+    tree_painted: struct { row: usize = 0, focused: bool = false, shown: bool = false } = .{},
 
     /// An in-progress tree-pane search (`f` or `/`), null the rest of the
     /// time. See `TreeFind`.
@@ -2620,6 +2625,10 @@ pub const Ui = struct {
                 }
                 if (l.boundsFor(self.status_layer)) |b| self.status_bounds = toBounds(b);
                 try self.syncContentSizes();
+                if (self.tree_reveal_pending and self.tree_bounds.rows > 0) {
+                    self.tree_reveal_pending = false;
+                    self.scrollTreeToCursor();
+                }
                 // The buffer layers' grids were resized: the rows they
                 // hold no longer line up with the panes, so the next frame
                 // can't shift them -- it has to repaint. Every pane moved.
