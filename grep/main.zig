@@ -6,6 +6,7 @@ const glyphwire = @import("glyphwire");
 const zargs = @import("zargunaught");
 
 const syntax = @import("applib").syntax;
+const homepath = @import("applib").homepath;
 
 const rg = @import("rg.zig");
 const nodes_mod = @import("nodes.zig");
@@ -270,7 +271,7 @@ const Tagger = struct {
     }
 
     pub fn tag(self: *Tagger, path: []const u8, line: u64) !glyphwire.MetadataHandle {
-        const abs = try absolutePath(self.io, self.alloc, path);
+        const abs = try homepath.absolute(self.io, self.alloc, path);
         defer self.alloc.free(abs);
         const json = try std.json.Stringify.valueAlloc(self.alloc, .{
             .kind = "file",
@@ -303,17 +304,6 @@ const Tagger = struct {
         return if (placeholder) |p| self.handles[p] else null;
     }
 };
-
-/// ripgrep reports paths relative to where it was run; an open action
-/// needs an absolute one. Same shape as `ls/entries.zig`'s
-/// `resolveAbsolutePath`, inlined rather than pulling in `ls_support`
-/// for five lines.
-fn absolutePath(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) return std.fs.path.resolve(alloc, &.{path});
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    return std.fs.path.resolve(alloc, &.{ cwd_buf[0..cwd_len], path });
-}
 
 /// Paints the outline into the shell's current layer and parks the cursor
 /// below it, so the next prompt lands under the results rather than over

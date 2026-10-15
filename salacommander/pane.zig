@@ -21,6 +21,7 @@
 const std = @import("std");
 
 const lsentries = @import("applib").entries;
+const homepath = @import("applib").homepath;
 pub const FileEntry = lsentries.FileEntry;
 pub const EntryKind = lsentries.EntryKind;
 
@@ -196,7 +197,7 @@ pub const Pane = struct {
     /// it was, so a directory that can't be opened doesn't blank the side.
     /// The cursor goes to the top and all marks are dropped.
     pub fn load(self: *Pane, path: []const u8) !void {
-        const abs = try lsentries.resolveAbsolutePath(self.io, self.alloc, path);
+        const abs = try homepath.absolute(self.io, self.alloc, path);
         errdefer self.alloc.free(abs);
         const entries = try self.readSorted(abs);
         errdefer lsentries.freeEntries(self.alloc, entries);

@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const homepath = @import("applib").homepath;
 const zmd = @import("zmd");
 const layout_mod = @import("layout.zig");
 const nav = @import("nav.zig");
@@ -285,7 +286,7 @@ pub const Ui = struct {
     /// Reads and parses `path` into a `Page`, or sets the statusline and
     /// returns null when there's nothing there to read.
     fn readPage(self: *Ui, path: []const u8) !?Page {
-        const abs = try self.absolutePath(path);
+        const abs = try homepath.absolute(self.io, self.alloc, path);
         defer self.alloc.free(abs);
 
         // A directory means its README, the way a forge shows one.
@@ -303,13 +304,6 @@ pub const Ui = struct {
         errdefer self.alloc.free(source);
         const doc = try zmd.Document.parse(self.alloc, source);
         return .{ .path = file, .source = source, .doc = doc };
-    }
-
-    fn absolutePath(self: *Ui, path: []const u8) ![]u8 {
-        if (std.fs.path.isAbsolute(path)) return std.fs.path.resolve(self.alloc, &.{path});
-        const cwd = try std.process.currentPathAlloc(self.io, self.alloc);
-        defer self.alloc.free(cwd);
-        return std.fs.path.resolve(self.alloc, &.{ cwd, path });
     }
 
     /// `abs` if it's a file; its README if it's a directory; null if

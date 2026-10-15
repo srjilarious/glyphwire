@@ -1048,6 +1048,49 @@ pub fn expandHomeFallsBackWhenBufferTooSmallTest(_: std.Io, _: std.mem.Allocator
     try testz.expectEqualStr("~/code", homepath.expandHome("~/code", "/home/jeff", &buf));
 }
 
+/// The allocating form always hands back an owned copy, expanded or not.
+pub fn expandHomeAllocAlwaysOwnsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const cases = [_]struct { in: []const u8, home: ?[]const u8, out: []const u8 }{
+        .{ .in = "~/x", .home = "/home/jeff", .out = "/home/jeff/x" },
+        .{ .in = "~", .home = "/home/jeff", .out = "/home/jeff" },
+        .{ .in = "~bob/x", .home = "/home/jeff", .out = "~bob/x" },
+        .{ .in = "~/x", .home = null, .out = "~/x" },
+        .{ .in = "src", .home = "/home/jeff", .out = "src" },
+    };
+    for (cases) |c| {
+        const got = try homepath.expandHomeAlloc(alloc, c.in, c.home);
+        defer alloc.free(got);
+        try testz.expectEqualStr(c.out, got);
+        try testz.expectTrue(got.ptr != c.in.ptr);
+    }
+}
+
+// ─── homepath.absolute: a typed path made absolute against the cwd
+
+pub fn absoluteNormalizesAnAbsolutePathTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const got = try homepath.absolute(io, alloc, "/usr/./lib/../bin/");
+    defer alloc.free(got);
+    try testz.expectEqualStr("/usr/bin", got);
+}
+
+pub fn absoluteJoinsARelativePathToTheCwdTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const cwd = try std.process.currentPathAlloc(io, alloc);
+    defer alloc.free(cwd);
+    const want = try std.fs.path.join(alloc, &.{ cwd, "a/b" });
+    defer alloc.free(want);
+    const got = try homepath.absolute(io, alloc, "a/./b");
+    defer alloc.free(got);
+    try testz.expectEqualStr(want, got);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testz.expectEqualStr(want, homepath.absoluteBuf(io, "a/./b", &buf).?);
+}
+
+pub fn absoluteBufIsNullWhenTooSmallTest(io: std.Io, _: std.mem.Allocator) !void {
+    var buf: [4]u8 = undefined;
+    try testz.expectTrue(homepath.absoluteBuf(io, "/usr/local/bin", &buf) == null);
+}
+
 pub fn collapseHomeLeavesPathsOutsideHomeAloneTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [256]u8 = undefined;
     try testz.expectEqualStr("/etc/hosts", homepath.collapseHome("/etc/hosts", "/home/jeff", &buf));

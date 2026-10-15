@@ -14,7 +14,7 @@ const lsentries = @import("applib").entries;
 const EntryKind = lsentries.EntryKind;
 const FileEntry = lsentries.FileEntry;
 const OwnerIds = lsentries.OwnerIds;
-const resolveAbsolutePath = lsentries.resolveAbsolutePath;
+const homepath = @import("applib").homepath;
 const followSymlinkKind = lsentries.followSymlinkKind;
 const sortEntries = lsentries.sortEntries;
 const freeEntries = lsentries.freeEntries;
@@ -213,7 +213,7 @@ fn statOperand(io: std.Io, alloc: std.mem.Allocator, path: []const u8, long_list
 
     const name_copy = try alloc.dupe(u8, path);
     errdefer alloc.free(name_copy);
-    const abs_path = try resolveAbsolutePath(io, alloc, path);
+    const abs_path = try homepath.absolute(io, alloc, path);
 
     // uid/gid via a raw `statx(2)` (see `listDir`) -- resolved against the
     // cwd handle since `path` is a bare command-line operand here.

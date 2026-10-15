@@ -15,19 +15,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const lsfmt = @import("format.zig");
 const lsicons = @import("icons.zig");
-
-/// `dir_path` as an absolute, `.`/`..`-normalized path -- resolved against
-/// the process's actual cwd if it wasn't already absolute. Every entry's
-/// metadata tag (`writeGrid`) embeds its full path this way rather than
-/// possibly-relative, since whatever reads it back later (glyphwire-shell's
-/// `browseEnter`, eventually other tools) can't be assumed to share this
-/// process's cwd.
-pub fn resolveAbsolutePath(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(dir_path)) return std.fs.path.resolve(alloc, &.{dir_path});
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    return std.fs.path.resolve(alloc, &.{ cwd_buf[0..cwd_len], dir_path });
-}
+const homepath = @import("homepath.zig");
 
 pub const EntryKind = enum { file, directory, sym_link, other };
 
@@ -100,7 +88,7 @@ pub fn listDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8, opts:
 
     // Resolved once here; each entry's `abs_path` is this joined with the
     // entry name (see `FileEntry.abs_path`).
-    const dir_abs = try resolveAbsolutePath(io, alloc, dir_path);
+    const dir_abs = try homepath.absolute(io, alloc, dir_path);
     defer alloc.free(dir_abs);
 
     var it = dir.iterate();

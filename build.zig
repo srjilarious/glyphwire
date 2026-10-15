@@ -146,6 +146,7 @@ pub fn build(b: *std.Build) void {
     // `read/ui.zig` is the reader's client half; `pages` / `zoom` /
     // `cache` stay pure.
     read_support_mod.addImport("glyphwire", glyphwire_mod);
+    read_support_mod.addImport("applib", applib_mod);
 
     // SQLite, vendored as the public-domain amalgamation (`read/libs/
     // sqlite/`) rather than pulled in as a package dependency -- it's a
@@ -191,6 +192,7 @@ pub fn build(b: *std.Build) void {
     });
     md_support_mod.addImport("glyphwire", glyphwire_mod);
     md_support_mod.addImport("zmd", zmd_mod);
+    md_support_mod.addImport("applib", applib_mod);
 
     // salacommander's panes, file operations, dialogs, action table and
     // client UI, shared by the `salacommander` binary and its test runner

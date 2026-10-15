@@ -5560,12 +5560,9 @@ const Prompt = struct {
     /// Returns `target` itself (same pointer) when there's nothing to
     /// expand, so `doCd` knows whether the result needs freeing.
     fn expandTilde(self: *Prompt, target: []const u8) ![]const u8 {
-        if (target.len == 0 or target[0] != '~') return target;
-        if (target.len > 1 and target[1] != '/') return target;
-
+        if (!homepath.isHomeRelative(target)) return target;
         const home = self.environ_map.get("HOME") orelse return error.HomeNotSet;
-        if (target.len == 1) return try self.client.alloc.dupe(u8, home);
-        return try std.fmt.allocPrint(self.client.alloc, "{s}{s}", .{ home, target[1..] });
+        return homepath.expandHomeAlloc(self.client.alloc, target, home);
     }
 
     fn reportCdError(self: *Prompt, target: []const u8, err: anyerror) !void {

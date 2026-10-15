@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const pages = @import("pages.zig");
+const homepath = @import("applib").homepath;
 
 /// What the magic bytes said the file is.
 pub const Format = enum {
@@ -495,7 +496,7 @@ fn extractExternally(self: *Archive, path: []const u8) OpenError![]const u8 {
     // Absolute, because the extractor runs with its cwd set to the temp
     // directory and a relative book path would resolve against that.
     // Same shape as `glyphwire-ls`'s `resolveAbsolutePath`.
-    const abs = absolutePath(self.io, alloc, path) catch return error.ExtractFailed;
+    const abs = homepath.absolute(self.io, alloc, path) catch return error.ExtractFailed;
     defer alloc.free(abs);
 
     const dir = try makeTempDir(self);
@@ -527,13 +528,6 @@ fn extractExternally(self: *Archive, path: []const u8) OpenError![]const u8 {
         }
     }
     return error.NoExtractorAvailable;
-}
-
-fn absolutePath(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) return std.fs.path.resolve(alloc, &.{path});
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    return std.fs.path.resolve(alloc, &.{ cwd_buf[0..cwd_len], path });
 }
 
 /// A private directory under `/tmp`, named from the process id. Not

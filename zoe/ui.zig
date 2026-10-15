@@ -1462,20 +1462,9 @@ pub const Ui = struct {
     fn shellDir(self: *const Ui, buf: []u8) []const u8 {
         const fallback = self.tree.primaryRoot();
         const p = self.buf.ed.path orelse return fallback;
-        const abs = self.absolutePath(p, buf) orelse return fallback;
+        const abs = homepath.absoluteBuf(self.io, p, buf) orelse return fallback;
         const loc = self.tree.locate(abs) orelse return fallback;
         return self.tree.roots.items[loc.root].path;
-    }
-
-    /// `path` made absolute against the cwd, into `buf`. Null when it
-    /// doesn't fit, or the cwd can't be read.
-    fn absolutePath(self: *const Ui, path: []const u8, buf: []u8) ?[]const u8 {
-        if (std.fs.path.isAbsolute(path)) return path;
-        const n = std.process.currentPath(self.io, buf) catch return null;
-        if (n + 1 + path.len > buf.len) return null;
-        buf[n] = '/';
-        @memcpy(buf[n + 1 ..][0..path.len], path);
-        return buf[0 .. n + 1 + path.len];
     }
 
     /// The panel went away -- Ctrl+` closed it, or its shell exited. Zoe
@@ -4292,14 +4281,12 @@ pub const Ui = struct {
             self.buf.ed.setStatus("E471: Argument required", .{});
             return;
         };
-        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const joined = self.absolutePath(t, &abs_buf) orelse {
-            self.buf.ed.setStatus("E: path too long", .{});
-            return;
-        };
         // Normalized, so `../x` and `x/` name the folder the same way the
         // tree's root list does and a duplicate is caught.
-        const abs = try std.fs.path.resolve(self.alloc, &.{joined});
+        const abs = homepath.absolute(self.io, self.alloc, t) catch |err| {
+            self.buf.ed.setStatus("E: {s}: {t}", .{ t, err });
+            return;
+        };
         defer self.alloc.free(abs);
         const st = std.Io.Dir.cwd().statFile(self.io, abs, .{}) catch {
             self.buf.ed.setStatus("E: no such directory: {s}", .{abs});
@@ -4330,12 +4317,10 @@ pub const Ui = struct {
     fn removeFolder(self: *Ui, target: ?[]const u8) !void {
         self.status_dirty = true;
         const index: usize = if (target) |t| blk: {
-            var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const joined = self.absolutePath(t, &abs_buf) orelse {
-                self.buf.ed.setStatus("E: path too long", .{});
+            const abs = homepath.absolute(self.io, self.alloc, t) catch |err| {
+                self.buf.ed.setStatus("E: {s}: {t}", .{ t, err });
                 return;
             };
-            const abs = try std.fs.path.resolve(self.alloc, &.{joined});
             defer self.alloc.free(abs);
             break :blk self.tree.rootIndex(abs) orelse {
                 self.buf.ed.setStatus("E: not a workspace folder: {s}", .{abs});
@@ -5279,17 +5264,6 @@ pub const Ui = struct {
         return due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() >= 0;
     }
 
-    /// `path` as an absolute path, owned by the caller. Every LSP URI is
-    /// absolute, and zoe's buffer paths are whatever was typed -- so this is
-    /// also what makes a diagnostic for `./src/main.zig` and one for the
-    /// absolute path the same file.
-    fn absPath(self: *Ui, path: []const u8) ?[]u8 {
-        if (std.fs.path.isAbsolute(path)) return std.fs.path.resolve(self.alloc, &.{path}) catch null;
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = std.process.currentPath(self.io, &cwd_buf) catch return null;
-        return std.fs.path.resolve(self.alloc, &.{ cwd_buf[0..n], path }) catch null;
-    }
-
     /// Names this context `zoe <file>` after the focused buffer (`~` for
     /// `$HOME`), or `zoe <cwd>` for a buffer with no file yet. Only sends
     /// when it changed, so the per-frame call is a string compare.
@@ -5316,7 +5290,10 @@ pub const Ui = struct {
     fn slotAbs(self: *Ui, slot: *Slot) ?[]const u8 {
         if (slot.abs_path) |p| return p;
         const path = slot.ed.path orelse return null;
-        const abs = self.absPath(path) orelse return null;
+        // Every LSP URI is absolute, and a buffer path is whatever was typed,
+        // so this is also what makes `./src/main.zig` and its absolute
+        // spelling the same file.
+        const abs = homepath.absolute(self.io, self.alloc, path) catch return null;
         slot.abs_path = abs;
         return abs;
     }

@@ -30,7 +30,9 @@
 //!                Tab, zoe's `:` line)
 //!   `fsops`      make a directory / file, rename in place
 //!                (salacommander, zoe's sidebar)
-//!   `homepath`   `~` <-> `$HOME` (gw-shell, zoe)
+//!   `homepath`   `~` <-> `$HOME` (gw-shell, zoe), and a typed path
+//!                made absolute (gw-ls, gw-grep, gw-read, gwmd,
+//!                salacommander, zoe)
 //!   `zjump`      the `zj` frecency directory database (gw-shell,
 //!                gw-hist --dirs)
 //!   `fuzzy`      the subsequence matcher (gw-hist, zoe, salacommander)

@@ -27,6 +27,7 @@ const themes = @import("applib").theme;
 const themeconf = @import("themeconf");
 const dividerconf = @import("dividerconf");
 const keybind = @import("applib").keybind;
+const homepath = @import("applib").homepath;
 const actions = @import("actions.zig");
 const editor = @import("editor.zig");
 const lsp = @import("lsp.zig");
@@ -315,7 +316,7 @@ fn readGrammarDirs(
         defer lua.pop(1);
         if (lua.rawGetIndex(-1, @intCast(i)) != .string) continue;
         const raw = lua.toString(-1) catch continue;
-        const expanded = expandTilde(a, raw, environ) catch continue;
+        const expanded = homepath.expandHomeAlloc(a, raw, environ.get("HOME")) catch continue;
         dirs.append(a, expanded) catch continue;
     }
     return dirs.toOwnedSlice(a) catch &.{};
@@ -649,14 +650,4 @@ fn appendJsonString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8
     const quoted = try std.json.Stringify.valueAlloc(a, s, .{});
     defer a.free(quoted);
     try out.appendSlice(a, quoted);
-}
-
-fn expandTilde(
-    a: std.mem.Allocator,
-    path: []const u8,
-    environ: *const std.process.Environ.Map,
-) ![]const u8 {
-    if (!std.mem.startsWith(u8, path, "~/")) return a.dupe(u8, path);
-    const home = environ.get("HOME") orelse return a.dupe(u8, path);
-    return std.fs.path.join(a, &.{ home, path[2..] });
 }
