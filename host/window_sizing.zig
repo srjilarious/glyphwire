@@ -57,9 +57,9 @@ pub const WindowSizing = struct {
     /// from the usable width before dividing into cells, so the last
     /// column isn't lost under the bar or the padding. The initial window
     /// (see `main`) is opened that much wider than the grid for the same
-    /// reason. The gutter is unconditional -- a context that opts the bar
-    /// out does not reclaim its columns, so creating or destroying such a
-    /// context never resizes the grid; see `geometry.rightGutterPx`.
+    /// reason. The gutter follows the visible context's
+    /// `window_scrollbar` while one pane fills the window, and is always
+    /// reserved under a pane tree; see `geometry.rightGutterPx`.
     ///
     /// The new size is debounced: while the window is actively being
     /// dragged the grid stays put (the render clips or letterboxes the
@@ -99,7 +99,9 @@ pub const WindowSizing = struct {
 
     /// The right gutter for the context currently on screen. Zero for one
     /// that opts the window scrollbar out, whose columns are then the
-    /// grid's -- see `geometry.rightGutterPx` for what that costs.
+    /// grid's -- see `geometry.rightGutterPx` for what that costs. Always
+    /// reserved while a pane tree is installed, so a switch in one pane
+    /// never reflows the others.
     ///
     /// Read under `ctx_mutex` and never cached: it changes whenever the
     /// visible context does, and the next `syncWindowSize` is what turns
@@ -109,7 +111,7 @@ pub const WindowSizing = struct {
         const server = self.app.server;
         server.ctx_mutex.lockUncancelable(server.io);
         defer server.ctx_mutex.unlock(server.io);
-        return geometry.rightGutterPx(server.ctx.window_scrollbar);
+        return geometry.rightGutterPx(server.ctx.window_scrollbar, server.session.root_pane_split != null);
     }
 
     /// A bounded wait, in ms, while a resize is still settling -- null

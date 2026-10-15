@@ -139,12 +139,21 @@ pub const scrollbar_min_thumb_px: f32 = 24;
 /// foreground child never hearing about the new size -- was a missing
 /// `layout` notification on resize, since fixed.
 ///
+/// That trade only holds while one program fills the window. With a pane
+/// tree installed (`pane_tree`), the focused context decides nothing: the
+/// gutter is always reserved. Otherwise a context switch in one pane --
+/// or just moving focus from a zoe pane to a shell pane -- reflowed every
+/// pane by a column, and every program in the window repainted from
+/// scratch for a change that was only one pane's business. Installing or
+/// tearing down the tree reflows the panes anyway, so the gutter flipping
+/// then costs nothing extra.
+///
 /// `syncWindowSize` and `applyFontSize` (px -> cell count, and cell
 /// count -> px when a font step has to grow the window) both read this
 /// through `WindowSizing.gutterPx`, so the reserved width and the width
 /// the window is sized to always agree.
-pub fn rightGutterPx(bar_enabled: bool) i32 {
-    return if (bar_enabled) scrollbar_width_px else 0;
+pub fn rightGutterPx(bar_enabled: bool, pane_tree: bool) i32 {
+    return if (bar_enabled or pane_tree) scrollbar_width_px else 0;
 }
 
 /// How many grid rows one full wheel "tick" (`scroll().y` of magnitude

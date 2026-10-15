@@ -14,7 +14,7 @@ const suite_version = @import("build.zig.zon").version;
 /// `build_info` module `addBuildInfo` gives it -- `--version` prints it,
 /// and the host answers `get_version` with its own.
 const program_versions = [_]struct { name: []const u8, version: []const u8 }{
-    .{ .name = "glyphwire", .version = "0.11.0" },
+    .{ .name = "glyphwire", .version = "0.11.1" },
     .{ .name = "glyphwire-server", .version = "0.10.0" },
     .{ .name = "gw-shell", .version = "0.10.0" },
     .{ .name = "gw-agent", .version = "0.8.0" },

@@ -634,8 +634,16 @@ pub fn rightGutterFollowsTheVisibleContextsBarTest(_: std.Io, _: std.mem.Allocat
     // `geometry.rightGutterPx`. Both sides of the px<->cell math
     // (`syncWindowSize`, `applyFontSize`) read this one value, so
     // the reserved width and the width the window is sized to agree.
-    try testz.expectEqual(geometry.rightGutterPx(true), geometry.scrollbar_width_px);
-    try testz.expectEqual(geometry.rightGutterPx(false), 0);
+    try testz.expectEqual(geometry.rightGutterPx(true, false), geometry.scrollbar_width_px);
+    try testz.expectEqual(geometry.rightGutterPx(false, false), 0);
+}
+
+pub fn rightGutterStaysReservedUnderAPaneTreeTest(_: std.Io, _: std.mem.Allocator) !void {
+    // With panes, the focused context's bar flag must not move the grid:
+    // a context switch (or a focus move) in one pane reflowed every pane
+    // by a column and repainted every program in the window.
+    try testz.expectEqual(geometry.rightGutterPx(true, true), geometry.scrollbar_width_px);
+    try testz.expectEqual(geometry.rightGutterPx(false, true), geometry.scrollbar_width_px);
 }
 
 // ─── geometry.layerRect / cellRectPx ──────────────────────────────────

@@ -2431,8 +2431,9 @@ pub const Renderer = struct {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
             // Whatever the grid was sized against -- a context that opts
-            // the bar out has no gutter to crop off.
-            gutter = geometry.rightGutterPx(server.ctx.window_scrollbar);
+            // the bar out has no gutter to crop off, unless a pane tree
+            // is keeping it reserved.
+            gutter = geometry.rightGutterPx(server.ctx.window_scrollbar, server.session.root_pane_split != null);
             // Cropping to the cursor row keeps a one-line shell session's
             // screenshot from being mostly blank, which is what the README
             // assets want. It only makes sense for a single pane, though:
@@ -2680,9 +2681,9 @@ pub const Renderer = struct {
             enabled = server.ctx.window_scrollbar;
         }
         // A pure-TUI context opts the bar out entirely -- see
-        // `core.Context.window_scrollbar`. The reserved gutter stays
-        // (grid sizing is session-global, the flag is per-context), it
-        // just isn't painted.
+        // `core.Context.window_scrollbar`. Under a pane tree its gutter
+        // stays reserved and just isn't painted (see
+        // `geometry.rightGutterPx`).
         if (!enabled) return;
         if (owned) {
             eng.renderer.drawFilledRect(
