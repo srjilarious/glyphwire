@@ -197,7 +197,9 @@ pub fn hideCompletionHint(self: *Prompt) void {
     self.completion_hint.clearRetainingCapacity();
 }
 
-/// Tab: completes the word under the caret from `gatherCandidates`:
+/// Tab: completes the word under the caret from `gatherCandidates`
+/// (a showing inline hint is taken whole first, as Right does -- see the
+/// key handler):
 ///
 ///   * 0 matches       -> nothing;
 ///   * exactly 1 match -> fills it in and appends `/` (a directory) or
@@ -669,8 +671,8 @@ pub fn acceptCompletionHintOrComplete(self: *Prompt) !void {
     try self.doComplete();
 }
 
-/// End / Ctrl+E (and Right) at the end of the input with a hint showing:
-/// takes all of it, as fish does. False when there was nothing to take.
+/// End / Ctrl+E (and Right, and Tab) at the end of the input with a
+/// hint showing: takes all of it, as fish does. False when there was nothing to take.
 pub fn acceptCompletionHint(self: *Prompt) bool {
     if (self.line.caret != self.line.text().len) return false;
     if (!self.completion_hint_visible or self.completion_hint.items.len == 0) return false;
