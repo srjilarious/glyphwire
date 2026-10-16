@@ -122,8 +122,32 @@ pub fn writeDefaultPrefix(self: *Prompt, sink: ChainSink) !glyphwire.Cursor {
 pub const PromptDataBufs = struct {
     cwd: [std.fs.max_path_bytes]u8 = undefined,
     tilde: [std.fs.max_path_bytes]u8 = undefined,
+    /// `{cwd}` with its middle cut out, when the prompt doesn't fit.
+    short_cwd: [std.fs.max_path_bytes]u8 = undefined,
     time: [64]u8 = undefined,
 };
+
+/// The narrowest `shortenCwd` cuts `{cwd}` down to, `…` included: below
+/// this it says too little to be worth the space it saves.
+const min_cwd_cols = 8;
+
+/// Cuts `over` more columns out of the middle of `data.cwd` (never below
+/// `min_cwd_cols`), always working from the uncut `full` so `b.short_cwd`
+/// is never read and written at once. False when there is nothing left
+/// to cut, which ends the caller's fit loop.
+fn shortenCwd(data: *prompt_template.Data, full: []const u8, over: usize, b: *PromptDataBufs) bool {
+    const w = prompt_template.displayWidth(data.cwd);
+    if (over == 0 or w <= min_cwd_cols) return false;
+    const cut = prompt_template.ellipsizeMiddle(full, @max(w -| over, min_cwd_cols), &b.short_cwd);
+    if (prompt_template.displayWidth(cut) >= w) return false;
+    data.cwd = cut;
+    return true;
+}
+
+/// How many times a prompt writer re-renders with a shorter `{cwd}`
+/// before drawing whatever it has. One pass is enough when `{cwd}`
+/// appears once; this only bounds a template that repeats it.
+const max_fit_passes = 3;
 
 /// Fills a `prompt_template.Data` from the shell's live state, using
 /// `b` for the strings that need somewhere to live.
@@ -284,7 +308,7 @@ pub fn writeTemplatedPrefix(self: *Prompt, p: *const config.PromptConfig, sink: 
     const alloc = self.client.alloc;
 
     var bufs: PromptDataBufs = .{};
-    const data = self.buildPromptData(&bufs, p);
+    var data = self.buildPromptData(&bufs, p);
 
     const start = try self.drawGetCursor();
 
@@ -292,6 +316,7 @@ pub fn writeTemplatedPrefix(self: *Prompt, p: *const config.PromptConfig, sink: 
     defer local.deinit();
     const b: *glyphwire.Client.Batch = sink orelse &local;
 
+    var right_w: usize = 0;
     if (p.right) |rt| {
         var r = try prompt_template.render(alloc, rt, data);
         defer r.deinit();
@@ -299,11 +324,24 @@ pub fn writeTemplatedPrefix(self: *Prompt, p: *const config.PromptConfig, sink: 
         if (w > 0 and w < self.grid_cols) {
             // `emitOps` positions itself with a leading `setCursor`.
             try self.emitOps(b, r.ops, start.row, self.grid_cols - w, .{});
+            right_w = w + 1;
         }
     }
 
+    // The left template has to fit beside the right one, so a long
+    // `{cwd}` loses its middle until it does.
+    const budget = self.grid_cols -| right_w;
+    const full_cwd = data.cwd;
     var l = try prompt_template.render(alloc, p.left orelse default_prompt_left, data);
     defer l.deinit();
+    var pass: usize = 0;
+    while (pass < max_fit_passes) : (pass += 1) {
+        const over = prompt_template.opsWidth(l.ops, self.icon_cols) -| budget;
+        if (!shortenCwd(&data, full_cwd, over, &bufs)) break;
+        const shorter = try prompt_template.render(alloc, p.left orelse default_prompt_left, data);
+        l.deinit();
+        l = shorter;
+    }
     try self.emitOps(b, l.ops, start.row, 0, .{});
 
     if (sink == null) {
@@ -507,7 +545,7 @@ pub fn writePowerlinePrefix(self: *Prompt, p: *const config.PromptConfig, sink: 
     const arena = arena_state.allocator();
 
     var bufs: PromptDataBufs = .{};
-    const data = self.buildPromptData(&bufs, p);
+    var data = self.buildPromptData(&bufs, p);
 
     self.prompt_lines = p.lines orelse 1;
 
@@ -543,26 +581,44 @@ pub fn writePowerlinePrefix(self: *Prompt, p: *const config.PromptConfig, sink: 
     // `head`, the same fallback shape as `sep_right` -> `sep`.
     const right_head = p.right_head orelse head;
 
+    const input_prefix = p.input orelse "> ";
+
+    // The right chain is rendered first: its width is what the left one
+    // has to fit beside on the top row.
+    var right_list: std.ArrayList(RenderedSeg) = .empty;
+    var right_w: usize = 0;
+    if (p.right_segments) |segs| {
+        const seg_sum = try self.renderChain(arena, segs, data, &right_list);
+        right_w = chainWidth(right_list.items.len, seg_sum, sep_right, right_head, "");
+    }
+    const right_shown = right_list.items.len > 0 and right_w < self.grid_cols;
+
     var left_end: usize = 0;
     if (p.left_segments) |segs| {
+        // A `{cwd}` too long for the row loses its middle, so the
+        // segments after it (the git branch) stay on screen. On a
+        // one-row prompt the input prefix has to fit there too.
+        var budget = self.grid_cols -| (if (right_shown) right_w + 1 else 0);
+        if (self.prompt_lines < 2) budget -|= prompt_template.displayWidth(input_prefix);
+        const full_cwd = data.cwd;
         var list: std.ArrayList(RenderedSeg) = .empty;
-        const seg_sum = try self.renderChain(arena, segs, data, &list);
+        var seg_sum = try self.renderChain(arena, segs, data, &list);
+        var pass: usize = 0;
+        while (pass < max_fit_passes) : (pass += 1) {
+            const over = chainWidth(list.items.len, seg_sum, sep, head, tail) -| budget;
+            if (!shortenCwd(&data, full_cwd, over, &bufs)) break;
+            list.clearRetainingCapacity();
+            seg_sum = try self.renderChain(arena, segs, data, &list);
+        }
         try self.drawChain(top, 0, list.items, sep, head, tail, false, b);
         left_end = @min(chainWidth(list.items.len, seg_sum, sep, head, tail), self.grid_cols);
     }
 
-    var right_w: usize = 0;
-    if (p.right_segments) |segs| {
-        var list: std.ArrayList(RenderedSeg) = .empty;
-        const seg_sum = try self.renderChain(arena, segs, data, &list);
-        right_w = chainWidth(list.items.len, seg_sum, sep_right, right_head, "");
-        if (list.items.len > 0 and right_w < self.grid_cols) {
-            self.right_dynamic = true;
-            try self.drawChain(top, self.grid_cols - right_w, list.items, sep_right, right_head, "", true, b);
-        }
+    if (right_shown) {
+        self.right_dynamic = true;
+        try self.drawChain(top, self.grid_cols - right_w, right_list.items, sep_right, right_head, "", true, b);
     }
 
-    const input_prefix = p.input orelse "> ";
     if (self.prompt_lines >= 2) {
         // `top + prompt_lines <= grid_rows` now, so this row is on-grid.
         const irow = top + self.prompt_lines - 1;

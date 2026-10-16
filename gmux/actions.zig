@@ -28,6 +28,13 @@ pub const Action = enum {
     resizeRight,
     resizeUp,
     resizeDown,
+    /// Every pane moves one slot along the layout in reading order (left
+    /// to right, top to bottom), the last wrapping to the first; the
+    /// layout and its ratios stay put. Focus stays on the slot, so the
+    /// pane that arrives there takes it (tmux's `rotate-window -D`).
+    rotateForward,
+    /// The same, the other way (`rotate-window -U`).
+    rotateBackward,
     quit,
     /// Hands the prefix chord itself to the focused pane's program, once
     /// (tmux's `send-prefix`): the prefix pressed twice. What lets a
@@ -36,11 +43,15 @@ pub const Action = enum {
     sendPrefix,
 
     /// Whether the command leaves a zoom in place: `zoom` toggles it
-    /// itself, `quit` is about to tear everything down, and `sendPrefix`
-    /// is a keystroke for the pane on screen. Everything else acts on the
-    /// real layout, so a zoom is undone first.
+    /// itself, `quit` is about to tear everything down, `sendPrefix` is a
+    /// keystroke for the pane on screen, and a rotate only changes which
+    /// pane the zoom shows. Everything else acts on the real layout, so a
+    /// zoom is undone first.
     pub fn keepsZoom(self: Action) bool {
-        return self == .zoom or self == .quit or self == .sendPrefix;
+        return switch (self) {
+            .zoom, .quit, .sendPrefix, .rotateForward, .rotateBackward => true,
+            else => false,
+        };
     }
 };
 
@@ -70,5 +81,7 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "L", .action = .resizeRight },
     .{ .chord = "K", .action = .resizeUp },
     .{ .chord = "J", .action = .resizeDown },
+    .{ .chord = "}", .action = .rotateForward },
+    .{ .chord = "{", .action = .rotateBackward },
     .{ .chord = "q", .action = .quit },
 };

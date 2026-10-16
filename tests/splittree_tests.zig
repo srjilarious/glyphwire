@@ -170,3 +170,45 @@ pub fn neighborNeedsOverlapAcrossTheOtherAxisTest(_: std.Io, _: std.mem.Allocato
     try testz.expectTrue(splittree.neighbor(&rects, 1, .left) == null);
     try testz.expectTrue(splittree.neighbor(&rects, 0, .down) == null);
 }
+
+/// gmux's rotate: ids move one leaf along in reading order, the shape and
+/// every node staying where it was.
+pub fn rotateMovesIdsAlongReadingOrderTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var tree = try Tree.init(alloc, 1);
+    defer tree.deinit();
+    _ = try tree.split(1, 2, .row, 100, .after);
+    _ = try tree.split(2, 3, .column, 101, .after);
+    const root = tree.root;
+
+    var leaves: std.ArrayList(*Tree.Node) = .empty;
+    defer leaves.deinit(alloc);
+    try tree.rotate(alloc, .after, &leaves);
+    try testz.expectTrue(tree.root == root);
+    try testz.expectEqual(leaves.items.len, 3);
+    const fwd = try order(alloc, &tree);
+    defer alloc.free(fwd);
+    try testz.expectEqual(fwd[0], 3);
+    try testz.expectEqual(fwd[1], 1);
+    try testz.expectEqual(fwd[2], 2);
+    try testz.expectEqual(leaves.items[0].kind.leaf, 3);
+    try testz.expectEqual(tree.root.kind.split.handle, 100);
+
+    leaves.clearRetainingCapacity();
+    try tree.rotate(alloc, .before, &leaves);
+    leaves.clearRetainingCapacity();
+    try tree.rotate(alloc, .before, &leaves);
+    const back = try order(alloc, &tree);
+    defer alloc.free(back);
+    try testz.expectEqual(back[0], 2);
+    try testz.expectEqual(back[1], 3);
+    try testz.expectEqual(back[2], 1);
+}
+
+pub fn rotateOnASingleLeafIsANoOpTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var tree = try Tree.init(alloc, 7);
+    defer tree.deinit();
+    var leaves: std.ArrayList(*Tree.Node) = .empty;
+    defer leaves.deinit(alloc);
+    try tree.rotate(alloc, .after, &leaves);
+    try testz.expectEqual(tree.root.kind.leaf, 7);
+}

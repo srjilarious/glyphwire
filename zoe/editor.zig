@@ -189,6 +189,9 @@ pub const Outcome = union(enum) {
     /// `:close` -- close this editor group, its tabs moving to the
     /// neighbour that takes its space.
     close_group,
+    /// `:zoom` -- this editor group full-window, or back again. A
+    /// `zoe/ui.zig` thing, like the groups themselves.
+    zoom_group,
     /// `K` -- ask a language server what is under the cursor. The editor
     /// has no idea; `zoe/ui.zig` owns the servers and puts the answer in a
     /// popup when it arrives. Named for what was asked, not for what will
@@ -803,6 +806,7 @@ pub const Editor = struct {
             .moveTabRight,
             .moveTabUp,
             .moveTabDown,
+            .zoomGroup,
             .jumpBack,
             .jumpForward,
             .cut,
@@ -3338,6 +3342,7 @@ pub const Editor = struct {
         if (eq(u8, name, "sp") or eq(u8, name, "split"))
             return .{ .split = .{ .vertical = false, .path = arg_opt } };
         if (eq(u8, name, "clo") or eq(u8, name, "close")) return .close_group;
+        if (eq(u8, name, "zoom")) return .zoom_group;
         // `:lsp` reports which language servers are attached; `:lsp restart`
         // brings back one that crashed. The editor core knows about neither,
         // so both are just relayed (see `Outcome.lsp_status`).

@@ -51,3 +51,33 @@ pub fn changedRanges(old: ?SelSpan, new: ?SelSpan, out: *[2]ByteRange) usize {
     }
     return n;
 }
+
+/// What of one buffer line a selection covers, for `paintSelectionRow`.
+pub const LineCover = struct {
+    /// The selected bytes of the line's text, relative to its start.
+    lo: usize,
+    hi: usize,
+    /// The line's newline is selected as well: one cell past the text.
+    newline: bool,
+    /// A linewise selection: the highlight runs to the pane's right edge.
+    to_edge: bool,
+};
+
+/// How `span` covers the line starting at byte `line_start` with
+/// `text_len` bytes of text, followed by a newline when `has_newline`.
+/// Null when it covers none of it. A span starting at the next line's
+/// first byte covers none of this one, so a selection made down from
+/// column 0 doesn't light up the end of the line above it.
+pub fn lineCover(span: SelSpan, line_start: usize, text_len: usize, has_newline: bool) ?LineCover {
+    const line_end = line_start + text_len; // the newline's byte, or EOF
+    const line_hi = line_end + @intFromBool(has_newline);
+    if (span.hi <= line_start or span.lo >= line_hi) return null;
+    const lo = @min(span.lo -| line_start, text_len);
+    const hi = @min(span.hi, line_end) - line_start;
+    return .{
+        .lo = lo,
+        .hi = @max(hi, lo),
+        .newline = has_newline and span.hi > line_end,
+        .to_edge = span.linewise,
+    };
+}

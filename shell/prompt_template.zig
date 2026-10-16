@@ -346,6 +346,41 @@ pub fn displayWidth(text: []const u8) usize {
     return width;
 }
 
+/// What `ellipsizeMiddle` puts in place of the cut: one column.
+pub const ellipsis = "…";
+
+/// `text` cut down to `max_cols` columns (as `displayWidth` counts them)
+/// by replacing its middle with `ellipsis`, written into `buf`. Both ends
+/// survive, so a long path keeps where it starts and the directory you
+/// are actually in; the end gets the odd column. `text` itself when it
+/// already fits, when `max_cols` leaves no room for anything but the
+/// ellipsis, or when `buf` is too small. `buf` must not overlap `text`.
+pub fn ellipsizeMiddle(text: []const u8, max_cols: usize, buf: []u8) []const u8 {
+    const w = displayWidth(text);
+    if (w <= max_cols or max_cols < 2) return text;
+    const keep = max_cols - 1;
+    const head = text[0..byteAtCol(text, keep / 2)];
+    const tail = text[byteAtCol(text, w - (keep - keep / 2))..];
+    const total = head.len + ellipsis.len + tail.len;
+    if (total > buf.len) return text;
+    @memcpy(buf[0..head.len], head);
+    @memcpy(buf[head.len..][0..ellipsis.len], ellipsis);
+    @memcpy(buf[head.len + ellipsis.len ..][0..tail.len], tail);
+    return buf[0..total];
+}
+
+/// The byte offset where column `col` of `text` starts (a codepoint per
+/// column, as `displayWidth` counts), or `text.len` past the end.
+fn byteAtCol(text: []const u8, col: usize) usize {
+    var seen: usize = 0;
+    for (text, 0..) |b, i| {
+        if (b & 0xC0 == 0x80) continue;
+        if (seen == col) return i;
+        seen += 1;
+    }
+    return text.len;
+}
+
 /// Total column width an op list occupies on its final line -- text widths
 /// (via `displayWidth`, so a `\n` in any run resets the running count) plus
 /// `icon_cols` columns per icon (the caller derives that from the cell

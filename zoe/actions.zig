@@ -70,6 +70,10 @@ pub const Action = enum {
     moveTabRight,
     moveTabUp,
     moveTabDown,
+    /// The focused group full-window, the other groups hidden (the
+    /// sidebar stays); again to put them back. Ctrl+W z and `:zoom` too.
+    /// Splitting, closing or moving to another group unzooms first.
+    zoomGroup,
     jumpBack,
     jumpForward,
     /// The selection (or the line) to the system clipboard, removed.
@@ -176,6 +180,7 @@ pub const Action = enum {
             .moveTabDown => "Move Tab Down a Group",
             .moveTabLeft => "Move Tab Left a Group",
             .moveTabRight => "Move Tab Right a Group",
+            .zoomGroup => "Toggle Zoom Group",
             .indent => "Indent Lines",
             .dedent => "Dedent Lines",
             .toggleComment => "Toggle Line Comment",

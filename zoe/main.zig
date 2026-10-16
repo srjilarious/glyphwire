@@ -90,7 +90,8 @@ pub fn main(init: std.process.Init) !void {
         \\glyphwire display server. Ctrl+W is vim's window prefix: then v or s
         \\splits the editor into a new group beside or below (:vsplit / :split
         \\[file]), each with its own tabs and a draggable divider; q closes a
-        \\group (:close) and w cycles focus. Ctrl+L/K/J and the Ctrl+arrows
+        \\group (:close), w cycles focus and z zooms the group to the whole
+        \\editor area and back (:zoom). Ctrl+L/K/J and the Ctrl+arrows
         \\move focus that way, Ctrl+Left out to the tree (in insert mode
         \\Ctrl+Left/Right jump by word instead, and Ctrl+Home/End go to the
         \\start and end of the file). Ctrl+B (or Ctrl+N, e.g. under gmux) toggles
@@ -287,6 +288,7 @@ pub fn main(init: std.process.Init) !void {
             .buffer_new,
             .split,
             .close_group,
+            .zoom_group,
             .lsp_hover,
             .lsp_definition,
             .diag_step,

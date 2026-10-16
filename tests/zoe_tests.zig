@@ -2815,6 +2815,38 @@ pub fn bufferTextSourceReadsAcrossGapTest(_: std.Io, alloc: std.mem.Allocator) !
 
 // ─── Selection repaint diff ────────────────────────────────────────────
 
+/// A selection ending at a line's first byte selects the newline of the
+/// line above (one cell), not the rest of that row; one starting there
+/// covers nothing of the line above at all.
+pub fn selectionLineCoverAtALineStartTest(_: std.Io, _: std.mem.Allocator) !void {
+    const diff = zoe.selection_diff;
+    // "abc\ndef\n": line 0 is bytes 0..3 plus its newline at 3; line 1
+    // starts at 4.
+    const down_to_start: diff.SelSpan = .{ .lo = 1, .hi = 4, .linewise = false };
+    const c0 = diff.lineCover(down_to_start, 0, 3, true).?;
+    try testz.expectEqual(c0.lo, 1);
+    try testz.expectEqual(c0.hi, 3);
+    try testz.expectTrue(c0.newline);
+    try testz.expectTrue(!c0.to_edge);
+    try testz.expectTrue(diff.lineCover(down_to_start, 4, 3, true) == null);
+
+    const from_start: diff.SelSpan = .{ .lo = 4, .hi = 6, .linewise = false };
+    try testz.expectTrue(diff.lineCover(from_start, 0, 3, true) == null);
+    const c1 = diff.lineCover(from_start, 4, 3, true).?;
+    try testz.expectEqual(c1.lo, 0);
+    try testz.expectEqual(c1.hi, 2);
+    try testz.expectTrue(!c1.newline);
+
+    // Just the newline, and a linewise span running to the edge.
+    const nl = diff.lineCover(.{ .lo = 3, .hi = 4, .linewise = false }, 0, 3, true).?;
+    try testz.expectEqual(nl.lo, 3);
+    try testz.expectEqual(nl.hi, 3);
+    try testz.expectTrue(nl.newline);
+    try testz.expectTrue(diff.lineCover(.{ .lo = 0, .hi = 4, .linewise = true }, 0, 3, true).?.to_edge);
+    // The last line has no newline to select.
+    try testz.expectTrue(!diff.lineCover(.{ .lo = 5, .hi = 7, .linewise = false }, 4, 3, false).?.newline);
+}
+
 pub fn selectionDiffCoversOnlyMovedEndsTest(_: std.Io, _: std.mem.Allocator) !void {
     const diff = zoe.selection_diff;
     var out: [2]diff.ByteRange = undefined;

@@ -228,7 +228,9 @@
 -- to keep the built-in "<cwd> > " prompt.
 --
 -- Tokens (usable in every template string, including a segment's `text`):
---   {cwd}        working directory, $HOME shown as ~
+--   {cwd}        working directory, $HOME shown as ~; when the prompt row
+--                is too narrow for it, its middle becomes … so what
+--                follows it (a git branch) still fits
 --   {cwd_full}   working directory, absolute
 --   {user}       $USER
 --   {host}       hostname

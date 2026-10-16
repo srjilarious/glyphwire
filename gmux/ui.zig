@@ -278,6 +278,8 @@ pub const Ui = struct {
             .resizeRight => self.resizeFocused(.row, true) catch |err| self.logError("resize", err),
             .resizeUp => self.resizeFocused(.column, false) catch |err| self.logError("resize", err),
             .resizeDown => self.resizeFocused(.column, true) catch |err| self.logError("resize", err),
+            .rotateForward => self.rotate(.after) catch |err| self.logError("rotate", err),
+            .rotateBackward => self.rotate(.before) catch |err| self.logError("rotate", err),
             .quit => self.quit = true,
             .sendPrefix => self.client.sendWindowPrefix() catch |err| self.logError("send prefix", err),
         }
@@ -462,6 +464,59 @@ pub const Ui = struct {
         // Focus has to be re-asserted: it fell back to the root pane
         // while this pane's neighbours were unmapped.
         self.setFocus(z.pane);
+    }
+
+    /// Moves every pane one slot along the layout (`dir` as in
+    /// `splittree.rotate`), leaving the splits and their ratios alone:
+    /// each leaf's slot is re-pointed at its new pane with
+    /// `replace_pane_split_child`, all in one batch so no frame shows a
+    /// pane in two slots at once. Focus stays on the slot. While zoomed
+    /// the zoom stays on and shows the pane that arrived in its slot.
+    fn rotate(self: *Ui, dir: splittree.Side) !void {
+        if (self.tree.count() < 2) return;
+
+        // Each slot's rect before the move, so `bounds` can follow the
+        // panes right away: an arrow in the next command measures from
+        // where each pane now is, not where it was. The zoomed pane's
+        // real slot is its pre-zoom rect, not the full window.
+        var before: std.ArrayList(PaneId) = .empty;
+        defer before.deinit(self.alloc);
+        try self.tree.leavesInOrder(self.alloc, &before);
+        const rects = try self.alloc.alloc(Bounds, before.items.len);
+        defer self.alloc.free(rects);
+        var focus_slot: usize = 0;
+        for (before.items, rects, 0..) |id, *r, i| {
+            r.* = self.bounds.get(id) orelse .{};
+            if (self.zoomed) |z| if (z.pane == id) {
+                r.* = z.restore_bounds;
+            };
+            if (id == self.focused) focus_slot = i;
+        }
+
+        var leaves: std.ArrayList(*layout.Node) = .empty;
+        defer leaves.deinit(self.alloc);
+        try self.tree.rotate(self.alloc, dir, &leaves);
+
+        var batch = self.client.batch();
+        defer batch.deinit();
+        for (leaves.items) |node| {
+            const parent = node.parent.?; // two or more leaves: none is the root
+            try batch.replacePaneSplitChild(parent.kind.split.handle, node.slot().?.index(), .{ .pane = node.kind.leaf });
+        }
+        const arrived = leaves.items[focus_slot].kind.leaf;
+        if (self.zoomed) |*z| {
+            try batch.replacePaneSplitChild(z.wrapper, 0, .{ .pane = arrived });
+            const full = self.bounds.get(z.pane) orelse Bounds{};
+            for (leaves.items, rects) |node, r| try self.bounds.put(node.kind.leaf, r);
+            try self.bounds.put(arrived, full);
+            z.pane = arrived;
+            z.restore_bounds = rects[focus_slot];
+        } else {
+            for (leaves.items, rects) |node, r| try self.bounds.put(node.kind.leaf, r);
+        }
+        var res = try batch.send();
+        res.deinit();
+        self.setFocus(arrived);
     }
 
     /// Makes `handle` the root of the real tree. While zoomed the wire

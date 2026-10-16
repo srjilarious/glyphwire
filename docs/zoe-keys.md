@@ -47,9 +47,10 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 | `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |
 | `closeTab` | Ctrl+F4, Ctrl+W x | Close the shown tab (`:bd`); refused on a modified buffer |
 | `newBuffer` | Ctrl+Shift+N | A new `[No Name]` scratch tab beside the shown one (`:enew`) |
-| `windowPrefix` | Ctrl+W | Then `v` / `s` split, `q` / `c` close the group, `x` close the tab, `w` (or Ctrl+W) next group, `h` `j` `k` `l` / arrows focus, Shift+`H` `J` `K` `L` / Shift+arrows move the tab |
+| `windowPrefix` | Ctrl+W | Then `v` / `s` split, `q` / `c` close the group, `x` close the tab, `w` (or Ctrl+W) next group, `z` zoom the group, `h` `j` `k` `l` / arrows focus, Shift+`H` `J` `K` `L` / Shift+arrows move the tab |
 | `focusLeft` `focusRight` `focusUp` `focusDown` | Ctrl+Left / Right / Up / Down, Ctrl+L / K / J | Focus the group (or tree) that way |
 | `moveTabLeft` `moveTabRight` `moveTabUp` `moveTabDown` | (unbound; Ctrl+W Shift+H / L / K / J) | Move the shown tab to the group that way, splitting a new group off on that side if there is none. A group left without tabs closes |
+| `zoomGroup` | (unbound; Ctrl+W z) | The focused group fills the editor area, the other groups hidden (the sidebar stays); again to restore (`:zoom`). Splitting, closing or moving to another group unzooms first |
 | `jumpBack` / `jumpForward` | Ctrl+O / Ctrl+I | Jumplist (the way back from `gd`) |
 | `cut` | Ctrl+Shift+X | Selection (or line) to the clipboard, removed |
 | `paste` | (unbound; the host's Ctrl+Shift+V) | Clipboard after the cursor, or over a selection |

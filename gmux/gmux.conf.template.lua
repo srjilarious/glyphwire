@@ -29,8 +29,11 @@
 --     -- After it: " splits the focused pane below, % splits it to the
 --     -- right, an arrow key moves focus in that direction, x kills the
 --     -- focused pane, z toggles zooming it to fill the window (any
---     -- other command un-zooms first, then acts), H/L shrink/grow it
---     -- along a row-axis split, J/K along a column-axis one, q quits
+--     -- other command un-zooms first, then acts), } and { rotate every
+--     -- pane one slot forward/back through the layout (focus stays on
+--     -- the slot, and a zoom stays on, showing the pane that rotated
+--     -- in), H/L shrink/grow the focused pane along a row-axis
+--     -- split, J/K along a column-axis one, q quits
 --     -- gmux, and the prefix again (Ctrl-B Ctrl-B) sends one Ctrl-B on
 --     -- to the focused program -- zoe's sidebar toggle, say.
 --     prefix_key = "b",
@@ -58,7 +61,8 @@
 --     --
 --     --   focusLeft left, focusRight right, focusUp up, focusDown down,
 --     --   splitBelow ", splitRight %, killPane x, zoom z,
---     --   resizeLeft H, resizeRight L, resizeUp K, resizeDown J, quit q,
+--     --   resizeLeft H, resizeRight L, resizeUp K, resizeDown J,
+--     --   rotateForward }, rotateBackward {, quit q,
 --     --   sendPrefix ctrl+<prefix_key>
 --     keys = {
 --         -- ["-"] = "splitBelow", ["|"] = "splitRight",

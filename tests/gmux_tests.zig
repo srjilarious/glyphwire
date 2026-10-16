@@ -51,6 +51,9 @@ pub fn keymapDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectTrue(actions.Action.zoom.keepsZoom());
     try testz.expectTrue(!actions.Action.splitRight.keepsZoom());
     try testz.expectTrue(actions.Action.sendPrefix.keepsZoom());
+    try testz.expectEqual(km.lookupText("}").?, actions.Action.rotateForward);
+    try testz.expectEqual(km.lookupText("{").?, actions.Action.rotateBackward);
+    try testz.expectTrue(actions.Action.rotateForward.keepsZoom());
 }
 
 /// The prefix pressed twice sends it on, whatever letter the prefix is --

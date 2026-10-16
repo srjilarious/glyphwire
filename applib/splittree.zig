@@ -215,6 +215,41 @@ pub fn SplitTree(comptime Id: type, comptime Axis: type, comptime Handle: type) 
             self.alloc.destroy(sibling);
             return .{ .handle = s.handle, .replacement = parent, .focus = parent.firstLeaf() };
         }
+
+        /// Moves every leaf id one leaf along in reading order, the
+        /// shape untouched: `.after` sends each id to the next leaf (the
+        /// last wraps to the first), `.before` to the previous one (tmux's
+        /// `rotate-window -D` / `-U`). Fills `out` with the leaf nodes in
+        /// reading order, now holding their new ids, so the caller can
+        /// re-send each one's slot. A no-op on a single leaf.
+        pub fn rotate(self: *Self, alloc: std.mem.Allocator, dir: Side, out: *std.ArrayList(*Node)) !void {
+            try appendLeafNodes(alloc, self.root, out);
+            const nodes = out.items;
+            if (nodes.len < 2) return;
+            switch (dir) {
+                .after => {
+                    const last = nodes[nodes.len - 1].kind.leaf;
+                    var i = nodes.len - 1;
+                    while (i > 0) : (i -= 1) nodes[i].kind = .{ .leaf = nodes[i - 1].kind.leaf };
+                    nodes[0].kind = .{ .leaf = last };
+                },
+                .before => {
+                    const first = nodes[0].kind.leaf;
+                    for (nodes[0 .. nodes.len - 1], nodes[1..]) |n, next| n.kind = .{ .leaf = next.kind.leaf };
+                    nodes[nodes.len - 1].kind = .{ .leaf = first };
+                },
+            }
+        }
+
+        fn appendLeafNodes(alloc: std.mem.Allocator, n: *Node, out: *std.ArrayList(*Node)) !void {
+            switch (n.kind) {
+                .leaf => try out.append(alloc, n),
+                .split => |s| {
+                    try appendLeafNodes(alloc, s.first, out);
+                    try appendLeafNodes(alloc, s.second, out);
+                },
+            }
+        }
     };
 }
 

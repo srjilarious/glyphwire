@@ -1151,11 +1151,12 @@ pub fn paintRowSpan(
 
 /// If the row's buffer line overlaps the visual selection, repaints
 /// its selected columns with `bg_selected` (keeping the default text
-/// colour). A charwise selection highlights the covered characters; a
-/// linewise one runs to the pane's right edge, like vim -- and so
-/// does one that carries on into the next row of a wrapped line,
-/// across the blank a word break left. A no-op when nothing is
-/// selected or the selected part is scrolled out of view.
+/// colour). A charwise selection highlights the covered characters,
+/// and one cell past the text for a selected newline; a linewise one
+/// runs to the pane's right edge, like vim -- and so does one that
+/// carries on into the next row of a wrapped line, across the blank a
+/// word break left. A no-op when nothing is selected or the selected
+/// part is scrolled out of view.
 pub fn paintSelectionRow(
     self: *Ui,
     batch: *glyphwire.client.Client.Batch,
@@ -1166,36 +1167,26 @@ pub fn paintSelectionRow(
     const span = self.buf.ed.selectionSpan() orelse return;
     const line = rv.line;
     const ls = self.buf.ed.buf.lineStart(line);
-    // One past the line's last byte, including its newline if it has
-    // one -- the range a linewise / cross-line selection can cover.
-    const line_hi = if (line + 1 < self.buf.ed.buf.lineCount())
-        self.buf.ed.buf.lineStart(line + 1)
-    else
-        self.buf.ed.buf.len();
-    if (span.hi <= ls or span.lo > line_hi) return;
+    const has_newline = line + 1 < self.buf.ed.buf.lineCount();
+    const cover = selection_diff.lineCover(span, ls, text.len, has_newline) orelse return;
 
     const gutter = self.gutterWidth();
     const cols = self.textCols();
     if (cols == 0) return;
 
-    // Selected byte range within this line's text.
-    const sel_lo_b = span.lo -| ls;
-    const sel_hi_b = span.hi - ls; // may exceed text.len (newline / EOL)
-    const to_eol = span.linewise or sel_hi_b > text.len;
-
     const opts = self.displayOpts();
     // The row's own columns end at `row_end`; past it is the blank
     // tail of the pane, which the highlight only fills when it runs
-    // on beyond the row (to the newline, or into the next row).
+    // on beyond the row (the newline's cell, or into the next row).
     const row_end = rv.left + rv.cols;
-    const start_dc = display.colOfByte(text, @min(sel_lo_b, text.len), opts);
-    var end_dc = if (to_eol)
+    const start_dc = display.colOfByte(text, cover.lo, opts);
+    var end_dc = if (cover.to_edge)
         rv.left + cols
     else
-        display.colOfByte(text, @min(sel_hi_b, text.len), opts);
+        display.colOfByte(text, cover.hi, opts) + @intFromBool(cover.newline);
     if (end_dc > row_end and !rv.last) end_dc = rv.left + cols;
     // A selection starting on a later row of this line.
-    if (start_dc >= row_end and !(rv.last and to_eol)) return;
+    if (start_dc >= row_end and !(rv.last and (cover.to_edge or cover.newline))) return;
     if (end_dc <= rv.left) return;
 
     const vis_lo = @max(start_dc, rv.left);

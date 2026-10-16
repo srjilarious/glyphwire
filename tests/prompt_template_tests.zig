@@ -452,3 +452,29 @@ pub fn whenTruthyRejectsEmptyAndFalseyTest(_: std.Io, _: std.mem.Allocator) !voi
     try testz.expectTrue(!pt.whenTruthy("False"));
     try testz.expectTrue(!pt.whenTruthy(" FALSE "));
 }
+
+// ─── ellipsizeMiddle ──────────────────────────────────────────────────
+
+/// A `{cwd}` too long for the prompt row keeps both ends, the odd column
+/// going to the end (the directory you are in).
+pub fn ellipsizeMiddleKeepsBothEndsTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [64]u8 = undefined;
+    const path = "~/code/glyphwire/src/zoe";
+    try testz.expectEqualStr(pt.ellipsizeMiddle(path, 10, &buf), "~/co…c/zoe");
+    try testz.expectEqual(pt.displayWidth(pt.ellipsizeMiddle(path, 10, &buf)), 10);
+    try testz.expectEqualStr(pt.ellipsizeMiddle(path, 11, &buf), "~/cod…c/zoe");
+    // Fits already, or no room for more than the ellipsis: unchanged.
+    try testz.expectEqualStr(pt.ellipsizeMiddle(path, 40, &buf), path);
+    try testz.expectEqualStr(pt.ellipsizeMiddle(path, 1, &buf), path);
+    // Too small a buffer: unchanged rather than truncated.
+    var tiny: [4]u8 = undefined;
+    try testz.expectEqualStr(pt.ellipsizeMiddle(path, 10, &tiny), path);
+}
+
+/// Columns are codepoints, so a multi-byte name is never split.
+pub fn ellipsizeMiddleCutsOnCodepointsTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [64]u8 = undefined;
+    const cut = pt.ellipsizeMiddle("/home/ünïcødé/dir", 9, &buf);
+    try testz.expectEqualStr(cut, "/hom…/dir");
+    try testz.expectEqualStr(pt.ellipsizeMiddle("ääääää", 5, &buf), "ää…ää");
+}

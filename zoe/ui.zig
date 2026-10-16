@@ -812,6 +812,19 @@ pub const Ui = struct {
     /// `zoe/groups.zig`.
     layout: groups.Layout,
     next_group_id: groups.GroupId = 1,
+    /// The group filling the editor area while zoomed (`zoomToggle`):
+    /// its `col_split` sits in the editors' slot of `pane_split` in place
+    /// of the layout's root, and every other group's layers are hidden.
+    /// The layout itself, and the ratios dragged on it, are untouched.
+    zoomed: ?struct {
+        group: groups.GroupId,
+        /// The group's bounds before it filled the area, put back on
+        /// unzoom so a Ctrl+hjkl in the same command measures from where
+        /// it is going back to, not from the whole area, before the
+        /// host's `layout` for the restored tree arrives.
+        tabs_bounds: Bounds,
+        buffer_bounds: Bounds,
+    } = null,
     /// False while `renderGroup` is drawing a group that doesn't have the
     /// keyboard, which then gets no caret.
     render_focused: bool = true,
@@ -1878,7 +1891,7 @@ pub const Ui = struct {
     /// layer, so the buffer actually reclaims the columns instead of
     /// leaving a gap where the tree was.
     pub fn applySplitChildren(self: *Ui) !void {
-        const editors = self.layoutChild(self.layout.root);
+        const editors = self.editorsChild();
         if (self.tree_visible) {
             try self.client.setSplitChildren(self.pane_split, &.{
                 glyphwire.SplitChildInput.layerFixed(self.tree_layer, default_tree_cols),
@@ -1905,6 +1918,63 @@ pub const Ui = struct {
             if (g.id == id) return g;
         }
         unreachable; // every id in `layout` has a group
+    }
+
+    /// What fills the editor area: the layout's root, or the zoomed
+    /// group alone.
+    pub fn editorsChild(self: *const Ui) glyphwire.SplitChildInput {
+        if (self.zoomed) |z| return glyphwire.SplitChildInput.splitWeighted(self.groupById(z.group).col_split, 1);
+        return self.layoutChild(self.layout.root);
+    }
+
+    /// Ctrl+W z and `:zoom`: the focused group takes the whole editor
+    /// area, or the layout comes back. Like gmux's zoom it never touches
+    /// the layout, only which split sits in the editors' slot; the other
+    /// groups' layers are hidden as well, since a layer the split walk no
+    /// longer reaches would otherwise stay drawn where it last was.
+    pub fn zoomToggle(self: *Ui) !void {
+        if (self.zoomed != null) return self.unzoom();
+        if (self.group_list.items.len < 2) return;
+        if (self.focus == .tree) self.setFocus(.buffer);
+        self.zoomed = .{ .group = self.grp.id, .tabs_bounds = self.grp.tabs_bounds, .buffer_bounds = self.grp.buffer_bounds };
+        self.setOtherGroupsVisible(false);
+        try self.replaceEditorsSlot();
+        self.grp.markRedraw();
+        self.status_dirty = true;
+    }
+
+    /// Puts the layout back in the editors' slot. A no-op when not zoomed.
+    /// Every command that changes the layout or moves to another group
+    /// calls it first -- gmux's (and tmux's) rule.
+    pub fn unzoom(self: *Ui) !void {
+        const z = self.zoomed orelse return;
+        self.zoomed = null;
+        try self.replaceEditorsSlot();
+        // The zoomed group still has the keyboard (everything that moves
+        // it elsewhere unzooms first), so "the others" are the hidden ones.
+        self.setOtherGroupsVisible(true);
+        for (self.group_list.items) |g| {
+            if (g.id != z.group) continue;
+            g.tabs_bounds = z.tabs_bounds;
+            g.buffer_bounds = z.buffer_bounds;
+        }
+        for (self.group_list.items) |each| each.markRedraw();
+        self.status_dirty = true;
+    }
+
+    fn setOtherGroupsVisible(self: *Ui, visible: bool) void {
+        for (self.group_list.items) |g| {
+            if (g == self.grp) continue;
+            self.client.setLayerVisible(g.tabs_layer, visible) catch {};
+            self.client.setLayerVisible(g.buffer_layer, visible) catch {};
+        }
+    }
+
+    /// Re-points the editors' slot of `pane_split` at `editorsChild`,
+    /// keeping the slot's size (the sidebar's dragged width).
+    fn replaceEditorsSlot(self: *Ui) !void {
+        const index: usize = if (self.tree_visible) 1 else 0;
+        try self.client.replaceSplitChild(self.pane_split, index, .{ .split = self.editorsChild().split.? });
     }
 
     /// The host split child a layout node stands for.
@@ -1955,6 +2025,8 @@ pub const Ui = struct {
     /// to take its caret off.
     pub fn focusGroup(self: *Ui, g: *Group) void {
         if (g != self.grp) {
+            // Before `grp` moves: `unzoom` shows every group but `grp`.
+            self.unzoom() catch {};
             self.grp.markRedraw();
             self.grp = g;
             self.buf = g.slot();
@@ -2032,6 +2104,7 @@ pub const Ui = struct {
     /// screen. Its buffer list is empty: the caller gives it a tab before
     /// anything draws, or takes it back out.
     pub fn insertGroup(self: *Ui, from: *Group, orientation: groups.Orientation, side: groups.Side) !*Group {
+        try self.unzoom();
         const size = try self.client.getSize();
         const g = try makeGroup(self.alloc, self.client, self.next_group_id, size);
         self.next_group_id += 1;
@@ -2147,6 +2220,7 @@ pub const Ui = struct {
     /// new to go.
     pub fn moveTabToward(self: *Ui, dir: groups.Direction) !void {
         if (self.focus == .tree) return;
+        try self.unzoom();
         if (self.groupFacing(self.grp.rect(), self.grp, dir)) |g| {
             try self.moveTab(self.buf, g, null);
             return;
@@ -2173,6 +2247,7 @@ pub const Ui = struct {
             self.status_dirty = true;
             return;
         }
+        try self.unzoom();
         const g = self.grp;
         const shown = self.buf;
         const removed = self.layout.remove(g.id) catch return;
@@ -2203,6 +2278,7 @@ pub const Ui = struct {
     /// The other way a group goes: its last tab was closed. Nothing to
     /// carry over, and focus goes where `closeGroup`'s would.
     pub fn closeEmptyGroup(self: *Ui, g: *Group) !void {
+        try self.unzoom();
         const removed = self.layout.remove(g.id) catch return;
         // Before the group goes: `grp` must not be left pointing at it.
         // (`buf` already doesn't point anywhere -- its slot was the one
@@ -2247,11 +2323,16 @@ pub const Ui = struct {
         if (self.focus == .tree) {
             // Out of the sidebar: whichever group faces it.
             if (dir != .right) return;
+            // Zoomed, the one group on screen is the one facing it.
+            if (self.zoomed != null) return self.focusGroup(self.grp);
             const t = self.tree_bounds;
             const from: groups.Rect = .{ .row = t.row, .col = t.col, .cols = t.cols, .rows = t.rows };
             self.focusGroup(self.groupFacing(from, null, dir) orelse self.grp);
             return;
         }
+        // The other groups' rects are stale while zoomed, and the zoomed
+        // one covers the whole area, so measure from the real layout.
+        self.unzoom() catch {};
         if (self.groupFacing(self.grp.rect(), self.grp, dir)) |g| {
             self.focusGroup(g);
         } else if (dir == .left and self.tree_visible) {
@@ -2283,6 +2364,7 @@ pub const Ui = struct {
     /// the same tree/buffer toggle the bare Ctrl+W was when there was
     /// only one group.
     pub fn cycleFocus(self: *Ui) !void {
+        try self.unzoom();
         var order: std.ArrayList(groups.GroupId) = .empty;
         defer order.deinit(self.alloc);
         try self.layout.leavesInOrder(self.alloc, &order);
@@ -2325,6 +2407,7 @@ pub const Ui = struct {
             // session-wide question, not a sidebar-local one.
             .toggleHidden => try self.toggleHidden(),
             .revealInTree => try self.revealInTree(),
+            .zoomGroup => try self.zoomToggle(),
             .toggleShell => self.toggleShell(),
             .nextTab => self.stepBuffer(true),
             .prevTab => self.stepBuffer(false),
@@ -2407,6 +2490,8 @@ pub const Ui = struct {
             try self.closeBuffer(self.grp.active, false);
         } else if (eq(u8, key, "w")) {
             try self.cycleFocus();
+        } else if (eq(u8, key, "z")) {
+            try self.zoomToggle();
         } else if (eq(u8, key, "h")) {
             // Plain `h` here, not Ctrl+H (hidden files), so the whole of
             // vim's hjkl is available behind the prefix.
@@ -3639,6 +3724,7 @@ pub const Ui = struct {
             .buffer_new => try self.newBuffer(),
             .split => |sp| try self.splitGroup(if (sp.vertical) .vertical else .horizontal, .after, self.expandArg(sp.path, &home_buf)),
             .close_group => try self.closeGroup(),
+            .zoom_group => try self.zoomToggle(),
             .chdir => |target| self.changeDir(target),
             .add_folder => |target| try self.addFolder(self.expandArg(target, &home_buf)),
             .remove_folder => |target| try self.removeFolder(self.expandArg(target, &home_buf)),
