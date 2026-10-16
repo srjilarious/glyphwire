@@ -17,7 +17,9 @@
 //!     installed (`prompt{ fish_completions }`): subcommands, flags with
 //!     their descriptions, branches, and fish's own file matching;
 //!   * a redirect target, or whatever the above left empty -- the files
-//!     in the directory the word names.
+//!     in the directory the word names. That includes a word fish
+//!     answered for but none of whose entries extend it
+//!     (`git worktree remove bui<Tab>`, where fish only lists worktrees).
 //!
 //! The word under the caret is read with the shell's own quoting rules
 //! (`compctx.scan`), so `cat 'My Fi<Tab>` completes inside the quote and
@@ -338,10 +340,16 @@ pub fn gatherCandidates(self: *Prompt, lookup: Lookup) !Candidates {
             }
         }
         if (self.fishCompletionsEnabled()) {
-            if (try appendFishCandidates(self, &set, &seen, dp, before, lookup)) return set;
-            // With fish in charge of arguments, the idle hint only falls
-            // back to file names for a word that is plainly a path.
-            if (lookup == .idle and !looksLikePath(word)) return set;
+            switch (try appendFishCandidates(self, &set, &seen, dp, before, lookup)) {
+                .matched => return set,
+                // fish knew this argument but nothing it offered extends
+                // the word: the word is something else, likely a path.
+                .unmatched => {},
+                // With fish in charge of arguments, the idle hint only
+                // falls back to file names for a word that is plainly a
+                // path.
+                .none => if (lookup == .idle and !looksLikePath(word)) return set,
+            }
         }
     }
 
@@ -422,10 +430,19 @@ fn pushWordCandidate(set: *Candidates, seen: *std.StringHashMapUnmanaged(void), 
     try set.push(seen, text, .arg, desc);
 }
 
-/// Asks fish what completes the word and appends its answer. True when
-/// fish answered with anything at all (even if nothing extends the
-/// word), false when it was unavailable, failed, timed out, had nothing,
-/// or -- for `.idle` -- has no cached answer for this query.
+/// What `appendFishCandidates` got from fish.
+const FishAnswer = enum {
+    /// fish answered and at least one entry extends the word.
+    matched,
+    /// fish answered, but none of its entries extend the word.
+    unmatched,
+    /// fish was unavailable, failed, timed out, had nothing, or -- for
+    /// `.idle` -- has no cached answer for this query.
+    none,
+};
+
+/// Asks fish what completes the word and appends the entries of its
+/// answer that extend it (see `FishAnswer` for the outcomes).
 ///
 /// The query is the command's raw text up to the word, plus the word's
 /// directory part (escaped) and, for a flag, its leading `-`: the parts
@@ -439,7 +456,7 @@ fn appendFishCandidates(
     dp: complete.DirPrefix,
     before: []const u8,
     lookup: Lookup,
-) !bool {
+) !FishAnswer {
     const alloc = self.client.alloc;
     const word = set.ctx.word;
 
@@ -452,8 +469,8 @@ fn appendFishCandidates(
     if (dp.dir.len == 0 and word.len > 0 and word[0] == '-') try query.append(alloc, '-');
 
     if (!std.mem.eql(u8, self.fish_cache.key, query.items)) {
-        if (lookup == .idle) return false;
-        const output = (try runFish(self, query.items)) orelse return false;
+        if (lookup == .idle) return .none;
+        const output = (try runFish(self, query.items)) orelse return .none;
         errdefer alloc.free(output);
         const items = try compctx.parseFishOutput(alloc, output);
         errdefer alloc.free(items);
@@ -461,11 +478,11 @@ fn appendFishCandidates(
         self.fish_cache.clear(alloc);
         self.fish_cache = .{ .key = key, .output = output, .items = items };
     }
-    if (self.fish_cache.items.len == 0) return false;
+    if (self.fish_cache.items.len == 0) return .none;
 
     set.prefix = word;
     for (self.fish_cache.items) |item| try pushWordCandidate(set, seen, item.text, item.desc);
-    return true;
+    return if (set.items.items.len > 0) .matched else .unmatched;
 }
 
 /// `fish --no-config -c 'complete --do-complete=...'` with `query` as the
