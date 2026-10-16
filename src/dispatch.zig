@@ -1145,6 +1145,13 @@ pub const Dispatcher = struct {
             for (responses.items) |r| alloc.free(r);
             responses.deinit(alloc);
         }
+        // Any sub-message that reshaped the pane tree makes the whole
+        // batch one that did: the caller's `applyPaneLayout` is what sends
+        // the affected programs their `resize`. Dropped, a batched pane
+        // edit (gmux's rotate) moved panes on screen -- the host re-lays
+        // out on `pane_layout_gen` alone -- while the programs inside kept
+        // drawing at their old size.
+        var panes_changed = false;
 
         for (parsed.value) |msg| {
             const sub = codec.parseEnvelopeFrom(alloc, msg) catch |err| {
@@ -1162,6 +1169,7 @@ pub const Dispatcher = struct {
                 std.log.warn("glyphwire: batch sub-message '{s}' failed: {t}", .{ sub.value.method, err });
                 continue;
             };
+            panes_changed = panes_changed or result.panes_changed;
 
             if (result.broadcast) |b| {
                 alloc.free(b.body);
@@ -1182,8 +1190,11 @@ pub const Dispatcher = struct {
             }
         }
 
-        const id = outer_id orelse return .{};
-        return .{ .response = try codec.batchResponse(self.format, alloc, id, responses.items) };
+        const id = outer_id orelse return .{ .panes_changed = panes_changed };
+        return .{
+            .response = try codec.batchResponse(self.format, alloc, id, responses.items),
+            .panes_changed = panes_changed,
+        };
     }
 
     /// Handles a `load_image` / `update_image` request's JSON header once

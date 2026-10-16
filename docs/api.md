@@ -1015,6 +1015,12 @@ band at a time. See decisions.md's Batch section for the reasoning.
   `subscribe`, `scroll_view`, …) are accepted but their server→client
   broadcast is suppressed, so a batch is really for draw / layer / table
   / metadata commands.
+- **Pane-tree edits are not suppressed:** a batch holding any
+  pane-tree edit (`replace_pane_split_child`, `set_root_pane_split`, …)
+  is followed, once, by the same `pane_layout` and per-connection
+  `resize` a standalone edit gets. gmux's rotate swaps every slot in one
+  batch so no frame shows a pane in two places, and each moved program
+  still learns its new size.
 - **Zig client:** `Client.Batch` has every notification method `Client`
   has, under the same name and signature (both alias
   `src/client_ops.zig`'s `Ops`), so moving draws into a batch is a

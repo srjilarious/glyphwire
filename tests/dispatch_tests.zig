@@ -4126,6 +4126,43 @@ pub fn paneTreeOpsRequireTheWindowManagerRoleTest(io: std.Io, alloc: std.mem.All
     try testz.expectTrue(made.panes_changed);
 }
 
+/// A pane-tree edit inside a `batch` still tells the caller to re-lay-out
+/// (gmux's rotate sends all its slot swaps as one); without it, the
+/// programs in the moved panes never got their `resize`.
+pub fn batchedPaneEditReportsPanesChangedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
+
+    const role = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"request_role","params":{"role":"window_manager"}}
+    );
+    defer if (role.response) |r| alloc.free(r);
+
+    const quiet = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"batch","params":{"messages":[]}}
+    );
+    try testz.expectTrue(!quiet.panes_changed);
+
+    const notified = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"batch","params":{"messages":[
+        \\  {"jsonrpc":"2.0","method":"set_root_pane_split","params":{"split":null}}
+        \\]}}
+    );
+    try testz.expectTrue(notified.panes_changed);
+
+    const requested = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"batch","params":{"messages":[
+        \\  {"jsonrpc":"2.0","method":"set_root_pane_split","params":{"split":null}}
+        \\]}}
+    );
+    defer if (requested.response) |r| alloc.free(r);
+    try testz.expectTrue(requested.panes_changed);
+}
+
 pub fn requestRoleIsRefusedWhenAnotherConnectionHoldsItTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var root = try glyphwire.Context.init(alloc, 40, 10, 0);
