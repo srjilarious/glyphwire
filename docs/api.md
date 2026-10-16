@@ -419,7 +419,7 @@ dangling id isn't an error).
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `create_metadata` | request | `json` | metadata handle | ✅ stores `json` verbatim — the server never parses it, only stores/returns it |
+| `create_metadata` | request | `json, drag?` | metadata handle | ✅ stores `json` verbatim — the server never parses it, only stores/returns it. `drag` (`{uris, label?, icon?}`) makes every cell tagged with the id Alt+draggable out of the window; see [Drag out](#drag-out). An empty `uris` errors `EmptyDrag` and creates nothing |
 | `destroy_metadata` | notification | `id` | — | ✅ frees `id`'s stored JSON; errors `UnknownMetadata` on an unknown id, same treatment `destroy_layer` gives an unknown layer handle. No reference counting — a cell still tagged with `id` afterward is left dangling, see `get_metadata` |
 | `get_metadata` | request | `layer?, row, col, view_offset?` | `{id, json}`, both nullable | ✅ resolves `(row, col)` to a cell and reports its `metadata_id` plus that id's stored JSON. `row`/`col` are required (unlike `draw_icon`/`draw_image`'s cursor-defaulted `row?`/`col?`) — this is a targeted lookup (e.g. resolving whatever cell a mouse click landed on), not a draw at "wherever the cursor is". `view_offset` (default 0) resolves against that many rows of scrollback above the live viewport, so a click made while the host is scrolled back — the `view_offset` comes through on the `mouse_button` event — lands on the row actually under the pointer. `id` non-null with `json` null means a dangling tag (the id was `destroy_metadata`'d after the cell was tagged) — reported rather than treated as an error, so a caller can tell "untagged" apart from "tagged but the data's gone" |
 | `tag_metadata` | notification | `layer?, row, col, metadata_id, focus?` | — | ✅ sets exactly one cell's `metadata_id`, touching nothing else about it — unlike `write_text`/`draw_icon` below, which tag as a side effect of also drawing something. For a client that needs a cell tagged without changing what's drawn there, e.g. `glyphwire-ls` tagging the extra cells a `.natural`-scaled icon visually overflows into so browsing resolves correctly anywhere the icon actually renders, not just its anchor cell. `metadata_id` is required (there'd be no point tagging with nothing) and validated the same as `write_text`/`draw_icon`'s. `focus` (default `false`) additionally marks the cell as its span's *focus* cell — where `find_metadata` lands instead of the span's first visible character; see that row. Any write that sets a cell's `metadata_id` (`write_text`, `draw_icon`, a table repaint) clears the mark, so it is set last, by whoever knows which cell should carry it |
@@ -699,6 +699,47 @@ Composited as its own quad batch, drawn last in the layer's draw order
 the layer paints — unlike the selection/highlight tints, which are drawn
 *under* text so the text pass stays readable over them. There is no
 `get_rect`/`rect_get_state` yet; nothing has needed to read a rect back.
+
+### Drag out
+
+Dragging something out of the window into another program: a file from a
+`gw-ls` listing or a salacommander pane onto Kate, Audacious or a file
+manager. The other half of drag-and-drop from the drop target below, and
+the one the host does own: the OS drag starts from the host's window, so
+only the host can begin it. glyphwire-host does it on Wayland only (SDL3
+has no drag source, so `host_eng/wayland_drag.zig` speaks
+`wl_data_device` itself on SDL's connection); elsewhere both ways in are
+accepted and do nothing.
+
+A payload is `{uris, label?, icon?}`: full URIs (`file:///home/me/a%20b.mp3`,
+percent-encoded — `applib.entries.fileUri` builds them), offered as
+`text/uri-list` and, newline-separated, as `text/plain`; `label` and
+`icon` (a catalog name) are drawn on the card that follows the pointer,
+which defaults to the first URI when `label` is absent. The drag offers
+the copy action only.
+
+There are two ways in, because the client that made the cells may be
+long gone:
+
+- **A tagged span.** `create_metadata`'s `drag`. An Alt+left press on a
+  cell carrying such an id is the host's: the press and release never
+  reach a client, and the drag starts once the pointer travels 6 px with
+  the button held. `gw-ls` tags every entry this way, so a listing stays
+  draggable from scrollback after `gw-ls` exits — the same reasoning that
+  keeps its tables sortable.
+- **`start_drag`.** A live client that knows more than one cell can say.
+  salacommander gets the Alt+press like any click and answers with the
+  marked set (when the row is marked) or the row. The host arms it only
+  while the left button is still down, measures the 6 px from that press,
+  and drops a request that arrives after the release.
+
+| Message | Kind | Params | Result | Status |
+|---|---|---|---|---|
+| `start_drag` | notification | `uris, label?, icon?` | — | ✅ queues the payload on the sender's context for the host, replacing one it hasn't taken; the host takes it only from the focused context, only with the left button held. An empty `uris` errors `EmptyDrag`. Batchable. `Client.startDrag(DragSpec)` / `Batch.startDrag` |
+
+Once the OS drag begins the compositor moves the pointer off the window,
+and SDL releases the held button, so a client that had the press gets its
+release as usual.
 
 ### Drop target
 

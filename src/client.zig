@@ -399,6 +399,7 @@ pub const Client = struct {
     pub const updateRect = ops.updateRect;
     pub const destroyRect = ops.destroyRect;
     pub const setDropTarget = ops.setDropTarget;
+    pub const startDrag = ops.startDrag;
     pub const updateNinePatch = ops.updateNinePatch;
     pub const destroyNinePatch = ops.destroyNinePatch;
     pub const destroyMetadata = ops.destroyMetadata;
@@ -1439,6 +1440,16 @@ pub const Client = struct {
         return parsed.value.result.handle;
     }
 
+    /// `create_metadata(json, drag)` -- a request. `createMetadata`, plus
+    /// a drag payload: a span tagged with the returned id can be Alt+dragged
+    /// out of the window into another program, carrying `drag.uris`, and
+    /// keeps working after this process exits. See `core.DragSpec`.
+    pub fn createMetadataDrag(self: *Client, json: []const u8, drag: core.DragSpec) !core.MetadataHandle {
+        var parsed = try self.request(protocol.CreateMetadataResult, "create_metadata", protocol.CreateMetadataParams{ .json = json, .drag = drag });
+        defer parsed.deinit();
+        return parsed.value.result.handle;
+    }
+
     /// `get_metadata(layer?, row, col)` -- a request. Resolves `(row, col)`
     /// to a cell (root layer when `layer` is omitted) and returns its
     /// `metadata_id` plus that id's stored JSON -- the pair a mouse-click
@@ -1859,6 +1870,7 @@ pub const Client = struct {
         pub const updateRect = batch_ops.updateRect;
         pub const destroyRect = batch_ops.destroyRect;
         pub const setDropTarget = batch_ops.setDropTarget;
+        pub const startDrag = batch_ops.startDrag;
         pub const updateNinePatch = batch_ops.updateNinePatch;
         pub const destroyNinePatch = batch_ops.destroyNinePatch;
         pub const destroyMetadata = batch_ops.destroyMetadata;
@@ -1910,6 +1922,12 @@ pub const Client = struct {
         /// Resolve the returned slot with `BatchResults.metadataHandle`.
         pub fn createMetadata(self: *Batch, json: []const u8) !Slot {
             return self.request("create_metadata", .{ .json = json });
+        }
+
+        /// Batched `create_metadata` with a drag payload -- see
+        /// `Client.createMetadataDrag`.
+        pub fn createMetadataDrag(self: *Batch, json: []const u8, drag: core.DragSpec) !Slot {
+            return self.request("create_metadata", protocol.CreateMetadataParams{ .json = json, .drag = drag });
         }
 
         /// `send`, with a `sync` request appended so it returns only once

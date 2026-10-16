@@ -318,6 +318,7 @@ into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
 | `UnknownMetadata`, `InvalidMetadataDirection` | metadata messages |
 | `UnknownTable`, `InvalidTableOption`, `TableRowShapeMismatch` | table messages |
 | `UnknownRect` | rect messages |
+| `EmptyDrag` | `start_drag`, or `create_metadata`'s `drag`, with no `uris` |
 | `UnknownNinePatch`, `UnknownNinePatchStyle` | nine-patch messages |
 | `UnknownOutline`, `OutlineNodeOutOfRange` | outline messages |
 | `InvalidMoveDirection` | `move_content` |
@@ -1056,13 +1057,17 @@ layer destroys its nine-patches.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `create_metadata` | request | `json` | `{handle}` |
+| `create_metadata` | request | `json`, `drag?` | `{handle}` |
 | `destroy_metadata` | notification | `id` | — |
 | `tag_metadata` | notification | `layer?`, `row`, `col`, `metadata_id` | — |
 | `get_metadata` | request | `layer?`, `row`, `col`, `view_offset?` = 0 | `{id, json}` |
 | `find_metadata` | request | `layer?`, `above?` = 0, `col?` = 0, `direction?` | `{found, above, col, id}` |
 
 `json` is stored and returned verbatim; the host never parses it.
+
+`drag` makes the tagged span draggable out of the window (6.10.2). It
+is kept beside `json`, not read out of it, so the blob stays opaque.
+An empty `uris` reports `EmptyDrag` and creates no handle.
 
 `get_metadata` resolves a viewport cell to its tag. `view_offset` resolves
 against that many rows of scrollback — pass the `view_offset` a
@@ -1181,6 +1186,30 @@ reports `InvalidDropTarget`; an unresolvable `layer` reports
 `UnknownLayer`. Re-sending the target already shown is a no-op, so a
 client need not deduplicate pointer moves. Batchable. A client SHOULD
 send `"none"` when the drag ends or leaves the layer.
+
+#### 6.10.2 Drag out
+
+| Method | Kind | Params | Result |
+|---|---|---|---|
+| `start_drag` | notification | `uris`, `label?`, `icon?` | — |
+
+A drag *out of* the window into another program, carrying `uris`: full
+URIs, offered to the drop target as `text/uri-list`. `label` and `icon`
+(an icon catalog name) describe what the host draws under the pointer.
+The same three fields form `create_metadata`'s `drag`.
+
+There are two ways to start one. A host that supports dragging out SHOULD
+treat an Alt+left press on a cell whose metadata carries a `drag` as its
+own: neither the press nor its release is delivered to a client. A live
+client that wants to choose the payload itself (several selected files)
+sends `start_drag` in response to the press it was handed. Either way the
+host SHOULD begin the drag only once the pointer has moved a few pixels
+with the button still down, so a click is not a drag, and MUST drop a
+`start_drag` that arrives after the button is released. A newer
+`start_drag` replaces an unstarted one. A host that cannot drag out of
+its window accepts both and does nothing.
+
+An empty `uris` reports `EmptyDrag`. Batchable.
 
 ### 6.11 Outlines
 

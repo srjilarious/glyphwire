@@ -10,6 +10,7 @@ const testz = @import("testz");
 const gridlayout = @import("applib").gridlayout;
 const lsfmt = @import("applib").format;
 const lsicons = @import("applib").icons;
+const lsentries = @import("applib").entries;
 const lsconfig = @import("ls_support").config;
 
 const small_opts: gridlayout.Options = .{ .icon_cols = 2, .block_rows = 1 };
@@ -344,4 +345,14 @@ pub fn lsConfigSurfacesLuaErrorButKeepsDefaultsTest(_: std.Io, alloc: std.mem.Al
     defer r.deinit(alloc);
     try testz.expectTrue(r.err != null);
     try testz.expectEqual(r.config.large_icon_px, @as(u32, 32));
+}
+
+// ─── entries.fileUri ────────────────────────────────────────────────────
+
+/// Unreserved bytes and `/` pass through; a space, `#`, `%` and each byte
+/// of a non-ASCII name are percent-encoded, upper-case hex.
+pub fn fileUriPercentEncodesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const uri = try lsentries.fileUri(alloc, "/home/me/My Song #1 100%_ü.mp3");
+    defer alloc.free(uri);
+    try testz.expectEqualStr(uri, "file:///home/me/My%20Song%20%231%20100%25_%C3%BC.mp3");
 }

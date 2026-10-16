@@ -24,6 +24,7 @@ const profiler_mod = @import("profiler.zig");
 const switcher_mod = @import("switcher.zig");
 const theme_switcher_mod = @import("theme_switcher.zig");
 const window_title_mod = @import("window_title.zig");
+const drag_out_mod = @import("drag_out.zig");
 
 const CursorConfig = config.CursorConfig;
 const CursorShape = config.CursorShape;
@@ -189,6 +190,9 @@ pub const App = struct {
     scroll: scroll_mod.Scroll,
     table_sort: table_sort_mod.TableSort,
     outline_toggle: outline_toggle_mod.OutlineToggle,
+    /// Alt+drag out of the window into other programs. See
+    /// `drag_out.zig`.
+    drag_out: drag_out_mod.DragOut,
     panes: panes_mod.Panes,
     /// Super+F12's context switcher. Its chord comes from `host.conf.lua`;
     /// `main` sets it after `init`.
@@ -237,6 +241,7 @@ pub const App = struct {
             .scroll = .{ .app = undefined },
             .table_sort = .{ .app = undefined },
             .outline_toggle = .{ .app = undefined },
+            .drag_out = .{ .app = undefined },
             .panes = .{ .app = undefined },
             .switcher = .{ .app = undefined },
             .theme_switcher = .{ .app = undefined },
@@ -264,6 +269,7 @@ pub const App = struct {
         app.scroll.app = app;
         app.table_sort.app = app;
         app.outline_toggle.app = app;
+        app.drag_out.app = app;
         app.panes.app = app;
         app.switcher.app = app;
         app.theme_switcher.app = app;
@@ -278,10 +284,15 @@ pub const App = struct {
             std.log.warn("glyphwire-host: icon atlas build failed ({t}); falling back to per-icon textures", .{err});
         };
 
+        // Non-fatal and silent off Wayland: without it Alt+drag just
+        // isn't a thing (see `DragSource.create`).
+        app.drag_out.init(eng);
+
         return app;
     }
 
     pub fn deinit(self: *App) void {
+        self.drag_out.deinit();
         self.panes.deinit();
         self.renderer.deinit();
         self.alloc.destroy(self);
@@ -338,13 +349,20 @@ pub const App = struct {
         // selection, the wire -- agrees on whether this press is a
         // double-click.
         self.keys.countClicks(eng);
+        // The Wayland drag source's listeners, before any mouse handling,
+        // so a press just reported already has its serial.
+        self.drag_out.pump(eng);
         const divider_took_left = self.panes.handleMouse(eng);
         // Then a pane's own scrollbar, which sits inside a pane and so
         // covers the window bar wherever the two overlap.
         const pane_bar_took_left = !divider_took_left and self.scroll.handlePaneScrollbar(eng);
         const chrome_took_left = divider_took_left or pane_bar_took_left;
         const scrollbar_took_left = !chrome_took_left and self.scroll.handleScrollbar(eng);
-        const chrome_or_bar_took_left = chrome_took_left or scrollbar_took_left;
+        // An Alt+drag out of the window: before the table header and the
+        // outline marker, so a draggable row is dragged from anywhere on
+        // it. Chrome still gets first refusal.
+        const drag_took_left = !(chrome_took_left or scrollbar_took_left) and self.drag_out.handleMouse(eng);
+        const chrome_or_bar_took_left = chrome_took_left or scrollbar_took_left or drag_took_left;
         // A click on a sortable table header cycles that column's sort and
         // repaints the table in place; it's consumed so it isn't also
         // delivered to glyphwire-shell as a grid click.
@@ -610,6 +628,7 @@ pub const App = struct {
         // while the loop runs, so sleeping past the schedule would land
         // the backlog in one frame instead of an even cadence.
         wait = softMin(wait, input_mod.repeatTimeoutMs(eng));
+        wait = softMin(wait, self.drag_out.idleTimeoutMs());
         return wait;
     }
 

@@ -558,3 +558,40 @@ pub fn downscaleAveragesPremultipliedTest(_: std.Io, _: std.mem.Allocator) !void
     color_font.downscaleRgba(&clear, 2, 2, &dst, 1, 1);
     try testz.expectTrue(std.mem.eql(u8, &dst, &.{ 0, 0, 0, 0 }));
 }
+
+// ─── drag_out.image ─────────────────────────────────────────────────────
+
+/// The drag card comes out a multiple of its buffer scale on both sides
+/// (as `wl_surface.set_buffer_scale` requires), its border pixel is the
+/// border colour in ARGB8888 byte order, and the label paints something
+/// in the foreground colour.
+pub fn dragCardIsScaleAlignedArgbTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var img = try host_eng.drag_out.image.render(alloc, .{
+        .label = "song.mp3",
+        .font_path = "assets/JetBrainsMono-Regular.ttf",
+        .font_px = 28,
+        .scale = 2,
+        .style = .{
+            .bg = .{ .r = 0, .g = 0, .b = 0, .a = 255 },
+            .fg = .{ .r = 255, .g = 255, .b = 255, .a = 255 },
+            .border = .{ .r = 10, .g = 20, .b = 30, .a = 255 },
+        },
+    });
+    defer img.deinit(alloc);
+
+    try testz.expectEqual(img.width % 2, 0);
+    try testz.expectEqual(img.height % 2, 0);
+    try testz.expectEqual(img.pixels.len, @as(usize, img.width) * img.height * 4);
+    // Top-left is border: B, G, R, A.
+    try testz.expectEqual(img.pixels[0], 30);
+    try testz.expectEqual(img.pixels[1], 20);
+    try testz.expectEqual(img.pixels[2], 10);
+    try testz.expectEqual(img.pixels[3], 255);
+
+    var bright: usize = 0;
+    var i: usize = 0;
+    while (i < img.pixels.len) : (i += 4) {
+        if (img.pixels[i] > 200 and img.pixels[i + 1] > 200 and img.pixels[i + 2] > 200) bright += 1;
+    }
+    try testz.expectTrue(bright > 20);
+}

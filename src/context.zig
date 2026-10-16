@@ -14,6 +14,8 @@ const cell_paint = @import("cell_paint.zig");
 
 const CellPos = core.CellPos;
 const ConnId = core.ConnId;
+const DragPayload = core.DragPayload;
+const DragSpec = core.DragSpec;
 const DropTarget = core.DropTarget;
 const ImageEntry = core.ImageEntry;
 const ImageFormat = core.ImageFormat;
@@ -339,6 +341,11 @@ pub const Context = struct {
     /// the serial it last pushed to the OS to know when to push again,
     /// without diffing the bytes every frame.
     clipboard_serial: u64 = 0,
+    /// The drag a client asked to start with `start_drag`, waiting for
+    /// glyphwire-host to pick it up (`takeDragRequest`) on its main
+    /// thread, where the OS drag has to begin. A newer request replaces
+    /// an untaken one. Headless, nothing ever takes it.
+    drag_request: ?DragPayload = null,
     /// The connections that own this context, for lifecycle culling --
     /// the exact mirror of `Layer.owners` / `connection_owned`, one level
     /// up. Populated only for a context created over a socket via
@@ -441,8 +448,12 @@ pub const Context = struct {
         while (np_it.next()) |k| self.alloc.free(k.*);
         self.nine_patch_styles.deinit();
         var metadata_it = self.metadata.valueIterator();
-        while (metadata_it.next()) |m| self.alloc.free(m.json);
+        while (metadata_it.next()) |m| {
+            self.alloc.free(m.json);
+            if (m.drag) |*d| d.deinit(self.alloc);
+        }
         self.metadata.deinit();
+        if (self.drag_request) |*d| d.deinit(self.alloc);
         self.clipboard.deinit(self.alloc);
         self.title.deinit(self.alloc);
     }
@@ -506,12 +517,22 @@ pub const Context = struct {
     /// possibly other scenarios freeing ids no cell references any more)
     /// is future work, not needed for this to be useful today.
     pub fn createMetadata(self: *Context, json: []const u8) !MetadataHandle {
+        return self.createMetadataDrag(json, null);
+    }
+
+    /// `create_metadata` with its optional `drag`: a span tagged with the
+    /// returned id is draggable out of the window (glyphwire-host's
+    /// Alt+drag) carrying `drag`'s URIs. `drag` is copied; an empty URI
+    /// list is `DragError.EmptyDrag`.
+    pub fn createMetadataDrag(self: *Context, json: []const u8, drag: ?DragSpec) !MetadataHandle {
         const owned = try self.alloc.dupe(u8, json);
         errdefer self.alloc.free(owned);
+        var payload: ?DragPayload = if (drag) |d| try DragPayload.init(self.alloc, d) else null;
+        errdefer if (payload) |*p| p.deinit(self.alloc);
 
         const handle = self.next_metadata_handle;
         self.next_metadata_handle += 1;
-        try self.metadata.put(handle, .{ .json = owned });
+        try self.metadata.put(handle, .{ .json = owned, .drag = payload });
         return handle;
     }
 
@@ -522,8 +543,9 @@ pub const Context = struct {
     /// than erroring, since a dangling tag is an expected, not
     /// exceptional, state once destruction is explicit.
     pub fn destroyMetadata(self: *Context, id: MetadataHandle) MetadataError!void {
-        const removed = self.metadata.fetchRemove(id) orelse return MetadataError.UnknownMetadata;
+        var removed = self.metadata.fetchRemove(id) orelse return MetadataError.UnknownMetadata;
         self.alloc.free(removed.value.json);
+        if (removed.value.drag) |*d| d.deinit(self.alloc);
     }
 
     /// `id`'s stored JSON, or null if it was never created or has since
@@ -531,6 +553,30 @@ pub const Context = struct {
     /// not an error here).
     pub fn metadataJson(self: *const Context, id: MetadataHandle) ?[]const u8 {
         return if (self.metadata.get(id)) |m| m.json else null;
+    }
+
+    /// `id`'s drag payload, borrowed, or null when the id is gone or its
+    /// span isn't draggable.
+    pub fn metadataDrag(self: *const Context, id: MetadataHandle) ?DragSpec {
+        const m = self.metadata.getPtr(id) orelse return null;
+        if (m.drag) |*d| return d.view();
+        return null;
+    }
+
+    /// `start_drag`: queues `drag` (copied) for glyphwire-host, replacing
+    /// any request it hasn't taken yet.
+    pub fn requestDrag(self: *Context, drag: DragSpec) !void {
+        const payload = try DragPayload.init(self.alloc, drag);
+        if (self.drag_request) |*old| old.deinit(self.alloc);
+        self.drag_request = payload;
+    }
+
+    /// Hands the pending `start_drag` over; the caller owns it now (free
+    /// with `DragPayload.deinit` and this context's allocator).
+    pub fn takeDragRequest(self: *Context) ?DragPayload {
+        const d = self.drag_request orelse return null;
+        self.drag_request = null;
+        return d;
     }
 
     /// `create_layer`: allocates a fresh layer parented to the root,

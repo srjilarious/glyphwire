@@ -9,6 +9,8 @@ const core = @import("core.zig");
 const input_mod = @import("input.zig");
 const platform_mod = @import("platform_sdl.zig");
 const window_mod = @import("window.zig");
+const wayland_drag_mod = @import("wayland_drag.zig");
+const drag_image_mod = @import("drag_image.zig");
 
 pub const gl = core.gl;
 pub const zopengl = core.zopengl;
@@ -49,6 +51,15 @@ pub const input = struct {
     pub const KeyRepeat = input_mod.KeyRepeat;
     pub const Mouse = input_mod.Mouse;
     pub const InputManager = input_mod.InputManager;
+};
+
+/// Dragging out of the window into other programs (Wayland only), and
+/// the card drawn under the pointer while it happens.
+pub const drag_out = struct {
+    pub const DragSource = wayland_drag_mod.DragSource;
+    pub const DragOptions = wayland_drag_mod.DragOptions;
+    pub const IconImage = wayland_drag_mod.IconImage;
+    pub const image = drag_image_mod;
 };
 
 const ResourceManager = core.resources.ResourceManager;

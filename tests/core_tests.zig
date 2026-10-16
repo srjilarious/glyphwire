@@ -1369,6 +1369,64 @@ pub fn contextDestroyMetadataFreesItAndErrorsOnUnknownIdTest(io: std.Io, alloc: 
     try testz.expectError(ctx.destroyMetadata(id), glyphwire.MetadataError.UnknownMetadata);
 }
 
+/// A metadata tag's drag payload is a copy (the caller's strings can go
+/// at once), read back by id, and freed with the tag; plain
+/// `createMetadata` tags carry none.
+pub fn contextMetadataDragPayloadRoundTripsAndFreesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const uri = try alloc.dupe(u8, "file:///tmp/a%20b.mp3");
+    const id = try ctx.createMetadataDrag("{}", .{ .uris = &.{uri}, .label = "a b.mp3", .icon = "file/audio" });
+    alloc.free(uri);
+
+    const drag = ctx.metadataDrag(id).?;
+    try testz.expectEqual(drag.uris.len, 1);
+    try testz.expectEqualStr(drag.uris[0], "file:///tmp/a%20b.mp3");
+    try testz.expectEqualStr(drag.label.?, "a b.mp3");
+    try testz.expectEqualStr(drag.icon.?, "file/audio");
+
+    const plain = try ctx.createMetadata("{}");
+    try testz.expectTrue(ctx.metadataDrag(plain) == null);
+
+    try ctx.destroyMetadata(id);
+    try testz.expectTrue(ctx.metadataDrag(id) == null);
+}
+
+/// A drag with nothing to carry is refused, and no tag is created.
+pub fn contextMetadataDragRefusesEmptyUrisTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    try testz.expectError(ctx.createMetadataDrag("{}", .{ .uris = &.{} }), glyphwire.DragError.EmptyDrag);
+    try testz.expectEqual(ctx.metadata.count(), 0);
+}
+
+/// `start_drag` requests queue one deep: a newer one replaces one the
+/// host hasn't taken, and taking empties the slot.
+pub fn contextDragRequestReplacesAndTakesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    try testz.expectTrue(ctx.takeDragRequest() == null);
+    try ctx.requestDrag(.{ .uris = &.{"file:///old"} });
+    try ctx.requestDrag(.{ .uris = &.{ "file:///a", "file:///b" }, .label = "2 files" });
+
+    var taken = ctx.takeDragRequest().?;
+    defer taken.deinit(alloc);
+    try testz.expectEqual(taken.uris.len, 2);
+    try testz.expectEqualStr(taken.uris[1], "file:///b");
+    try testz.expectEqualStr(taken.label.?, "2 files");
+    try testz.expectTrue(ctx.takeDragRequest() == null);
+
+    // An untaken request is freed with the context (the leak check is the
+    // assertion here).
+    try ctx.requestDrag(.{ .uris = &.{"file:///left-behind"} });
+}
+
 /// A `w x h` RGBA8 `.9.png` stand-in: transparent everywhere except
 /// black guide pixels on the top row over `[h_first, h_last]` and on the
 /// left column over `[v_first, v_last]` (full-image coordinates).

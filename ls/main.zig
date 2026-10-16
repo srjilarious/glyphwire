@@ -579,7 +579,12 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
         for (entries, 0..) |entry, i| {
             const json = try entryMetadataJson(alloc, entry);
             defer alloc.free(json);
-            slots[i] = try meta_batch.createMetadata(json);
+            // The drag payload makes the entry Alt+draggable out of the
+            // window, for as long as the listing stays in scrollback.
+            var uri: [1][]const u8 = undefined;
+            const drag = try lsentries.entryDrag(alloc, entry, &uri);
+            defer alloc.free(uri[0]);
+            slots[i] = try meta_batch.createMetadataDrag(json, drag);
         }
         var results = try meta_batch.send();
         defer results.deinit();
@@ -914,7 +919,12 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         for (entries, 0..) |entry, i| {
             const json = try entryMetadataJson(alloc, entry);
             defer alloc.free(json);
-            slots[i] = try meta_batch.createMetadata(json);
+            // The drag payload makes the entry Alt+draggable out of the
+            // window, for as long as the listing stays in scrollback.
+            var uri: [1][]const u8 = undefined;
+            const drag = try lsentries.entryDrag(alloc, entry, &uri);
+            defer alloc.free(uri[0]);
+            slots[i] = try meta_batch.createMetadataDrag(json, drag);
         }
         var results = try meta_batch.send();
         defer results.deinit();

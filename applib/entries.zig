@@ -16,6 +16,7 @@ const builtin = @import("builtin");
 const lsfmt = @import("format.zig");
 const lsicons = @import("icons.zig");
 const homepath = @import("homepath.zig");
+const glyphwire = @import("glyphwire");
 
 pub const EntryKind = enum { file, directory, sym_link, other };
 
@@ -361,6 +362,34 @@ pub fn entryMetadataJson(alloc: std.mem.Allocator, entry: FileEntry) ![]u8 {
             .symlink = symlink,
         }, .{}),
     };
+}
+
+/// `path` (absolute) as a `file://` URI, owned by `alloc`: every byte
+/// but the RFC 3986 unreserved set and `/` percent-encoded, so a space,
+/// `#` or non-ASCII name survives the trip. What an Alt+drag out of the
+/// window hands the drop target (see `entryDrag`).
+pub fn fileUri(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "file://");
+    for (path) |b| {
+        const plain = std.ascii.isAlphanumeric(b) or b == '-' or b == '.' or b == '_' or b == '~' or b == '/';
+        if (plain) {
+            try out.append(alloc, b);
+        } else {
+            try out.print(alloc, "%{X:0>2}", .{b});
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// The drag payload for one entry: its `file://` URI, its name as the
+/// label and its icon. `uri_buf` receives the URI (owned by `alloc`, the
+/// caller frees it once the payload has been sent); the payload borrows
+/// it and `entry`.
+pub fn entryDrag(alloc: std.mem.Allocator, entry: FileEntry, uri_buf: *[1][]const u8) !glyphwire.DragSpec {
+    uri_buf[0] = try fileUri(alloc, entry.abs_path);
+    return .{ .uris = uri_buf, .label = entry.name, .icon = iconForEntry(entry) };
 }
 
 pub fn mimetypeForExtension(name: []const u8) []const u8 {

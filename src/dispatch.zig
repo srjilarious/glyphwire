@@ -42,6 +42,8 @@ pub const DispatchError = error{
     /// `set_drop_target`'s `mode` wasn't `"none"` / `"layer"` / `"cells"`
     /// / `"insert"`, or a `cells` / `insert` target left out `row` / `col`.
     InvalidDropTarget,
+    /// `start_drag` or `create_metadata`'s `drag` carried no URIs.
+    EmptyDrag,
     /// `write_text` carried both `text` and `spans`, or neither.
     InvalidSpans,
     NotARequest,
@@ -1037,6 +1039,7 @@ pub const Dispatcher = struct {
         .{ "update_rect", catVoid(handleUpdateRect) },
         .{ "destroy_rect", catVoid(handleDestroyRect) },
         .{ "set_drop_target", catVoid(handleSetDropTarget) },
+        .{ "start_drag", catVoid(handleStartDrag) },
         .{ "create_nine_patch", catResultId(handleCreateNinePatch) },
         .{ "update_nine_patch", catVoid(handleUpdateNinePatch) },
         .{ "destroy_nine_patch", catVoid(handleDestroyNinePatch) },
@@ -2321,7 +2324,10 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.CreateMetadataParams, alloc, params_value);
         defer parsed.deinit();
 
-        const metadata_handle = try self.ctx.createMetadata(parsed.value.json);
+        const metadata_handle = self.ctx.createMetadataDrag(parsed.value.json, parsed.value.drag) catch |err| switch (err) {
+            error.EmptyDrag => return DispatchError.EmptyDrag,
+            else => |e| return e,
+        };
         return try self.respond(alloc, id, protocol.CreateMetadataResult{ .handle = metadata_handle });
     }
 
@@ -3160,6 +3166,18 @@ pub const Dispatcher = struct {
         };
         self.ctx.setDropTarget(self.surfaceOr(p.layer), target) catch |err| switch (err) {
             error.UnknownLayer => return DispatchError.UnknownLayer,
+        };
+    }
+
+    /// `start_drag`: queues the drag for glyphwire-host, which begins it
+    /// on its main thread if the press that asked for it is still down.
+    /// See `Context.requestDrag`.
+    fn handleStartDrag(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
+        const parsed = try codec.parseParams(protocol.StartDragParams, alloc, params_value);
+        defer parsed.deinit();
+        self.ctx.requestDrag(parsed.value) catch |err| switch (err) {
+            error.EmptyDrag => return DispatchError.EmptyDrag,
+            else => |e| return e,
         };
     }
 

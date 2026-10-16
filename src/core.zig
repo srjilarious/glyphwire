@@ -80,6 +80,67 @@ pub const MetadataError = error{UnknownMetadata};
 /// gets for PNG bytes).
 pub const Metadata = struct {
     json: []u8,
+    /// What an Alt+drag starting on a cell tagged with this id hands the
+    /// OS, or null when the span isn't draggable. Kept beside `json`
+    /// rather than read out of it, so the blob stays opaque to the host.
+    drag: ?DragPayload = null,
+};
+
+/// An outbound OS drag's contents, as a client describes them: on a
+/// metadata tag (`create_metadata`'s `drag`) or for a drag it starts
+/// itself (`start_drag`). Borrowed; `DragPayload` is the owned copy.
+///
+/// `uris` are full URIs (`file:///home/me/a%20b.mp3`), offered to the drop
+/// target as `text/uri-list`. `label` and `icon` (an icon catalog name,
+/// `file/audio`) are what the host draws under the pointer during the
+/// drag.
+pub const DragSpec = struct {
+    uris: []const []const u8,
+    label: ?[]const u8 = null,
+    icon: ?[]const u8 = null,
+};
+
+pub const DragError = error{
+    /// A drag with no URIs: there is nothing to hand the drop target.
+    EmptyDrag,
+};
+
+/// The owned copy of a `DragSpec`.
+pub const DragPayload = struct {
+    uris: [][]u8,
+    label: ?[]u8 = null,
+    icon: ?[]u8 = null,
+
+    pub fn init(alloc: std.mem.Allocator, spec: DragSpec) !DragPayload {
+        if (spec.uris.len == 0) return DragError.EmptyDrag;
+        const uris = try alloc.alloc([]u8, spec.uris.len);
+        var filled: usize = 0;
+        errdefer {
+            for (uris[0..filled]) |u| alloc.free(u);
+            alloc.free(uris);
+        }
+        for (spec.uris) |u| {
+            uris[filled] = try alloc.dupe(u8, u);
+            filled += 1;
+        }
+        const label = if (spec.label) |l| try alloc.dupe(u8, l) else null;
+        errdefer if (label) |l| alloc.free(l);
+        const icon = if (spec.icon) |i| try alloc.dupe(u8, i) else null;
+        return .{ .uris = uris, .label = label, .icon = icon };
+    }
+
+    pub fn deinit(self: *DragPayload, alloc: std.mem.Allocator) void {
+        for (self.uris) |u| alloc.free(u);
+        alloc.free(self.uris);
+        if (self.label) |l| alloc.free(l);
+        if (self.icon) |i| alloc.free(i);
+        self.* = undefined;
+    }
+
+    /// The borrowed view, for handing the same contents on.
+    pub fn view(self: *const DragPayload) DragSpec {
+        return .{ .uris = self.uris, .label = self.label, .icon = self.icon };
+    }
 };
 
 /// A cell's image-backed background: which loaded image, the pixel offset

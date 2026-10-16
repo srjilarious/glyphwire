@@ -2785,6 +2785,40 @@ pub fn setCaretShapeSetsAndClearsTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectEqual(ctx.caret_shape, null);
 }
 
+/// `create_metadata`'s optional `drag` reaches the tag; `start_drag`
+/// queues its payload for the host; an empty URI list is refused.
+pub fn createMetadataDragAndStartDragTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const create_msg =
+        \\{"jsonrpc":"2.0","id":1,"method":"create_metadata","params":{"json":"{}","drag":{"uris":["file:///tmp/x.txt"],"label":"x.txt","icon":"file/text"}}}
+    ;
+    const created = try d.handle(alloc, create_msg);
+    defer if (created.response) |r| alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, created.response.?, "\"handle\":1") != null);
+    const drag = ctx.metadataDrag(1).?;
+    try testz.expectEqualStr(drag.uris[0], "file:///tmp/x.txt");
+    try testz.expectEqualStr(drag.label.?, "x.txt");
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"start_drag","params":{"uris":["file:///a","file:///b"],"label":"2 files"}}
+    );
+    var req = ctx.takeDragRequest().?;
+    defer req.deinit(alloc);
+    try testz.expectEqual(req.uris.len, 2);
+    try testz.expectTrue(req.icon == null);
+
+    const empty_start = try roundTripThroughWire(alloc,
+        \\{"jsonrpc":"2.0","method":"start_drag","params":{"uris":[]}}
+    );
+    defer alloc.free(empty_start);
+    if (d.handle(alloc, empty_start)) |_| return error.ExpectedFailure else |_| {}
+    try testz.expectTrue(ctx.takeDragRequest() == null);
+}
+
 /// `set_drop_target`'s three shapes land on the layer, `"none"` clears
 /// it, a cell shape missing its `row` / `col` or an unknown `mode` is
 /// refused and leaves what was there, and repeating the target already

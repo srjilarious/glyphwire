@@ -850,6 +850,16 @@ pub fn Ops(comptime Self: type) type {
             try self.notify("set_drop_target", dropTargetParams(layer, target));
         }
 
+        /// `start_drag(uris, label?, icon?)` -- a notification. Asks the
+        /// host to begin an OS drag carrying `drag.uris` out of the window,
+        /// from the mouse press this client was just handed and the user is
+        /// still holding. The host starts it once the pointer moves (the
+        /// press may still turn out to be a click); a press already
+        /// released, or a host with no OS drag support, drops it.
+        pub fn startDrag(self: *Self, drag: core.DragSpec) !void {
+            try self.notify("start_drag", drag);
+        }
+
         /// `update_nine_patch(layer?, nine_patch, ...)` -- a notification.
         /// Moves, resizes, or restyles a nine-patch; see `NinePatchUpdate`.
         pub fn updateNinePatch(self: *Self, layer: ?core.LayerHandle, handle: core.NinePatchHandle, patch: NinePatchUpdate) !void {

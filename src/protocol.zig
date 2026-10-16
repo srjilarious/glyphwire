@@ -1003,6 +1003,9 @@ pub const AdoptLayerParams = struct {
 
 pub const CreateMetadataParams = struct {
     json: []const u8,
+    /// Makes the tagged span draggable out of the window (glyphwire-host:
+    /// Alt+drag). See `core.DragSpec`.
+    drag: ?core.DragSpec = null,
 };
 
 pub const CreateMetadataResult = struct { handle: core.MetadataHandle };
@@ -1334,6 +1337,11 @@ pub const SetDropTargetParams = struct {
     cols: ?usize = null,
 };
 
+/// `start_drag`: a live client handing the host an OS drag to begin from
+/// the press it is still holding. Same shape as `create_metadata`'s
+/// `drag`.
+pub const StartDragParams = core.DragSpec;
+
 // ─── Nine-patch ──────────────────────────────────────────────────────────
 //
 // See nine_patch.zig's header. Same create/update/destroy shape as
@@ -1519,6 +1527,7 @@ pub const Methods = struct {
     update_rect: UpdateRectParams,
     destroy_rect: DestroyRectParams,
     set_drop_target: SetDropTargetParams,
+    start_drag: StartDragParams,
     create_nine_patch: CreateNinePatchParams,
     update_nine_patch: UpdateNinePatchParams,
     destroy_nine_patch: DestroyNinePatchParams,

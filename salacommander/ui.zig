@@ -40,7 +40,8 @@
 //! `Action` handled in `perform`. Typed text isn't a binding: with no
 //! field open it's type-to-find, moving the cursor to the first entry
 //! starting with what's been typed. A Ctrl+click marks a row the way
-//! Space does, and never activates it. The dialogs run their own nested event
+//! Space does, and never activates it. An Alt+drag carries the row, or
+//! the marked set it belongs to, out of the window (`startDrag`). The dialogs run their own nested event
 //! loop (`runDialog`), which is also what the file operations' conflict
 //! and error hooks call -- so an operation is synchronous, and a question
 //! halfway through a copy is just a dialog opened from inside it.
@@ -1178,6 +1179,14 @@ pub const Ui = struct {
 
         p.setCursor(row);
         self.markDirty(i, .full);
+        if (left and m.mods.alt) {
+            // Alt+drag carries files out of the window. The host begins
+            // the drag once the pointer moves; a plain Alt+click just
+            // lands the cursor here.
+            self.last_click = null;
+            try self.startDrag(i, row);
+            return;
+        }
         if (right or (left and m.mods.ctrl)) {
             // Total Commander's right-click select, and Ctrl+click as the
             // mouse's Space. Neither opens anything: a Ctrl+click is
@@ -1198,6 +1207,39 @@ pub const Ui = struct {
                 }
             }
         }
+    }
+
+    /// Hands glyphwire-host the files an Alt+drag from `row` carries: the
+    /// whole marked set when the row is marked, else that row alone --
+    /// the same rule F5/F6 follow, except a drag starts on a row and so
+    /// never falls back to the cursor. The `..` row carries nothing.
+    fn startDrag(self: *Ui, pane_i: usize, row: usize) !void {
+        const alloc = self.alloc;
+        const p = &self.panes[pane_i];
+        const entry = p.entryAt(row) orelse return;
+
+        var uris: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (uris.items) |u| alloc.free(u);
+            uris.deinit(alloc);
+        }
+        if (p.isMarked(row)) {
+            for (p.entries, p.marked) |e, marked| {
+                if (marked) try appendUri(alloc, &uris, e.abs_path);
+            }
+        } else {
+            try appendUri(alloc, &uris, entry.abs_path);
+        }
+
+        var label_buf: [32]u8 = undefined;
+        const label = if (uris.items.len == 1) entry.name else try std.fmt.bufPrint(&label_buf, "{d} files", .{uris.items.len});
+        try self.client.startDrag(.{ .uris = uris.items, .label = label, .icon = lsentries.iconForEntry(entry.*) });
+    }
+
+    fn appendUri(alloc: std.mem.Allocator, uris: *std.ArrayList([]const u8), path: []const u8) !void {
+        const uri = try lsentries.fileUri(alloc, path);
+        errdefer alloc.free(uri);
+        try uris.append(alloc, uri);
     }
 
     // ── Clipboard ───────────────────────────────────────────────────────
