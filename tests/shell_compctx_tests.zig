@@ -132,3 +132,51 @@ pub fn parseFishOutputSplitsTokenAndDescriptionTest(_: std.Io, alloc: std.mem.Al
     try testz.expectEqualStr("", items[2].desc);
     try testz.expectEqualStr("plain", items[3].text);
 }
+
+// ─── suggestedPaths ────────────────────────────────────────────────────
+
+pub fn suggestedPathsCdTargetMustBeADirectoryTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const paths = try compctx.suggestedPaths(alloc, "cd .claude/worktrees/old", "cd .c".len, .{});
+    defer compctx.freeSuggestedPaths(alloc, paths);
+    try testz.expectEqual(@as(usize, 1), paths.len);
+    try testz.expectEqualStr(".claude/worktrees/old", paths[0].path);
+    try testz.expectTrue(paths[0].kind == .dir);
+
+    // Even a target with no slash in it.
+    const plain = try compctx.suggestedPaths(alloc, "cd build", "cd ".len, .{});
+    defer compctx.freeSuggestedPaths(alloc, plain);
+    try testz.expectEqual(@as(usize, 1), plain.len);
+    try testz.expectTrue(plain[0].kind == .dir);
+}
+
+pub fn suggestedPathsSkipsWordsAlreadyTypedTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // `src/a.zig` is typed in full; only what the hint adds counts.
+    const paths = try compctx.suggestedPaths(alloc, "cat src/a.zig ./b.txt", "cat src/a.zig".len, .{});
+    defer compctx.freeSuggestedPaths(alloc, paths);
+    try testz.expectEqual(@as(usize, 1), paths.len);
+    try testz.expectEqualStr("./b.txt", paths[0].path);
+    try testz.expectTrue(paths[0].kind == .definite);
+}
+
+pub fn suggestedPathsClassifiesWordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const entry = "git checkout origin/main -- --out=x/y https://a/b *.o/x /etc/hosts ../up";
+    const paths = try compctx.suggestedPaths(alloc, entry, "g".len, .{});
+    defer compctx.freeSuggestedPaths(alloc, paths);
+    // `git`, `checkout`, `--`, the flag, the URL and the glob are out.
+    try testz.expectEqual(@as(usize, 3), paths.len);
+    try testz.expectEqualStr("origin/main", paths[0].path);
+    try testz.expectTrue(paths[0].kind == .maybe);
+    try testz.expectEqualStr("/etc/hosts", paths[1].path);
+    try testz.expectTrue(paths[1].kind == .definite);
+    try testz.expectEqualStr("../up", paths[2].path);
+    try testz.expectTrue(paths[2].kind == .definite);
+}
+
+pub fn suggestedPathsResetsAtEachCommandTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Only a `cd`'s first argument is its target; a later command's
+    // plain words aren't checked.
+    const paths = try compctx.suggestedPaths(alloc, "cd gone && ls more", 1, .{});
+    defer compctx.freeSuggestedPaths(alloc, paths);
+    try testz.expectEqual(@as(usize, 1), paths.len);
+    try testz.expectEqualStr("gone", paths[0].path);
+}

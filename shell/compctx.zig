@@ -197,3 +197,100 @@ pub fn parseFishOutput(alloc: std.mem.Allocator, bytes: []const u8) std.mem.Allo
     }
     return out.toOwnedSlice(alloc);
 }
+
+/// A word a history autosuggestion would complete or add that has to
+/// name something that still exists for the suggestion to be offered
+/// (see `suggestedPaths`).
+pub const SuggestedPath = struct {
+    /// Unquoted and `$` / `~` expanded. Owned.
+    path: []u8,
+    kind: Kind,
+
+    pub const Kind = enum {
+        /// A `cd` / `pushd` target: must be a directory.
+        dir,
+        /// Plainly a path (`/`, `./`, `../`, `~`, or `.` / `..` itself):
+        /// must exist.
+        definite,
+        /// Any other word with a `/` in it: a path only if its parent
+        /// directory exists (`.claude/worktrees/old`), otherwise
+        /// something else that happens to have a slash (`origin/main`,
+        /// `feature/x`), and left alone.
+        maybe,
+    };
+};
+
+/// The words of history `entry` that end past `typed_len` -- the one a
+/// suggestion would finish and every one it would add, never a word the
+/// user already typed in full -- and that could be paths. Flags, URLs,
+/// unquoted globs and leading assignments are left out, as are words
+/// with no `/` (except a `cd` target). Free with `freeSuggestedPaths`.
+pub fn suggestedPaths(
+    alloc: std.mem.Allocator,
+    entry: []const u8,
+    typed_len: usize,
+    exp: wordsplit.Expansion,
+) std.mem.Allocator.Error![]SuggestedPath {
+    var out: std.ArrayList(SuggestedPath) = .empty;
+    errdefer {
+        for (out.items) |p| alloc.free(p.path);
+        out.deinit(alloc);
+    }
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+
+    // Which word of its command the next one is (0 = the name), and
+    // whether that command is `cd` / `pushd`.
+    var arg_index: usize = 0;
+    var cmd_is_cd = false;
+
+    var i = wordsplit.skipBlanks(entry, 0);
+    while (i < entry.len) {
+        const c = entry[i];
+        if (wordsplit.isOperatorByte(c)) {
+            if (c == '|' or c == ';' or c == '&') {
+                arg_index = 0;
+                cmd_is_cd = false;
+            }
+            i = wordsplit.skipBlanks(entry, i + operatorLen(entry, i));
+            continue;
+        }
+
+        const start = i;
+        buf.clearRetainingCapacity();
+        const w = try wordsplit.readWord(alloc, &buf, entry, start, .blanks_and_operators, exp);
+        i = wordsplit.skipBlanks(entry, w.end);
+        if (!w.present) continue;
+        const raw = entry[start..w.end];
+        if (arg_index == 0 and isAssignment(raw)) continue;
+
+        const index = arg_index;
+        arg_index += 1;
+        const text = buf.items;
+        if (index == 0) cmd_is_cd = std.mem.eql(u8, text, "cd") or std.mem.eql(u8, text, "pushd");
+
+        if (w.end <= typed_len) continue;
+        if (text.len == 0 or text[0] == '-') continue;
+        if (std.mem.indexOf(u8, text, "://") != null) continue;
+        if (!w.quoted and std.mem.indexOfAny(u8, raw, "*?[") != null) continue;
+
+        const kind: SuggestedPath.Kind = if (cmd_is_cd and index == 1)
+            .dir
+        else if (text[0] == '/' or std.mem.startsWith(u8, text, "./") or
+            std.mem.startsWith(u8, text, "../") or
+            std.mem.eql(u8, text, ".") or std.mem.eql(u8, text, ".."))
+            .definite
+        else if (std.mem.indexOfScalar(u8, text, '/') != null)
+            .maybe
+        else
+            continue;
+        try out.ensureUnusedCapacity(alloc, 1);
+        out.appendAssumeCapacity(.{ .path = try alloc.dupe(u8, text), .kind = kind });
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+pub fn freeSuggestedPaths(alloc: std.mem.Allocator, paths: []SuggestedPath) void {
+    for (paths) |p| alloc.free(p.path);
+    alloc.free(paths);
+}

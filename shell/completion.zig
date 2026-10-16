@@ -198,8 +198,7 @@ pub fn hideCompletionHint(self: *Prompt) void {
 }
 
 /// Tab: completes the word under the caret from `gatherCandidates`
-/// (a showing inline hint is taken whole first, as Right does -- see the
-/// key handler):
+/// (a showing inline hint is followed first -- `completeAlongHint`):
 ///
 ///   * 0 matches       -> nothing;
 ///   * exactly 1 match -> fills it in and appends `/` (a directory) or
@@ -597,8 +596,9 @@ pub fn sortCompletionCandidates(cands: []CompletionCandidate) void {
 /// fish's autosuggestion: the rest of the newest history entry that
 /// starts with everything typed so far, or null. One that would continue
 /// onto another line is skipped -- the hint is drawn on a single row --
-/// so an older single-line match can still show.
-pub fn historySuggestion(self: *Prompt) ?[]const u8 {
+/// and so is one naming a path that is gone (`suggestionPathsExist`),
+/// so an older match can still show.
+pub fn historySuggestion(self: *Prompt) !?[]const u8 {
     const typed = self.line.text();
     if (typed.len == 0) return null;
     var i = self.history.items.len;
@@ -607,9 +607,39 @@ pub fn historySuggestion(self: *Prompt) ?[]const u8 {
         const entry = self.history.items[i];
         if (entry.len <= typed.len or !std.mem.startsWith(u8, entry, typed)) continue;
         const rest = entry[typed.len..];
-        if (std.mem.indexOfScalar(u8, rest, '\n') == null) return rest;
+        if (std.mem.indexOfScalar(u8, rest, '\n') != null) continue;
+        if (!try suggestionPathsExist(self, entry, typed.len)) continue;
+        return rest;
     }
     return null;
+}
+
+/// Whether every path history `entry` would complete or add past
+/// `typed_len` still exists (see `compctx.suggestedPaths`), so the
+/// suggestion doesn't lead into a deleted worktree. Relative paths
+/// resolve against the cwd, as the command would.
+fn suggestionPathsExist(self: *Prompt, entry: []const u8, typed_len: usize) !bool {
+    const alloc = self.client.alloc;
+    const io = self.client.io;
+    const paths = try compctx.suggestedPaths(alloc, entry, typed_len, self.expansion());
+    defer compctx.freeSuggestedPaths(alloc, paths);
+
+    const cwd = std.Io.Dir.cwd();
+    for (paths) |p| {
+        switch (p.kind) {
+            .dir => {
+                const st = cwd.statFile(io, p.path, .{}) catch return false;
+                if (st.kind != .directory) return false;
+            },
+            .definite => cwd.access(io, p.path, .{}) catch return false,
+            .maybe => {
+                const parent = std.fs.path.dirname(p.path) orelse continue;
+                cwd.access(io, parent, .{}) catch continue; // not a path
+                cwd.access(io, p.path, .{}) catch return false;
+            },
+        }
+    }
+    return true;
 }
 
 /// On an idle tick, draw a dim suggestion after the caret: the history
@@ -631,7 +661,7 @@ pub fn maybeShowCompletionHint(self: *Prompt) !bool {
     self.completion_hint.clearRetainingCapacity();
 
     if (self.autosuggestEnabled()) {
-        if (self.historySuggestion()) |rest| {
+        if (try self.historySuggestion()) |rest| {
             try self.completion_hint.appendSlice(self.client.alloc, rest);
             self.completion_hint_visible = true;
             try self.renderInputLine();
@@ -671,8 +701,8 @@ pub fn acceptCompletionHintOrComplete(self: *Prompt) !void {
     try self.doComplete();
 }
 
-/// End / Ctrl+E (and Right, and Tab) at the end of the input with a
-/// hint showing: takes all of it, as fish does. False when there was nothing to take.
+/// End / Ctrl+E (and Right) at the end of the input with a hint showing:
+/// takes all of it, as fish does. False when there was nothing to take.
 pub fn acceptCompletionHint(self: *Prompt) bool {
     if (self.line.caret != self.line.text().len) return false;
     if (!self.completion_hint_visible or self.completion_hint.items.len == 0) return false;
@@ -681,6 +711,84 @@ pub fn acceptCompletionHint(self: *Prompt) bool {
     defer alloc.free(hint);
     self.insertText(hint) catch return false;
     return true;
+}
+
+/// Tab at the end of the input with a hint showing. A hint that runs
+/// along a path (`cd .c` + `laude/worktrees/foo`) is taken a segment at
+/// a time for as long as each one is the only match in its directory --
+/// or the longest prefix all the matches share -- stopping where there
+/// is a choice. Tab at that choice opens the picker with the hint's
+/// entry selected. Any other hint is taken whole, as Right does. False
+/// when no hint was showing, so Tab completes as usual.
+pub fn completeAlongHint(self: *Prompt) !bool {
+    if (self.line.caret != self.line.text().len) return false;
+    if (!self.completion_hint_visible or self.completion_hint.items.len == 0) return false;
+    const alloc = self.client.alloc;
+    const hint = try alloc.dupe(u8, self.completion_hint.items);
+    defer alloc.free(hint);
+
+    var used: usize = 0;
+    while (used < hint.len) {
+        var set = try self.gatherCandidates(.interactive);
+        defer set.deinit();
+        const rest = hint[used..];
+        const m = (try matchHintCandidate(alloc, &set, rest)) orelse break;
+
+        var take: []const u8 = "";
+        if (set.items.items.len == 1) {
+            take = rest[0..m.len];
+        } else {
+            var names: std.ArrayList([]const u8) = .empty;
+            defer names.deinit(alloc);
+            for (set.items.items) |cand| try names.append(alloc, cand.name);
+            const lcp = complete.commonPrefixLen(names.items);
+            const shared = try compctx.escapeInsert(alloc, set.items.items[0].name[set.prefix.len..lcp], set.ctx.open_quote);
+            defer alloc.free(shared);
+            if (std.mem.startsWith(u8, rest, shared)) take = shared;
+            if (take.len == 0) {
+                if (used > 0) break;
+                // The choice: the picker, opened on the hint's entry
+                // (stepping a fresh picker by `idx` lands on row `idx`).
+                try self.recomputeAndDrawPicker(@intCast(m.idx));
+                return true;
+            }
+        }
+        if (take.len == 0) break;
+        try self.insertText(take);
+        used += take.len;
+        if (take.len < m.len or !std.mem.endsWith(u8, take, "/")) break;
+    }
+
+    if (used == 0) return self.acceptCompletionHint();
+    // Keep the rest showing, so the next Tab carries on from here
+    // without waiting out the idle delay.
+    if (used < hint.len) {
+        self.completion_hint.clearRetainingCapacity();
+        try self.completion_hint.appendSlice(alloc, hint[used..]);
+        self.completion_hint_visible = true;
+        self.completion_hint_dirty = false;
+        try self.renderInputLine();
+    }
+    return true;
+}
+
+/// The path candidate (`.file` / `.dir`) the hint `rest` continues
+/// into: its escaped rest past `set.prefix` starts `rest` and ends at a
+/// boundary there (the end, a blank, or the `/` into a directory). `len`
+/// is how much of `rest` that covers, the `/` included. Null when the
+/// hint doesn't run along a path, or the word is already complete.
+fn matchHintCandidate(alloc: std.mem.Allocator, set: *const Candidates, rest: []const u8) !?struct { idx: usize, len: usize } {
+    for (set.items.items, 0..) |cand, idx| {
+        if (cand.source != .file and cand.source != .dir) continue;
+        const esc = try compctx.escapeInsert(alloc, cand.name[set.prefix.len..], set.ctx.open_quote);
+        defer alloc.free(esc);
+        if (!std.mem.startsWith(u8, rest, esc)) continue;
+        // A word typed out in full (`foo`, beside `foobar`) only has its
+        // `/` left to take.
+        if (esc.len > 0 and (esc.len == rest.len or rest[esc.len] == ' ')) return .{ .idx = idx, .len = esc.len };
+        if (cand.source == .dir and rest[esc.len] == '/') return .{ .idx = idx, .len = esc.len + 1 };
+    }
+    return null;
 }
 
 /// Ctrl+Right at the end of the input with a hint showing: takes the

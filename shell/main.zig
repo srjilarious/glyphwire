@@ -1059,14 +1059,15 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         if (prompt.browse_pos) |bp| try prompt.toggleHighlightAt(bp.row, bp.col, prompt.view_scroll);
     } else if (std.mem.eql(u8, ev.key, "tab")) {
         // Tab cycles the picker's selection forward when it's open
-        // (zsh menu-select style, alongside Down); otherwise it takes a
-        // showing inline hint whole, as Right does, or failing that
-        // completes the word on the live line. Does nothing while
-        // browsing scrollback.
+        // (zsh menu-select style, alongside Down); otherwise it follows
+        // a showing inline hint (`completeAlongHint`: a path a segment
+        // at a time, anything else whole), or failing that completes
+        // the word on the live line. Does nothing while browsing
+        // scrollback.
         if (prompt.completion_picker != null) {
             try prompt.moveCompletionPicker(1);
         } else if (prompt.browse_pos == null) {
-            if (!prompt.acceptCompletionHint()) try prompt.doComplete();
+            if (!try prompt.completeAlongHint()) try prompt.doComplete();
         }
     } else if (ctrl and std.mem.eql(u8, ev.key, "backspace")) {
         // Bash's Ctrl+Backspace/Ctrl+Delete (unix-word-rubout /
@@ -1757,6 +1758,7 @@ pub const Prompt = struct {
     pub const invalidateCompletionCaches = completion.invalidateCompletionCaches;
     pub const acceptCompletionHintOrComplete = completion.acceptCompletionHintOrComplete;
     pub const acceptCompletionHint = completion.acceptCompletionHint;
+    pub const completeAlongHint = completion.completeAlongHint;
     pub const acceptCompletionHintWord = completion.acceptCompletionHintWord;
     pub const completionDir = completion.completionDir;
     pub const recomputeAndDrawPicker = completion.recomputeAndDrawPicker;
