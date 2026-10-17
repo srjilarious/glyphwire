@@ -190,6 +190,14 @@
 --     -- and says why; :q! still quits.
 --     workspace_autosave = true,
 --
+--     -- Keep a copy of every modified buffer (about a second behind your
+--     -- typing) under $XDG_STATE_HOME/glyphwire/zoe/backups, nowhere
+--     -- near the file itself, and put it back when the file is next
+--     -- opened. It also makes :q quit with unsaved changes, VS Code's
+--     -- "hot exit": they come back next time, untitled buffers with
+--     -- their workspace. :q! and closing a tab with ! throw them away.
+--     backups = true,
+--
 --     -- What notices an open file changing or being deleted outside
 --     -- zoe (a deleted file gets a red ✘ on its tab):
 --     --   "poll"     stat the open files once a second (the default)

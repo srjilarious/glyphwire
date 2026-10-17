@@ -213,6 +213,9 @@ pub const Outcome = union(enum) {
     /// `:extensions` -- the extension list popup. The extensions are
     /// `zoe/ui.zig`'s, like the language servers.
     extensions_list,
+    /// `:recover` -- open every unsaved-change backup no buffer has.
+    /// The backups are `zoe/ui.zig`'s (`zoe/backup.zig`).
+    recover,
     /// `:theme [name]` -- switch the colour theme, or (bare) report the
     /// current one. Themes are `zoe/ui.zig`'s, like the language servers:
     /// the editor core paints nothing. Borrows `Editor.cmd_arg`.
@@ -392,6 +395,10 @@ pub const Editor = struct {
     yank_pending: bool = false,
     /// The file this buffer came from, owned. Null for a scratch buffer.
     path: ?[]u8 = null,
+    /// `:q` on a modified buffer quits anyway, leaving the unsaved edits
+    /// to the host's backups (`zoe/backup.zig`) to bring back next time.
+    /// Set by `zoe/ui.zig` while backups are on; the E37 refusal without.
+    hot_exit: bool = false,
 
     /// The pattern of the most recent search, owned. Kept after the
     /// prompt closes so `n` / `N` have something to repeat, and cleared
@@ -561,6 +568,31 @@ pub const Editor = struct {
         self.pair_closers.clearRetainingCapacity();
         self.autoindent_at = null;
         self.hidden_key = null;
+    }
+
+    /// Turns the buffer's text into `text` as one undoable change, the
+    /// way a backup's unsaved edits are put back (`zoe/backup.zig`): one
+    /// `u` returns to what was there, which for a file just read is what
+    /// is on disk, so the buffer is clean again. Only the span between
+    /// the common prefix and suffix is replaced -- folds and the parse
+    /// tree outside it survive -- and the cursor lands at its start.
+    pub fn replaceAllText(self: *Editor, text: []const u8) !void {
+        const old = try self.buf.text(self.alloc);
+        defer self.alloc.free(old);
+        const common = @min(old.len, text.len);
+        var pre: usize = 0;
+        while (pre < common and old[pre] == text[pre]) pre += 1;
+        var suf: usize = 0;
+        while (suf < common - pre and old[old.len - 1 - suf] == text[text.len - 1 - suf]) suf += 1;
+        if (pre == old.len and pre == text.len) return;
+
+        self.mode = .normal;
+        self.resetPending();
+        self.buf.undoCheckpoint(self.cursor);
+        try self.buf.delete(pre, old.len - pre - suf);
+        try self.buf.insert(pre, text[pre .. text.len - suf]);
+        self.buf.closeUndoGroup();
+        self.moveCursorTo(pre);
     }
 
     /// Replaces `path` with a copy of `new_path` -- what `:w <name>` does
@@ -3349,13 +3381,14 @@ pub const Editor = struct {
         if (eq(u8, name, "lsp")) return .{ .lsp_status = arg_opt };
         if (eq(u8, name, "diag") or eq(u8, name, "diagnostics")) return .diag_list;
         if (eq(u8, name, "extensions")) return .extensions_list;
+        if (eq(u8, name, "recover")) return .recover;
         if (eq(u8, name, "theme") or eq(u8, name, "colo") or eq(u8, name, "colorscheme")) return .{ .theme = arg_opt };
         if (eq(u8, name, "shell")) return .{ .shell_position = arg_opt };
         if (eq(u8, name, "wq") or eq(u8, name, "x")) return .{ .write_quit = arg_opt };
         if (eq(u8, name, "q!") or eq(u8, name, "quit!")) return .{ .quit = .{ .force = true } };
         if (eq(u8, name, "wq!") or eq(u8, name, "x!")) return .{ .write_quit = arg_opt };
         if (eq(u8, name, "q") or eq(u8, name, "quit")) {
-            if (self.buf.dirty) {
+            if (self.buf.dirty and !self.hot_exit) {
                 self.setStatus("E37: No write since last change (add ! to override)", .{});
                 return .none;
             }

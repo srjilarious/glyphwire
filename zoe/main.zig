@@ -86,6 +86,13 @@ pub fn main(init: std.process.Init) !void {
         \\That .zoe-workspace is rewritten on :q, :wq and the window closing
         \\(not :q!); workspace_autosave = false in zoe.conf.lua turns it off.
         \\
+        \\Every modified buffer is backed up about a second behind your typing
+        \\to $XDG_STATE_HOME/glyphwire/zoe/backups (not beside the file), so :q
+        \\quits with unsaved changes, and reopening the file (or the workspace,
+        \\for untitled buffers) brings them back; u undoes the restore. :w
+        \\deletes the backup, :q! throws it away, :recover opens every backup
+        \\no tab has. backups = false in zoe.conf.lua turns it off.
+        \\
         \\With GLYPHWIRE_SOCK set and no --keys, zoe opens its editor UI on the
         \\glyphwire display server. Ctrl+W is vim's window prefix: then v or s
         \\splits the editor into a new group beside or below (:vsplit / :split
@@ -295,6 +302,7 @@ pub fn main(init: std.process.Init) !void {
             .lsp_status,
             .diag_list,
             .extensions_list,
+            .recover,
             .theme,
             .shell_position,
             => {},

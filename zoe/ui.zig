@@ -81,6 +81,8 @@ const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
 const zoe_workspace = @import("workspace.zig");
 const hangup = @import("hangup.zig");
+const askRecover = @import("backupglue.zig").askRecover;
+const backupglue = @import("backupglue.zig");
 const profile = @import("profile.zig");
 const SpanCache = @import("spancache.zig").SpanCache;
 const selection_diff = @import("selection_diff.zig");
@@ -136,7 +138,7 @@ pub const tree_scroll_margin: usize = 3;
 
 /// The most zoe will read into a buffer. Every open buffer holds its
 /// text for as long as it is open, so this is also the per-tab ceiling.
-const max_file_bytes: usize = 64 * 1024 * 1024;
+pub const max_file_bytes: usize = 64 * 1024 * 1024;
 
 /// How long a whole-buffer parse may hold up the frame that needs it
 /// before zoe draws a highlighted prefix instead and finishes the parse
@@ -701,10 +703,31 @@ pub const Slot = struct {
     /// it comes back or a `:w` writes it again.
     gone: bool = false,
 
+    /// The name, in the backup directory, of this buffer's backup
+    /// (`zoe/backup.zig`), owned. Null when it has none on disk. A slot
+    /// freed with one keeps the file: that is what brings unsaved edits
+    /// back after `:q`.
+    backup_name: ?[]u8 = null,
+    /// `ed.buf.edits` when the backup was last written. A mismatch on a
+    /// modified buffer is a backup that has fallen behind.
+    backup_edits: u64 = 0,
+    /// An untitled buffer's id in its backup's name, random, so the
+    /// backup keeps one name across writes and sessions.
+    backup_id: ?u64 = null,
+    /// A backup that doesn't match the file on disk any more, waiting on
+    /// recover / discard / split (`Ui.recoverKey`), owned. While set the
+    /// slot's backup is left untouched.
+    pending_backup: ?[]u8 = null,
+    /// Another running zoe has this file open with unsaved edits: its
+    /// backup is that zoe's, and this one never writes or deletes it.
+    backup_foreign: bool = false,
+
     pub fn deinit(self: *Slot, alloc: std.mem.Allocator) void {
         if (self.hl) |*h| h.deinit();
         self.spans.deinit(alloc);
         if (self.abs_path) |p| alloc.free(p);
+        if (self.backup_name) |n| alloc.free(n);
+        if (self.pending_backup) |t| alloc.free(t);
         self.ed.deinit();
         alloc.destroy(self);
     }
@@ -1120,6 +1143,16 @@ pub const Ui = struct {
     /// to, absolute and owned: where a bare `:wssave` writes.
     ws_file: ?[]u8 = null,
 
+    /// Where unsaved-change backups go (`zoe/backup.zig`), owned. Null
+    /// with `backups = false`, or nowhere to put them.
+    backup_dir: ?[]u8 = null,
+    /// When the backups next catch up with the buffers, armed by the
+    /// first change after the last write (`armBackup`).
+    backup_due: ?std.Io.Clock.Timestamp = null,
+    /// The last `syncBackups` couldn't write a backup. Kept so the error
+    /// is reported once rather than on every retry.
+    backup_failed: bool = false,
+
     /// tree-sitter syntax highlighting: the config, the grammar registry
     /// every buffer's highlighter resolves through, and the search path
     /// it was built from. `grammars` is null when highlighting is off --
@@ -1366,6 +1399,8 @@ pub const Ui = struct {
         // which builds its own highlighter against what this leaves.
         self.loadConfig(cfg_owned.?, environ);
         cfg_owned = null;
+        // Before the first buffer, whose file may have a backup to put back.
+        self.startBackups();
         if (self.hl_config) |*cfg| {
             self.shell.setPosition(cfg.shell_position, cfg.shell_float_percent, self.winSize());
             // Borrowed from the config's arena, which outlives the tree.
@@ -1428,6 +1463,9 @@ pub const Ui = struct {
         if (start.editors) |e| self.restoreEditors(e) catch |err| {
             self.buf.ed.setStatus("E: couldn't restore the workspace's editors ({t})", .{err});
         };
+        // Untitled buffers left behind by the last session over these
+        // folders (or this workspace file).
+        self.restoreUntitled();
         if (start.theme != null and ws_theme == null) {
             self.buf.ed.setStatus("E185: Cannot find color scheme '{s}' (workspace theme ignored)", .{start.theme.?});
         }
@@ -1742,6 +1780,7 @@ pub const Ui = struct {
         slot.ed.search_history = &self.search_history;
         slot.ed.line_comment = self.lineCommentFor(path);
         slot.ed.colon_block = self.colonBlockFor(path);
+        slot.ed.hot_exit = self.backup_dir != null;
 
         // Same line vim shows on opening: the file and its length, or
         // that it doesn't exist yet.
@@ -1799,6 +1838,10 @@ pub const Ui = struct {
             slot.ed.auto_close = self.buf.ed.auto_close;
             slot.ed.fold_column = self.buf.ed.fold_column;
         }
+
+        // Last, so the edits land on a buffer set up like any other --
+        // highlighter, language server and all.
+        if (path != null) self.restoreBackup(slot);
         return slot;
     }
 
@@ -1859,6 +1902,7 @@ pub const Ui = struct {
         if (self.tree_edit) |*te| te.deinit(self.alloc);
         if (self.prev_cwd) |p| self.alloc.free(p);
         if (self.ws_file) |p| self.alloc.free(p);
+        if (self.backup_dir) |p| self.alloc.free(p);
 
         // Every open buffer's text and parse tree, not just the visible
         // one -- that is the bargain multiple buffers made.
@@ -2606,6 +2650,7 @@ pub const Ui = struct {
             // the way `:q` would, minus the dirty-buffer guard -- there's
             // no one left to answer it.
             if (hangup.requested()) {
+                _ = self.syncBackups();
                 _ = self.autosaveWorkspace();
                 break;
             }
@@ -2654,6 +2699,7 @@ pub const Ui = struct {
             // woken this wait (`armDiskCheck`).
             self.armLspChange();
             self.armDiskCheck();
+            self.armBackup();
             const timeout: std.Io.Timeout = if (self.nextLspDeadline()) |due|
                 .{ .deadline = due }
             else
@@ -2688,6 +2734,10 @@ pub const Ui = struct {
             if (self.diskCheckDue()) {
                 self.checkDisk();
                 try self.checkTreeDisk();
+            }
+            if (self.backupDue()) {
+                self.backup_due = null;
+                _ = self.syncBackups();
             }
             // After the events, before the frame they produced: a mode
             // change in that batch retimes the host's key repeat before
@@ -2881,6 +2931,12 @@ pub const Ui = struct {
                     try self.finderKey(k);
                     return;
                 }
+                // A backup that no longer matches its file is answered
+                // before the buffer takes anything else.
+                if (self.recoverPending() and !isModifierKey(k.key)) {
+                    try self.recoverKey(k);
+                    return;
+                }
 
                 // The key after Ctrl+W. A modifier pressed on the way to
                 // it (letting go of Ctrl, reaching for Shift) is not it.
@@ -2990,6 +3046,9 @@ pub const Ui = struct {
                     self.swallow_window_text = false;
                     return;
                 }
+                // Typing with no key behind it (an input method) doesn't
+                // answer the backup question either.
+                if (self.recoverPending()) return;
                 self.buf.ed.status.clearRetainingCapacity();
                 if (self.focus == .tree) {
                     try self.treeText(t.text);
@@ -3012,6 +3071,7 @@ pub const Ui = struct {
                     try self.finder.text(t.text);
                     return;
                 }
+                if (self.recoverPending()) return;
                 self.buf.ed.status.clearRetainingCapacity();
                 // A paste is not typing: it neither narrows nor opens the
                 // popup.
@@ -3702,15 +3762,19 @@ pub const Ui = struct {
             .write_quit => |target| {
                 self.save(self.expandArg(target, &home_buf));
                 if (self.buf.ed.buf.dirty) return;
-                if (self.refuseQuitForDirtyBuffer()) return;
+                if (!self.hotExitReady()) return;
                 if (!self.autosaveWorkspace()) return;
                 self.quit = true;
             },
             // `:q!` leaves the workspace file as it was, the way it
-            // leaves every other file.
+            // leaves every other file, and throws the unsaved edits away
+            // backups and all. A plain `:q` leaves them in their backups
+            // (`hotExitReady`) when backups are on.
             .quit => |q| {
-                if (!q.force) {
-                    if (self.refuseQuitForDirtyBuffer()) return;
+                if (q.force) {
+                    self.discardBackups();
+                } else {
+                    if (!self.hotExitReady()) return;
                     if (!self.autosaveWorkspace()) return;
                 }
                 self.quit = true;
@@ -3735,7 +3799,7 @@ pub const Ui = struct {
                     self.status_dirty = true;
                     return;
                 };
-                if (!o.force and self.refuseQuitForDirtyBuffer()) return;
+                if (o.force) self.discardBackups() else if (!self.hotExitReady()) return;
                 try self.workspaceOpen(path);
             },
             .pwd => {
@@ -3761,6 +3825,7 @@ pub const Ui = struct {
             .lsp_status => |arg| self.lspStatus(arg),
             .diag_list => self.diagList(),
             .extensions_list => try self.openExtList(),
+            .recover => try self.recoverAll(),
             .theme => |arg| self.themeCommand(arg),
             .shell_position => |arg| self.shellPositionCommand(arg),
         }
@@ -4088,6 +4153,8 @@ pub const Ui = struct {
         if (self.ws_file) |old| self.alloc.free(old);
         self.ws_file = null;
         if (zoe_workspace.formatOf(abs) == .zoe) self.ws_file = abs else self.alloc.free(abs);
+        // With `ws_file` set: the new scope is what picks them.
+        self.restoreUntitled();
     }
 
     /// Re-roots the sidebar on `folders`, telling the language servers
@@ -4885,6 +4952,8 @@ pub const Ui = struct {
         // over, so the incoming buffer repaints and re-pushes its extent.
         self.buf.full_redraw = true;
         self.buf.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
+        // A tab still waiting on its backup asks again when shown.
+        if (self.buf.pending_backup != null) askRecover(self.buf);
         self.grp.buffer_dirty = true;
         self.grp.tabs_dirty = true;
         self.status_dirty = true;
@@ -4921,6 +4990,10 @@ pub const Ui = struct {
             self.status_dirty = true;
             return;
         }
+
+        // A forced close throws the unsaved edits away, backup included;
+        // a clean tab's backup is one still waiting to be recovered.
+        if (slot.ed.buf.dirty) self.dropBackup(slot);
 
         // While the slot still exists: `didClose` needs its path, and the
         // stored diagnostics go with it.
@@ -4993,6 +5066,8 @@ pub const Ui = struct {
             self.buf.lsp_opened = false;
         }
         self.buf.ed.markSaved();
+        // On disk for real now: the backup has nothing left to keep.
+        self.dropBackup(self.buf);
         // Our own write moves the mtime too; this is the version on disk
         // now, not an outside change to react to.
         self.buf.disk = self.diskStamp(self.buf.ed.path orelse dest);
@@ -5041,6 +5116,21 @@ pub const Ui = struct {
     pub const lspStatus = lspglue.lspStatus;
     pub const restartLsp = lspglue.restartLsp;
     pub const diagList = lspglue.diagList;
+
+    // ── Unsaved-change backups (backupglue.zig) ────────────────────────
+    pub const startBackups = backupglue.startBackups;
+    pub const writeBackup = backupglue.writeBackup;
+    pub const dropBackup = backupglue.dropBackup;
+    pub const syncBackups = backupglue.syncBackups;
+    pub const armBackup = backupglue.armBackup;
+    pub const backupDue = backupglue.backupDue;
+    pub const hotExitReady = backupglue.hotExitReady;
+    pub const discardBackups = backupglue.discardBackups;
+    pub const restoreBackup = backupglue.restoreBackup;
+    pub const recoverPending = backupglue.recoverPending;
+    pub const recoverKey = backupglue.recoverKey;
+    pub const restoreUntitled = backupglue.restoreUntitled;
+    pub const recoverAll = backupglue.recoverAll;
 
     /// Names this context `zoe <file>` after the focused buffer (`~` for
     /// `$HOME`), or `zoe <cwd>` for a buffer with no file yet. Only sends

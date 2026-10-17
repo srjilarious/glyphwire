@@ -259,7 +259,7 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:[range]s` | Repeat the last substitution on `range`, without its flags |
 | `:{a},{b}` `:'<,'>` | Jump to the range's last line |
 | `:w [path]` | Write (with a path: save as) |
-| `:q` `:q!` `:wq` `:x` `:wq!` `:x!` | Quit / write and quit |
+| `:q` `:q!` `:wq` `:x` `:wq!` `:x!` | Quit / write and quit (`:q` keeps unsaved changes in their backups; `:q!` throws them away) |
 | `:e path` | Open in a new tab (or focus it) |
 | `:e` `:e!` | Reload from disk (`!` discards changes) |
 | `:bn` `:bp` | Next / previous tab |
@@ -282,6 +282,7 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:lsp`, `:lsp restart` | Language server status / restart |
 | `:diag` | List diagnostics |
 | `:extensions` | List the extensions and whether each loaded |
+| `:recover` | Open every unsaved-change backup no tab has |
 
 **`:s`.** With no range it works on the cursor's line. A range is two
 addresses joined by `,`, or `%` for the whole file. An address is a line
@@ -308,6 +309,23 @@ the buffer as it was; `:w` writes it back and clears the mark.
 `file_watch` in `zoe.conf.lua` picks what notices: `"poll"` (the default,
 a stat a second), `"inotify"` (Linux, within about 50 ms, idle otherwise)
 or `"off"`.
+
+**Unsaved changes are backed up.** About a second after an edit, a copy of
+every modified buffer is written under `$XDG_STATE_HOME/glyphwire/zoe/backups`
+(else `~/.local/state/...`), never next to the file, so nothing shows up in
+the folder, `git status` or the tree. `:w` deletes the copy. That makes `:q`
+VS Code's "hot exit": it quits with unsaved changes instead of refusing,
+and so do closing the window and a crash (minus the last second). Opening
+the file again puts the changes back as one undo step, so `u` is the file
+as it is on disk. If the file changed on disk since the backup was taken,
+zoe asks first: `r` recovers the backup, `d` deletes it, `s` opens it in a
+split as an untitled buffer next to the file. Untitled buffers come back
+with their workspace (or the folders zoe was started on). `:q!`, `:bd!`
+and `:wsopen!` throw the changes away along with their backups. `:recover`
+opens every backup that no tab has, whatever folder it came from. A file
+another running zoe has unsaved changes to is left to that zoe and gets
+no backup here. `backups = false` in `zoe.conf.lua` turns all of this
+off, and `:q` refuses unsaved changes again.
 
 Ctrl+P and the tree's `/` search skip dotfiles and `.gitignore`d paths.
 Alt+H brings the dotfiles back but not the ignored paths, so `.zig-cache/`

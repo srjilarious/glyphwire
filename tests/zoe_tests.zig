@@ -3256,6 +3256,204 @@ pub fn workspaceAutosaveIsOnByDefaultTest(_: std.Io, alloc: std.mem.Allocator) !
     }
 }
 
+pub fn backupsAreOnByDefaultTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    {
+        var cfg = try parseConf(alloc, "config = {}");
+        defer cfg.deinit();
+        try testz.expectTrue(cfg.backups);
+    }
+    {
+        var cfg = try parseConf(alloc, "config = { backups = false }");
+        defer cfg.deinit();
+        try testz.expectFalse(cfg.backups);
+    }
+}
+
+// ── Unsaved-change backups ──────────────────────────────────────────────
+
+const backup = zoe.backup;
+
+pub fn backupRoundTripsAFileBufferTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const bytes = try backup.serialize(alloc, .{
+        .pid = 4242,
+        .disk = .{ .size = 12, .mtime_ns = 1760000000123456789 },
+        .path = "/home/me/src/main.zig",
+    }, "line one\n\nline three");
+    defer alloc.free(bytes);
+
+    const p = backup.parse(bytes) orelse return testz.fail();
+    try testz.expectEqual(p.header.pid, 4242);
+    try testz.expectEqualStr(p.header.path.?, "/home/me/src/main.zig");
+    try testz.expectTrue(p.header.scope == null);
+    try testz.expectEqual(p.header.disk.?.size, 12);
+    try testz.expectTrue(p.header.disk.?.mtime_ns == 1760000000123456789);
+    // The text is byte for byte, its own blank lines included.
+    try testz.expectEqualStr(p.text, "line one\n\nline three");
+}
+
+pub fn backupRoundTripsAnUntitledBufferTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const bytes = try backup.serialize(alloc, .{ .pid = 7, .scope = "/a\t/b" }, "");
+    defer alloc.free(bytes);
+    const p = backup.parse(bytes) orelse return testz.fail();
+    try testz.expectTrue(p.header.disk == null);
+    try testz.expectTrue(p.header.path == null);
+    try testz.expectEqualStr(p.header.scope.?, "/a\t/b");
+    try testz.expectEqualStr(p.text, "");
+}
+
+pub fn backupParseRefusesWhatItDidNotWriteTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Not a backup at all, another version, a header cut short, and a
+    // header naming neither a file nor a scope.
+    try testz.expectTrue(backup.parse("hello\n\nworld") == null);
+    try testz.expectTrue(backup.parse("zoe-backup 2\npid 1\ndisk -\npath /x\n\ntext") == null);
+    try testz.expectTrue(backup.parse("zoe-backup 1\npid 1\ndisk -\npath /x") == null);
+    try testz.expectTrue(backup.parse("zoe-backup 1\npid 1\ndisk -\n\ntext") == null);
+    // A key a later version added is skipped, not refused.
+    const p = backup.parse("zoe-backup 1\npid 1\ncolour blue\ndisk -\npath /x\n\ntext") orelse return testz.fail();
+    try testz.expectEqualStr(p.text, "text");
+}
+
+pub fn backupRefusesAPathWithANewlineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try testz.expectError(backup.serialize(alloc, .{ .path = "/odd\nname" }, "x"), error.Unrepresentable);
+}
+
+pub fn backupRestoresOnlyOverTheSameFileTest(_: std.Io, _: std.mem.Allocator) !void {
+    const a: zoe.diskwatch.Stamp = .{ .size = 10, .mtime_ns = 100 };
+    const b: zoe.diskwatch.Stamp = .{ .size = 10, .mtime_ns = 200 };
+    // Unchanged since the backup was taken: put it back.
+    try testz.expectEqual(backup.decide(a, a), .restore);
+    // A new file that still isn't on disk: nothing to clash with.
+    try testz.expectEqual(backup.decide(null, null), .restore);
+    // Written since, created since, or deleted since: ask.
+    try testz.expectEqual(backup.decide(a, b), .ask);
+    try testz.expectEqual(backup.decide(null, a), .ask);
+    try testz.expectEqual(backup.decide(a, null), .ask);
+}
+
+pub fn backupNamesTest(_: std.Io, _: std.mem.Allocator) !void {
+    var b1: [backup.name_len]u8 = undefined;
+    var b2: [backup.name_len]u8 = undefined;
+    const f = backup.fileName(&b1, "/home/me/a.zig");
+    try testz.expectTrue(std.mem.startsWith(u8, f, backup.file_prefix));
+    try testz.expectTrue(std.mem.endsWith(u8, f, backup.extension));
+    // Another path, another name; the same path, the same one.
+    try testz.expectFalse(std.mem.eql(u8, f, backup.fileName(&b2, "/home/me/b.zig")));
+    try testz.expectEqualStr(f, backup.fileName(&b2, "/home/me/a.zig"));
+
+    const u = backup.untitledName(&b1, "/proj", 0xabc);
+    try testz.expectTrue(std.mem.startsWith(u8, u, backup.untitledPrefix(&b2, "/proj")));
+    try testz.expectEqual(backup.untitledId(u).?, 0xabc);
+    // Another scope's untitled buffers don't share the prefix.
+    try testz.expectFalse(std.mem.startsWith(u8, u, backup.untitledPrefix(&b2, "/other")));
+    try testz.expectTrue(backup.untitledId(backup.fileName(&b2, "/x")) == null);
+}
+
+pub fn backupScopeKeyTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [64]u8 = undefined;
+    // A workspace file is the scope, whatever its folders.
+    try testz.expectEqualStr(backup.scopeKey(&buf, "/p/x.zoe-workspace", &.{ "/a", "/b" }), "/p/x.zoe-workspace");
+    try testz.expectEqualStr(backup.scopeKey(&buf, null, &.{ "/a", "/b" }), "/a\t/b");
+    try testz.expectEqualStr(backup.scopeKey(&buf, null, &.{"/a"}), "/a");
+}
+
+pub fn backupDirFollowsXdgStateHomeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var env: std.process.Environ.Map = .init(alloc);
+    defer env.deinit();
+    try env.put("HOME", "/home/me");
+    {
+        const d = (try backup.dirPath(alloc, &env)).?;
+        defer alloc.free(d);
+        try testz.expectEqualStr(d, "/home/me/.local/state/glyphwire/zoe/backups");
+    }
+    try env.put("XDG_STATE_HOME", "/state");
+    {
+        const d = (try backup.dirPath(alloc, &env)).?;
+        defer alloc.free(d);
+        try testz.expectEqualStr(d, "/state/glyphwire/zoe/backups");
+    }
+}
+
+pub fn backupFilesWriteListAndDeleteTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const dir = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/zoe-backup-test-{d}/backups", .{std.Thread.getCurrentId()});
+    defer alloc.free(dir);
+    const top = std.fs.path.dirname(dir).?;
+    std.Io.Dir.cwd().deleteTree(io, top) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, top) catch {};
+
+    // The directory doesn't exist yet: no backups, not an error.
+    const none = try backup.list(alloc, io, dir);
+    defer backup.freeNames(alloc, none);
+    try testz.expectEqual(none.len, 0);
+
+    try backup.writeFile(io, dir, "f-1.zoebak", "one");
+    try backup.writeFile(io, dir, "f-1.zoebak", "two");
+    try backup.writeFile(io, dir, "u-2.zoebak", "three");
+    const names = try backup.list(alloc, io, dir);
+    defer backup.freeNames(alloc, names);
+    try testz.expectEqual(names.len, 2);
+
+    // A rewrite replaces the file whole.
+    const got = backup.readFile(alloc, io, dir, "f-1.zoebak", 1024) orelse return testz.fail();
+    defer alloc.free(got);
+    try testz.expectEqualStr(got, "two");
+
+    // Private to the user: the files may hold anything being edited.
+    const st = try std.Io.Dir.cwd().statFile(io, dir, .{});
+    try testz.expectEqual(st.permissions.toMode() & 0o777, 0o700);
+
+    backup.deleteFile(alloc, io, dir, "f-1.zoebak");
+    backup.deleteFile(alloc, io, dir, "f-1.zoebak");
+    try testz.expectTrue(backup.readFile(alloc, io, dir, "f-1.zoebak", 1024) == null);
+}
+
+pub fn backupOwnerAliveIgnoresThisProcessAndOthersTest(io: std.Io, _: std.mem.Allocator) !void {
+    const me = std.os.linux.getpid();
+    // This process is never "another zoe", and pid 0 is nobody.
+    try testz.expectFalse(backup.ownerAlive(io, me, me));
+    try testz.expectFalse(backup.ownerAlive(io, 0, me));
+    // pid 1 is alive but isn't zoe.
+    try testz.expectFalse(backup.ownerAlive(io, 1, me));
+}
+
+pub fn replaceAllTextIsOneUndoBackToCleanTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "alpha\nbeta\ngamma\n", null);
+    defer ed.deinit();
+    try ed.replaceAllText("alpha\nBETA two\ngamma\n");
+    try expectText(alloc, &ed.buf, "alpha\nBETA two\ngamma\n");
+    try testz.expectTrue(ed.buf.dirty);
+    // The cursor goes to where the text first differs.
+    try testz.expectEqual(ed.pos().line, 1);
+
+    // One `u` is the file as it was, and clean again.
+    _ = try keys.feed(&ed, "u");
+    try expectText(alloc, &ed.buf, "alpha\nbeta\ngamma\n");
+    try testz.expectFalse(ed.buf.dirty);
+
+    // The same text is no change at all.
+    try ed.replaceAllText("alpha\nbeta\ngamma\n");
+    try testz.expectFalse(ed.buf.dirty);
+}
+
+pub fn commandLineQuitLeavesADirtyBufferWithHotExitTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    ed.hot_exit = true;
+    _ = try keys.feed(&ed, "iy<esc>");
+    switch (try keys.feed(&ed, ":q<cr>")) {
+        .quit => |q| try testz.expectFalse(q.force),
+        else => try testz.fail(),
+    }
+}
+
+pub fn recoverCommandTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    switch (try keys.feed(&ed, ":recover<cr>")) {
+        .recover => {},
+        else => try testz.fail(),
+    }
+}
+
 // ── Ctrl+P file finder ──────────────────────────────────────────────────
 //
 // The scan is the only part of `applib/finder.zig` that touches a

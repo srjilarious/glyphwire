@@ -11,7 +11,7 @@
 //! the editor's display options (`page_lines`, `line_numbers`,
 //! `tab_width`, `expand_tab`, `show_whitespace`, `wrap`,
 //! `auto_indent`, `auto_close`, `fold_column`,
-//! `tab_tooltip_delay_ms`), `workspace_autosave`, `file_watch` and
+//! `tab_tooltip_delay_ms`), `workspace_autosave`, `backups`, `file_watch` and
 //! `unignore`.
 //! With no file present
 //! zoe runs on the built-in languages, the `default` theme, injection
@@ -182,6 +182,11 @@ pub const Config = struct {
     /// `.zoe-workspace` on the way out (`:q`, `:wq`, the window closing;
     /// never `:q!`). Default true.
     workspace_autosave: bool = true,
+    /// `config.backups` -- keep a copy of every modified buffer under
+    /// `$XDG_STATE_HOME/glyphwire/zoe/backups` and put it back when the
+    /// file is next opened, which also lets `:q` quit with unsaved
+    /// changes (`zoe/backup.zig`). Default true.
+    backups: bool = true,
     /// `config.shell_position` -- where the Ctrl+` shell panel sits:
     /// `"bottom"` (the default), `"top"`, `"left"`, `"right"`, or
     /// `"float"` for a framed box in the middle. `:shell <position>`
@@ -326,6 +331,7 @@ const Apply = struct {
         if (conf.boolean(lua, "fold_column")) |v| cfg.fold_column = v;
         if (conf.number(lua, f64, "tab_tooltip_delay_ms", delay)) |v| cfg.tab_tooltip_delay_ms = v;
         if (conf.boolean(lua, "workspace_autosave")) |v| cfg.workspace_autosave = v;
+        if (conf.boolean(lua, "backups")) |v| cfg.backups = v;
         if (conf.enumValue(lua, shellpanel.Position, "shell_position")) |v| cfg.shell_position = v;
         if (conf.uint(lua, u8, "shell_float_percent", float_percent)) |v| cfg.shell_float_percent = v;
         if (conf.enumValue(lua, diskwatch.Mode, "file_watch")) |v| cfg.file_watch = v;

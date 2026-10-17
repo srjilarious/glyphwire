@@ -170,7 +170,7 @@ pub fn lspFlushChange(self: *Ui) void {
 /// tooltip delays, and the oldest outstanding request's timeout, or null
 /// for none -- the loop's whole notion of time.
 pub fn nextLspDeadline(self: *Ui) ?std.Io.Clock.Timestamp {
-    var best = earlier(earlier(earlier(self.lsp_change_due, self.completion_due), self.tab_tip_due), self.disk_check_due);
+    var best = earlier(earlier(earlier(earlier(self.lsp_change_due, self.completion_due), self.tab_tip_due), self.disk_check_due), self.backup_due);
     const pool = if (self.lsp_pool) |*p| p else return best;
     if (pool.nextDeadlineMs()) |req_ms| {
         best = earlier(best, .{
