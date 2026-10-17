@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # zoe extensions
 
 A zoe extension is a Lua 5.3 script that adds named **commands** to the

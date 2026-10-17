@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # zoe key reference
 
 Every key and command zoe understands, then the gaps that remain and what

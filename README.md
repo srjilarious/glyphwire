@@ -3,11 +3,15 @@
 
 ![Version Badge](https://img.shields.io/badge/Version-0.21.0-brightgreen)
 ![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0-%23f7a41d?logo=zig)
+![Protocol Badge](https://img.shields.io/badge/Protocol-0.9.0-blueviolet)
 [![License](https://img.shields.io/badge/License-MPL--2.0%20%7C%20GPL--3.0%20%7C%20CC--BY--4.0-blue)](#license)
 
 A 2D-grid terminal replacement. Programs talk to the display over a local
-socket with structured JSON-RPC messages instead of a stream of ANSI
-escape sequences.
+socket with structured JSON-RPC (or MessagePack) messages instead of a
+stream of ANSI escape sequences, and get real layers, tables, images,
+splits and panes back.
+
+**Website: [srjilarious.github.io/glyphwire](https://srjilarious.github.io/glyphwire/)**
 
 - **No client library needed.** Anything that can open a Unix socket can
   speak the protocol. The Zig `Client` in `src/client.zig` is a convenience.
@@ -15,49 +19,73 @@ escape sequences.
   `GLYPHWIRE_SOCK`; without it, it writes plain stdout.
 - **Still a terminal.** Plain programs run on a PTY and their escape
   sequences are interpreted, so ordinary terminal programs keep working.
-- **State lives server-side.** Layers, tables, panes and contexts outlive
-  the process that made them and are redrawn by the host without a round
-  trip.
+- **State lives server-side.** Layers, tables, outlines, panes and contexts
+  outlive the process that made them and are redrawn by the host without a
+  round trip.
 - **Atomic frames.** A `batch` applies many messages under one lock, so a
   listing appears whole instead of painting a band at a time.
 
-[`docs/protocol.md`](docs/protocol.md) is the specification, enough to write
-a client or a host in any language. [`docs/api.md`](docs/api.md) is the
-annotated message catalog with per-message status.
+![zoe with two editor groups side by side](docs/images/zoe-split.png)
 
-## Screenshots
+## The protocol
 
-`gw-ls` as an icon grid:
+The wire protocol is at **version 0.9.0**, a pre-1.0 draft.
+[`docs/protocol.md`](docs/protocol.md) is the normative specification
+(CC-BY-4.0), enough to write a client or a host in any language without
+reading the Zig. [`docs/api.md`](docs/api.md) is the annotated message
+catalog with per-message implementation status.
 
-![gw-ls grid listing](docs/images/ls-grid.png)
+- **Transport.** A Unix domain stream socket, found through
+  `GLYPHWIRE_SOCK`. Other variables seat a process in a pane
+  (`GLYPHWIRE_PANE`) or on a layer (`GLYPHWIRE_LAYER`), or mark a remote
+  session.
+- **Two encodings, one message shape.** JSON-RPC 2.0 bodies under
+  `Content-Length` headers, or length-prefixed MessagePack after a four-byte
+  `c1 47 57 4d` preamble. The host tells them apart by the first byte and
+  answers each connection in its own encoding. The reference client
+  defaults to MessagePack; `GLYPHWIRE_WIRE=json` switches it back.
+- **Binary without base64.** Image bytes ride a raw side channel after the
+  JSON frame, or inline `bin` on MessagePack.
+- **Object model.** Contexts (independent full-window surfaces) hold layers
+  in a split tree; layers hold cells, tables, outlines, rects, images,
+  nine-patches and metadata. Panes are a separate window-level split tree,
+  each seating a context and a host-managed PTY. Everything is addressed by
+  integer handle.
+- **Catalog.** About 110 methods (requests and notifications) and some two
+  dozen notification kinds over opt-in subscription streams: key, text,
+  mouse, scroll, resize, focus, selection, clipboard, theme, panes, layout
+  and more.
+- **Themes are roles, not colours.** Programs paint a palette slot or a
+  named role (`keyword`, `table_header_bg`, `divider`, ...) and the host
+  resolves it at draw time, so a theme switch recolours what is already on
+  screen.
 
-`gw-ls -l -S` as a long listing in a server-side table:
+Known gaps, called out in the spec: a failed request severs the connection
+rather than returning an error response, and there is no capability
+negotiation yet (`get_version` reports the host and protocol version, but
+nothing adapts to it). Both are expected before 1.0.
 
-![gw-ls table listing](docs/images/ls-table.png)
-
-`glyphwire-demo`: truecolor runs, swatches, a box/icon panel, and
-multi-script text:
-
-![glyphwire styled-text demo](docs/images/demo.png)
-
-## Server-side features
+### Server-side features
 
 | Feature | Key messages | What it gives you |
 |---|---|---|
-| **Contexts** | `create_context`, `activate_context`, `attach_context` | Independent full-window surfaces. A generalized alt-screen: the shell's scrollback sits untouched under a full-screen app and reappears when it exits. |
+| **Contexts** | `create_context`, `activate_context`, `attach_context` | Independent full-window surfaces. A generalized alt-screen: the shell's scrollback sits untouched under a full-screen app and reappears when it exits. Super+F12 switches between them. |
 | **Panes** | `create_pane`, `spawn_in_pane`, `focus_pane`, `set_window_prefix` | Window-level split tree of panes, each running its own program on a host-managed PTY. What `gmux` is built on. |
-| **Splits** | `create_split`, `set_split_children`, `move_divider` | Layout tree of layers inside a context, with weighted or fixed children and draggable dividers. Re-lays itself on window resize. |
-| **Layers** | `create_layer`, `raise_layer`, `get_property` / `set_property` | Addressable surfaces with position, size, visibility, opacity and background. A viewport over a larger content grid scrolls host-side, with opt-in scrollbars. |
-| **Text** | `write_text`, `insert_cells`, `delete_cells`, `move_content`, `clear`, `set_bg`, `set_fg` | Truecolor styled runs or spans, text scale (1.5x, 2x, 3x) from re-rasterized font atlases, colour emoji from the system's CBDT emoji font (Noto Color Emoji), in-place cell editing, row shifting without a repaint, and background- or foreground-only repaints for moving a highlight. |
-| **Images** | `load_image`, `update_image`, `draw_image` | Real bitmaps (PNG, JPEG, BMP, GIF) placed in the grid, with source cropping. Bytes ride a binary side channel, never base64. |
+| **Splits** | `create_split`, `set_split_children`, `replace_split_child`, `move_divider` | Layout tree of layers inside a context, with weighted or fixed children and draggable dividers that keep their ratios. Re-lays itself on window resize. |
+| **Layers** | `create_layer`, `raise_layer`, `get_property` / `set_property` | Addressable surfaces with position, size, visibility, opacity, background and drop shadow. A viewport over a larger content grid scrolls host-side, with opt-in scrollbars. |
+| **Text** | `write_text`, `insert_cells`, `delete_cells`, `move_content`, `set_bg`, `set_fg` | Truecolor styled runs, text scale (1.5x, 2x, 3x) from re-rasterized font atlases, colour emoji, in-place cell editing, row shifting without a repaint, and background- or foreground-only repaints for moving a highlight. |
+| **Images** | `load_image`, `update_image`, `draw_image` | Real bitmaps (PNG, JPEG, BMP, GIF) placed in the grid, with source cropping. |
 | **Icons and panels** | `draw_icon`, `create_nine_patch` | A bundled icon catalog (file types, Devicon logos, distro logos) and nine-patch panels from `.9.png` art, corners at native pixel size. |
-| **Rects** | `create_rect`, `update_rect`, `destroy_rect` | Pixel-space outlines and fills on a layer, independent of the cell grid. Good for marks, crop boxes and focus rings. |
-| **Tables** | `create_table`, `table_set_rows`, `table_set_sort`, `table_set_style` | Typed, sortable tables with column widths, alignment and cell wrapping. Survive the client that created them. |
-| **Metadata** | `create_metadata`, `tag_metadata`, `get_metadata`, `find_metadata` | Opaque client JSON attached to cells: a path to open, a link to follow. The server stores it and never parses it. |
+| **Rects** | `create_rect`, `update_rect` | Pixel-space outlines and fills on a layer, independent of the cell grid. |
+| **Tables** | `create_table`, `table_set_rows`, `table_set_sort`, `table_set_style` | Typed, sortable tables with column widths, alignment and cell wrapping. Click-to-sort keeps working after the client exits. |
+| **Outlines** | `create_outline`, `outline_set_nodes`, `outline_set_collapsed` | Collapsible trees the host expands and collapses on a click, with nothing running. What `gw-grep` draws. |
+| **Metadata** | `create_metadata`, `tag_metadata`, `find_metadata` | Opaque client JSON attached to cells: a path to open, a link to follow. The server stores it and never parses it. |
+| **Drag and drop** | `start_drag`, `set_drop_target`, `create_metadata`'s `drag` | Drag files out of the grid into other desktop programs on Wayland, and accept drops onto a highlighted target. |
 | **Selection and clipboard** | `set_selection`, `get_selection_text`, `set_clipboard` | Host-drawn selection per layer, mirrored to the OS clipboard. |
 | **Highlights** | `toggle_highlight`, `set_highlight` | Multi-select by metadata id, drawn by the host. |
+| **Themes** | `set_theme`, `get_theme`, the `theme` stream | Nineteen built-in themes plus your own, per window or per context, switched live (Super+F10) with a preview. |
 | **Batching** | `batch` | Many messages applied in one pass as one rendered frame. |
-| **Input** | `subscribe`, `set_key_repeat` | Opt-in key, text, mouse, resize and scroll events with modifier state. Per-program key repeat cadence. |
+| **Input** | `subscribe`, `set_key_repeat`, `get_input_state` | Opt-in key, text, mouse, resize and scroll events with modifier state. Per-program key repeat cadence. |
 | **Remote sessions** | `start_remote`, `stop_remote` | Remote glyphwire clients drawing into a local pane over one ssh trunk (`gw-agent` on the far side). |
 
 Planned: server-driven animation, action maps, capability negotiation,
@@ -65,46 +93,47 @@ wheel and gamepad streams.
 
 ## Applications
 
-| App | What it is | What glyphwire makes possible |
+Each is an ordinary client of the protocol, versioned on its own.
+[`docs/apps.md`](docs/apps.md) has the full feature list for each.
+
+| App | Version | What it is |
 |---|---|---|
-| **`gw-shell`** | The shell `glyphwire` spawns | Pipelines, bash-style quoting and `$VAR` expansion, commands that span several lines (an open quote or a trailing `\` continues onto the next), Lua config and scripting, history with fish-style autosuggestions, Tab completion of `$PATH` commands and of arguments through fish's completions or Lua `defcomplete` functions, powerline prompts, `gwssh` remote sessions, Ctrl+R history search through `gw-hist`, and Alt+C to pick a frecent directory (`gw-hist --dirs`, Tab flips between the two), and Alt+Up to go up a directory. `--embed` runs the same prompt inside another client's layer, and `--context` on a context the host made for it (the context switcher's new shell). `exit` leaves background programs with a screen of their own running. |
-| **`zoe`** | Modal text editor | File tree, tabs and buffer in a host-side split tree. `:vsplit` / `:split` (or Ctrl+W v / s) split the editor into groups side by side or stacked, each with its own tab strip, resized by dragging the divider between them. Incremental tree-sitter highlighting with embedded languages. Ctrl+P fuzzy file finding over the working directory. Resting the pointer on a tab shows the file's full path in a popup under it; a strip with more tabs than fit scrolls sideways with the wheel or the `‹` / `›` arrows at its ends, and Ctrl+Shift+E finds the current file in the tree. In the tree pane, `f` jumps by name prefix and `/` searches the whole tree, opening whatever folders that takes. Dotfiles and `.gitignore`d paths are hidden from the tree and every search until Alt+H, which in a search reveals the dotfiles only, so `.zig-cache/` and `.venv/` stay out; git worktrees inside the folder are searched anyway. A tab whose file was deleted on disk shows a red ✘, noticed by polling (the default), inotify, or not at all (`file_watch`). Small scrolls move drawn rows instead of repainting, and moving the tree cursor repaints two row backgrounds rather than the listing. Ctrl+` drops a `gw-shell` into a panel over the bottom of the window for builds and tests (drag its top edge to resize it); clicking the tree or a buffer takes the keyboard back with the panel still up, and clicking the panel or Ctrl+` returns it. The cursor is a block in normal mode and a bar in insert mode, where Ctrl+Left/Right jump by word and Ctrl+Home/End go to the start and end of the file. In the buffer, `/` and `?` search incrementally (literal text, smartcase) with `n`/`N`/`*`/`#` to step and `:noh` to clear the highlight; Ctrl+F / Ctrl+H open a VS Code style find and replace box over the buffer (match count, match case / whole word / in selection toggles, replace one or all), and `:s/pat/rep/g` substitutes over a range (`%`, `5,$`, `.,+3`, or `'<,'>`, which `:` from visual mode starts with), and `u`/Ctrl+R undo and redo a whole command or insert session at a time; undoing back to the last save (or to an untouched new buffer) clears the modified mark. Visual-mode `>`/`<` keep the selection so a block can be indented repeatedly, which is vim plus the mapping everyone adds, and Tab/Shift+Tab do the same to the selection or the cursor line; `gv` reselects the last range. Alt+Up/Down move the cursor line or the selected lines past their neighbour and Shift+Alt+Up/Down copy them above or below, in insert mode too. VSCode-style keys work alongside the vim ones: Ctrl+S saves, Ctrl+Z / Ctrl+Shift+Z undo and redo, Ctrl+/ toggles line comments, Ctrl+Backspace/Delete delete by word, and Shift+arrows select (in insert mode the selection is typed over, as in any other editor). Enter, `o` and `O` keep the line's indent, a level deeper after an opening bracket, and brackets and quotes close themselves. Indented blocks fold with `za`/`zc`/`zo`/`zM`/`zR`, Ctrl+Shift+[ and ], or a click on the ▾/▸ fold column; `j`/`k` and `dd` treat a closed fold as one line. Every chord is a named action `zoe.conf.lua` can rebind; [docs/zoe-keys.md](docs/zoe-keys.md) lists them all. Lua extensions add commands of their own to the palette and the key tables ([docs/zoe-extensions.md](docs/zoe-extensions.md)); the bundled `task_journal` keeps a todo list and dated journal in Markdown, compatible with the Task Journal VS Code extension. Language servers supply diagnostics (a curly underline plus a sign in the gutter, and the message with the tool that reported it in the statusline), `K` for hover (fenced code in the reply coloured with the buffer grammars) and `gd` for goto-definition with Ctrl+O/Ctrl+I to come back, and completion in insert mode: it opens by itself as you type a name or after a trigger character like `.`, Ctrl+Space asks on demand, Up/Down or Ctrl+N/Ctrl+P move, Tab or Enter accept and Escape closes it; `]d`/`[d` step through the diagnostics and `:lsp` says which servers are attached. Draws in the window's colour theme (see `theme.lua` below), or its own from `zoe.conf.lua`, switched live with `:theme`. `zls`, `basedpyright` and `ruff server` are configured out of the box and each starts only if its binary is on `$PATH` — two servers on one file is the normal case, so their diagnostics are kept apart rather than overwriting each other. |
-| **`gmux`** | Terminal multiplexer | A pure window manager: it draws nothing and never touches a program's I/O. It asks the server for panes and places them. Keys follow `Ctrl-B`: `"` / `%` split, arrows move focus, `x` closes a pane, `z` zooms it to the full window and back, `H`/`J`/`K`/`L` resize, `q` quits, and `Ctrl-B` again sends one `Ctrl-B` through to the focused program. |
-| **`salacommander`** | Two-pane file manager | File-type icons, modal dialogs on their own layer, host scrollbars, only the visible rows sent. F3 searches below the pane with zoe's fuzzy finder, F4 opens a text file in zoe and Shift+F4 a new one. F8 moves to the desktop trash (the freedesktop.org one your file manager's trash can shows) and Shift+F8 deletes outright. Alt+Left/Right go back and forward through the directories a pane has shown, and Alt+Down lists them to pick from. Super on the same function keys does it as root through sudo (a masked password dialog, sudoedit for editing). F1 changes permissions (twelve toggles kept in step with the octal value) or owner/group, recursively if you like, files only or directories only; hold Super while picking to do it as root. Holding a modifier turns the key bar into what each F-key does under it. Dragging files onto a folder or the other pane moves them there, Ctrl+drag copies. Alt+drag carries a file, or the marked set, into another program on Wayland (an mp3 onto Audacious, a text file onto Kate). Each pane has tabs: Ctrl+T opens one on the same directory, Ctrl+Tab / Ctrl+Shift+Tab walk them, Ctrl+W or a middle click on the strip closes one; a strip too wide for its pane scrolls with the wheel or its `‹` / `›` arrows, the same way zoe's does. Ctrl+` drops a `gw-shell` into a panel that follows the active pane; drag its top edge to resize it. Every key is a rebindable named action. |
-| **`gwmd`** | Markdown reader | Scaled headings, GFM tables as native tables, inline images, clickable links. The document is one tall layer the host scrolls. |
-| **`gw-read`** | Comic and manga reader | Pages as bitmaps with zoom and pan. Mokuro OCR text overlays, Yomitan dictionary lookup, AI bubble translation, Anki card mining. |
-| **`gw-ls`** | `ls` replacement | Icon grid, or a long listing in a table that stays sortable after `gw-ls` exits. On Wayland any entry, even from scrollback, can be Alt+dragged into another program. |
-| **`gw-view`** | Image viewer | Shows an image in the grid, or `--interactive` for a context of its own with zoom and pan. |
+| **`gw-shell`** | 0.10.2 | The shell `glyphwire` spawns. Pipelines, Lua config, fish-style autosuggestions, fish and Lua completions, powerline prompt, Ctrl+R / Alt+C through `gw-hist`, `gwssh`. |
+| **`zoe`** | 0.18.0 | Modal editor: vim grammar with VS Code keys alongside. Split editor groups, workspaces, tree-sitter highlighting, LSP (diagnostics, hover, goto, completion), find and replace, folding, Lua extensions, unsaved-change backups. Keys in [`docs/zoe-keys.md`](docs/zoe-keys.md). |
+| **`gmux`** | 0.10.0 | Multiplexer as a pure window manager: it draws nothing and never touches a program's I/O, it only asks the server for panes. |
+| **`salacommander`** | 0.10.0 | Two-pane file manager: icons, tabs, sudo operations, trash, permission editing, drag and drop within and out of the window. |
+| **`gwmd`** | 0.8.0 | Markdown reader: scaled headings, GFM tables as native tables, inline images, links. |
+| **`gw-read`** | 0.9.0 | Comic and manga reader: zoom and pan, Mokuro OCR overlays, dictionary lookup, AI bubble translation, Anki mining. |
+| **`gw-ls`** | 0.8.0 | `ls` as an icon grid, or a long listing in a table that stays sortable after it exits. |
+| **`gw-grep`** | 0.8.0 | ripgrep hits as a collapsible, highlighted outline in the scrollback. |
+| **`gw-hist`** | 0.8.0 | Fuzzy history and frecent-directory search for `gw-shell`. |
+| **`gw-view`** | 0.8.0 | Image viewer, inline or interactive. |
+| **`gw-agent`** | 0.8.0 | The remote end of an ssh session; bridges remote clients onto one trunk. |
 
 Developer tools: `glyphwire-probe` drives and inspects a live session
 from the command line (`zig build probe`), and `glyphwire-demo`,
 `glyphwire-table-demo` and `glyphwire-notify` exercise parts of the
 protocol.
 
-### zoe
+### Screenshots
 
-Editing its own client library, with the file tree and tab strip:
-
-![zoe editor](docs/images/zoe.png)
-
-### salacommander
-
-The repository on the left and `docs/` on the right:
+salacommander, the repository on the left and `docs/` on the right:
 
 ![salacommander file manager](docs/images/salacommander.png)
 
-### gwmd
+`gw-grep` hits as an outline in the shell's scrollback:
 
-Rendering [`docs/protocol.md`](docs/protocol.md), with scaled headings and
-links:
+![gw-grep outline of search hits](docs/images/grep.png)
 
-![gwmd Markdown reader](docs/images/gwmd.png)
+`gw-ls -l -S`, a long listing in a server-side table:
 
-### gw-read
+![gw-ls table listing](docs/images/ls-table.png)
 
-A word highlighted in a speech bubble, with its dictionary entry up:
+gwmd reading `docs/zoe-keys.md` under the Catppuccin Latte theme:
 
-![gw-read comic reader with a dictionary lookup](docs/images/gw-read.png)
+![gwmd Markdown reader in a light theme](docs/images/gwmd-light.png)
+
+More on the [website](https://srjilarious.github.io/glyphwire/).
 
 ## Build and run
 
@@ -124,11 +153,11 @@ Each program also has its own run step (`zig build zoe`, `zig build gwmd`,
 
 Every program answers `--version` (or `-V`) with its own version, the
 glyphwire release and the `git describe` it was built from, e.g. `zoe
-0.8.0 (glyphwire 0.8.0, 1e34abf)`. The programs are versioned separately:
-each one's number is a line in `program_versions` at the top of
-`build.zig`, bumped when that program changes in a release, and the
-release's own number is `build.zig.zon`'s `version`. A client can ask the
-host the same with the `get_version` request.
+0.18.0 (glyphwire 0.20.0, a9ed435)`. Each program's number is a line in
+`program_versions` at the top of `build.zig`, bumped when that program
+changes in a release, and the release's own number is `build.zig.zon`'s
+`version`. A client can ask the host the same with the `get_version`
+request.
 
 CI builds `glyphwire-linux-x86_64.tar.gz`, a `.deb` and an Arch
 `.pkg.tar.zst` on every push to `main`, and attaches all three to the GitHub
@@ -161,11 +190,11 @@ Every config file is Lua, named `*.conf.lua`, and read from
 
 | File | Configures | Reference |
 |---|---|---|
-| `host.conf.lua` | Font face, fallbacks (one or a list) and size, colour emoji (`font_emoji`), cursor, grid size, scrollback, icon theme, the context switcher (Super+F12) and theme switcher (Super+F10) chords | `host/host.conf.template.lua` |
-| `theme.lua` | The window's colour theme: a 24-slot ANSI palette (terminal output uses it) and the shared roles every program paints with (`fg`, `heading1`, `table_header_bg`, `keyword`, ...). Nineteen built-ins (Default, xterm, GitHub, Catppuccin, Tokyo Night, Solarized, Darcula, Cobalt2, Dracula, Nord, Gruvbox, Monokai, VS Code Light and more) or your own. zoe, salacommander, gw-read and gw-shell can each override it in their own config. Super+F10 switches it for the session, with a live preview | `host/theme.template.lua` |
-| `shell.conf.lua` | Aliases, prompt segments, `zj` directory jumping, hooks | `shell/shell.conf.template.lua` |
+| `host.conf.lua` | Font face, fallbacks and size, colour emoji, cursor, grid size, scrollback, icon theme, the context switcher (Super+F12) and theme switcher (Super+F10) chords | `host/host.conf.template.lua` |
+| `theme.lua` | The window's colour theme: a 24-slot ANSI palette and the shared roles every program paints with. Nineteen built-ins (Catppuccin, Tokyo Night, Solarized, Dracula, Nord, Gruvbox, VS Code Light and more) or your own | `host/theme.template.lua` |
+| `shell.conf.lua` | Aliases, prompt segments, `zj` directory jumping, completions, hooks | `shell/shell.conf.template.lua` |
 | `gmux.conf.lua` | Prefix key, pane shell, scrollback | `gmux/gmux.conf.template.lua` |
-| `zoe.conf.lua` | Languages (and their comment markers), grammar path, its own colour theme, editor options, language servers, key bindings, Lua extensions to load ([docs/zoe-extensions.md](docs/zoe-extensions.md)) | `zoe/zoe.conf.template.lua` |
+| `zoe.conf.lua` | Languages, grammar path, theme, editor options, language servers, key bindings, extensions | `zoe/zoe.conf.template.lua` |
 | `ls.conf.lua` | Icon sizes | `ls/ls.conf.template.lua` |
 | `read.conf.lua` | Reading direction, sizing, zoom, cache | `read/read.conf.template.lua` |
 | `salacommander.conf.lua` | Key bindings, open actions, F4 editor | `salacommander/salacommander.conf.template.lua` |
@@ -178,15 +207,16 @@ keeps its size and the grid gains or loses cells to match.
 
 | Path | What |
 |---|---|
-| `src/` | Protocol core: grid model (`core.zig` for cells and `Layer`, with `vt.zig` for its VT machine, `layer_selection.zig`, `unicode_width.zig`), layer components (`table.zig`, `outline.zig`, `rect.zig`, `nine_patch.zig`), `context.zig`, `session.zig`, dispatch, server, client (`client.zig`, with `client_ops.zig` for the notification ops `Client` and `Batch` share), wire framing, PTY |
-| `applib/` | Helpers shared by two or more applications: line editor, keymaps, fuzzy finder, shell panel, history |
+| `src/` | Protocol core: grid model (`core.zig` for cells and `Layer`, with `vt.zig` for its VT machine), layer components (`table.zig`, `outline.zig`, `rect.zig`, `nine_patch.zig`), `context.zig`, `session.zig`, dispatch, server, client (`client.zig`, `client_ops.zig`), wire framing and codecs, PTY |
+| `applib/` | Helpers shared by two or more applications: line editor, keymaps, fuzzy finder, shell panel, tab strip, history, file operations |
 | `host/`, `host_eng/` | `glyphwire`, the SDL3 / OpenGL host, and its engine backend |
 | `shell/`, `hist/` | `gw-shell` and `gw-hist` |
-| `zoe/`, `gmux/`, `salacommander/`, `md/`, `read/`, `ls/`, `view/` | Applications |
+| `zoe/`, `gmux/`, `salacommander/`, `md/`, `read/`, `ls/`, `grep/`, `view/` | Applications |
 | `agent/` | `gw-agent`, the remote end of an ssh session |
 | `debug/`, `demo/`, `table-demo/`, `notify/`, `client/`, `server/` | Developer tools and demos |
 | `tests/` | testz suite |
-| `docs/` | Protocol spec, API reference |
+| `docs/` | Protocol spec, API reference, app and key references |
+| `site/` | The project website, published to GitHub Pages |
 
 ## Regenerating the screenshots
 
@@ -196,7 +226,29 @@ scripts/regen-readme-assets.sh ls-grid    # just one
 ```
 
 Scenes are defined at the top of the script. `docs/images/gw-read.png` is
-taken by hand.
+taken by hand. The website uses the same images, copied in when the Pages
+workflow builds it.
+
+## Contributing: issues welcome, forks encouraged
+
+glyphwire follows a **remix model**. It is one person's vision of what a
+terminal could be, and it moves quickly in the direction that person
+wants.
+
+- **Issues are the way in.** Bug reports, reproduction cases, feature
+  requests, design feedback and questions are all welcome, and need no
+  agreement of any kind.
+- **Fork it and make it yours.** The licences are chosen so you can take
+  the protocol, the plumbing or the apps and build your own take on them.
+  You don't need permission, and you don't need to send it back.
+- **Pull requests are not the normal path.** An unsolicited PR will most
+  likely be closed, however good it is, because merging it means
+  maintaining someone else's direction. If you think a change belongs
+  here, open an issue first; on the rare occasion a PR is invited, it is
+  accepted under the [Contributor Licence Agreement](CLA.md).
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) has the details, and the build, test
+and licensing conventions for anyone working on a fork.
 
 ## License
 
@@ -207,16 +259,10 @@ Full detail in [`LICENSE.md`](LICENSE.md); third-party code and assets in
 |---|---|---|
 | **The protocol**: `docs/` | `CC-BY-4.0` | Implement it in any language, under any license. |
 | **The plumbing**: `src/`, `applib/`, `host/`, `host_eng/`, `server/`, `client/`, `agent/`, demos and debug tools | `MPL-2.0` | File-level copyleft: owe source only for MPL files you change. |
-| **The applications**: `gw-shell`, `gw-hist`, `gmux`, `gw-ls`, `gw-view`, `gw-read`, `gwmd`, `zoe`, `salacommander` | `GPL-3.0-or-later` | Programs people run, not components people embed. |
+| **The applications**: `gw-shell`, `gw-hist`, `gmux`, `gw-ls`, `gw-grep`, `gw-view`, `gw-read`, `gwmd`, `zoe`, `salacommander` | `GPL-3.0-or-later` | Programs people run, not components people embed. |
 
 Every source file carries an `SPDX-License-Identifier`. The default icon
 theme (Oxygen) is LGPL-3.0 and Papirus is GPL-3.0; set
 `icon_theme = "material"` for the MIT Material theme if that matters.
-
-## Contributing
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md). Code contributions are accepted
-under a [Contributor Licence Agreement](CLA.md); bug reports and design
-feedback need none.
 
 Copyright (c) 2026 Jeff DeWall.

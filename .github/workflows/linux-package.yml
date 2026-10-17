@@ -3,7 +3,7 @@ name: Linux Package
 # Builds and packages the user-facing glyphwire programs for Linux
 # x86_64. The tarball holds exactly what `zig build package` installs:
 # glyphwire, gw-shell, glyphwire-notify, glyphwire-demo, gw-view,
-# gw-read, gwmd, gw-ls, gw-hist, zoe, gmux, salacommander and gw-agent,
+# gw-read, gwmd, gw-ls, gw-hist, gw-grep, zoe, gmux, salacommander and gw-agent,
 # plus the shared assets, zoe's bundled tree-sitter grammars, and the
 # desktop entry and icons. The staging step runs that step against the
 # package directory instead of hand-copying binaries, so build.zig stays

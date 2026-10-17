@@ -1,0 +1,56 @@
+name: Pages
+
+# Publishes the project website (site/, plus the screenshots in
+# docs/images/) to GitHub Pages. scripts/build-site.sh does the assembling,
+# so a local preview builds exactly what ships.
+#
+# The repository's Pages source must be set to "GitHub Actions"
+# (Settings -> Pages -> Build and deployment) for the deploy step to
+# take effect.
+#
+# Only main publishes, matching the release builds in linux-package.yml;
+# a dev push that touches the site waits until it lands on main.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "docs/images/**"
+      - "assets/glyphwire_icon.*"
+      - "scripts/build-site.sh"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push supersedes a queued one but never
+# cancels a deploy already in flight.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble site
+        run: scripts/build-site.sh _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

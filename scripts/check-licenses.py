@@ -39,7 +39,7 @@ CCBY = "CC-BY-4.0"
 ZONES = {
     MPL: ["src", "applib", "host", "host_eng", "server", "client", "agent",
           "notify", "debug", "demo", "table-demo"],
-    GPL: ["shell", "gmux", "ls", "view", "read", "md", "zoe", "salacommander", "tests"],
+    GPL: ["shell", "hist", "gmux", "ls", "grep", "view", "read", "md", "zoe", "salacommander", "tests"],
 }
 
 # Third-party trees, including ones nested inside our own directories.
@@ -51,7 +51,7 @@ THIRD_PARTY = ("host_eng/libs/", "read/libs/", "md/libs/", "libs/", "vendor/", "
 BUILD_FILES = ["build.zig", "build.zig.zon"]
 
 # Everything under these is CC-BY-4.0.
-DOC_DIRS = ["docs"]
+DOC_DIRS = ["docs", "site"]
 DOC_FILES = ["README.md"]
 
 SPDX_RE = re.compile(r"SPDX-License-Identifier:\s*(\S+)")

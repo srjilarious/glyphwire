@@ -1,0 +1,353 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>glyphwire: the terminal, rewired</title>
+  <meta name="description" content="glyphwire is an open-source terminal replacement for Linux. Programs draw with structured messages over a socket: real layers, tables, images, splits and panes, while every ordinary terminal program keeps working.">
+  <meta property="og:title" content="glyphwire: the terminal, rewired">
+  <meta property="og:description" content="An open-source terminal where programs draw layers, tables, images and panes over a structured protocol, and plain terminal programs still just work.">
+  <meta property="og:image" content="images/zoe-split.png">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#06110c">
+  <link rel="icon" type="image/svg+xml" href="images/glyphwire_icon.svg">
+  <link rel="icon" type="image/png" href="images/glyphwire_icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top">
+      <img src="images/glyphwire_icon.svg" alt="" width="28" height="28">
+      <span>glyphwire</span>
+    </a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#why">Why</a>
+      <a href="#features">Features</a>
+      <a href="#apps">Apps</a>
+      <a href="#protocol">Protocol</a>
+      <a href="#install">Install</a>
+    </nav>
+    <a class="btn btn-small btn-ghost" href="https://github.com/srjilarious/glyphwire">
+      <svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">Open source &middot; Linux &middot; Written in Zig</p>
+      <h1>The terminal, <span class="glow">rewired.</span></h1>
+      <p class="lead">
+        glyphwire replaces the stream of escape codes with a real protocol.
+        Programs draw <strong>layers, tables, images, splits and panes</strong>
+        over a local socket, and the display keeps them alive and interactive.
+        Every ordinary terminal program still just works.
+      </p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/srjilarious/glyphwire">View on GitHub</a>
+        <a class="btn btn-ghost" href="https://github.com/srjilarious/glyphwire/releases">Download a release</a>
+        <a class="btn btn-link" href="https://github.com/srjilarious/glyphwire/blob/main/docs/protocol.md">Read the protocol &rarr;</a>
+      </div>
+      <figure class="window hero-shot">
+        <div class="window-bar"><span></span><span></span><span></span><em>zoe &mdash; two editor groups in a host-side split</em></div>
+        <img src="images/zoe-split.png" alt="The zoe editor with a file tree and two editor groups side by side" width="1661" height="660">
+      </figure>
+    </div>
+  </section>
+
+  <!-- Facts strip -->
+  <section class="strip" aria-label="At a glance">
+    <div class="wrap strip-inner">
+      <div><b>~110</b><span>protocol methods</span></div>
+      <div><b>11</b><span>bundled apps</span></div>
+      <div><b>19</b><span>built-in themes</span></div>
+      <div><b>0</b><span>client libraries required</span></div>
+    </div>
+  </section>
+
+  <!-- Why -->
+  <section id="why" class="section">
+    <div class="wrap">
+      <h2>Why not just a terminal emulator?</h2>
+      <p class="section-lead">
+        A terminal emulator gives a program one thing: a byte stream it can
+        sprinkle escape codes into. Everything richer is a hack layered on
+        top, and it all disappears the moment the program exits. glyphwire
+        starts from the other end.
+      </p>
+      <div class="compare">
+        <article>
+          <h3>Objects, not paint</h3>
+          <p class="was">In a terminal emulator, a program paints characters and forgets them.</p>
+          <p>In glyphwire, tables, outlines, layers and panes are <em>server-side state</em>. A <code>gw-ls -l</code> table stays sortable by clicking a header long after <code>gw-ls</code> has exited.</p>
+        </article>
+        <article>
+          <h3>Real images</h3>
+          <p class="was">In a terminal emulator, images are base64 stuffed into escape codes, in whichever of several competing formats it supports.</p>
+          <p>In glyphwire, PNG, JPEG, BMP and GIF bitmaps are placed in the grid, their bytes on a binary side channel. Nine-patch panels and an icon catalog too.</p>
+        </article>
+        <article>
+          <h3>No flicker, no tearing</h3>
+          <p class="was">In a terminal emulator, a big redraw arrives and paints a band at a time.</p>
+          <p>In glyphwire, a <code>batch</code> applies many messages under one lock and shows them as one frame. Scrolling and highlights move on the host without a repaint.</p>
+        </article>
+        <article>
+          <h3>Structured input</h3>
+          <p class="was">In a terminal emulator, a program parses mouse and key escape sequences and guesses at modifiers.</p>
+          <p>In glyphwire, a program subscribes to key, text, mouse, scroll and resize events with full modifier state, key up and down, and its own key repeat.</p>
+        </article>
+        <article>
+          <h3>Layout the host owns</h3>
+          <p class="was">In a terminal emulator, tmux re-encodes every pane through a single stream.</p>
+          <p>In glyphwire, splits, panes and dividers live in the host. <code>gmux</code> is a multiplexer that never draws a cell or touches a program's I/O.</p>
+        </article>
+        <article>
+          <h3>Themes as meaning</h3>
+          <p class="was">In a terminal emulator, there are 16 colours and every app hard-codes its own RGB.</p>
+          <p>In glyphwire, programs paint <em>roles</em> like <code>keyword</code> or <code>table_header_bg</code>, so switching theme recolours everything already on screen, live.</p>
+        </article>
+      </div>
+      <p class="note">
+        And it's still a terminal: plain programs run on a PTY with their escape
+        sequences interpreted. <code>vim</code>, <code>htop</code> and your build
+        scripts run unchanged, and a glyphwire program run outside a session
+        falls back to plain stdout.
+      </p>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section id="features" class="section alt">
+    <div class="wrap">
+      <h2>What the display can do</h2>
+      <p class="section-lead">One host, one protocol. Any program in any language can use all of it.</p>
+      <div class="grid features">
+        <div class="card"><h3>Contexts</h3><p>Independent full-window surfaces: a generalized alt-screen. Your shell's scrollback waits untouched under a full-screen app. Super+F12 switches between them.</p></div>
+        <div class="card"><h3>Panes &amp; splits</h3><p>A window-level split tree of panes on host-managed PTYs, plus layer splits inside each, with draggable dividers that keep their ratios.</p></div>
+        <div class="card"><h3>Layers</h3><p>Positioned surfaces with opacity, backgrounds, drop shadows and host-side scrolling over content larger than the view, with real scrollbars.</p></div>
+        <div class="card"><h3>Rich text</h3><p>Truecolor styled spans, headings at 1.5&times;, 2&times; and 3&times; from re-rasterized fonts, colour emoji, and multi-script text with CJK fallback.</p></div>
+        <div class="card"><h3>Tables &amp; outlines</h3><p>Typed, sortable tables and collapsible trees that the host expands, collapses and re-sorts with nothing running.</p></div>
+        <div class="card"><h3>Drag and drop</h3><p>Alt+drag a file out of the grid into any Wayland app, even from scrollback, and accept drops onto host-highlighted targets.</p></div>
+        <div class="card"><h3>Metadata</h3><p>Attach opaque JSON to cells (a path to open, a link to follow) that the host stores and returns on a click.</p></div>
+        <div class="card"><h3>Selection &amp; clipboard</h3><p>Host-drawn selection per layer, multi-select highlights by id, mirrored to the OS clipboard.</p></div>
+        <div class="card"><h3>Remote sessions</h3><p><code>glyphwire --ssh host</code> carries every remote client over one ssh trunk. Remote editors and image viewers draw exactly like local ones.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Apps -->
+  <section id="apps" class="section">
+    <div class="wrap">
+      <h2>A suite of apps built on it</h2>
+      <p class="section-lead">
+        Each is an ordinary client of the public protocol, with no private
+        hooks into the host, and each shows off something a byte stream can't do.
+      </p>
+
+      <div class="app">
+        <div class="app-text">
+          <h3>zoe <span class="tag">editor</span></h3>
+          <p>A modal editor with vim's grammar and VS Code's keys side by side. Split editor groups, multi-folder workspaces, tree-sitter highlighting and language servers (diagnostics, hover, goto definition, completion as you type).</p>
+          <ul>
+            <li>VS Code style find and replace, plus <code>:s</code> over ranges</li>
+            <li>Folding, auto-indent, auto-closing pairs</li>
+            <li>Unsaved changes backed up continuously: <code>:q</code> and pick up later</li>
+            <li>Lua extensions and fully rebindable keys</li>
+          </ul>
+        </div>
+        <figure class="window"><img src="images/zoe.png" alt="zoe editing a Zig file with the file tree and tab strip" loading="lazy" width="1650" height="660"></figure>
+      </div>
+
+      <div class="app reverse">
+        <div class="app-text">
+          <h3>salacommander <span class="tag">file manager</span></h3>
+          <p>A two-pane file manager in the Norton Commander tradition, with icons, tabs, host scrollbars and modal dialogs on their own layers.</p>
+          <ul>
+            <li>Drag between panes, or Alt+drag out into other apps</li>
+            <li>Sudo operations behind a masked password dialog</li>
+            <li>Desktop trash, permission and owner editing</li>
+            <li>Fuzzy search and a drop-down shell panel</li>
+          </ul>
+        </div>
+        <figure class="window"><img src="images/salacommander.png" alt="salacommander showing the repository and the docs folder side by side" loading="lazy" width="1650" height="660"></figure>
+      </div>
+
+      <div class="app">
+        <div class="app-text">
+          <h3>gw-grep <span class="tag">search</span></h3>
+          <p>ripgrep results as a syntax-highlighted, collapsible outline right in your scrollback. The outline is server-side state, so clicking &#9656; still expands a hit after the command has exited.</p>
+        </div>
+        <figure class="window"><img src="images/grep.png" alt="gw-grep hits as an expanded outline with highlighted code" loading="lazy" width="1650" height="594"></figure>
+      </div>
+
+      <div class="app reverse">
+        <div class="app-text">
+          <h3>gw-ls <span class="tag">listing</span></h3>
+          <p>An <code>ls</code> with file-type icons, or a long listing in a real table: colour-coded sizes, striped rows, and headers you can click to re-sort whenever you like.</p>
+        </div>
+        <figure class="window"><img src="images/ls-table.png" alt="gw-ls long listing as a server-side table" loading="lazy" width="1650" height="660"></figure>
+      </div>
+
+      <div class="app">
+        <div class="app-text">
+          <h3>gwmd <span class="tag">markdown</span></h3>
+          <p>Markdown with scaled headings, GFM tables as native tables, inline images and links you can Tab through. Here in the Catppuccin Latte theme, one of nineteen.</p>
+        </div>
+        <figure class="window narrow"><img src="images/gwmd-light.png" alt="gwmd rendering a key reference with headings and a table in a light theme" loading="lazy" width="847" height="1000"></figure>
+      </div>
+
+      <div class="app reverse">
+        <div class="app-text">
+          <h3>gw-read <span class="tag">comics &amp; manga</span></h3>
+          <p>A reader with zoom and pan, Mokuro OCR text overlays, dictionary lookup on any word in a speech bubble, AI bubble translation, and Anki card mining.</p>
+        </div>
+        <figure class="window"><img src="images/gw-read.png" alt="gw-read with a word highlighted in a speech bubble and its dictionary entry" loading="lazy" width="1406" height="838"></figure>
+      </div>
+
+      <div class="grid more-apps">
+        <div class="card"><h3>gw-shell</h3><p>The default shell: pipelines, Lua config, fish-style autosuggestions and completions, a powerline prompt, and Ctrl+R history in a real UI.</p></div>
+        <div class="card"><h3>gmux</h3><p>A multiplexer that is a pure window manager. It asks the host for panes and places them; it never draws or relays a byte.</p></div>
+        <div class="card"><h3>gw-hist</h3><p>Fuzzy history and frecent-directory search with a host-drawn scrollbar, every redraw one atomic frame.</p></div>
+        <div class="card"><h3>gw-view</h3><p>Images inline in your scrollback, or in a context of their own with zoom and pan.</p></div>
+        <div class="card"><h3>gw-agent</h3><p>The far end of an ssh session. It multiplexes remote clients onto one trunk without parsing the protocol.</p></div>
+        <div class="card"><h3>Dev tools</h3><p><code>glyphwire-probe</code> drives and inspects a live session; demos exercise tables, panels and text.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Protocol -->
+  <section id="protocol" class="section alt">
+    <div class="wrap two-col">
+      <div>
+        <h2>A protocol you can implement in an afternoon</h2>
+        <p>
+          The display listens on a Unix socket named by <code>GLYPHWIRE_SOCK</code>.
+          Messages are JSON-RPC 2.0 under <code>Content-Length</code> headers
+          (the same framing as LSP), or length-prefixed MessagePack. No client
+          library, no handshake: connect and draw.
+        </p>
+        <ul class="checks">
+          <li>A normative spec, licensed CC-BY-4.0: write a client <em>or a host</em> in any language</li>
+          <li>Integer handles for contexts, layers, tables and panes</li>
+          <li>Opt-in event streams, subscribed to by name</li>
+          <li>Unknown params ignored, so newer clients degrade gracefully</li>
+        </ul>
+        <p class="muted">
+          Protocol version 0.9.0, pre-1.0. The spec lists its open gaps
+          (error responses and capability negotiation) in plain sight.
+        </p>
+        <a class="btn btn-ghost" href="https://github.com/srjilarious/glyphwire/blob/main/docs/protocol.md">Read the spec</a>
+      </div>
+      <div>
+        <figure class="code">
+          <figcaption>hello.py: a complete glyphwire client</figcaption>
+<pre><code><span class="k">import</span> json, os, socket
+
+sock = os.environ.get(<span class="s">"GLYPHWIRE_SOCK"</span>)
+<span class="k">if not</span> sock:
+    print(<span class="s">"hello"</span>)            <span class="c"># no session: plain stdout</span>
+    <span class="k">raise</span> SystemExit
+
+s = socket.socket(socket.AF_UNIX)
+s.connect(sock)
+
+<span class="k">def</span> <span class="f">send</span>(msg):
+    body = json.dumps({<span class="s">"jsonrpc"</span>: <span class="s">"2.0"</span>, **msg}).encode()
+    s.sendall(<span class="s">b"Content-Length: %d\r\n\r\n"</span> % len(body) + body)
+
+send({<span class="s">"method"</span>: <span class="s">"write_text"</span>, <span class="s">"params"</span>: {
+    <span class="s">"text"</span>: <span class="s">"hello\n"</span>, <span class="s">"fg"</span>: {<span class="s">"r"</span>: 0, <span class="s">"g"</span>: 255, <span class="s">"b"</span>: 0}}})
+
+<span class="c"># One request, so we know the host applied the write.</span>
+send({<span class="s">"id"</span>: 1, <span class="s">"method"</span>: <span class="s">"get_property"</span>,
+      <span class="s">"params"</span>: {<span class="s">"property"</span>: <span class="s">"revision"</span>}})
+s.recv(4096)</code></pre>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- Install -->
+  <section id="install" class="section">
+    <div class="wrap">
+      <h2>Get it running</h2>
+      <div class="grid install">
+        <div class="card">
+          <h3>Ubuntu / Debian</h3>
+          <p>Grab the <code>.deb</code> from the <a href="https://github.com/srjilarious/glyphwire/releases">latest release</a>.</p>
+          <pre><code>sudo apt install ./glyphwire_&lt;version&gt;-1_amd64.deb</code></pre>
+        </div>
+        <div class="card">
+          <h3>Arch Linux</h3>
+          <p>Grab the <code>.pkg.tar.zst</code> from the <a href="https://github.com/srjilarious/glyphwire/releases">latest release</a>.</p>
+          <pre><code>sudo pacman -U glyphwire-&lt;version&gt;-1-x86_64.pkg.tar.zst</code></pre>
+        </div>
+        <div class="card">
+          <h3>From source</h3>
+          <p>Needs Zig 0.17.0 and nothing else: SDL3 builds from source.</p>
+          <pre><code>git clone https://github.com/srjilarious/glyphwire
+cd glyphwire && zig build glyphwire</code></pre>
+        </div>
+      </div>
+      <p class="muted center">Release binaries need glibc 2.39 or newer (Ubuntu 24.04, Debian 13, current Arch) and a working OpenGL setup.</p>
+    </div>
+  </section>
+
+  <!-- Open source -->
+  <section id="open-source" class="section alt">
+    <div class="wrap two-col">
+      <div>
+        <h2>Open source, built to be remixed</h2>
+        <p>
+          glyphwire is one person's take on what a terminal could be. It
+          follows a <strong>remix model</strong>: take it, fork it, bend it
+          into your own thing. You don't need permission, and you don't
+          need to send it back.
+        </p>
+        <p>
+          Bug reports, ideas and feature requests are very welcome as
+          <a href="https://github.com/srjilarious/glyphwire/issues">GitHub issues</a>.
+          Pull requests are by invitation, so start with an issue.
+        </p>
+        <a class="btn btn-primary" href="https://github.com/srjilarious/glyphwire/issues">Open an issue</a>
+        <a class="btn btn-ghost" href="https://github.com/srjilarious/glyphwire/fork">Fork on GitHub</a>
+      </div>
+      <div class="licenses">
+        <div class="lic"><b>CC-BY-4.0</b><span>The protocol spec. Implement it in any language, under any license.</span></div>
+        <div class="lic"><b>MPL-2.0</b><span>The plumbing: core, host, server, client library. File-level copyleft, friendly to embedding.</span></div>
+        <div class="lic"><b>GPL-3.0+</b><span>The applications: shell, editor, file manager, readers and tools.</span></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <div class="brand">
+      <img src="images/glyphwire_icon.svg" alt="" width="22" height="22">
+      <span>glyphwire</span>
+    </div>
+    <nav aria-label="Project links">
+      <a href="https://github.com/srjilarious/glyphwire">GitHub</a>
+      <a href="https://github.com/srjilarious/glyphwire/releases">Releases</a>
+      <a href="https://github.com/srjilarious/glyphwire/blob/main/docs/protocol.md">Protocol</a>
+      <a href="https://github.com/srjilarious/glyphwire/blob/main/docs/apps.md">Apps</a>
+      <a href="https://github.com/srjilarious/glyphwire/issues">Issues</a>
+    </nav>
+    <p class="muted">&copy; 2026 Jeff DeWall. Site content CC-BY-4.0.</p>
+  </div>
+</footer>
+
+</body>
+</html>

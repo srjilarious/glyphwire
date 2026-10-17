@@ -9,3 +9,6 @@ docker/remote-test/dist/
 # locally with `zig build package --prefix $PWD/glyphwire-linux-x86_64`.
 glyphwire-linux-x86_64/
 glyphwire-linux-x86_64.tar.gz
+
+# The assembled website, from scripts/build-site.sh.
+_site/

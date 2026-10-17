@@ -9,6 +9,11 @@
 > projects). If glyphwire ever becomes something you would go to court
 > over, have a solicitor review this before relying on it.
 
+> **Pull requests are by invitation.** glyphwire follows a remix model
+> (see [`CONTRIBUTING.md`](CONTRIBUTING.md)): issues and forks are the
+> normal ways to take part, and this agreement only comes into play for a
+> pull request the maintainer has asked for.
+
 By contributing to glyphwire you agree to the terms below. You do not need
 to send anything separately: the act of signing off a contribution (see
 [How to sign](#how-to-sign)) is your agreement.

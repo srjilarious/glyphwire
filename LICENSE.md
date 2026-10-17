@@ -43,6 +43,7 @@ people embed. They are GPL-3.0-or-later.
 |---|---|
 | `docs/` | the protocol specification, design decisions, roadmap |
 | `README.md` | |
+| `site/` | the project website |
 
 ### `MPL-2.0`
 
@@ -67,6 +68,8 @@ people embed. They are GPL-3.0-or-later.
 | `shell/` | `gw-shell` — the glyphwire-aware shell |
 | `gmux/` | `gmux` — the window multiplexer |
 | `ls/` | `gw-ls` — the directory lister |
+| `grep/` | `gw-grep` — the ripgrep outline browser |
+| `hist/` | `gw-hist` — the history search |
 | `view/` | `gw-view` — the file viewer |
 | `read/` | `gw-read` — the comic/manga reader |
 | `md/` | `gwmd` — the Markdown reader |

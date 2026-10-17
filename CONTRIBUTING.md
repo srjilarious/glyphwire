@@ -1,20 +1,44 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # Contributing to glyphwire
 
-Thanks for looking. glyphwire is pre-1.0 and moving quickly; the fastest
-way to have a change accepted is to open an issue describing it before
-writing much code.
+Thanks for looking. glyphwire follows a **remix model**: it is one
+person's take on what a terminal could be, and it moves quickly in the
+direction that person wants. That shapes how to take part.
 
-**Before your first pull request, read [`CLA.md`](CLA.md).** Contributions
-are accepted under a Contributor Licence Agreement that assigns copyright
-to the maintainer, so the project stays relicensable by a single decision.
-It grants your own work back to you under Apache-2.0, so it costs you
-nothing you had before. Signing is two lines in a commit — see
+## Issues: the way in
+
+Bug reports, reproduction cases, feature requests, design feedback,
+documentation corrections and questions are all welcome as
+[GitHub issues](https://github.com/srjilarious/glyphwire/issues). They
+need **no agreement of any kind**. "Would it make sense for glyphwire to do
+X?" is a perfectly good issue.
+
+A good bug report says which program and version (`<program> --version`),
+what you did, what you expected and what happened instead. For a drawing
+bug, a screenshot and the program that drew it help most.
+
+## Forks: encouraged
+
+Fork it and make it yours. Change the keys, rip out an app, write a host
+in another language, take the protocol somewhere new. The licences
+([`LICENSE.md`](LICENSE.md)) are chosen so you can, and you don't need
+permission or need to send anything back. The rest of this document (setup,
+tests, licensing zones, conventions) is as useful on a fork as it is here.
+
+## Pull requests: by invitation
+
+Unsolicited pull requests will most likely be closed without a detailed
+review, however good they are. Merging a change means maintaining it and
+the direction it takes the project, and that is the part this project
+keeps to itself.
+
+If you think a change belongs upstream, **open an issue first**. If the
+maintainer agrees and asks for a PR, it is accepted under a Contributor
+Licence Agreement: read [`CLA.md`](CLA.md) before sending one. The CLA
+assigns copyright to the maintainer, so the project stays relicensable by a
+single decision, and grants your own work back to you under Apache-2.0, so
+it costs you nothing you had before. Signing is two lines in a commit; see
 [Signing off](#signing-off).
-
-Bug reports, reproduction cases, design feedback and documentation
-corrections need **no agreement at all**. If you can't sign the CLA, those
-are still very welcome.
 
 ## Getting set up
 
@@ -49,7 +73,7 @@ zig build package         # only the shipped programs, grammars and assets
 
 ## Tests
 
-**Every pull request must keep `zig build tests` green.** It is currently
+**Every change must keep `zig build tests` green.** It is currently
 937 tests and takes about eight seconds; there is no excuse for skipping
 it.
 
@@ -250,6 +274,9 @@ people who will never read this repository. Write for them.
 
 ## Commits and pull requests
 
+These apply to every commit in this repository, and to an invited pull
+request.
+
 **Commit subjects are written in the past tense**, describing what the
 commit did:
 
@@ -286,7 +313,8 @@ is two pull requests.
 
 ## Signing off
 
-On your **first** contribution, add yourself to
+Only for a pull request the maintainer asked for. On your **first**
+contribution, add yourself to
 [`CONTRIBUTORS.md`](CONTRIBUTORS.md) in the same pull request:
 
 ```
@@ -309,5 +337,5 @@ reasonable window before disclosure.
 
 ## Questions
 
-Open an issue. "Would you accept a change that does X?" is a perfectly good
-one to ask before writing it, and will save you time.
+Open an issue. Asking before writing code saves you time whether you end
+up sending a change here or keeping it on your fork.
