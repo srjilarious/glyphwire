@@ -13,6 +13,7 @@ const ls_icons = @import("applib").icons;
 const editor = @import("editor.zig");
 const display = @import("display.zig");
 const softwrap = @import("wrap.zig");
+const rowcount = @import("rowcount.zig");
 const search = @import("search.zig");
 const tree_mod = @import("tree.zig");
 const homepath = @import("applib").homepath;
@@ -236,8 +237,11 @@ pub fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
             };
             self.buf.hl_edits = self.buf.ed.buf.edits;
         }
-        self.buf.ed.buf.clearEdits();
     }
+    // The journal's last reader this frame, highlighter or not:
+    // `syncBufferScrollbar` above has followed it into `rows` already.
+    self.buf.ed.buf.clearEdits();
+    self.buf.rows_applied = 0;
     // Every row this frame paints reads its colours from the cache;
     // fill in the visible lines it is missing first, a run at a time.
     self.fillSpanCache();
@@ -1484,6 +1488,13 @@ pub fn lineRows(self: *Ui, line: usize) usize {
     if (line >= self.buf.ed.buf.lineCount()) return 1;
     if (fold.isHidden(self.buf.ed.hiddenLines(), line)) return 0;
     if (!self.buf.ed.wrap) return 1;
+    return self.wrappedLineRows(line);
+}
+
+/// `lineRows` for a line in a wrapped pane, closed folds or not: what
+/// `RowCounts` stores, since a fold opening doesn't rewrap anything.
+pub fn wrappedLineRows(self: *Ui, line: usize) usize {
+    if (line >= self.buf.ed.buf.lineCount()) return 1;
     const text = self.buf.ed.buf.lineText(self.alloc, line) catch return 1;
     defer self.alloc.free(text);
     return softwrap.rowCount(text, self.displayOpts(), self.textCols());
@@ -1621,42 +1632,58 @@ pub fn wrappedScrollDelta(self: *Ui, rows: usize) ?i64 {
 
 /// Applies a host-driven scroll of group `g`'s buffer pane (wheel or
 /// thumb drag): moves the view and drags the cursor back onto it,
-/// keeping its column. Records the new position as already pushed so
-/// the next `syncBufferScrollbar` doesn't bounce it back to the host.
-/// Any group, not only the focused one -- the wheel follows the
-/// pointer, not the keyboard.
+/// keeping its column. `row` is a screen row, as the bar counts them
+/// (`barRows`). Records the new position as already pushed so the next
+/// `syncBufferScrollbar` doesn't bounce it back to the host. Any group,
+/// not only the focused one -- the wheel follows the pointer, not the
+/// keyboard.
 pub fn scrollGroupTo(self: *Ui, g: *Group, row: usize, col: usize) void {
     const b = g.buffer_bounds;
     if (b.rows == 0) return;
     const slot = g.slot();
-    // A row inside a closed fold isn't on screen. Scrolling down past
-    // one lands below it rather than back on its first line, or the
-    // wheel could never get past a fold longer than one notch.
-    const hidden = slot.ed.hiddenLines();
-    slot.top_line = if (fold.rangeOf(hidden, row)) |r|
-        (if (row > slot.top_line and r.last + 1 < slot.ed.buf.lineCount()) r.last + 1 else r.first - 1)
-    else
-        row;
-    // The host scrolls in buffer lines (the bar's extent is the line
-    // count), so a wrapped view lands on a line's first row.
-    slot.top_sub = 0;
+    const focused_grp = self.grp;
+    const focused_buf = self.buf;
+    self.grp = g;
+    self.buf = slot;
+    defer {
+        self.grp = focused_grp;
+        self.buf = focused_buf;
+    }
+
+    // The bar counts only rows on screen, so the row asked for is never
+    // inside a closed fold, and wrapped it can be part-way down a line.
+    const top = self.placeOfRow(row);
+    slot.top_line = top.line;
+    slot.top_sub = top.sub;
     slot.left_col = if (slot.ed.wrap) 0 else col;
 
     const cur = slot.ed.pos();
     const last = slot.ed.buf.lineCount() -| 1;
-    // From `top_line`, not `row`: the row asked for may have been a
-    // hidden one, and a cursor dragged into a closed fold would open it.
-    const clamped_line = std.math.clamp(cur.line, slot.top_line, @min(self.lastWholeLine(g), last));
+    // A line whose first rows are scrolled off the top isn't one the
+    // cursor can keep its column on without pulling the view back.
+    const last_whole = @min(self.lastWholeLine(g), last);
+    const first_whole = if (slot.top_sub > 0 and slot.top_line + 1 <= last_whole) slot.top_line + 1 else slot.top_line;
+    const clamped_line = std.math.clamp(cur.line, first_whole, last_whole);
     if (clamped_line != cur.line) {
         slot.ed.cursor = slot.ed.buf.offsetOf(.{ .line = clamped_line, .col = cur.col });
     }
-    // What the host's bar holds now is `row`, not `top_line`. When a
-    // closed fold moved the view off `row`, the difference makes
-    // `syncBufferScrollbar` push `top_line` back, so the next wheel
-    // step starts from the line on screen rather than from inside the
-    // fold -- otherwise the wheel walks the hidden lines a notch at a
-    // time while the view sits still.
-    slot.pushed_bar = .{ slot.ed.buf.lineCount(), b.cols, row, slot.left_col };
+    // Left on the top line -- one taller than the pane, with no whole
+    // line to go to -- the cursor has to be on one of its rows the pane
+    // shows, or `scrollRowsToCursor` would scroll straight back to it.
+    if (slot.ed.wrap and slot.ed.pos().line == slot.top_line) {
+        const at = self.cursorRowPos();
+        if (at.sub < slot.top_sub or at.sub >= slot.top_sub + b.rows) {
+            if (slot.ed.buf.lineText(self.alloc, slot.top_line)) |text| {
+                defer self.alloc.free(text);
+                const r = softwrap.rowAt(text, self.displayOpts(), self.textCols(), slot.top_sub);
+                slot.ed.cursor = slot.ed.buf.lineStart(slot.top_line) + r.row.start_byte;
+            } else |_| {}
+        }
+    }
+    // What the host's bar holds now is `row`, which is `top`'s row
+    // unless `row` ran past the end; any difference makes
+    // `syncBufferScrollbar` push the real one back.
+    slot.pushed_bar = .{ self.barRows().extent, b.cols, row, slot.left_col };
     // The view moved and the cursor may have been dragged with it;
     // the status row shows both.
     g.buffer_dirty = true;
@@ -1688,24 +1715,96 @@ pub fn lastWholeLine(self: *Ui, g: *Group) usize {
 }
 
 /// Keeps the buffer layer's host-drawn scrollbar in step with zoe's
-/// own scroll state: the content extent is the line count (the width
-/// is just the pane's, so no horizontal bar), and the offset is
-/// `top_line`/`left_col`. Only sent when something changed, so a
-/// still buffer is silent. A wheel or thumb drag over the pane comes
-/// back the other way as a `scroll_offset` notification (see
-/// `handleEvent`). Batched with the frame, so the bar never moves
-/// ahead of the rows it describes.
+/// own scroll state: the content extent is the screen rows the buffer
+/// takes (`barRows`; the width is just the pane's, so no horizontal
+/// bar), and the offset is the top row's and `left_col`. Only sent when
+/// something changed, so a still buffer is silent. A wheel or thumb drag
+/// over the pane comes back the other way as a `scroll_offset`
+/// notification (see `handleEvent`). Batched with the frame, so the bar
+/// never moves ahead of the rows it describes.
 pub fn syncBufferScrollbar(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     const b = self.grp.buffer_bounds;
-    const now: [4]usize = .{ self.buf.ed.buf.lineCount(), b.cols, self.buf.top_line, self.buf.left_col };
+    const bar = self.barRows();
+    const now: [4]usize = .{ bar.extent, b.cols, bar.top, self.buf.left_col };
     if (std.mem.eql(usize, &now, &self.buf.pushed_bar)) return;
 
     if (now[0] != self.buf.pushed_bar[0] or now[1] != self.buf.pushed_bar[1]) {
         try batch.setLayerContentExtent(self.grp.buffer_layer, now[1], now[0]);
     }
-    try batch.setLayerScrollOffset(self.grp.buffer_layer, self.buf.top_line, self.buf.left_col);
+    try batch.setLayerScrollOffset(self.grp.buffer_layer, bar.top, self.buf.left_col);
     self.buf.pushed_bar = now;
 }
+
+/// The buffer pane's vertical extent and scroll position in screen
+/// rows, the units the host's bar and its wheel clamp work in. Counting
+/// lines instead stops the wheel `extent - rows` lines down, which
+/// wrapped lines leave short of the last screen, and lets it run past
+/// the end of a buffer with closed folds.
+pub const BarRows = struct { extent: usize, top: usize };
+
+pub fn barRows(self: *Ui) BarRows {
+    const line_count = self.buf.ed.buf.lineCount();
+    const hidden: []const fold.Range = if (self.buf.ed.hasClosedFolds()) self.buf.ed.hiddenLines() else &.{};
+    // Nothing keeps unwrapped counts in step with edits, so they are
+    // dropped and counted afresh when `wrap` comes back on.
+    if (!self.buf.ed.wrap) self.buf.rows.reset();
+    if (self.buf.ed.wrap and self.syncRowCounts()) {
+        return .{
+            .extent = self.buf.rows.total(hidden),
+            .top = self.buf.rows.rowsAbove(hidden, self.buf.top_line) + self.buf.top_sub,
+        };
+    }
+    return .{
+        .extent = line_count - rowcount.hiddenBefore(hidden, line_count),
+        .top = self.buf.top_line -| rowcount.hiddenBefore(hidden, self.buf.top_line),
+    };
+}
+
+/// The line and wrapped row at the top of the pane when it is scrolled
+/// to screen row `row` -- `barRows` the other way round.
+pub fn placeOfRow(self: *Ui, row: usize) RowPos {
+    const hidden: []const fold.Range = if (self.buf.ed.hasClosedFolds()) self.buf.ed.hiddenLines() else &.{};
+    if (self.buf.ed.wrap and self.syncRowCounts()) {
+        const p = self.buf.rows.placeOf(hidden, row);
+        return .{ .line = p.line, .sub = p.sub };
+    }
+    return .{ .line = rowcount.unwrappedLineOf(hidden, row, self.buf.ed.buf.lineCount()), .sub = 0 };
+}
+
+/// Brings the active slot's `rows` up to date with its text and the
+/// pane's width: follows the edits the journal holds that it hasn't yet,
+/// then counts whatever lines that left uncounted. False when it
+/// couldn't (out of memory), and the caller falls back to counting
+/// lines. Only meaningful with `wrap` on.
+pub fn syncRowCounts(self: *Ui) bool {
+    const slot = self.buf;
+    const buf = &slot.ed.buf;
+    if (buf.edits_overflowed) {
+        slot.rows.reset();
+    } else {
+        for (buf.pending_edits.items[@min(slot.rows_applied, buf.pending_edits.items.len)..]) |e| {
+            slot.rows.applyEdit(self.alloc, e.start_point.line, e.old_end_point.line, e.new_end_point.line) catch
+                slot.rows.reset();
+        }
+    }
+    slot.rows_applied = buf.pending_edits.items.len;
+    const opts = self.displayOpts();
+    slot.rows.sync(self.alloc, .{
+        .cols = self.textCols(),
+        .tab_width = opts.tab_width,
+        .show_whitespace = opts.show_whitespace,
+    }, buf.lineCount()) catch return false;
+    slot.rows.fill(WrappedRows{ .ui = self });
+    return true;
+}
+
+/// `RowCounts.fill`'s view of the active slot.
+const WrappedRows = struct {
+    ui: *Ui,
+    pub fn lineRows(self: WrappedRows, line: usize) usize {
+        return self.ui.wrappedLineRows(line);
+    }
+};
 
 /// How the buffer pane lays a line out, from the active buffer's own
 /// settings. One accessor so every column calculation in this file --

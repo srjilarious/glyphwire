@@ -87,6 +87,7 @@ const jump_mod = @import("jump.zig");
 const jumpglue = @import("jumpglue.zig");
 const profile = @import("profile.zig");
 const SpanCache = @import("spancache.zig").SpanCache;
+const RowCounts = @import("rowcount.zig").RowCounts;
 const selection_diff = @import("selection_diff.zig");
 const diag = @import("diag.zig");
 const hover_mod = @import("hover.zig");
@@ -672,6 +673,14 @@ pub const Slot = struct {
     /// `hl`'s spans for the lines painted so far, kept in step with the
     /// buffer by `syncHighlight` and filled per frame by `fillSpanCache`.
     spans: SpanCache = .{},
+    /// Screen rows per line while `ed.wrap` is on, for the scrollbar
+    /// (`syncRowCounts`). Follows the edit journal alongside `spans`.
+    rows: RowCounts = .{},
+    /// How many of `Buffer.pending_edits` `rows` has already followed:
+    /// the journal is only cleared once per frame, after the
+    /// highlighter, and `rows` may be brought up to date more than once
+    /// before then (a wheel event between frames).
+    rows_applied: usize = 0,
 
     /// The `Buffer.edits` value the language servers have been told about.
     /// A mismatch arms the `didChange` debounce -- deliberately a separate
@@ -727,6 +736,7 @@ pub const Slot = struct {
     pub fn deinit(self: *Slot, alloc: std.mem.Allocator) void {
         if (self.hl) |*h| h.deinit();
         self.spans.deinit(alloc);
+        self.rows.deinit(alloc);
         if (self.abs_path) |p| alloc.free(p);
         if (self.backup_name) |n| alloc.free(n);
         if (self.pending_backup) |t| alloc.free(t);
@@ -1787,6 +1797,10 @@ pub const Ui = struct {
         slot.ed.line_comment = self.lineCommentFor(path);
         slot.ed.colon_block = self.colonBlockFor(path);
         slot.ed.hot_exit = self.backup_dir != null;
+        // The edit journal: the wrapped scrollbar's row counts follow it
+        // (`syncRowCounts`), and so does the incremental reparse when a
+        // highlighter is attached below.
+        slot.ed.buf.track_edits = true;
 
         // Same line vim shows on opening: the file and its length, or
         // that it doesn't exist yet.
@@ -1818,9 +1832,6 @@ pub const Ui = struct {
                 // shared registry; `injections` is the `zoe.conf.lua` switch.
                 const reg: ?*syntax.Registry = if (self.grammars) |*g| g else null;
                 slot.hl.?.configureInjections(reg, cfg.injections);
-                // From here on `Buffer` keeps the edit journal the
-                // incremental reparse replays.
-                slot.ed.buf.track_edits = true;
                 self.selectHighlightLanguage(slot, path);
             } else |_| {}
         }
@@ -5433,6 +5444,7 @@ pub const Ui = struct {
     pub const layoutRows = render_ui.layoutRows;
     pub const RowPos = render_ui.RowPos;
     pub const lineRows = render_ui.lineRows;
+    pub const wrappedLineRows = render_ui.wrappedLineRows;
     pub const cursorRowPos = render_ui.cursorRowPos;
     pub const rowsBetween = render_ui.rowsBetween;
     pub const rowsBack = render_ui.rowsBack;
@@ -5444,6 +5456,9 @@ pub const Ui = struct {
     pub const scrollGroupTo = render_ui.scrollGroupTo;
     pub const lastWholeLine = render_ui.lastWholeLine;
     pub const syncBufferScrollbar = render_ui.syncBufferScrollbar;
+    pub const barRows = render_ui.barRows;
+    pub const placeOfRow = render_ui.placeOfRow;
+    pub const syncRowCounts = render_ui.syncRowCounts;
     pub const displayOpts = render_ui.displayOpts;
     pub const cursorDisplayCol = render_ui.cursorDisplayCol;
     pub const cursorGrapheme = render_ui.cursorGrapheme;

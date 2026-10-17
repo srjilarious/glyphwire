@@ -22,6 +22,7 @@ const search = zoe.search;
 const keys = zoe.keys;
 const tabs = zoe.tabs;
 const SpanCache = zoe.spancache.SpanCache;
+const rowcount = zoe.rowcount;
 const lsp = zoe.lsp;
 const diag = zoe.diag;
 const langconf = zoe.langconf;
@@ -3110,6 +3111,99 @@ pub fn spanCacheFollowsEditsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try cache.sync(alloc, 2, 9);
     try testz.expectEqual(cache.lines.items.len, 9);
     try testz.expectTrue(cache.get(0) == null);
+}
+
+/// `RowCounts.fill`'s line measure for the tests below: line `l` wraps
+/// into `rows[l]` screen rows.
+const FakeRows = struct {
+    rows: []const usize,
+    asked: *usize,
+    pub fn lineRows(self: FakeRows, line: usize) usize {
+        self.asked.* += 1;
+        return self.rows[line];
+    }
+};
+
+pub fn rowCountsReachTheLastWrappedRowTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Ten lines, two of which wrap onto a second row: twelve screen rows.
+    // Counted in lines the bar's extent was ten, so a five-row pane
+    // stopped the wheel at line 5 with rows 10 and 11 still below it.
+    var counts: rowcount.RowCounts = .{};
+    defer counts.deinit(alloc);
+    const rows = [_]usize{ 1, 2, 1, 1, 1, 1, 2, 1, 1, 1 };
+    var asked: usize = 0;
+    try counts.sync(alloc, .{ .cols = 40, .tab_width = 4 }, rows.len);
+    counts.fill(FakeRows{ .rows = &rows, .asked = &asked });
+    try testz.expectEqual(counts.total(&.{}), 12);
+
+    // The wheel's last stop is 12 - 5 = 7: line 6, whose two rows and
+    // lines 7 to 9 are exactly the five the pane shows.
+    const last = counts.placeOf(&.{}, 7);
+    try testz.expectEqual(last.line, 6);
+    try testz.expectEqual(last.sub, 0);
+    // Part-way down a wrapped line, and back.
+    const mid = counts.placeOf(&.{}, 2);
+    try testz.expectEqual(mid.line, 1);
+    try testz.expectEqual(mid.sub, 1);
+    try testz.expectEqual(counts.rowsAbove(&.{}, 1) + mid.sub, 2);
+    try testz.expectEqual(counts.rowsAbove(&.{}, 7), 9);
+    // Past the end is the last line's last row.
+    const past = counts.placeOf(&.{}, 99);
+    try testz.expectEqual(past.line, 9);
+    try testz.expectEqual(past.sub, 0);
+}
+
+pub fn rowCountsSkipClosedFoldsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var counts: rowcount.RowCounts = .{};
+    defer counts.deinit(alloc);
+    const rows = [_]usize{ 1, 2, 3, 1, 2, 1 };
+    var asked: usize = 0;
+    try counts.sync(alloc, .{ .cols = 40, .tab_width = 4 }, rows.len);
+    counts.fill(FakeRows{ .rows = &rows, .asked = &asked });
+    // Lines 2..=3 folded under line 1: their four rows are gone.
+    const hidden = [_]zoe.fold.Range{.{ .first = 2, .last = 3 }};
+    try testz.expectEqual(counts.total(&hidden), 6);
+    try testz.expectEqual(counts.rowsAbove(&hidden, 4), 3);
+    // Row 3 is line 4, the first below the fold, not a hidden one.
+    const below = counts.placeOf(&hidden, 3);
+    try testz.expectEqual(below.line, 4);
+    try testz.expectEqual(below.sub, 0);
+
+    // Unwrapped, a fold just takes its lines out of the count.
+    try testz.expectEqual(rowcount.hiddenBefore(&hidden, 6), 2);
+    try testz.expectEqual(rowcount.hiddenBefore(&hidden, 3), 1);
+    try testz.expectEqual(rowcount.hiddenBefore(&hidden, 2), 0);
+    try testz.expectEqual(rowcount.unwrappedLineOf(&hidden, 1, 6), 1);
+    try testz.expectEqual(rowcount.unwrappedLineOf(&hidden, 2, 6), 4);
+    try testz.expectEqual(rowcount.unwrappedLineOf(&hidden, 9, 6), 5);
+}
+
+pub fn rowCountsFollowEditsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var counts: rowcount.RowCounts = .{};
+    defer counts.deinit(alloc);
+    var rows = [_]usize{ 1, 2, 3, 4, 5, 6, 7 };
+    var asked: usize = 0;
+    const key: rowcount.RowCounts.Key = .{ .cols = 40, .tab_width = 4 };
+    try counts.sync(alloc, key, 5);
+    counts.fill(FakeRows{ .rows = &rows, .asked = &asked });
+    try testz.expectEqual(asked, 5);
+
+    // Two lines inserted after line 1: only line 1 and the new two are
+    // measured again, and old line 2 (three rows) is now line 4.
+    try counts.applyEdit(alloc, 1, 1, 3);
+    try counts.sync(alloc, key, 7);
+    rows = .{ 1, 9, 9, 9, 3, 4, 5 };
+    asked = 0;
+    counts.fill(FakeRows{ .rows = &rows, .asked = &asked });
+    try testz.expectEqual(asked, 3);
+    try testz.expectEqual(counts.counts.items[4], 3);
+    try testz.expectEqual(counts.total(&.{}), 1 + 27 + 3 + 4 + 5);
+
+    // A narrower pane rewraps everything.
+    asked = 0;
+    try counts.sync(alloc, .{ .cols = 20, .tab_width = 4 }, 7);
+    counts.fill(FakeRows{ .rows = &rows, .asked = &asked });
+    try testz.expectEqual(asked, 7);
 }
 
 // ─── Buffer tabs ───────────────────────────────────────────────────────
