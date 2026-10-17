@@ -108,30 +108,52 @@ extern "c" fn execvpe(
 /// `c.environ` and allocates, neither of which `spawn`'s child may do
 /// after it).
 pub fn buildEnvWith(alloc: std.mem.Allocator, extra: []const [:0]const u8) ![:null]?[*:0]const u8 {
+    return buildEnvWithout(alloc, &.{}, extra);
+}
+
+/// `buildEnvWith`, also leaving out every variable named in `drop`. How
+/// a process filters what it hands its children without editing its own
+/// environment: `unsetenv` shifts entries inside the very array Zig's
+/// `std.Io` captured at startup, and its next spawn then reads a slot
+/// that is suddenly null and panics.
+pub fn buildEnvWithout(alloc: std.mem.Allocator, drop: []const []const u8, extra: []const [:0]const u8) ![:null]?[*:0]const u8 {
     var count: usize = 0;
     while (c.environ[count] != null) count += 1;
     const base: []const ?[*:0]const u8 = @ptrCast(c.environ[0..count]);
-    return mergeEnv(alloc, base, extra);
+    return mergeEnv(alloc, base, drop, extra);
 }
 
+/// The variables a glyphwire session sets for the programs inside it:
+/// they name a pane, a context, a layer and a result pipe of *that*
+/// session. A host started from inside another one leaves them out of
+/// everything it spawns; to its own children they would point at the
+/// outer host.
+pub const session_vars = [_][]const u8{
+    "GLYPHWIRE_PANE",
+    "GLYPHWIRE_CTX",
+    "GLYPHWIRE_LAYER",
+    "GLYPHWIRE_RESULT_FD",
+};
+
 /// `base` with `extra` laid over it: an entry of `base` whose name an
-/// `extra` entry also sets is dropped, then every `extra` entry is
+/// `extra` entry also sets, or that `drop` names, is left out, then
+/// every `extra` entry is
 /// appended. Replacing rather than just appending matters because
 /// `getenv` returns the *first* match: a glyphwire-host started from
 /// inside another one's pane carries that pane's `GLYPHWIRE_PANE`, and
 /// appending its own after it left every child it spawned attaching to
 /// the outer host's pane number.
-pub fn mergeEnv(alloc: std.mem.Allocator, base: []const ?[*:0]const u8, extra: []const [:0]const u8) ![:null]?[*:0]const u8 {
+pub fn mergeEnv(alloc: std.mem.Allocator, base: []const ?[*:0]const u8, drop: []const []const u8, extra: []const [:0]const u8) ![:null]?[*:0]const u8 {
     // Counted first so the array is exactly as long as what goes in it:
     // callers free it with `alloc.free`, which needs the true length.
     var kept: usize = 0;
     for (base) |entry| {
-        if (!overridden(std.mem.span(entry.?), extra)) kept += 1;
+        if (!leftOut(std.mem.span(entry.?), drop, extra)) kept += 1;
     }
     const out = try alloc.allocSentinel(?[*:0]const u8, kept + extra.len, null);
     var n: usize = 0;
     for (base) |entry| {
-        if (overridden(std.mem.span(entry.?), extra)) continue;
+        if (leftOut(std.mem.span(entry.?), drop, extra)) continue;
         out[n] = entry;
         n += 1;
     }
@@ -142,9 +164,13 @@ pub fn mergeEnv(alloc: std.mem.Allocator, base: []const ?[*:0]const u8, extra: [
     return out;
 }
 
-/// Whether an `extra` entry sets the variable `entry` names.
-fn overridden(entry: []const u8, extra: []const [:0]const u8) bool {
+/// Whether `drop` names the variable `entry` sets, or an `extra` entry
+/// sets it too.
+fn leftOut(entry: []const u8, drop: []const []const u8, extra: []const [:0]const u8) bool {
     const name = entry[0 .. std.mem.indexOfScalar(u8, entry, '=') orelse entry.len];
+    for (drop) |d| {
+        if (std.mem.eql(u8, d, name)) return true;
+    }
     for (extra) |e| {
         const eq = std.mem.indexOfScalar(u8, e, '=') orelse e.len;
         if (std.mem.eql(u8, e[0..eq], name)) return true;

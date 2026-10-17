@@ -166,7 +166,7 @@
 --     pane_focus_highlight = "pulse",
 --     pane_focus_color = "pane_focus",
 --     pane_focus_pulse_color = "pane_focus_pulse",
---     pane_focus_pulse_seconds = 3,
+--     pane_focus_pulse_seconds = 1.5,
 --
 --     ---- Grid --------------------------------------------------------
 --

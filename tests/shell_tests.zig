@@ -1490,7 +1490,7 @@ pub fn jobStopSecondPressKillsAtOnceTest(_: std.Io, _: std.mem.Allocator) !void 
 /// `GLYPHWIRE_PANE` behind an inherited one was never seen.
 pub fn mergeEnvReplacesInheritedNamesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     const base = [_]?[*:0]const u8{ "HOME=/home/u", "GLYPHWIRE_PANE=2", "GLYPHWIRE_PANEL=x", "PATH=/bin" };
-    const env = try pty.mergeEnv(alloc, &base, &.{ "GLYPHWIRE_PANE=5", "NEW=1" });
+    const env = try pty.mergeEnv(alloc, &base, &.{}, &.{ "GLYPHWIRE_PANE=5", "NEW=1" });
     defer alloc.free(env);
     try testz.expectEqual(env.len, 5);
     try testz.expectEqualStr(std.mem.span(env[0].?), "HOME=/home/u");
@@ -1500,4 +1500,15 @@ pub fn mergeEnvReplacesInheritedNamesTest(_: std.Io, alloc: std.mem.Allocator) !
     try testz.expectEqualStr(std.mem.span(env[3].?), "GLYPHWIRE_PANE=5");
     try testz.expectEqualStr(std.mem.span(env[4].?), "NEW=1");
     try testz.expectTrue(env[5] == null);
+}
+
+/// `drop` leaves a variable out altogether, the way a host started inside
+/// another session sheds that session's pane, layer and result pipe.
+pub fn mergeEnvDropsNamedVariablesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const base = [_]?[*:0]const u8{ "HOME=/home/u", "GLYPHWIRE_RESULT_FD=9", "GLYPHWIRE_LAYER=3" };
+    const env = try pty.mergeEnv(alloc, &base, &pty.session_vars, &.{"GLYPHWIRE_SOCK=/s"});
+    defer alloc.free(env);
+    try testz.expectEqual(env.len, 2);
+    try testz.expectEqualStr(std.mem.span(env[0].?), "HOME=/home/u");
+    try testz.expectEqualStr(std.mem.span(env[1].?), "GLYPHWIRE_SOCK=/s");
 }

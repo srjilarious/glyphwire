@@ -414,7 +414,7 @@ pub fn fontEmojiDefaultsOnTest(_: std.Io, alloc: std.mem.Allocator) !void {
 
 // ─── pane_focus ───────────────────────────────────────────────────────
 
-/// The highlight defaults to a 3-second pulse between the two theme
+/// The highlight defaults to a 1.5-second pulse between the two theme
 /// roles; each key overrides its own part, and a bad value keeps the
 /// default.
 pub fn paneFocusConfigTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -425,7 +425,7 @@ pub fn paneFocusConfigTest(_: std.Io, alloc: std.mem.Allocator) !void {
 
     const none = parse(arena, alloc, "config = {}").pane_focus;
     try testz.expectTrue(none.mode == .pulse);
-    try testz.expectEqual(none.pulse_ms, 3000);
+    try testz.expectEqual(none.pulse_ms, 1500);
     try testz.expectTrue(none.color.role == .pane_focus);
     try testz.expectTrue(none.pulse_color.role == .pane_focus_pulse);
 
@@ -497,10 +497,10 @@ pub fn paneFocusClockTest(_: std.Io, _: std.mem.Allocator) !void {
     const off: hs.pane_focus.PaneFocus = .{ .cfg = .{ .mode = .none } };
     try testz.expectTrue(off.color(&th) == null);
     // Solid is the highlight colour itself; a pulse at its start too.
-    const accent = th.roleColor(.accent);
-    try testz.expectEqual(solid.color(&th).?.b, accent.b);
+    const strong = th.roleColor(.pane_focus);
+    try testz.expectEqual(solid.color(&th).?.b, strong.b);
     pf.tick(2, true, 0);
-    try testz.expectEqual(pf.color(&th).?.b, accent.b);
+    try testz.expectEqual(pf.color(&th).?.b, strong.b);
 }
 
 /// The cells that border a pane are its one-cell ring, corners included;

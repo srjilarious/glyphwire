@@ -42,7 +42,7 @@ pub const Config = struct {
     pulse_ms: f64 = pulse_ms_default,
 };
 
-pub const pulse_ms_default: f64 = 3000;
+pub const pulse_ms_default: f64 = 1500;
 /// Below this a "pulse" is a flicker.
 pub const pulse_ms_min: f64 = 100;
 pub const pulse_ms_max: f64 = 60_000;

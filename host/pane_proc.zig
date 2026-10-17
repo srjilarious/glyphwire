@@ -321,7 +321,9 @@ pub const PaneProcs = struct {
         const ctx_var = try std.fmt.allocPrintSentinel(self.alloc, "GLYPHWIRE_CTX={d}", .{context}, 0);
         errdefer self.alloc.free(ctx_var);
 
-        const envp = try glyphwire.pty.buildEnvWith(self.alloc, &.{ sock, pane_var, ctx_var });
+        // An outer session's variables stay out: this host may have been
+        // started from inside another one (`pty.session_vars`).
+        const envp = try glyphwire.pty.buildEnvWithout(self.alloc, &glyphwire.pty.session_vars, &.{ sock, pane_var, ctx_var });
         return .{ .envp = envp, .owned = .{ sock, pane_var, ctx_var } };
     }
 
