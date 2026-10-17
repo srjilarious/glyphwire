@@ -1963,6 +1963,109 @@ pub fn layerPtyModeCarriesPartialCsiAcrossCallsTest(io: std.Io, alloc: std.mem.A
     try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.ground);
 }
 
+pub fn layerOscTitleWithNonAsciiDrawsNothingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+
+    // Claude Code animates a spinner in the window title. The glyph is
+    // OSC payload, so none of it reaches the grid or moves the cursor
+    // -- it used to be drawn at the input caret on every frame.
+    try layer.writeText("ab\x1b]0;✳ Claude Code\x07c", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("c", layer.cell(0, 2).grapheme());
+    try testz.expectEqualStr("", layer.cell(0, 3).grapheme());
+    try testz.expectEqual(layer.cursor.col, 3);
+
+    // Split across writes, the payload is still swallowed.
+    try layer.writeText("\x1b]0;◐ ", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try layer.writeText("◑ title\x07d", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("d", layer.cell(0, 3).grapheme());
+    try testz.expectEqual(layer.cursor.col, 4);
+
+    // U+009C, the C1 string terminator, ends the OSC too.
+    try layer.writeText("\x1b]2;x\u{9c}e", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("e", layer.cell(0, 4).grapheme());
+}
+
+pub fn layerNonAsciiInsideCsiAbandonsItTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+
+    // A character that can't be part of a CSI cancels it (and is
+    // dropped); the next byte prints normally.
+    try layer.writeText("\x1b[3✳Z", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.ground);
+    try testz.expectEqualStr("Z", layer.cell(0, 0).grapheme());
+    try testz.expectEqual(layer.cursor.col, 1);
+}
+
+pub fn layerEscIntermediateSequenceDrawsNothingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+
+    // DECALN, select-UTF-8, a G2 designation, S7C1T: each ends at its
+    // final byte, which used to print.
+    try layer.writeText("\x1b#8\x1b%G\x1b*0\x1b F" ++ "x", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("x", layer.cell(0, 0).grapheme());
+    try testz.expectEqual(layer.cursor.col, 1);
+}
+
+pub fn layerC0InsideCsiExecutesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+
+    // A CR inside `ESC [ 5 C` returns to column 0 and the CSI still
+    // completes: the cursor ends at column 5.
+    try layer.writeText("abc\x1b[5\rC", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cursor.col, 5);
+    try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.ground);
+
+    // CAN cancels a sequence; its tail prints.
+    layer.cursor = .{ .row = 1, .col = 0 };
+    try layer.writeText("\x1b[3\x18m", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("m", layer.cell(1, 0).grapheme());
+
+    // ESC mid-CSI starts over: `ESC [ 9 ESC [ 2 C` moves 2, not 9.
+    layer.cursor = .{ .row = 2, .col = 0 };
+    try layer.writeText("\x1b[9\x1b[2C", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cursor.col, 2);
+
+    // SUB cancels a string sequence; what follows prints.
+    layer.cursor = .{ .row = 3, .col = 0 };
+    try layer.writeText("\x1b]0;t\x1ay", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("y", layer.cell(3, 0).grapheme());
+}
+
+pub fn layerCursorUpDownStopAtScrollMarginsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 10, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+
+    // Region rows 3..6 (1-based 3;6 -> 0-based 2..5).
+    try layer.writeText("\x1b[3;6r", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    layer.cursor = .{ .row = 4, .col = 0 };
+    try layer.writeText("\x1b[9A", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cursor.row, 2);
+    try layer.writeText("\x1b[9B", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cursor.row, 5);
+
+    // Outside the region the screen edges are the limits.
+    layer.cursor = .{ .row = 1, .col = 0 };
+    try layer.writeText("\x1b[9A", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cursor.row, 0);
+    layer.cursor = .{ .row = 7, .col = 0 };
+    try layer.writeText("\x1b[9B", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqual(layer.cursor.row, 9);
+}
+
 pub fn layerPtyModeKeepsSgrColourAcrossCallsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);

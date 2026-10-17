@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # glyphwire
 
-![Version Badge](https://img.shields.io/badge/Version-0.19.1-brightgreen)
+![Version Badge](https://img.shields.io/badge/Version-0.19.2-brightgreen)
 ![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0-%23f7a41d?logo=zig)
 [![License](https://img.shields.io/badge/License-MPL--2.0%20%7C%20GPL--3.0%20%7C%20CC--BY--4.0-blue)](#license)
 

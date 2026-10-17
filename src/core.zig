@@ -2461,6 +2461,7 @@ pub const Layer = struct {
                     continue;
                 }
                 const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
+                if (cp_bytes.len > 1 and vt.consumeInSequence(self, cp)) continue;
                 // A program's own column math (wcwidth) gives combining
                 // marks, ZWJ and variation selectors no width, so on a
                 // pty stream they join the character before them rather

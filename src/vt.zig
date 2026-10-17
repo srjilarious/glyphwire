@@ -181,7 +181,12 @@ pub const Vt = struct {
 ///  - **discards** every other `ESC [ ...` (CSI) final and every
 ///    `ESC ] ... ` / `ESC P|X|^|_ ... ` (OSC and other string-terminated)
 ///    sequence, same as the old stripper -- recognized well enough to
-///    find the end, then dropped.
+///    find the end, then dropped. So is `ESC` + any other intermediate
+///    (`ESC # 8`, `ESC % G`). A sequence's payload never reaches the
+///    grid, multi-byte characters included (`consumeInSequence`).
+///  - follows xterm for controls *inside* a sequence: a C0 control is
+///    carried out and the sequence goes on, CAN/SUB cancel it, and ESC
+///    starts a new one (`consumeControl`).
 ///
 /// Nothing carries across `writeText` calls. The machine is reset to
 /// `.ground` (and the CSI parameter buffer cleared) at the end of every
@@ -209,6 +214,11 @@ pub const EscState = enum {
     charset_g0,
     /// Saw `ESC )`; the next byte designates G1 (`g1_line_drawing`).
     charset_g1,
+    /// Saw `ESC` and an intermediate byte (0x20..0x2f) other than `(`
+    /// / `)` -- `ESC # 8`, `ESC % G`, `ESC * 0`, `ESC SP F`. More
+    /// intermediates may follow; a final byte (0x30..0x7e) ends it.
+    /// Recognized and dropped.
+    esc_intermediate,
 };
 
 
@@ -620,11 +630,47 @@ pub const SgrPen = struct {
 /// per-control semantics and `EscState` for the escape-strip rationale.
 pub fn consumeControl(self: *Layer, byte: u8) !bool {
     if (self.vt.esc_state != .ground) {
+        // A C0 control inside a sequence is acted on as if it came
+        // before it, and the sequence carries on (xterm, and the DEC
+        // parser it follows): a CR or BS a program emits mid-CSI still
+        // moves the cursor rather than landing in the parameters. CAN
+        // and SUB cancel the sequence, and ESC starts a new one. A
+        // string sequence is different -- its terminators are BEL and
+        // ESC (see `stepEscape`), and any other control is payload.
+        if (byte < 0x20 and self.vt.esc_state != .string) {
+            switch (byte) {
+                0x18, 0x1a => {
+                    self.vt.esc_state = .ground;
+                    self.vt.csi_len = 0;
+                },
+                0x1b => {
+                    self.vt.esc_state = .esc;
+                    self.vt.csi_len = 0;
+                },
+                else => execC0(self, byte),
+            }
+            return true;
+        }
+        if (self.vt.esc_state == .string and (byte == 0x18 or byte == 0x1a)) {
+            self.vt.esc_state = .ground;
+            return true;
+        }
         try stepEscape(self, byte);
         return true;
     }
+    if (byte == 0x1b) {
+        self.vt.esc_state = .esc; // ESC: start of a sequence to strip
+        return true;
+    }
+    if (byte >= 0x20 and byte != 0x7f) return false; // printable
+    execC0(self, byte);
+    return true;
+}
+
+/// Acts on one C0 control byte (or DEL) outside an escape sequence's
+/// own syntax -- see `consumeControl`.
+fn execC0(self: *Layer, byte: u8) void {
     switch (byte) {
-        0x1b => self.vt.esc_state = .esc, // ESC: start of a sequence to strip
         // LF, VT, FF. On an ordinary layer all three are a newline
         // (CR + LF), the cooked-terminal reading a client's `"a\nb"`
         // wants. A `pty_mode` layer takes them literally -- down one
@@ -646,8 +692,32 @@ pub fn consumeControl(self: *Layer, byte: u8) !bool {
         0x0e => self.vt.shift_out = true, // SO -- invoke G1 into GL
         0x0f => self.vt.shift_out = false, // SI -- invoke G0 into GL
         // Every other C0 byte (NUL, BEL, DLE..SUB, FS..US) and DEL: dropped.
-        0x00...0x07, 0x10...0x1a, 0x1c...0x1f, 0x7f => {},
-        else => return false, // printable
+        else => {},
+    }
+}
+
+/// Returns true when the multi-byte codepoint `cp` belongs to an escape
+/// sequence still open (`esc_state != .ground`) and must not be placed
+/// as a grapheme. `consumeControl` only ever sees single bytes, so
+/// without this a non-ASCII character inside a sequence fell through and
+/// was drawn at the cursor -- Claude Code animates its spinner in the
+/// window title (`ESC ] 0 ; ✳ Claude Code BEL`), and every frame left
+/// the glyph wherever its input caret sat.
+///
+/// Inside a string sequence (OSC and friends) the codepoint is payload,
+/// and U+009C, the C1 form of ST, ends it. Anywhere else (`ESC`, CSI, a
+/// charset designation) it can't be part of the sequence, which is
+/// abandoned along with the codepoint.
+pub fn consumeInSequence(self: *Layer, cp: u21) bool {
+    switch (self.vt.esc_state) {
+        .ground => return false,
+        .string => if (cp == 0x9c) {
+            self.vt.esc_state = .ground;
+        },
+        .esc, .csi, .charset_g0, .charset_g1, .esc_intermediate => {
+            self.vt.esc_state = .ground;
+            self.vt.csi_len = 0;
+        },
     }
     return true;
 }
@@ -666,7 +736,6 @@ fn stepEscape(self: *Layer, byte: u8) !void {
                 self.vt.csi_len = 0;
             },
             ']', 'P', 'X', '^', '_' => self.vt.esc_state = .string,
-            0x1b => {}, // ESC ESC -- stay armed for the real sequence
             '7' => { // DECSC -- save cursor
                 saveCursor(self);
                 self.vt.esc_state = .ground;
@@ -702,6 +771,9 @@ fn stepEscape(self: *Layer, byte: u8) !void {
             },
             '(' => self.vt.esc_state = .charset_g0, // designate G0, next byte
             ')' => self.vt.esc_state = .charset_g1, // designate G1, next byte
+            // Any other intermediate (`#`, `%`, `*`, `+`, a space...)
+            // opens a longer escape that its final byte ends.
+            0x20...0x27, 0x2a...0x2f => self.vt.esc_state = .esc_intermediate,
             // Anything else is a short two-byte escape (or the ST
             // half of `ESC \`) -- it ends here.
             else => self.vt.esc_state = .ground,
@@ -712,6 +784,8 @@ fn stepEscape(self: *Layer, byte: u8) !void {
                 try execCsi(self, byte);
                 self.vt.esc_state = .ground;
                 self.vt.csi_len = 0;
+            } else if (byte == 0x7f) {
+                // DEL is ignored anywhere in a CSI.
             } else if (self.vt.csi_len < self.vt.csi_buf.len) {
                 // Parameter (0x30-0x3f) / intermediate (0x20-0x2f)
                 // byte -- accumulate for `execCsi`.
@@ -733,6 +807,9 @@ fn stepEscape(self: *Layer, byte: u8) !void {
         },
         .charset_g1 => {
             self.vt.g1_line_drawing = byte == '0';
+            self.vt.esc_state = .ground;
+        },
+        .esc_intermediate => if (byte >= 0x30 and byte <= 0x7e) {
             self.vt.esc_state = .ground;
         },
     }
@@ -1095,7 +1172,8 @@ fn csiParam(params: []const u8, index: usize, default_val: usize) usize {
 }
 
 /// Cursor-movement CSI finals. **Every one clamps to the screen and
-/// never scrolls** -- a real terminal only scrolls on a line feed /
+/// never scrolls** (the vertical relative moves stop at the scroll
+/// region's margins too -- `cursorUp`/`cursorDown`) -- a real terminal only scrolls on a line feed /
 /// `IND` / `RI` / an explicit scroll command, never on a cursor
 /// address. (This used to route downward/absolute-row moves through
 /// `resolveRow`, which scrolls; harmless for Phase A's colour+
@@ -1109,16 +1187,16 @@ fn csiCursor(self: *Layer, final: u8, params: []const u8) void {
     const last_row = self.height - 1;
     self.cursor.col = pendingCol(self);
     switch (final) {
-        'A' => self.cursor.row -|= @max(csiParam(params, 0, 1), 1),
-        'B', 'e' => self.cursor.row = @min(self.cursor.row + @max(csiParam(params, 0, 1), 1), last_row), // CUD / VPR
+        'A' => cursorUp(self, @max(csiParam(params, 0, 1), 1)),
+        'B', 'e' => cursorDown(self, @max(csiParam(params, 0, 1), 1)), // CUD / VPR
         'C', 'a' => self.cursor.col = @min(self.cursor.col + @max(csiParam(params, 0, 1), 1), self.width - 1), // CUF / HPR
         'D' => self.cursor.col -|= @max(csiParam(params, 0, 1), 1),
         'E' => { // CNL -- down n lines, to column 0
-            self.cursor.row = @min(self.cursor.row + @max(csiParam(params, 0, 1), 1), last_row);
+            cursorDown(self, @max(csiParam(params, 0, 1), 1));
             self.cursor.col = 0;
         },
         'F' => { // CPL -- up n lines, to column 0
-            self.cursor.row -|= @max(csiParam(params, 0, 1), 1);
+            cursorUp(self, @max(csiParam(params, 0, 1), 1));
             self.cursor.col = 0;
         },
         'G', '`' => self.cursor.col = @min(@max(csiParam(params, 0, 1), 1) - 1, self.width - 1), // CHA / HPA
@@ -1129,6 +1207,20 @@ fn csiCursor(self: *Layer, final: u8, params: []const u8) void {
         },
         else => unreachable,
     }
+}
+
+/// CUU / CPL: up `n` rows, stopping at the top margin when the cursor
+/// starts inside the scroll region (xterm's rule), else at row 0.
+fn cursorUp(self: *Layer, n: usize) void {
+    const stop = if (self.cursor.row >= self.vt.scroll_top) self.vt.scroll_top else 0;
+    self.cursor.row = @max(self.cursor.row -| n, stop);
+}
+
+/// CUD / VPR / CNL: down `n` rows, stopping at the bottom margin when
+/// the cursor starts inside the scroll region, else at the last row.
+fn cursorDown(self: *Layer, n: usize) void {
+    const stop = if (self.cursor.row <= self.vt.scroll_bot) self.vt.scroll_bot else self.height - 1;
+    self.cursor.row = @min(self.cursor.row +| n, stop);
 }
 
 /// `ESC [ <n> K` -- erase in line: 0 = cursor to end of line
