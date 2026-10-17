@@ -157,6 +157,29 @@
 --     -- changes it live.
 --     wrap = false,
 --
+--     -- Enter, `o` and `O` start the new line at the current line's
+--     -- indent, one level deeper after a line ending in `(`, `[` or `{`
+--     -- (or `:` in Python); Enter between a pair (`{|}`) puts the
+--     -- closer on its own line; a closing bracket typed on a blank line
+--     -- lines up with its opener. `:set autoindent=on|off` changes it
+--     -- live.
+--     auto_indent = true,
+--
+--     -- Typing `(`, `[`, `{`, `"`, `'` or a backtick also types its
+--     -- partner after the caret (only before a blank, the line's end or
+--     -- closing punctuation). Typing the partner then steps over it,
+--     -- Backspace between the two deletes both, and over a Shift+arrow
+--     -- selection the pair goes round it. `:set autoclose=on|off`
+--     -- changes it live.
+--     auto_close = true,
+--
+--     -- A gutter column showing ▾ beside each line that can fold (the
+--     -- next non-blank line is indented further) and ▸ beside a closed
+--     -- fold; click either to toggle it. `:set foldcolumn=on|off`
+--     -- changes it live. Folding itself (za, zc, zo, zM, zR,
+--     -- Ctrl+Shift+[ and ]) works either way.
+--     fold_column = true,
+--
 --     -- Milliseconds the pointer rests on a tab before the file's full
 --     -- path pops up under it. 0 shows it at once.
 --     tab_tooltip_delay_ms = 400,

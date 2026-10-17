@@ -107,6 +107,15 @@ pub const Action = enum {
     copyLinesDown,
     /// Line comments on or off for the cursor line or the selected lines.
     toggleComment,
+    /// Close the innermost open fold around the cursor (`zc`).
+    fold,
+    /// Open the closed fold on the cursor's line (`zo`).
+    unfold,
+    /// `za`: open it if closed, else close the one the cursor is in.
+    toggleFold,
+    /// Every fold closed (`zM`) / open (`zR`).
+    foldAll,
+    unfoldAll,
 
     /// Insert mode's typing keys. Over a selection they replace it.
     newline,
@@ -150,6 +159,10 @@ pub const Action = enum {
             .indent => "Indent Lines",
             .dedent => "Dedent Lines",
             .toggleComment => "Toggle Line Comment",
+            .fold => "Fold",
+            .unfold => "Unfold",
+            .foldAll => "Fold All",
+            .unfoldAll => "Unfold All",
             .paste => "Paste from Clipboard",
             .cut => "Cut to Clipboard",
             else => null,
@@ -231,6 +244,11 @@ pub const global_defaults = [_]Default{
     .{ .chord = "shift+alt+up", .action = .copyLinesUp },
     .{ .chord = "shift+alt+down", .action = .copyLinesDown },
     .{ .chord = "ctrl+slash", .action = .toggleComment },
+    // VS Code's fold chords. Its fold-all / unfold-all are Ctrl+K
+    // chords, and Ctrl+K is focus-up here, so those two are the
+    // palette's (and `keys`') alone.
+    .{ .chord = "ctrl+shift+left_bracket", .action = .fold },
+    .{ .chord = "ctrl+shift+right_bracket", .action = .unfold },
 };
 
 /// vim's chords with no printable key to carry them, and Tab as `>>`.

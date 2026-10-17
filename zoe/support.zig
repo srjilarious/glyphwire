@@ -32,6 +32,7 @@ pub const pathmenu = @import("pathmenu.zig");
 pub const workspace = @import("workspace.zig");
 pub const hangup = @import("hangup.zig");
 pub const ext = @import("ext.zig");
+pub const fold = @import("fold.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const GapBuffer = buffer.GapBuffer;

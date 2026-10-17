@@ -516,6 +516,12 @@ const EdSnapshot = struct {
     expand_tab: bool,
     show_whitespace: bool,
     wrap: bool,
+    auto_indent: bool,
+    auto_close: bool,
+    fold_column: bool,
+    /// `Buffer.folds_gen`: a fold opening or closing redraws the pane
+    /// without the cursor or the text having moved.
+    folds_gen: u64,
     /// The mode and selection anchor so a bare `v` / `V` / `<esc>` / `o`
     /// -- which can change the highlighted range without moving the
     /// cursor -- still repaints the buffer pane.
@@ -544,6 +550,10 @@ const EdSnapshot = struct {
             .expand_tab = ed.expand_tab,
             .show_whitespace = ed.show_whitespace,
             .wrap = ed.wrap,
+            .auto_indent = ed.auto_indent,
+            .auto_close = ed.auto_close,
+            .fold_column = ed.fold_column,
+            .folds_gen = ed.buf.folds_gen,
             .mode = ed.mode,
             .anchor = ed.select_anchor,
             .match_hash = matchHash(ed),
@@ -556,7 +566,9 @@ const EdSnapshot = struct {
             a.line_numbers == b.line_numbers and a.mode == b.mode and a.anchor == b.anchor and
             a.match_hash == b.match_hash and a.match == b.match and
             a.tab_width == b.tab_width and a.expand_tab == b.expand_tab and
-            a.show_whitespace == b.show_whitespace and a.wrap == b.wrap;
+            a.show_whitespace == b.show_whitespace and a.wrap == b.wrap and
+            a.auto_indent == b.auto_indent and a.auto_close == b.auto_close and
+            a.fold_column == b.fold_column and a.folds_gen == b.folds_gen;
     }
 
     /// Zero when nothing is highlighted, otherwise a hash of the pattern
@@ -595,6 +607,10 @@ pub const Slot = struct {
     /// takes moves every row below it, which the localised repaint can't
     /// express; a changed digest sends it down the full path instead.
     prev_row_hash: u64 = 0,
+    /// `Buffer.folds_gen` when the layer was last drawn. A fold opening
+    /// or closing moves every row below it, so a change forces a full
+    /// repaint.
+    prev_folds_gen: u64 = 0,
     /// The scroll position and edit count the buffer layer's cells
     /// currently reflect. `renderBuffer` diffs against these to shift the
     /// rows it already drew (`move_content`) on a pure scroll instead of
@@ -1651,6 +1667,7 @@ pub const Ui = struct {
         slot.ed.cmd_history = &self.cmd_history;
         slot.ed.search_history = &self.search_history;
         slot.ed.line_comment = self.lineCommentFor(path);
+        slot.ed.colon_block = self.colonBlockFor(path);
 
         // Same line vim shows on opening: the file and its length, or
         // that it doesn't exist yet.
@@ -1672,6 +1689,9 @@ pub const Ui = struct {
             slot.ed.expand_tab = cfg.expand_tab;
             slot.ed.show_whitespace = cfg.show_whitespace;
             slot.ed.wrap = cfg.wrap;
+            slot.ed.auto_indent = cfg.auto_indent;
+            slot.ed.auto_close = cfg.auto_close;
+            slot.ed.fold_column = cfg.fold_column;
 
             if (syntax.Highlighter.init(self.alloc, syntax.Theme.fromTheme(&self.th.theme))) |h| {
                 slot.hl = h;
@@ -1701,6 +1721,9 @@ pub const Ui = struct {
             slot.ed.expand_tab = self.buf.ed.expand_tab;
             slot.ed.show_whitespace = self.buf.ed.show_whitespace;
             slot.ed.wrap = self.buf.ed.wrap;
+            slot.ed.auto_indent = self.buf.ed.auto_indent;
+            slot.ed.auto_close = self.buf.ed.auto_close;
+            slot.ed.fold_column = self.buf.ed.fold_column;
         }
         return slot;
     }
@@ -2890,7 +2913,10 @@ pub const Ui = struct {
             after.tab_width != before.tab_width or
             after.expand_tab != before.expand_tab or
             after.show_whitespace != before.show_whitespace or
-            after.wrap != before.wrap)
+            after.wrap != before.wrap or
+            after.auto_indent != before.auto_indent or
+            after.auto_close != before.auto_close or
+            after.fold_column != before.fold_column)
         {
             self.buf.full_redraw = true;
             for (self.group_list.items) |g| {
@@ -2900,6 +2926,9 @@ pub const Ui = struct {
                     slot.ed.expand_tab = after.expand_tab;
                     slot.ed.show_whitespace = after.show_whitespace;
                     slot.ed.wrap = after.wrap;
+                    slot.ed.auto_indent = after.auto_indent;
+                    slot.ed.auto_close = after.auto_close;
+                    slot.ed.fold_column = after.fold_column;
                     slot.full_redraw = true;
                 }
                 // The groups not being typed in show it too.
@@ -3042,6 +3071,13 @@ pub const Ui = struct {
                     self.setActive(h.index);
                     self.tab_drag = .{ .slot = self.buf, .start = ev.cell };
                 }
+                return;
+            }
+            if (self.foldMarkerAt(ev.cell)) |line| {
+                try self.buf.ed.toggleFoldAt(line);
+                self.focus = .buffer;
+                self.grp.buffer_dirty = true;
+                self.status_dirty = true;
                 return;
             }
             if (self.cellInBuffer(ev.cell)) |byte| {
@@ -3300,6 +3336,22 @@ pub const Ui = struct {
         if (!self.tab_tip_shown) return;
         self.tab_tip_shown = false;
         self.tab_tip_dirty = true;
+    }
+
+    /// The buffer line whose fold-column cell `cell` is, or null when
+    /// it isn't one: off the column, a wrapped line's continuation row,
+    /// or below the buffer's end.
+    pub fn foldMarkerAt(self: *Ui, cell: glyphwire.CellPos) ?usize {
+        if (self.foldWidth() == 0) return null;
+        const b = self.grp.buffer_bounds;
+        if (cell.row < b.row or cell.row >= b.row + b.rows) return null;
+        if (cell.col != b.col + self.signWidth()) return null;
+        self.layoutRows() catch return null;
+        const r = cell.row - b.row;
+        if (r >= self.row_map.items.len) return null;
+        const rv = self.row_map.items[r];
+        if (rv.sub > 0 or rv.line >= self.buf.ed.buf.lineCount()) return null;
+        return rv.line;
     }
 
     /// The buffer byte offset under grid cell `cell`, or null if the
@@ -4566,6 +4618,15 @@ pub const Ui = struct {
         return syntax.lineCommentFor(langs, p);
     }
 
+    /// Whether a line ending in `:` opens a block in `path`'s language,
+    /// for auto-indent. Python is the one bundled language that does.
+    pub fn colonBlockFor(self: *const Ui, path: ?[]const u8) bool {
+        const p = path orelse return false;
+        const langs = if (self.hl_config) |cfg| cfg.langs else &syntax.default_langs;
+        const lang = syntax.languageFor(langs, p) orelse return false;
+        return std.mem.eql(u8, lang, "python");
+    }
+
     pub fn save(self: *Ui, target: ?[]const u8) void {
         const dest = target orelse self.buf.ed.path orelse {
             self.buf.ed.setStatus("E32: No file name", .{});
@@ -4582,6 +4643,7 @@ pub const Ui = struct {
             self.buf.ed.setPath(t) catch {};
             // Saved under a new extension, it may be another language now.
             self.buf.ed.line_comment = self.lineCommentFor(t);
+            self.buf.ed.colon_block = self.colonBlockFor(t);
             // The buffer is a different file now, so the cached absolute
             // path and whatever the servers were told about the old name
             // both stop being true.
@@ -4868,12 +4930,14 @@ pub const Ui = struct {
     pub const dirtyLineListed = render_ui.dirtyLineListed;
     pub const renderBufferRows = render_ui.renderBufferRows;
     pub const gutterWidth = render_ui.gutterWidth;
+    pub const foldWidth = render_ui.foldWidth;
     pub const signWidth = render_ui.signWidth;
     pub const textCols = render_ui.textCols;
     pub const renderGutterCell = render_ui.renderGutterCell;
     pub const diagSeverityForLine = render_ui.diagSeverityForLine;
     pub const renderBufferRow = render_ui.renderBufferRow;
     pub const paintDiagnosticRow = render_ui.paintDiagnosticRow;
+    pub const paintFoldTail = render_ui.paintFoldTail;
     pub const hoverRect = render_ui.hoverRect;
     pub const renderHover = render_ui.renderHover;
     pub const hideHover = render_ui.hideHover;
@@ -4900,6 +4964,7 @@ pub const Ui = struct {
     pub const rowPosBefore = render_ui.rowPosBefore;
     pub const scrollBufferToCursor = render_ui.scrollBufferToCursor;
     pub const scrollWrappedToCursor = render_ui.scrollWrappedToCursor;
+    pub const scrollRowsToCursor = render_ui.scrollRowsToCursor;
     pub const wrappedScrollDelta = render_ui.wrappedScrollDelta;
     pub const scrollGroupTo = render_ui.scrollGroupTo;
     pub const lastWholeLine = render_ui.lastWholeLine;

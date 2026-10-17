@@ -31,6 +31,7 @@ const wrap_mod = @import("wrap.zig");
 const search = @import("search.zig");
 const cmdhistory = @import("cmdhistory.zig");
 const actions = @import("actions.zig");
+const fold = @import("fold.zig");
 
 const Buffer = buffer.Buffer;
 const Pos = buffer.Pos;
@@ -189,6 +190,32 @@ pub const Outcome = union(enum) {
     shell_position: ?[]const u8,
 };
 
+/// The closer auto-close types after opener `c`, or null when `c` opens
+/// nothing. Quotes are their own closers.
+pub fn pairCloser(c: u8) ?u8 {
+    return switch (c) {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        '"', '\'', '`' => c,
+        else => null,
+    };
+}
+
+/// The opening bracket closing bracket `c` matches, or null.
+pub fn pairOpener(c: u8) ?u8 {
+    return switch (c) {
+        ')' => '(',
+        ']' => '[',
+        '}' => '{',
+        else => null,
+    };
+}
+
+fn isQuote(c: u8) bool {
+    return c == '"' or c == '\'' or c == '`';
+}
+
 pub const Editor = struct {
     alloc: std.mem.Allocator,
     buf: Buffer,
@@ -266,6 +293,47 @@ pub const Editor = struct {
     /// left it on: any other move, or an edit, makes it stale.
     wrap_want: usize = 0,
     wrap_want_at: ?usize = null,
+
+    /// Enter, `o` and `O` start the new line at the current one's indent,
+    /// a level deeper after an opening bracket, and a closing bracket
+    /// typed on a blank line goes back to its opener's indent. vim's
+    /// `autoindent` plus the bracket half of `smartindent`. `zoe.conf`'s
+    /// `auto_indent`, `:set autoindent=…`.
+    auto_indent: bool = true,
+    /// Typing `(`, `[`, `{` or a quote also types its partner after the
+    /// cursor; typing that partner then steps over it, Backspace between
+    /// the two removes both, and over a select-mode selection the pair
+    /// goes round it. VS Code's auto-closing. `zoe.conf`'s `auto_close`,
+    /// `:set autoclose=…`.
+    auto_close: bool = true,
+    /// Whether the buffer pane has a fold column -- ▾ beside each line
+    /// that can fold, ▸ beside each closed one. Pure display, like
+    /// `line_numbers`. `zoe.conf`'s `fold_column`, `:set foldcolumn=…`.
+    fold_column: bool = true,
+    /// A line ending in `:` opens a block, so Enter after it indents --
+    /// Python's rule. Set by the host from the file's language.
+    colon_block: bool = false,
+
+    /// The closing brackets and quotes auto-close typed, as byte
+    /// offsets, so typing one of them steps over it and Backspace takes
+    /// both halves. Only these: a `)` the user typed is never stepped
+    /// over. Kept current by the insert-mode edits (`insertText`,
+    /// `deleteTracked`); any other edit leaves `pair_edits` behind
+    /// `Buffer.edits`, which makes the list stale and it is dropped.
+    pair_closers: std.ArrayList(usize) = .empty,
+    pair_edits: u64 = 0,
+    /// The line Enter / `o` / `O` just indented, as its start offset, and
+    /// `Buffer.edits` at the time. Escape with nothing typed since takes
+    /// the indent back off, so an abandoned line isn't left as trailing
+    /// whitespace -- vim does the same.
+    autoindent_at: ?usize = null,
+    autoindent_edits: u64 = 0,
+
+    /// The lines the closed folds hide (`fold.hiddenRanges`), cached:
+    /// rebuilt only when `hidden_key` -- the buffer's edit count, its
+    /// fold generation and the tab width -- has moved.
+    hidden: std.ArrayList(fold.Range) = .empty,
+    hidden_key: ?[3]u64 = null,
 
     /// The `:` line being typed, without the leading colon -- the same
     /// one-line field gw-shell's prompt and salacommander's path row use,
@@ -369,6 +437,8 @@ pub const Editor = struct {
         self.status.deinit(self.alloc);
         self.yank.deinit(self.alloc);
         self.search_pat.deinit(self.alloc);
+        self.pair_closers.deinit(self.alloc);
+        self.hidden.deinit(self.alloc);
         if (self.path) |p| self.alloc.free(p);
         if (self.own_keymaps) |*k| k.deinit(self.alloc);
         self.* = undefined;
@@ -416,6 +486,9 @@ pub const Editor = struct {
         self.search_match = null;
         self.search_hl = false;
         self.search_origin = 0;
+        self.pair_closers.clearRetainingCapacity();
+        self.autoindent_at = null;
+        self.hidden_key = null;
     }
 
     /// Replaces `path` with a copy of `new_path` -- what `:w <name>` does
@@ -438,12 +511,20 @@ pub const Editor = struct {
         var rest = text;
         while (rest.len > 0) {
             switch (self.mode) {
+                // One typed character may close a pair, step over one or
+                // dedent a closing bracket (`typeChar`); a longer chunk
+                // (an IME commit) goes in as it is.
                 .insert => {
-                    try self.insertText(rest);
+                    if (rest.len == 1) try self.typeChar(rest[0]) else try self.insertText(rest);
                     return self.takeYankPending();
                 },
-                // Typing over a selection replaces it.
+                // Typing over a selection replaces it, except that an
+                // opening bracket or quote goes round it.
                 .select => {
+                    if (rest.len == 1 and self.auto_close and pairCloser(rest[0]) != null) {
+                        try self.wrapSelection(rest[0]);
+                        return self.takeYankPending();
+                    }
                     try self.dropSelectSpan();
                     try self.insertText(rest);
                     return self.takeYankPending();
@@ -684,7 +765,7 @@ pub const Editor = struct {
                     // selection (`3>`), the same as the vim keys.
                     .normal => {
                         const line = self.buf.lineAt(self.cursor);
-                        try self.shiftLines(line, line + n - 1, right, 1);
+                        try self.shiftLines(line, self.rowsDownLast(line, n - 1), right, 1);
                     },
                     .visual, .visual_line, .select => try self.visualShift(right, n),
                     .insert => try self.shiftCaretLine(right),
@@ -716,12 +797,28 @@ pub const Editor = struct {
                 if (typing) self.buf.closeUndoGroup();
             },
 
+            // Folding never edits, so it needs nothing from the undo
+            // log. A selection is dropped first: one spanning a fold
+            // that closes would cover lines nobody can see.
+            .fold, .unfold, .toggleFold, .foldAll, .unfoldAll => {
+                self.resetPending();
+                if (self.mode == .visual or self.mode == .visual_line) self.exitVisual();
+                switch (action) {
+                    .fold => try self.closeFold(),
+                    .unfold => self.openFold(),
+                    .toggleFold => try self.toggleFold(),
+                    .foldAll => try self.closeAllFolds(),
+                    .unfoldAll => self.openAllFolds(),
+                    else => unreachable,
+                }
+            },
+
             // The typing keys only type in insert mode; over a select-mode
             // selection they replace it (or, for the deletes, just remove
             // it), and in normal / visual mode they do nothing.
             .newline => if (typing) {
                 if (self.mode == .select) try self.dropSelectSpan();
-                try self.insertText("\n");
+                try self.newline();
             },
             // Tab over a selection indents it, as every editor's Tab does.
             .insertTab => switch (self.mode) {
@@ -767,8 +864,8 @@ pub const Editor = struct {
         switch (m) {
             .left => self.moveTo(motion.left(buf, self.cursor, 1), true),
             .right => self.moveTo(motion.right(buf, self.cursor, 1, eol), true),
-            .up => if (!self.rowMove(.up, eol)) self.moveTo(motion.up(buf, self.cursor, 1, self.sticky_col, eol), false),
-            .down => if (!self.rowMove(.down, eol)) self.moveTo(motion.down(buf, self.cursor, 1, self.sticky_col, eol), false),
+            .up => if (!self.rowMove(.up, eol)) self.moveTo(self.lineUp(1, eol), false),
+            .down => if (!self.rowMove(.down, eol)) self.moveTo(self.lineDown(1, eol), false),
             .line_start => self.moveTo(motion.lineStart(buf, self.cursor), true),
             .line_end => self.moveTo(motion.lineEnd(buf, self.cursor, eol), true),
             // vim's insert-mode <C-Left>/<C-Right>: the `b` / `w` motions,
@@ -891,6 +988,8 @@ pub const Editor = struct {
         switch (self.mode) {
             .normal => self.resetPending(),
             .insert => {
+                self.dropUnusedIndent();
+                self.pair_closers.clearRetainingCapacity();
                 self.mode = .normal;
                 self.moveTo(motion.clampNormal(&self.buf, motion.left(&self.buf, self.cursor, 1)), true);
             },
@@ -1040,8 +1139,9 @@ pub const Editor = struct {
             .down => {
                 if (here.index + 1 < wrap_mod.rowCount(text, opts, width)) {
                     index = here.index + 1;
-                } else if (line + 1 < self.buf.lineCount()) {
-                    target_line = line + 1;
+                } else if (self.rowLast(line) + 1 < self.buf.lineCount()) {
+                    // Past a closed fold, not into it.
+                    target_line = self.rowLast(line) + 1;
                     index = 0;
                 } else return true;
             },
@@ -1049,7 +1149,7 @@ pub const Editor = struct {
                 if (here.index > 0) {
                     index = here.index - 1;
                 } else if (line > 0) {
-                    target_line = line - 1;
+                    target_line = fold.visibleAtOrAbove(self.hiddenLines(), line - 1);
                     index = std.math.maxInt(usize);
                 } else return true;
             },
@@ -1077,8 +1177,8 @@ pub const Editor = struct {
     fn pageMove(self: *Editor, dir: VDir, allow_eol: bool) void {
         const n = self.page_lines;
         const target = switch (dir) {
-            .down => motion.down(&self.buf, self.cursor, n, self.sticky_col, allow_eol),
-            .up => motion.up(&self.buf, self.cursor, n, self.sticky_col, allow_eol),
+            .down => self.lineDown(n, allow_eol),
+            .up => self.lineUp(n, allow_eol),
         };
         self.moveTo(target, false);
     }
@@ -1149,9 +1249,9 @@ pub const Editor = struct {
             // still counts buffer lines, which is what relative line
             // numbers and `5j` mean.
             'j' => if (had_count or !self.rowMove(.down, false))
-                self.moveTo(motion.down(&self.buf, self.cursor, n, self.sticky_col, false), false),
+                self.moveTo(self.lineDown(n, false), false),
             'k' => if (had_count or !self.rowMove(.up, false))
-                self.moveTo(motion.up(&self.buf, self.cursor, n, self.sticky_col, false), false),
+                self.moveTo(self.lineUp(n, false), false),
             'w' => self.moveTo(motion.wordForward(&self.buf, self.cursor, n, false), true),
             'W' => self.moveTo(motion.wordForward(&self.buf, self.cursor, n, true), true),
             'b' => self.moveTo(motion.wordBackward(&self.buf, self.cursor, n, false), true),
@@ -1172,8 +1272,8 @@ pub const Editor = struct {
     fn command(self: *Editor, c: u8) !Outcome {
         // `g` is a prefix, not a command: it leaves any count pending for
         // the character that completes it (`3gg` is "line 3").
-        if (c == 'g') {
-            self.prefix = 'g';
+        if (c == 'g' or c == 'z') {
+            self.prefix = c;
             return .none;
         }
         const had_count = self.count != 0;
@@ -1279,6 +1379,13 @@ pub const Editor = struct {
     fn prefixedCommand(self: *Editor, prefix: u8, c: u8) !Outcome {
         switch (prefix) {
             'g' => {},
+            'z' => {
+                // Only from normal mode: a fold changing under a visual
+                // selection would leave it covering hidden lines.
+                if (self.mode == .normal) try self.foldCommand(c);
+                self.resetPending();
+                return .none;
+            },
             ']', '[' => {
                 // `]d` / `[d` -- step through this buffer's diagnostics.
                 _ = self.takeCount();
@@ -1297,7 +1404,7 @@ pub const Editor = struct {
                     self.operator = null;
                     self.operator_count = 0;
                     const first = n - 1;
-                    const last = self.buf.lineAt(self.cursor);
+                    const last = self.rowLast(self.buf.lineAt(self.cursor));
                     switch (op) {
                         'd' => try self.deleteLines(first, last),
                         'y' => try self.yankLines(first, last),
@@ -1352,13 +1459,16 @@ pub const Editor = struct {
 
         // `>` / `<` are always linewise, so they take the vertical
         // motions and the doubled form and nothing else.
+        // A closed fold counts as the one line it shows, here and for
+        // `d` / `y` below: `dd` on one takes the whole fold, and `3j`
+        // steps over it as one line.
         if (op == '>' or op == '<') {
             const line = self.buf.lineAt(self.cursor);
             const right = op == '>';
             switch (c) {
-                '>', '<' => if (c == op) try self.shiftLines(line, line + n - 1, right, 1),
-                'j' => try self.shiftLines(line, line + n, right, 1),
-                'k' => try self.shiftLines(line -| n, line, right, 1),
+                '>', '<' => if (c == op) try self.shiftLines(line, self.rowsDownLast(line, n - 1), right, 1),
+                'j' => try self.shiftLines(line, self.rowsDownLast(line, n), right, 1),
+                'k' => try self.shiftLines(fold.visibleUp(self.hiddenLines(), line, n), self.rowLast(line), right, 1),
                 'G' => try self.shiftLines(line, self.buf.lineCount() - 1, right, 1),
                 else => {},
             }
@@ -1374,10 +1484,17 @@ pub const Editor = struct {
             // vertical motions don't.
             'd', 'y' => {
                 if (c != op) return .none;
-                if (del) try self.deleteLines(line, line + n - 1) else try self.yankLines(line, line + n - 1);
+                const last = self.rowsDownLast(line, n - 1);
+                if (del) try self.deleteLines(line, last) else try self.yankLines(line, last);
             },
-            'j' => if (del) try self.deleteLines(line, line + n) else try self.yankLines(line, line + n),
-            'k' => if (del) try self.deleteLines(line -| n, line) else try self.yankLines(line -| n, line),
+            'j' => {
+                const last = self.rowsDownLast(line, n);
+                if (del) try self.deleteLines(line, last) else try self.yankLines(line, last);
+            },
+            'k' => {
+                const first = fold.visibleUp(self.hiddenLines(), line, n);
+                if (del) try self.deleteLines(first, self.rowLast(line)) else try self.yankLines(first, self.rowLast(line));
+            },
             'G' => if (del) try self.deleteLines(line, self.buf.lineCount() - 1) else try self.yankLines(line, self.buf.lineCount() - 1),
 
             // Charwise, forward.
@@ -1409,7 +1526,14 @@ pub const Editor = struct {
     // ── Edits ───────────────────────────────────────────────────────────
 
     fn insertText(self: *Editor, text: []const u8) !void {
+        const tracked = self.pairsCurrent();
         try self.buf.insert(self.cursor, text);
+        if (tracked) {
+            for (self.pair_closers.items) |*off| {
+                if (off.* >= self.cursor) off.* += text.len;
+            }
+            self.pair_edits = self.buf.edits;
+        }
         self.cursor += text.len;
         self.syncSticky();
     }
@@ -1439,11 +1563,20 @@ pub const Editor = struct {
 
     fn backspace(self: *Editor) !void {
         if (self.cursor == 0) return;
+        // Between a pair auto-close typed (`(|)`): both halves go.
+        if (self.cursor < self.buf.len() and self.isTrackedCloser(self.cursor) and
+            pairCloser(self.buf.byteAt(self.cursor - 1)) == self.buf.byteAt(self.cursor))
+        {
+            try self.deleteTracked(self.cursor - 1, 2);
+            self.cursor -= 1;
+            self.syncSticky();
+            return;
+        }
         const target = if (self.buf.byteAt(self.cursor - 1) == '\n')
             self.cursor - 1
         else
             motion.prevCodepoint(&self.buf, self.cursor);
-        try self.buf.delete(target, self.cursor - target);
+        try self.deleteTracked(target, self.cursor - target);
         self.cursor = target;
         self.syncSticky();
     }
@@ -1454,7 +1587,7 @@ pub const Editor = struct {
             self.cursor + 1
         else
             motion.nextCodepoint(&self.buf, self.cursor);
-        try self.buf.delete(self.cursor, end - self.cursor);
+        try self.deleteTracked(self.cursor, end - self.cursor);
         self.syncSticky();
     }
 
@@ -1978,20 +2111,479 @@ pub const Editor = struct {
     /// `o` / `O`: a new line and insert mode on it.
     fn openLine(self: *Editor, where: OpenWhere) !void {
         const line = self.buf.lineAt(self.cursor);
+        var indent: std.ArrayList(u8) = .empty;
+        defer indent.deinit(self.alloc);
+        if (self.auto_indent) {
+            try self.appendIndentOf(&indent, line);
+            // `o` under an opening line goes a level in; `O` over a
+            // closing one does too, since it lands inside the block.
+            const deeper = switch (where) {
+                .below => self.opensBlock(line),
+                .above => self.closesBlock(line),
+            };
+            if (deeper) try self.appendIndentUnit(&indent);
+        }
         switch (where) {
             .below => {
-                const at = self.buf.lineEnd(line);
+                // Below a closed fold, not inside it.
+                const at = self.buf.lineEnd(self.rowLast(line));
                 try self.buf.insert(at, "\n");
-                self.cursor = at + 1;
+                try self.buf.insert(at + 1, indent.items);
+                self.cursor = at + 1 + indent.items.len;
             },
             .above => {
                 const at = self.buf.lineStart(line);
                 try self.buf.insert(at, "\n");
-                self.cursor = at;
+                try self.buf.insert(at, indent.items);
+                self.cursor = at + indent.items.len;
             },
         }
+        self.noteAutoIndent(indent.items.len);
         self.syncSticky();
         self.mode = .insert;
+    }
+
+    // ── Auto-indent and auto-close ──────────────────────────────────────
+    //
+    // Both work on what is on the line, not on a grammar: the indent is
+    // copied from the line above and one level is added after an opening
+    // bracket (or a `:` in Python), the same for every language. That is
+    // VS Code's behaviour without a language's indentation rules, and
+    // vim's `autoindent` with the bracket part of `smartindent`.
+
+    /// Enter in insert mode. With `auto_indent` off it is a bare newline.
+    /// With it on, the new line takes the current line's indent, one
+    /// level more after an opener, and Enter between a pair (`{|}`) puts
+    /// the closer on a line of its own below an indented blank one.
+    /// Whitespace either side of the break is dropped, so neither line
+    /// keeps a trailing run.
+    fn newline(self: *Editor) !void {
+        if (!self.auto_indent) return self.insertText("\n");
+        const line = self.buf.lineAt(self.cursor);
+        const ls = self.buf.lineStart(line);
+        const le = self.buf.lineEnd(line);
+
+        // Only blanks before the caret: the line keeps nothing, and the
+        // blanks move down in front of what follows -- the line's text
+        // keeps its indent, one line lower.
+        var lead = ls;
+        while (lead < self.cursor and isBlank(self.buf.byteAt(lead))) lead += 1;
+        if (lead == self.cursor) {
+            const blanks = try self.buf.read(self.alloc, ls, self.cursor);
+            defer self.alloc.free(blanks);
+            try self.deleteTracked(ls, self.cursor - ls);
+            self.cursor = ls;
+            try self.insertText("\n");
+            try self.insertText(blanks);
+            if (self.cursor == self.buf.lineEnd(line + 1)) self.noteAutoIndent(blanks.len);
+            return;
+        }
+
+        var indent: std.ArrayList(u8) = .empty;
+        defer indent.deinit(self.alloc);
+        try self.appendIndentOf(&indent, line);
+        const outer_len = indent.items.len;
+
+        // Trailing blanks before the caret, and leading ones after it.
+        var cut_lo = self.cursor;
+        while (cut_lo > ls and isBlank(self.buf.byteAt(cut_lo - 1))) cut_lo -= 1;
+        var cut_hi = self.cursor;
+        while (cut_hi < le and isBlank(self.buf.byteAt(cut_hi))) cut_hi += 1;
+
+        const before = self.buf.byteAt(cut_lo - 1);
+        const opener = (pairOpener(before) == null and pairCloser(before) != null and !isQuote(before)) or
+            (self.colon_block and before == ':');
+        const split_pair = opener and cut_hi < le and pairCloser(before) == self.buf.byteAt(cut_hi);
+        if (opener) try self.appendIndentUnit(&indent);
+
+        try self.deleteTracked(cut_lo, cut_hi - cut_lo);
+        self.cursor = cut_lo;
+        try self.insertText("\n");
+        try self.insertText(indent.items);
+        if (split_pair) {
+            const caret = self.cursor;
+            try self.insertText("\n");
+            try self.insertText(indent.items[0..outer_len]);
+            self.cursor = caret;
+            self.syncSticky();
+        }
+        if (self.cursor == self.buf.lineEnd(self.buf.lineAt(self.cursor))) self.noteAutoIndent(indent.items.len);
+    }
+
+    /// Remembers that the caret's line was just given an indent and
+    /// nothing else, for `dropUnusedIndent`.
+    fn noteAutoIndent(self: *Editor, len: usize) void {
+        if (len == 0) {
+            self.autoindent_at = null;
+            return;
+        }
+        self.autoindent_at = self.buf.lineStart(self.buf.lineAt(self.cursor));
+        self.autoindent_edits = self.buf.edits;
+    }
+
+    /// Escape out of insert mode on a line auto-indent made, with nothing
+    /// typed on it since: the indent comes off again.
+    fn dropUnusedIndent(self: *Editor) void {
+        const at = self.autoindent_at orelse return;
+        self.autoindent_at = null;
+        if (self.buf.edits != self.autoindent_edits) return;
+        const line = self.buf.lineAt(self.cursor);
+        if (self.buf.lineStart(line) != at) return;
+        const le = self.buf.lineEnd(line);
+        var i = at;
+        while (i < le) : (i += 1) if (!isBlank(self.buf.byteAt(i))) return;
+        self.buf.delete(at, le - at) catch return;
+        self.cursor = at;
+    }
+
+    /// Appends `line`'s leading blanks to `out`.
+    fn appendIndentOf(self: *Editor, out: *std.ArrayList(u8), line: usize) !void {
+        const ls = self.buf.lineStart(line);
+        const le = self.buf.lineEnd(line);
+        var i = ls;
+        while (i < le and isBlank(self.buf.byteAt(i))) : (i += 1) try out.append(self.alloc, self.buf.byteAt(i));
+    }
+
+    /// One level of indent: a tab, or `tab_width` spaces with `expand_tab`.
+    fn appendIndentUnit(self: *Editor, out: *std.ArrayList(u8)) !void {
+        if (self.expand_tab) {
+            try out.appendNTimes(self.alloc, ' ', @min(self.tab_width, max_tab_width));
+        } else {
+            try out.append(self.alloc, '\t');
+        }
+    }
+
+    /// Whether `line`'s last non-blank character opens a block: a `(`,
+    /// `[` or `{`, or a `:` where `colon_block` says so.
+    fn opensBlock(self: *const Editor, line: usize) bool {
+        const ls = self.buf.lineStart(line);
+        var i = self.buf.lineEnd(line);
+        while (i > ls and isBlank(self.buf.byteAt(i - 1))) i -= 1;
+        if (i == ls) return false;
+        const c = self.buf.byteAt(i - 1);
+        return (pairCloser(c) != null and !isQuote(c)) or (self.colon_block and c == ':');
+    }
+
+    /// Whether `line`'s first non-blank character is a closing bracket.
+    fn closesBlock(self: *const Editor, line: usize) bool {
+        const le = self.buf.lineEnd(line);
+        var i = self.buf.lineStart(line);
+        while (i < le and isBlank(self.buf.byteAt(i))) i += 1;
+        return i < le and pairOpener(self.buf.byteAt(i)) != null;
+    }
+
+    /// One character typed in insert mode. Steps over a closer
+    /// auto-close put there, closes an opener, or takes a closing
+    /// bracket typed on a blank line back to its opener's indent;
+    /// anything else is just typed.
+    fn typeChar(self: *Editor, c: u8) !void {
+        if (self.auto_close and self.cursor < self.buf.len() and
+            self.buf.byteAt(self.cursor) == c and self.isTrackedCloser(self.cursor))
+        {
+            self.untrackCloser(self.cursor);
+            self.moveTo(self.cursor + 1, true);
+            return;
+        }
+        if (self.auto_indent and pairOpener(c) != null) try self.dedentForCloser(c);
+        if (self.auto_close and self.shouldClose(c)) {
+            const closer = pairCloser(c).?;
+            try self.insertText(&.{ c, closer });
+            self.cursor -= 1;
+            self.syncSticky();
+            try self.trackCloser(self.cursor);
+            return;
+        }
+        try self.insertText(&.{c});
+    }
+
+    /// Whether typing opener `c` here should also type its closer. Only
+    /// before a blank, the line's end or punctuation that ends an
+    /// expression -- VS Code's `autoCloseBefore` -- so typing `(` in
+    /// front of a word doesn't wrap nothing in brackets. A quote has two
+    /// more conditions: not straight after a word character (`don't`),
+    /// and not when the line already has an odd number of them before
+    /// the caret, which is the caret sitting inside a string, about to
+    /// close it.
+    fn shouldClose(self: *const Editor, c: u8) bool {
+        if (pairCloser(c) == null) return false;
+        if (self.cursor < self.buf.len()) {
+            const next = self.buf.byteAt(self.cursor);
+            if (!isBlank(next) and next != '\n' and std.mem.indexOfScalar(u8, ";:.,=}])>", next) == null) return false;
+        }
+        if (!isQuote(c)) return true;
+
+        const ls = self.buf.lineStart(self.buf.lineAt(self.cursor));
+        if (self.cursor > ls) {
+            const prev = self.buf.byteAt(self.cursor - 1);
+            if (std.ascii.isAlphanumeric(prev) or prev == '_' or prev == c or prev >= 0x80) return false;
+        }
+        var quotes: usize = 0;
+        var i = ls;
+        while (i < self.cursor) : (i += 1) {
+            const b = self.buf.byteAt(i);
+            if (b == '\\') {
+                i += 1;
+            } else if (b == c) quotes += 1;
+        }
+        return quotes % 2 == 0;
+    }
+
+    /// Closing bracket `c` typed with only blanks before it on the line:
+    /// the blanks become the indent of the line holding its opener, so
+    /// the bracket lines up with the line that opened the block. Found by
+    /// walking back counting brackets of the same kind; strings and
+    /// comments aren't recognised, so an unmatched one in a string can
+    /// throw it, and then the line keeps its indent.
+    fn dedentForCloser(self: *Editor, c: u8) !void {
+        const line = self.buf.lineAt(self.cursor);
+        const ls = self.buf.lineStart(line);
+        var i = ls;
+        while (i < self.cursor) : (i += 1) if (!isBlank(self.buf.byteAt(i))) return;
+        const open = pairOpener(c).?;
+        var depth: usize = 0;
+        var at = ls;
+        const found = while (at > 0) {
+            at -= 1;
+            const b = self.buf.byteAt(at);
+            if (b == c) {
+                depth += 1;
+            } else if (b == open) {
+                if (depth == 0) break at;
+                depth -= 1;
+            }
+        } else return;
+
+        var indent: std.ArrayList(u8) = .empty;
+        defer indent.deinit(self.alloc);
+        try self.appendIndentOf(&indent, self.buf.lineAt(found));
+        try self.deleteTracked(ls, self.cursor - ls);
+        self.cursor = ls;
+        try self.insertText(indent.items);
+    }
+
+    /// An opener typed over a select-mode selection: the pair goes round
+    /// it, and the selection stays on the text inside.
+    fn wrapSelection(self: *Editor, c: u8) !void {
+        const span = self.selectionSpan() orelse {
+            self.select_anchor = null;
+            self.mode = .insert;
+            return self.typeChar(c);
+        };
+        const anchor_low = self.select_anchor.? <= self.cursor;
+        try self.buf.insert(span.hi, &.{pairCloser(c).?});
+        try self.buf.insert(span.lo, &.{c});
+        self.select_anchor = if (anchor_low) span.lo + 1 else span.hi + 1;
+        self.moveTo(if (anchor_low) span.hi + 1 else span.lo + 1, true);
+    }
+
+    /// Deletes `[at, at + n)` keeping the auto-closed pairs current.
+    fn deleteTracked(self: *Editor, at: usize, n: usize) !void {
+        if (n == 0) return;
+        const tracked = self.pairsCurrent();
+        try self.buf.delete(at, n);
+        if (!tracked) return;
+        var i: usize = 0;
+        while (i < self.pair_closers.items.len) {
+            const off = &self.pair_closers.items[i];
+            if (off.* >= at + n) {
+                off.* -= n;
+            } else if (off.* >= at) {
+                _ = self.pair_closers.orderedRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+        self.pair_edits = self.buf.edits;
+    }
+
+    /// Whether `pair_closers` still describes the text. An edit made by
+    /// anything but the insert-mode paths above (a paste, an undo, a
+    /// Lua command) leaves it behind, and then it is dropped here.
+    fn pairsCurrent(self: *Editor) bool {
+        if (self.pair_closers.items.len == 0) return false;
+        if (self.pair_edits == self.buf.edits) return true;
+        self.pair_closers.clearRetainingCapacity();
+        return false;
+    }
+
+    fn isTrackedCloser(self: *Editor, off: usize) bool {
+        if (!self.pairsCurrent()) return false;
+        return std.mem.indexOfScalar(usize, self.pair_closers.items, off) != null;
+    }
+
+    fn trackCloser(self: *Editor, off: usize) !void {
+        _ = self.pairsCurrent();
+        try self.pair_closers.append(self.alloc, off);
+        self.pair_edits = self.buf.edits;
+    }
+
+    fn untrackCloser(self: *Editor, off: usize) void {
+        const i = std.mem.indexOfScalar(usize, self.pair_closers.items, off) orelse return;
+        _ = self.pair_closers.orderedRemove(i);
+    }
+
+    // ── Folding (`fold.zig`) ────────────────────────────────────────────
+
+    /// The lines the closed folds hide, sorted and disjoint. Rebuilt only
+    /// when the text, the folds or the tab width changed since the last
+    /// call. Empty if it can't be built: folds stop hiding anything
+    /// rather than half-hiding it.
+    pub fn hiddenLines(self: *Editor) []const fold.Range {
+        const key: [3]u64 = .{ self.buf.edits, self.buf.folds_gen, self.tab_width };
+        if (self.hidden_key) |k| {
+            if (std.mem.eql(u64, &k, &key)) return self.hidden.items;
+        }
+        fold.hiddenRanges(self.alloc, &self.buf, &self.buf.closed_folds, self.tab_width, &self.hidden) catch {
+            self.hidden.clearRetainingCapacity();
+        };
+        self.hidden_key = key;
+        return self.hidden.items;
+    }
+
+    /// Whether any fold is closed -- the cheap test the renderer makes
+    /// before taking the folds into account at all.
+    pub fn hasClosedFolds(self: *const Editor) bool {
+        return self.buf.closed_folds.items.len > 0;
+    }
+
+    /// The last line of the closed fold `line` heads, or `line` itself:
+    /// how far a linewise command reaches when it lands on `line`.
+    pub fn rowLast(self: *const Editor, line: usize) usize {
+        if (!fold.isClosed(self.buf.closed_folds.items, line)) return line;
+        return fold.foldEnd(&self.buf, line, self.tab_width) orelse line;
+    }
+
+    /// The last buffer line of the `n` on-screen lines below `line`,
+    /// counting a closed fold as one -- the bottom of `{n+1}dd`.
+    fn rowsDownLast(self: *Editor, line: usize, n: usize) usize {
+        return self.rowLast(fold.visibleDown(self.hiddenLines(), line, n, self.buf.lineCount()));
+    }
+
+    /// `j` / Down by `n` on-screen lines, keeping the sticky column.
+    fn lineDown(self: *Editor, n: usize, allow_eol: bool) usize {
+        const line = fold.visibleDown(self.hiddenLines(), self.buf.lineAt(self.cursor), n, self.buf.lineCount());
+        return motion.atColumn(&self.buf, line, self.sticky_col, allow_eol);
+    }
+
+    /// `k` / Up by `n` on-screen lines.
+    fn lineUp(self: *Editor, n: usize, allow_eol: bool) usize {
+        const line = fold.visibleUp(self.hiddenLines(), self.buf.lineAt(self.cursor), n);
+        return motion.atColumn(&self.buf, line, self.sticky_col, allow_eol);
+    }
+
+    fn foldsChanged(self: *Editor) void {
+        self.buf.folds_gen += 1;
+    }
+
+    /// Opens whatever closed folds hide the cursor's line -- a search
+    /// match, a `gd` target, an undo or a `:123` inside one shows it.
+    /// The host calls this before each frame; the editor's own up/down
+    /// motions step over folds and never land inside one.
+    pub fn revealCursor(self: *Editor) void {
+        if (!self.hasClosedFolds()) return;
+        const line = self.buf.lineAt(self.cursor);
+        while (fold.rangeOf(self.hiddenLines(), line)) |r| {
+            if (!fold.removeClosed(&self.buf.closed_folds, r.first - 1)) return;
+            self.foldsChanged();
+        }
+    }
+
+    /// `zc` / Ctrl+Shift+[: closes the innermost open fold the cursor is
+    /// in. On a closed fold already, that is the one around it, so
+    /// repeating it folds outward. The cursor moves onto the fold's line.
+    pub fn closeFold(self: *Editor) !void {
+        const line = self.buf.lineAt(self.cursor);
+        var start = fold.foldAt(&self.buf, line, self.tab_width) orelse return;
+        while (fold.isClosed(self.buf.closed_folds.items, start)) {
+            start = fold.enclosingFold(&self.buf, start, self.tab_width) orelse return;
+        }
+        try fold.addClosed(self.alloc, &self.buf.closed_folds, start);
+        self.foldsChanged();
+        if (start != line) self.moveTo(motion.atColumn(&self.buf, start, self.sticky_col, false), false);
+    }
+
+    /// `zo` / Ctrl+Shift+]: opens the closed fold on the cursor's line.
+    pub fn openFold(self: *Editor) void {
+        const line = self.buf.lineAt(self.cursor);
+        if (fold.removeClosed(&self.buf.closed_folds, line)) self.foldsChanged();
+    }
+
+    /// `za`: opens the fold on the cursor's line if it is closed, else
+    /// closes the one the cursor is in.
+    pub fn toggleFold(self: *Editor) !void {
+        if (fold.isClosed(self.buf.closed_folds.items, self.buf.lineAt(self.cursor))) {
+            self.openFold();
+        } else try self.closeFold();
+    }
+
+    /// A click on `line`'s fold-column marker: open it if closed, close
+    /// it if it can fold, nothing otherwise.
+    pub fn toggleFoldAt(self: *Editor, line: usize) !void {
+        if (fold.removeClosed(&self.buf.closed_folds, line)) {
+            self.foldsChanged();
+            return;
+        }
+        if (!fold.isFoldStart(&self.buf, line, self.tab_width)) return;
+        try fold.addClosed(self.alloc, &self.buf.closed_folds, line);
+        self.foldsChanged();
+        // A caret inside the fold just closed comes out onto its line.
+        const cur = self.buf.lineAt(self.cursor);
+        if (cur > line and cur <= self.rowLast(line)) {
+            self.moveTo(motion.atColumn(&self.buf, line, self.sticky_col, false), false);
+        }
+    }
+
+    /// `zM`: every fold closed, nested ones included, so opening an
+    /// outer one shows the inner ones still folded.
+    pub fn closeAllFolds(self: *Editor) !void {
+        try fold.allStarts(self.alloc, &self.buf, self.tab_width, &self.buf.closed_folds);
+        self.foldsChanged();
+        const line = self.buf.lineAt(self.cursor);
+        const shown = fold.visibleAtOrAbove(self.hiddenLines(), line);
+        if (shown != line) self.moveTo(motion.atColumn(&self.buf, shown, self.sticky_col, false), false);
+    }
+
+    /// `zR`: every fold open.
+    pub fn openAllFolds(self: *Editor) void {
+        if (self.buf.closed_folds.items.len == 0) return;
+        self.buf.closed_folds.clearRetainingCapacity();
+        self.foldsChanged();
+    }
+
+    /// `zj` / `zk`: the next / previous on-screen line that starts a fold.
+    fn jumpToFold(self: *Editor, forward: bool, n: usize) void {
+        const hidden = self.hiddenLines();
+        var line = self.buf.lineAt(self.cursor);
+        var target: ?usize = null;
+        var left = n;
+        while (left > 0) {
+            const next = if (forward)
+                fold.visibleDown(hidden, line, 1, self.buf.lineCount())
+            else
+                fold.visibleUp(hidden, line, 1);
+            if (next == line) break;
+            line = next;
+            if (fold.isFoldStart(&self.buf, line, self.tab_width)) {
+                target = line;
+                left -= 1;
+            }
+        }
+        if (target) |t| self.moveTo(motion.firstNonBlank(&self.buf, self.buf.lineStart(t)), true);
+    }
+
+    /// The `z` commands: `za` `zo` `zc` `zR` `zM` `zj` `zk`.
+    fn foldCommand(self: *Editor, c: u8) !void {
+        const n = self.takeCount();
+        switch (c) {
+            'a' => try self.toggleFold(),
+            'o' => self.openFold(),
+            'c' => try self.closeFold(),
+            'R' => self.openAllFolds(),
+            'M' => try self.closeAllFolds(),
+            'j' => self.jumpToFold(true, n),
+            'k' => self.jumpToFold(false, n),
+            else => {},
+        }
     }
 
     // ── Visual mode & clipboard ────────────────────────────────────────
@@ -2022,8 +2614,9 @@ pub const Editor = struct {
                 return .{ .lo = lo, .hi = hi, .linewise = false };
             },
             .visual_line => {
+                // A closed fold at the bottom end is selected whole.
                 const first = self.buf.lineStart(self.buf.lineAt(lo));
-                const text_end = self.buf.lineEnd(self.buf.lineAt(hi));
+                const text_end = self.buf.lineEnd(self.rowLast(self.buf.lineAt(hi)));
                 return .{
                     .lo = first,
                     .hi = @min(text_end + 1, self.buf.len()),
@@ -2651,6 +3244,9 @@ pub const Editor = struct {
     ///  - `whitespace=on|off`            -- mark spaces and tabs
     ///  - `wrap=on|off`                  -- soft-wrap long lines (vim's
     ///                                      bare `wrap` / `nowrap` too)
+    ///  - `autoindent=on|off`            -- indent new lines
+    ///  - `autoclose=on|off`             -- close brackets and quotes
+    ///  - `foldcolumn=on|off`            -- the fold markers' column
     ///
     /// An unknown option name or value leaves the setting as it was and
     /// reports the matching vim error. `zoe/ui.zig` pushes whatever
@@ -2716,6 +3312,27 @@ pub const Editor = struct {
             };
             return;
         }
+        if (std.mem.eql(u8, opt, "autoindent")) {
+            self.auto_indent = parseFlag(val) orelse {
+                self.setStatus("E474: Invalid argument: autoindent={s}", .{val});
+                return;
+            };
+            return;
+        }
+        if (std.mem.eql(u8, opt, "autoclose")) {
+            self.auto_close = parseFlag(val) orelse {
+                self.setStatus("E474: Invalid argument: autoclose={s}", .{val});
+                return;
+            };
+            return;
+        }
+        if (std.mem.eql(u8, opt, "foldcolumn")) {
+            self.fold_column = parseFlag(val) orelse {
+                self.setStatus("E474: Invalid argument: foldcolumn={s}", .{val});
+                return;
+            };
+            return;
+        }
         self.setStatus("E518: Unknown option: {s}", .{opt});
     }
 
@@ -2767,12 +3384,11 @@ pub const Editor = struct {
     fn commandLineMotion(self: *Editor, m: []const u8, count: usize) bool {
         const buf = &self.buf;
         const c = self.cursor;
-        const sc = self.sticky_col;
         const eq = std.mem.eql;
         if (eq(u8, m, "j")) {
-            self.moveTo(motion.down(buf, c, count, sc, false), false);
+            self.moveTo(self.lineDown(count, false), false);
         } else if (eq(u8, m, "k")) {
-            self.moveTo(motion.up(buf, c, count, sc, false), false);
+            self.moveTo(self.lineUp(count, false), false);
         } else if (eq(u8, m, "h")) {
             self.moveTo(motion.left(buf, c, count), true);
         } else if (eq(u8, m, "l")) {

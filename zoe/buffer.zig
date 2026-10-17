@@ -300,6 +300,18 @@ pub const Buffer = struct {
     undo_open: ?UndoGroup = null,
     undo_phase: UndoPhase = .normal,
 
+    /// The lines closed folds start on, ascending (`zoe/fold.zig`). The
+    /// buffer knows nothing about folding; it keeps these here only
+    /// because `insert` and `delete` are where lines move, so this is the
+    /// one place that can carry each one along with its line -- undo and
+    /// redo included, since they replay through the same two calls. A
+    /// line deleted outright takes its entry with it.
+    closed_folds: std.ArrayList(usize) = .empty,
+    /// Bumped whenever `closed_folds` changes, by an edit or by the
+    /// editor opening and closing folds, so a renderer can tell that the
+    /// rows on screen moved without anything being typed.
+    folds_gen: u64 = 0,
+
     pub fn init(alloc: std.mem.Allocator) !Buffer {
         return initFromText(alloc, "");
     }
@@ -318,6 +330,7 @@ pub const Buffer = struct {
         self.clearUndo();
         self.undo_stack.deinit(self.alloc);
         self.redo_stack.deinit(self.alloc);
+        self.closed_folds.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -435,6 +448,7 @@ pub const Buffer = struct {
         try self.reindexInsert(line, at, bytes);
         errdefer self.reindex() catch {};
         try self.gap.insert(at, bytes);
+        self.shiftFoldsInsert(line, at == self.line_starts.items[line], std.mem.count(u8, bytes, "\n"));
         self.dirty = true;
         self.edits += 1;
 
@@ -461,7 +475,15 @@ pub const Buffer = struct {
         errdefer self.alloc.free(removed);
 
         // Before the text changes: `lineAt` clamps to the current length.
-        self.reindexDelete(self.lineAt(offset), self.lineAt(offset + del), del);
+        const first_line = self.lineAt(offset);
+        const last_line = self.lineAt(offset + del);
+        self.shiftFoldsDelete(
+            first_line,
+            last_line,
+            offset == self.lineStart(first_line) and offset + del == self.lineStart(last_line),
+            offset == self.lineStart(first_line),
+        );
+        self.reindexDelete(first_line, last_line, del);
         self.gap.delete(offset, del);
         self.dirty = true;
         self.edits += 1;
@@ -508,6 +530,45 @@ pub const Buffer = struct {
         const removed = last_line - first_line;
         self.line_starts.replaceRangeAssumeCapacity(first_line + 1, removed, &.{});
         for (self.line_starts.items[first_line + 1 ..]) |*start| start.* -= del;
+    }
+
+    /// `closed_folds` after `newlines` line breaks were inserted on
+    /// `line`: every fold below it moves down by that many, and so does
+    /// one on `line` itself when the insert went in at its very start
+    /// (`at_start`), since that pushes the whole line down.
+    fn shiftFoldsInsert(self: *Buffer, line: usize, at_start: bool, newlines: usize) void {
+        if (newlines == 0 or self.closed_folds.items.len == 0) return;
+        for (self.closed_folds.items) |*f| {
+            if (f.* > line or (f.* == line and at_start)) f.* += newlines;
+        }
+        self.folds_gen += 1;
+    }
+
+    /// `closed_folds` after a delete from `first` through `last` (the
+    /// lines its two ends are on). A fold on a line whose start was cut
+    /// goes with it -- the line was deleted or joined onto the one above.
+    /// The exceptions are where the cut ran from the start of `first`
+    /// to the start of `last` (`whole_lines`, which is `dd`): then
+    /// `first` itself went, and `last` survives intact as the new
+    /// `first`. `from_start` says the cut began at `first`'s start, so a
+    /// fold there loses its line even when the cut ends mid-line.
+    fn shiftFoldsDelete(self: *Buffer, first: usize, last: usize, whole_lines: bool, from_start: bool) void {
+        if (last == first or self.closed_folds.items.len == 0) return;
+        const removed = last - first;
+        var i: usize = 0;
+        while (i < self.closed_folds.items.len) {
+            const f = &self.closed_folds.items[i];
+            if (f.* > last) {
+                f.* -= removed;
+            } else if (f.* == last and whole_lines) {
+                f.* = first;
+            } else if (f.* > first or (f.* == first and from_start)) {
+                _ = self.closed_folds.orderedRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+        self.folds_gen += 1;
     }
 
     /// Append one edit to the pending log, or trip `edits_overflowed` and

@@ -88,9 +88,12 @@ The `select…` actions start a selection if there isn't one:
 | `moveLinesUp` / `moveLinesDown` | Alt+Up / Alt+Down | Move the line or selected lines (count = distance) |
 | `copyLinesUp` / `copyLinesDown` | Shift+Alt+Up / Shift+Alt+Down | Copy them above / below (count = copies) |
 | `toggleComment` | Ctrl+/ | Line comments on or off, at the block's smallest indent |
+| `fold` / `unfold` | Ctrl+Shift+[ / Ctrl+Shift+] | Close the innermost open fold around the cursor (again: the one around that) / open the closed fold on the cursor's line. `zc` / `zo` |
+| `toggleFold` | (unbound; `za`) | Open the fold on the cursor's line if closed, else close the one the cursor is in |
+| `foldAll` / `unfoldAll` | (unbound; `zM` / `zR`) | Every fold closed / open. VS Code's Ctrl+K Ctrl+0 / Ctrl+J aren't the defaults because Ctrl+K is focus-up |
 
-Each is one undo step, including in insert mode, where it is separate from
-the typing around it.
+Each edit is one undo step, including in insert mode, where it is separate
+from the typing around it. The fold actions change no text.
 
 Ctrl+/ uses the language's line-comment marker: `//` for Zig and C, `#`
 for Python, TOML and Bash, `--` for Lua, none for JSON and Markdown.
@@ -107,7 +110,37 @@ one.
 | `deleteWordBack` | Ctrl+Backspace (stops at the line's start; at it, joins lines) |
 | `deleteWordForward` | Ctrl+Delete (stops at the line's end; at it, joins lines) |
 
-Enter does **not** auto-indent yet.
+### Auto-indent and auto-close
+
+Both read the line, not a grammar, so every language gets the same
+rules. `:set autoindent=off` / `:set autoclose=off` (or `auto_indent` /
+`auto_close` in `zoe.conf.lua`) turn them off.
+
+- **Enter**, `o` and `O` start the new line at the current line's
+  indent. After a line ending in `(`, `[` or `{` (or `:` in Python) it is
+  one level deeper (a tab, or `tabwidth` spaces with `expandtab`), and
+  `O` above a line starting with a closing bracket is too.
+- **Enter between a pair** (`{|}`) puts the closer on its own line at the
+  outer indent and the caret on an indented line between.
+- Blanks either side of the break are dropped, so Enter never leaves
+  trailing whitespace, and Enter on a line holding only its indent leaves
+  that line empty.
+- **Escape** straight after Enter / `o` / `O`, with nothing typed, takes
+  the indent back off.
+- A **closing bracket** typed on a line with only blanks before it lines
+  up with the line its opener is on.
+- Typing `(`, `[`, `{`, `"`, `'` or `` ` `` also types its **partner**
+  after the caret, but only before a blank, the line's end or one of
+  `` ;:.,=}])> ``. A quote isn't paired straight after a letter or digit
+  (`don't`), or where the line already has an odd number of them (you
+  are closing a string).
+- Typing the partner zoe put there **steps over** it; one you typed
+  yourself is never stepped over. **Backspace** between a fresh pair
+  deletes both.
+- An opener typed over a **select-mode selection** (Shift+arrows in
+  insert mode) goes round it, and the selection stays on the text inside.
+
+Paste never auto-indents or pairs anything.
 
 With the completion popup up: Up / Down or Ctrl+N / Ctrl+P move, PageUp /
 PageDown page, Tab or Enter accept, Escape closes.
@@ -138,6 +171,9 @@ PageDown page, Tab or Enter accept, Escape closes.
 | `K` | LSP hover |
 | `gd` | LSP go to definition |
 | `]d` `[d` | Next / previous diagnostic |
+| `za` `zo` `zc` | Toggle / open / close a fold (see Folding below) |
+| `zR` `zM` | Open / close every fold |
+| `zj` `zk` | Next / previous line that starts a fold (count works) |
 
 Yanks and deletes always go to the system clipboard (one register, no
 `"a`-style named registers).
@@ -197,6 +233,8 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:set lineno=off\|absolute\|relative` | Line numbers |
 | `:set tabwidth=N`, `expandtab=on\|off`, `whitespace=on\|off` | Indent and whitespace display |
 | `:set wrap=on\|off` (or `:set wrap` / `:set nowrap`) | Soft-wrap long lines at word breaks |
+| `:set autoindent=on\|off`, `autoclose=on\|off` | Auto-indent; closing brackets and quotes |
+| `:set foldcolumn=on\|off` | The fold markers' gutter column |
 | `:theme [name]` (`:colo`) | Switch colour theme |
 | `:shell [bottom\|top\|left\|right\|float]` | Move the Ctrl+` shell panel (bare: report where it is) |
 | `:lsp`, `:lsp restart` | Language server status / restart |
@@ -218,6 +256,33 @@ and `.venv/` never bury a search. Git worktrees that live inside the
 folder (say under an ignored `.claude/worktrees/`) are searched anyway,
 under their own `.gitignore`; `unignore = { "vendor/lib" }` in
 `zoe.conf.lua` does the same for any other path.
+
+### Folding
+
+A line folds when the next non-blank line is indented further (VS Code's
+"indentation" folding). The fold runs to the end of that deeper block:
+blank lines inside it are included, blank lines after it aren't, and the
+line that closes the block (a `}` back at the outer indent) stays
+visible. That needs no grammar, so every file folds the same way.
+
+- The **fold column**, between the diagnostic signs and the line
+  numbers, shows a dim ▾ beside every line that can fold and ▸ beside a
+  closed one. Click either to toggle it. `:set foldcolumn=off` (or
+  `fold_column = false`) hides it.
+- A closed fold shows its first line followed by a dim `⋯ N lines`.
+- `j` / `k`, the arrows, PageUp / PageDown and `:Nj` step over a closed
+  fold as one line, and relative line numbers count it as one.
+- `dd`, `yy`, `>>` and `<<` on a closed fold act on the whole fold; so do
+  `dj` / `dk` and friends when they reach one, and `V` with one at its
+  bottom end. `o` opens the new line below the fold.
+- Anything else that puts the cursor inside a closed fold (a search
+  match, `gd`, `]d`, `:123`, an undo) opens it.
+- `zc` on a closed fold closes the one around it, so repeating it folds
+  outward. `zM` closes nested folds too, so opening an outer one shows the
+  inner ones still folded.
+- Closed folds follow their lines as text is added or removed above
+  them, and go away when their first line is deleted. They aren't saved
+  in a workspace, and `:e` or a reload from disk opens them all.
 
 ### File tree pane
 
@@ -306,7 +371,7 @@ groups or the shell panel.
 - **Marks** (`m` / `'`), **macros** (`q` / `@`), **named registers** (`"a`).
 - **`:s` substitute** and `'<,'>` ranges.
 - **`gu` / `gU`** case operators, **`>` / `<`** over word or paragraph motions.
-- **Auto-indent** on Enter / `o` / `O`.
+- **Manual folds** (`zf`), and `zA` / `zO` / `zC`.
 
 ### Missing for a VSCode user
 
@@ -318,11 +383,11 @@ groups or the shell panel.
 - **Ctrl+G** go to line, **F12** definition.
 - **Ctrl+Shift+K** delete line, **Ctrl+Enter / Ctrl+Shift+Enter** insert line below / above.
 - **Ctrl+D** add next occurrence / multi-cursor (Ctrl+D is half-page down in normal mode).
-- **Auto-indent and bracket pairing.**
 
 Closed since the first version of this list: Shift+arrow selection, Ctrl+Z
 / Ctrl+Y, Ctrl+Backspace / Ctrl+Delete, Ctrl+/, Ctrl+S, Shift+Alt+Up/Down,
-rebindable keys, and the Ctrl+Shift+P command palette.
+rebindable keys, the Ctrl+Shift+P command palette, auto-indent, bracket
+pairing, and folding.
 
 ## Modal versus Ctrl/Alt-heavy
 
@@ -373,14 +438,11 @@ reasonable editor of its own (Shift+arrow selection, word delete, Ctrl+Z,
 Ctrl+/, line move and copy), so living in insert mode and dropping to
 normal for composed commands is workable. What would round it out:
 
-1. **Auto-indent** on Enter, `o` and `O`.
-2. **The biggest vim gaps** (text objects, `c` operator, `.`, `f`/`t`) so
+1. **The biggest vim gaps** (text objects, `c` operator, `.`, `f`/`t`) so
    normal mode is worth dropping into.
-3. **More shared chords**: Ctrl+A, Ctrl+G go to line, F12 / Shift+F12,
+2. **More shared chords**: Ctrl+A, Ctrl+G go to line, F12 / Shift+F12,
    F2 rename, Ctrl+Shift+K delete line, find / replace.
-4. **A command palette** on a free chord (F1, or Ctrl+Shift+O), listing
-   the named actions, which also documents them.
-5. **An optional "start in insert mode" setting**, which would make zoe
+3. **An optional "start in insert mode" setting**, which would make zoe
    chord-first out of the box.
 
 Multi-cursor and Ctrl+D-style occurrence selection are the large item and

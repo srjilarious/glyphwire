@@ -10,6 +10,7 @@
 //! an `injections` on/off switch, and
 //! the editor's display options (`page_lines`, `line_numbers`,
 //! `tab_width`, `expand_tab`, `show_whitespace`, `wrap`,
+//! `auto_indent`, `auto_close`, `fold_column`,
 //! `tab_tooltip_delay_ms`), `workspace_autosave`, `file_watch` and
 //! `unignore`.
 //! With no file present
@@ -163,6 +164,16 @@ pub const Config = struct {
     /// `config.wrap` -- soft-wrap long lines in the buffer pane. Default
     /// false; `:set wrap=…` overrides.
     wrap: bool = false,
+    /// `config.auto_indent` -- Enter, `o` and `O` indent the new line,
+    /// and a closing bracket typed on a blank line lines up with its
+    /// opener. Default true; `:set autoindent=…` overrides.
+    auto_indent: bool = true,
+    /// `config.auto_close` -- typing an opening bracket or quote types
+    /// its partner too. Default true; `:set autoclose=…` overrides.
+    auto_close: bool = true,
+    /// `config.fold_column` -- the gutter column of fold markers.
+    /// Default true; `:set foldcolumn=…` overrides.
+    fold_column: bool = true,
     /// `config.tab_tooltip_delay_ms` -- how long the pointer rests on a
     /// tab before its file's full path pops up under it. Zero shows it
     /// at once; a negative value or a non-number is ignored.
@@ -310,6 +321,9 @@ const Apply = struct {
         if (conf.boolean(lua, "expand_tab")) |v| cfg.expand_tab = v;
         if (conf.boolean(lua, "show_whitespace")) |v| cfg.show_whitespace = v;
         if (conf.boolean(lua, "wrap")) |v| cfg.wrap = v;
+        if (conf.boolean(lua, "auto_indent")) |v| cfg.auto_indent = v;
+        if (conf.boolean(lua, "auto_close")) |v| cfg.auto_close = v;
+        if (conf.boolean(lua, "fold_column")) |v| cfg.fold_column = v;
         if (conf.number(lua, f64, "tab_tooltip_delay_ms", delay)) |v| cfg.tab_tooltip_delay_ms = v;
         if (conf.boolean(lua, "workspace_autosave")) |v| cfg.workspace_autosave = v;
         if (conf.enumValue(lua, shellpanel.Position, "shell_position")) |v| cfg.shell_position = v;

@@ -387,24 +387,26 @@ pub const default_langs = [_]LangDef{
     .{ .name = "bash", .extensions = &.{ ".sh", ".bash", ".zsh" }, .line_comment = "#" },
 };
 
+/// The language `path`'s extension maps to in `langs` (first match wins,
+/// as for highlighting), or null when none claims it.
+pub fn languageFor(langs: []const LangDef, path: []const u8) ?[]const u8 {
+    const ext = std.fs.path.extension(path);
+    if (ext.len == 0) return null;
+    for (langs) |l| {
+        for (l.extensions) |e| {
+            if (std.ascii.eqlIgnoreCase(e, ext)) return l.name;
+        }
+    }
+    return null;
+}
+
 /// The line-comment marker for `path`: the language its extension maps to
 /// in `langs` (first match wins, as for highlighting), then the first
 /// entry of that name that gives a marker -- so a config entry that only
 /// re-claims extensions for `c` still comments with `//`. Null when no
 /// language claims the file or the language has no line comment.
 pub fn lineCommentFor(langs: []const LangDef, path: []const u8) ?[]const u8 {
-    const ext = std.fs.path.extension(path);
-    if (ext.len == 0) return null;
-    var name: ?[]const u8 = null;
-    outer: for (langs) |l| {
-        for (l.extensions) |e| {
-            if (std.ascii.eqlIgnoreCase(e, ext)) {
-                name = l.name;
-                break :outer;
-            }
-        }
-    }
-    const lang = name orelse return null;
+    const lang = languageFor(langs, path) orelse return null;
     for (langs) |l| {
         if (std.mem.eql(u8, l.name, lang)) {
             if (l.line_comment) |m| return m;

@@ -1220,7 +1220,7 @@ pub fn layoutRowMapWrapsFromAPartScrolledLineTest(_: std.Io, alloc: std.mem.Allo
     defer map.deinit(alloc);
     const lines = TestLines{ .lines = &.{ "aaaa bbbb", "x" } };
     // Scrolled one row into the first line.
-    try zoe.ui.layoutRowMap(alloc, &map, lines, 0, 1, 0, 4, 5, true, wrap_opts);
+    try zoe.ui.layoutRowMap(alloc, &map, lines, 0, 1, 0, 4, 5, true, wrap_opts, &.{});
     try testz.expectEqual(map.items.len, 4);
     try testz.expectEqual(map.items[0].line, 0);
     try testz.expectEqual(map.items[0].sub, 1);
@@ -1237,7 +1237,7 @@ pub fn layoutRowMapUnwrappedIsOneRowPerLineTest(_: std.Io, alloc: std.mem.Alloca
     var map: std.ArrayList(zoe.ui.RowView) = .empty;
     defer map.deinit(alloc);
     const lines = TestLines{ .lines = &.{ "aaaa bbbb", "x", "y" } };
-    try zoe.ui.layoutRowMap(alloc, &map, lines, 1, 0, 3, 2, 5, false, wrap_opts);
+    try zoe.ui.layoutRowMap(alloc, &map, lines, 1, 0, 3, 2, 5, false, wrap_opts, &.{});
     try testz.expectEqual(map.items.len, 2);
     try testz.expectEqual(map.items[0].line, 1);
     try testz.expectEqual(map.items[1].line, 2);
@@ -1248,10 +1248,10 @@ pub fn layoutRowMapUnwrappedIsOneRowPerLineTest(_: std.Io, alloc: std.mem.Alloca
 pub fn rowMapHashSeesARowCountChangeTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var map: std.ArrayList(zoe.ui.RowView) = .empty;
     defer map.deinit(alloc);
-    try zoe.ui.layoutRowMap(alloc, &map, TestLines{ .lines = &.{ "aaaa", "x" } }, 0, 0, 0, 3, 5, true, wrap_opts);
+    try zoe.ui.layoutRowMap(alloc, &map, TestLines{ .lines = &.{ "aaaa", "x" } }, 0, 0, 0, 3, 5, true, wrap_opts, &.{});
     const before = zoe.ui.rowMapHash(map.items);
     // The first line grew a second row, pushing "x" down.
-    try zoe.ui.layoutRowMap(alloc, &map, TestLines{ .lines = &.{ "aaaa bb", "x" } }, 0, 0, 0, 3, 5, true, wrap_opts);
+    try zoe.ui.layoutRowMap(alloc, &map, TestLines{ .lines = &.{ "aaaa bb", "x" } }, 0, 0, 0, 3, 5, true, wrap_opts, &.{});
     try testz.expectNotEqual(zoe.ui.rowMapHash(map.items), before);
 }
 
@@ -1979,12 +1979,11 @@ pub fn gutterCellTextRightAlignsAbsoluteNumbersTest(_: std.Io, _: std.mem.Alloca
 
 pub fn gutterCellTextRelativeKeepsTheCaretLineAbsoluteTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [32]u8 = undefined;
-    const cursor_line: usize = 10;
-    // The caret's own row shows its absolute number...
-    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .relative, 4, 10, cursor_line, false), " 11 ");
+    // The caret's own row (distance 0) shows its absolute number...
+    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .relative, 4, 10, 0, false), " 11 ");
     // ...every other row shows its distance from the caret.
-    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .relative, 4, 7, cursor_line, false), "  3 ");
-    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .relative, 4, 13, cursor_line, false), "  3 ");
+    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .relative, 4, 7, 3, false), "  3 ");
+    try testz.expectEqualStr(zoe.ui.gutterCellText(&buf, .relative, 4, 13, 3, false), "  3 ");
 }
 
 // ─── Syntax highlighting (tree-sitter) ──────────────────────────────────
@@ -5751,4 +5750,343 @@ pub fn editorAddAndRemoveFolderCommandsTest(_: std.Io, alloc: std.mem.Allocator)
         .remove_folder => |p| try testz.expectTrue(p == null),
         else => return error.TestUnexpectedResult,
     }
+}
+
+// ─── Auto-indent ─────────────────────────────────────────────────────────
+
+pub fn autoIndentEnterKeepsTheIndentTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "    foo", "A<cr>bar<esc>", "    foo\n    bar");
+    // Tabs are copied as tabs.
+    try expectEdit(alloc, "\tfoo", "A<cr>bar<esc>", "\tfoo\n\tbar");
+}
+
+pub fn autoIndentEnterAfterAnOpenerGoesALevelInTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "fn x() {", "A<cr>y<esc>", "fn x() {\n    y");
+    try expectEdit(alloc, "  call(", "A<cr>y<esc>", "  call(\n      y");
+}
+
+pub fn autoIndentEnterBetweenAPairSplitsItTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // `{|}`: the closer goes onto its own line at the outer indent, the
+    // caret onto an indented blank line between.
+    try expectEdit(alloc, "{}", "a<cr>x<esc>", "{\n    x\n}");
+    try expectEdit(alloc, "  f()", "$i<cr>x<esc>", "  f(\n      x\n  )");
+}
+
+pub fn autoIndentEnterDropsBlanksAroundTheBreakTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Blanks before the caret would be trailing whitespace; blanks after
+    // it would sit between the new indent and the text.
+    try expectEdit(alloc, "a   b", "lli<cr><esc>", "a\nb");
+}
+
+pub fn autoIndentEscapeTakesAnUnusedIndentBackTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "    foo", "A<cr><esc>", "    foo\n");
+    try expectEdit(alloc, "    foo", "o<esc>", "    foo\n");
+    // Something typed on it keeps it, even if it was deleted again.
+    try expectEdit(alloc, "    foo", "A<cr>x<bs><esc>", "    foo\n    ");
+}
+
+pub fn autoIndentEnterOnABlankLineLeavesItEmptyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "    foo", "A<cr><cr>bar<esc>", "    foo\n\n    bar");
+}
+
+pub fn autoIndentOpenLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "  a", "ob<esc>", "  a\n  b");
+    try expectEdit(alloc, "  a", "Ob<esc>", "  b\n  a");
+    // `o` under an opener, and `O` over a closer, land inside the block.
+    try expectEdit(alloc, "if x {", "oy<esc>", "if x {\n    y");
+    try expectEdit(alloc, "{\n}", "jOy<esc>", "{\n    y\n}");
+}
+
+pub fn autoIndentColonOpensABlockOnlyWhereTheLanguageSaysTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "if x:", "A<cr>y<esc>", "if x:\ny");
+
+    var ed = try Editor.initFromText(alloc, "if x:", null);
+    defer ed.deinit();
+    ed.colon_block = true;
+    _ = try keys.feed(&ed, "A<cr>y<esc>");
+    try expectText(alloc, &ed.buf, "if x:\n    y");
+}
+
+pub fn autoIndentCloserLinesUpWithItsOpenerTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "fn {\n    a", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "GA<cr>");
+    try expectText(alloc, &ed.buf, "fn {\n    a\n    ");
+    try typeKeys(&ed, "}");
+    try expectText(alloc, &ed.buf, "fn {\n    a\n}");
+}
+
+pub fn autoIndentOffIsABareNewlineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, "    foo {", ":set autoindent=off<cr>A<cr>bar<esc>", "    foo {\nbar");
+}
+
+// ─── Auto-close ──────────────────────────────────────────────────────────
+
+/// Types `text` one character at a time, the way keystrokes arrive.
+/// Auto-close only acts on a single typed character; a run fed as one
+/// chunk (an IME commit) goes in as it is.
+fn typeKeys(ed: *Editor, text: []const u8) !void {
+    for (text) |c| _ = try ed.feedText(&.{c});
+}
+
+pub fn autoCloseTypesThePartnerAndStepsOverItTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i");
+    try typeKeys(&ed, "(");
+    try expectText(alloc, &ed.buf, "()");
+    try testz.expectEqual(ed.cursor, 1);
+    // The typed closer steps over the one auto-close put there.
+    try typeKeys(&ed, "x)");
+    try expectText(alloc, &ed.buf, "(x)");
+    try testz.expectEqual(ed.cursor, 3);
+    // Nested pairs each step over their own closer.
+    try typeKeys(&ed, " {[");
+    try typeKeys(&ed, "]}");
+    try expectText(alloc, &ed.buf, "(x) {[]}");
+    try testz.expectEqual(ed.cursor, 8);
+}
+
+pub fn autoCloseLeavesAnOpenerBeforeAWordAloneTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "foo", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i");
+    try typeKeys(&ed, "(");
+    try expectText(alloc, &ed.buf, "(foo");
+}
+
+pub fn autoCloseNeverStepsOverAClosingBracketItDidNotTypeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, ")", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i");
+    try typeKeys(&ed, ")");
+    try expectText(alloc, &ed.buf, "))");
+}
+
+pub fn autoCloseBackspaceTakesBothHalvesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i");
+    try typeKeys(&ed, "[");
+    _ = try keys.feed(&ed, "<bs>");
+    try expectText(alloc, &ed.buf, "");
+}
+
+pub fn autoCloseQuotesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i");
+    try typeKeys(&ed, "\"ab\"");
+    try expectText(alloc, &ed.buf, "\"ab\"");
+    try testz.expectEqual(ed.cursor, 4);
+
+    // Not straight after a word character: an apostrophe.
+    var word = try Editor.initFromText(alloc, "don", null);
+    defer word.deinit();
+    _ = try keys.feed(&word, "A");
+    try typeKeys(&word, "'");
+    try expectText(alloc, &word.buf, "don'");
+
+    // An odd number of them before the caret: this one closes a string.
+    var open = try Editor.initFromText(alloc, "x = \"ab", null);
+    defer open.deinit();
+    _ = try keys.feed(&open, "A");
+    try typeKeys(&open, "\"");
+    try expectText(alloc, &open.buf, "x = \"ab\"");
+}
+
+pub fn autoCloseWrapsASelectModeSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "foo", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "A<s-left><s-left><s-left>");
+    try typeKeys(&ed, "(");
+    try expectText(alloc, &ed.buf, "(foo)");
+    // Still selected, on the text inside.
+    try testz.expectEqual(ed.mode, .select);
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 1);
+    try testz.expectEqual(span.hi, 4);
+}
+
+pub fn autoCloseOffTypesOneCharacterTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, ":set autoclose=off<cr>i");
+    try typeKeys(&ed, "(\"");
+    try expectText(alloc, &ed.buf, "(\"");
+}
+
+pub fn autoCloseAndIndentTogetherTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // The everyday sequence: `{`, Enter, the body.
+    var ed = try Editor.initFromText(alloc, "fn f() ", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "A");
+    try typeKeys(&ed, "{");
+    _ = try keys.feed(&ed, "<cr>body<esc>");
+    try expectText(alloc, &ed.buf, "fn f() {\n    body\n}");
+}
+
+// ─── Folding ─────────────────────────────────────────────────────────────
+
+const fold_src = "fn a() {\n    one\n    two\n}\nfn b() {\n    three\n}";
+
+pub fn foldRangesFollowIndentationTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, fold_src);
+    defer buf.deinit();
+    try testz.expectEqual(zoe.fold.foldEnd(&buf, 0, 4).?, 2);
+    try testz.expectEqual(zoe.fold.foldEnd(&buf, 4, 4).?, 5);
+    // The closing brace is back at the outer indent: no fold.
+    try testz.expectTrue(zoe.fold.foldEnd(&buf, 3, 4) == null);
+    try testz.expectTrue(zoe.fold.foldEnd(&buf, 1, 4) == null);
+    try testz.expectTrue(zoe.fold.isFoldStart(&buf, 0, 4));
+    try testz.expectFalse(zoe.fold.isFoldStart(&buf, 1, 4));
+}
+
+pub fn foldKeepsInnerBlankLinesAndDropsTrailingOnesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "a:\n    b\n\n    c\n\nd");
+    defer buf.deinit();
+    try testz.expectEqual(zoe.fold.foldEnd(&buf, 0, 4).?, 3);
+    // A blank line belongs to the block around it.
+    try testz.expectEqual(zoe.fold.foldAt(&buf, 2, 4).?, 0);
+}
+
+pub fn foldCloseMovesTheCaretOntoItsLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, fold_src, null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "jzc");
+    try testz.expectEqual(ed.buf.closed_folds.items.len, 1);
+    try testz.expectEqual(ed.buf.closed_folds.items[0], 0);
+    try testz.expectEqual(ed.pos().line, 0);
+    const hidden = ed.hiddenLines();
+    try testz.expectEqual(hidden.len, 1);
+    try testz.expectEqual(hidden[0].first, 1);
+    try testz.expectEqual(hidden[0].last, 2);
+}
+
+pub fn foldUpAndDownStepOverAClosedFoldTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, fold_src, null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "jzcj");
+    try testz.expectEqual(ed.pos().line, 3);
+    _ = try keys.feed(&ed, "k");
+    try testz.expectEqual(ed.pos().line, 0);
+    _ = try keys.feed(&ed, "<down>");
+    try testz.expectEqual(ed.pos().line, 3);
+    _ = try keys.feed(&ed, "2k");
+    try testz.expectEqual(ed.pos().line, 0);
+}
+
+pub fn foldLinewiseCommandsTakeTheWholeFoldTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, fold_src, "jzcdd", "}\nfn b() {\n    three\n}");
+    try expectEdit(alloc, fold_src, "jzcjdk", "fn b() {\n    three\n}");
+
+    var ed = try Editor.initFromText(alloc, fold_src, null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "jzcyy");
+    try testz.expectEqualStr(ed.yank.items, "fn a() {\n    one\n    two\n");
+}
+
+pub fn foldOpenLineBelowGoesUnderTheFoldTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    try expectEdit(alloc, fold_src, ":set autoindent=off<cr>jzcox<esc>", "fn a() {\n    one\n    two\nx\n}\nfn b() {\n    three\n}");
+}
+
+pub fn foldToggleAndAllTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, fold_src, null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "za");
+    try testz.expectEqual(ed.buf.closed_folds.items.len, 1);
+    _ = try keys.feed(&ed, "za");
+    try testz.expectEqual(ed.buf.closed_folds.items.len, 0);
+
+    _ = try keys.feed(&ed, "zM");
+    try testz.expectEqual(ed.buf.closed_folds.items.len, 2);
+    _ = try keys.feed(&ed, "jjj");
+    try testz.expectEqual(ed.pos().line, 6);
+    _ = try keys.feed(&ed, "zR");
+    try testz.expectEqual(ed.buf.closed_folds.items.len, 0);
+}
+
+pub fn foldCloseRepeatedFoldsOutwardTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const src = "class A:\n    def f(self):\n        return 1\n    def g(self):\n        pass";
+    var ed = try Editor.initFromText(alloc, src, null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "jjzc");
+    try testz.expectEqual(ed.pos().line, 1);
+    _ = try keys.feed(&ed, "zc");
+    try testz.expectEqual(ed.pos().line, 0);
+    try testz.expectEqual(ed.buf.closed_folds.items.len, 2);
+    // The inner fold is covered by the outer one.
+    const hidden = ed.hiddenLines();
+    try testz.expectEqual(hidden.len, 1);
+    try testz.expectEqual(hidden[0].last, 4);
+    // Opening the outer one shows the inner one still closed.
+    _ = try keys.feed(&ed, "zoj");
+    try testz.expectEqual(ed.pos().line, 1);
+    _ = try keys.feed(&ed, "j");
+    try testz.expectEqual(ed.pos().line, 3);
+}
+
+pub fn foldFollowsItsLineThroughEditsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, fold_src, null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "5Gzc");
+    try testz.expectEqual(ed.buf.closed_folds.items[0], 4);
+    _ = try keys.feed(&ed, "ggOnew<esc>");
+    try testz.expectEqual(ed.buf.closed_folds.items[0], 5);
+    _ = try keys.feed(&ed, "ggdd");
+    try testz.expectEqual(ed.buf.closed_folds.items[0], 4);
+    // Undo replays through the same calls, so the fold rides along.
+    _ = try keys.feed(&ed, "u");
+    try testz.expectEqual(ed.buf.closed_folds.items[0], 5);
+    // Deleting the fold's own line takes it away.
+    _ = try keys.feed(&ed, "6Gdd");
+    try testz.expectEqual(ed.buf.closed_folds.items.len, 0);
+}
+
+pub fn foldRevealCursorOpensAFoldHidingItTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, fold_src, null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "jzc");
+    ed.setCursor(ed.buf.lineStart(2));
+    ed.revealCursor();
+    try testz.expectEqual(ed.buf.closed_folds.items.len, 0);
+}
+
+pub fn foldVisibleLineArithmeticTest(_: std.Io, _: std.mem.Allocator) !void {
+    const hidden = [_]zoe.fold.Range{.{ .first = 1, .last = 2 }};
+    try testz.expectEqual(zoe.fold.visibleDown(&hidden, 0, 1, 7), 3);
+    try testz.expectEqual(zoe.fold.visibleDown(&hidden, 0, 10, 7), 6);
+    try testz.expectEqual(zoe.fold.visibleUp(&hidden, 3, 1), 0);
+    try testz.expectEqual(zoe.fold.visibleDistance(&hidden, 0, 3), 1);
+    try testz.expectEqual(zoe.fold.visibleDistance(&hidden, 5, 0), 3);
+    try testz.expectEqual(zoe.fold.lastOfRow(&hidden, 0), 2);
+    try testz.expectEqual(zoe.fold.lastOfRow(&hidden, 3), 3);
+}
+
+pub fn layoutRowMapSkipsHiddenLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var map: std.ArrayList(zoe.ui.RowView) = .empty;
+    defer map.deinit(alloc);
+    const lines = TestLines{ .lines = &.{ "a {", "  b", "  c", "}", "d" } };
+    const hidden = [_]zoe.fold.Range{.{ .first = 1, .last = 2 }};
+    try zoe.ui.layoutRowMap(alloc, &map, lines, 0, 0, 0, 3, 5, false, wrap_opts, &hidden);
+    try testz.expectEqual(map.items[0].line, 0);
+    try testz.expectEqual(map.items[1].line, 3);
+    try testz.expectEqual(map.items[2].line, 4);
+
+    try zoe.ui.layoutRowMap(alloc, &map, lines, 0, 0, 0, 3, 5, true, wrap_opts, &hidden);
+    try testz.expectEqual(map.items[1].line, 3);
+}
+
+pub fn editorConfigTogglesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cfg = try parseConf(alloc, "config = { auto_indent = false, auto_close = false, fold_column = false }");
+    defer cfg.deinit();
+    try testz.expectFalse(cfg.auto_indent);
+    try testz.expectFalse(cfg.auto_close);
+    try testz.expectFalse(cfg.fold_column);
+
+    var dflt = try parseConf(alloc, "config = {}");
+    defer dflt.deinit();
+    try testz.expectTrue(dflt.auto_indent);
+    try testz.expectTrue(dflt.auto_close);
+    try testz.expectTrue(dflt.fold_column);
 }

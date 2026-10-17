@@ -21,6 +21,7 @@ const tabs = @import("tabs.zig");
 const lsp = @import("lsp.zig");
 const selection_diff = @import("selection_diff.zig");
 const diag = @import("diag.zig");
+const fold = @import("fold.zig");
 const hover_mod = @import("hover.zig");
 const buffer_mod = @import("buffer.zig");
 const lineedit = @import("applib").lineedit;
@@ -198,6 +199,12 @@ pub fn writeAt(
 pub fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     const b = self.grp.buffer_bounds;
     if (b.cols == 0 or b.rows == 0) return;
+    // A jump that lands inside a closed fold (a search match, `gd`, an
+    // undo) opens it, before anything below lays the rows out.
+    self.buf.ed.revealCursor();
+    // A fold opening or closing moves every row below it, which no row
+    // shift or caret-row repaint can express.
+    if (self.buf.ed.buf.folds_gen != self.buf.prev_folds_gen) self.buf.full_redraw = true;
     self.scrollBufferToCursor();
     try self.syncBufferScrollbar(batch);
     // What every screen row shows this frame; all the row painters
@@ -232,8 +239,10 @@ pub fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         self.buf.left_col != self.buf.prev_left_col;
     const edited = self.buf.ed.buf.edits != self.buf.prev_edits;
     // Wrapped, an edit that changed how many rows a line takes moved
-    // every row below it -- more than the edited lines to repaint.
-    if (self.buf.ed.wrap and edited and row_hash != self.buf.prev_row_hash) self.buf.full_redraw = true;
+    // every row below it -- more than the edited lines to repaint. A
+    // closed fold does the same when an edit changes how far it reaches.
+    const by_rows = self.buf.ed.wrap or self.buf.ed.hasClosedFolds();
+    if (by_rows and edited and row_hash != self.buf.prev_row_hash) self.buf.full_redraw = true;
 
     // A visual selection covers rows the caret never touches. When it
     // changed, the rows to repaint are the ones whose highlight
@@ -251,7 +260,7 @@ pub fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     // repaint.
     var prev_top = self.buf.prev_top_line;
     var top = self.buf.top_line;
-    if (self.buf.ed.wrap and scrolled and !edited and !self.buf.full_redraw) {
+    if (by_rows and scrolled and !edited and !self.buf.full_redraw) {
         if (self.wrappedScrollDelta(b.rows)) |d| {
             prev_top = b.rows;
             top = @intCast(@as(i64, @intCast(b.rows)) + d);
@@ -345,6 +354,7 @@ pub fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     self.buf.prev_top_line = self.buf.top_line;
     self.buf.prev_top_sub = self.buf.top_sub;
     self.buf.prev_row_hash = row_hash;
+    self.buf.prev_folds_gen = self.buf.ed.buf.folds_gen;
     self.buf.prev_left_col = self.buf.left_col;
     self.buf.prev_cursor_line = cursor.line;
     self.buf.prev_edits = self.buf.ed.buf.edits;
@@ -556,8 +566,12 @@ pub fn addDirtyLine(self: *Ui, line: usize) !void {
 /// as it was. `renderBuffer`'s caret pass runs afterwards.
 pub fn renderChangedRows(self: *Ui, batch: *glyphwire.client.Client.Batch, cursor_line: usize) !void {
     for (self.row_map.items, 0..) |rv, r| {
-        if (self.dirtyLineListed(rv.line) or rv.line == self.buf.prev_cursor_line or rv.line == cursor_line)
+        if (self.dirtyLineListed(rv.line) or rv.line == self.buf.prev_cursor_line or rv.line == cursor_line) {
             try self.renderBufferRow(batch, r);
+            // Whether the line above can fold depends on this one's
+            // indent, so its fold marker may have just changed too.
+            if (r > 0 and self.foldWidth() > 0) try self.renderGutterCell(batch, r - 1);
+        }
     }
 }
 
@@ -582,7 +596,14 @@ pub fn renderBufferRows(self: *Ui, batch: *glyphwire.client.Client.Batch, from: 
 /// the count already forces a full pane repaint, so it is always safe
 /// to read fresh.
 pub fn gutterWidth(self: *const Ui) usize {
-    return self.signWidth() + gutterWidthFor(self.buf.ed.line_numbers, self.buf.ed.buf.lineCount());
+    return self.signWidth() + self.foldWidth() + gutterWidthFor(self.buf.ed.line_numbers, self.buf.ed.buf.lineCount());
+}
+
+/// Cells the fold column takes, between the sign column and the line
+/// numbers (vim's `foldcolumn` sits there too): one while
+/// `fold_column` is on.
+pub fn foldWidth(self: *const Ui) usize {
+    return if (self.buf.ed.fold_column) 1 else 0;
 }
 
 /// Cells reserved for the diagnostic sign column, left of the line
@@ -632,32 +653,63 @@ pub fn renderGutterCell(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usi
         }
     }
 
+    // The fold marker: ▸ on a closed fold, a dim ▾ on a line that can
+    // fold, blank elsewhere. Same width rule as the signs.
+    const folds = self.foldWidth();
+    var marker: []const u8 = " ";
+    var marker_fg = role(.fg_dim);
+    if (folds > 0 and !past_end) {
+        if (fold.isClosed(self.buf.ed.buf.closed_folds.items, line)) {
+            marker = fold_closed_marker;
+            marker_fg = role(.fg);
+        } else if (fold.isFoldStart(&self.buf.ed.buf, line, self.buf.ed.tab_width)) {
+            marker = fold_open_marker;
+        }
+    }
+
+    // Relative numbers count the lines on screen, so a closed fold is
+    // one -- `5j` lands where the gutter says 5.
+    const distance = if (self.buf.ed.hasClosedFolds())
+        fold.visibleDistance(self.buf.ed.hiddenLines(), line, cursor_line)
+    else if (line > cursor_line) line - cursor_line else cursor_line - line;
     var buf: [32]u8 = undefined;
     const cell = gutterCellText(
         &buf,
         self.buf.ed.line_numbers,
-        width - signs,
+        width - signs - folds,
         line,
-        cursor_line,
+        distance,
         past_end,
     );
     const fg = if (!past_end and line == cursor_line) role(.fg) else role(.fg_dim);
 
-    // Sign and number as one write: the gutter is repainted for every
-    // row a frame draws, and a write's fixed fields cost more than the
-    // handful of cells it carries.
-    const spans = [_]glyphwire.client.Client.Span{
-        .{ .text = sign, .fg = sign_fg },
-        .{ .text = cell, .fg = fg },
-    };
-    const first: usize = if (signs > 0) 0 else 1;
-    try batch.writeSpans(spans[first..], .{
+    // Sign, marker and number as one write: the gutter is repainted for
+    // every row a frame draws, and a write's fixed fields cost more than
+    // the handful of cells it carries.
+    var spans: [3]glyphwire.client.Client.Span = undefined;
+    var n: usize = 0;
+    if (signs > 0) {
+        spans[n] = .{ .text = sign, .fg = sign_fg };
+        n += 1;
+    }
+    if (folds > 0) {
+        spans[n] = .{ .text = marker, .fg = marker_fg };
+        n += 1;
+    }
+    spans[n] = .{ .text = cell, .fg = fg };
+    n += 1;
+    try batch.writeSpans(spans[0..n], .{
         .layer = self.grp.buffer_layer,
         .row = r,
         .col = 0,
         .bg = role(.bg),
     });
 }
+
+/// The fold column's markers. Both are East Asian "ambiguous" width,
+/// drawn one cell wide like the diagnostic signs.
+pub const fold_open_marker = "\u{25be}"; // ▾
+pub const fold_closed_marker = "\u{25b8}"; // ▸
 
 /// The worst diagnostic severity starting on buffer `line` of the active
 /// buffer, or null. Runs once per visible row per frame, so it does no
@@ -717,6 +769,29 @@ pub fn renderBufferRow(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usiz
     // Every path that repaints a row comes through here, so a mark is
     // re-applied whenever the row under it is redrawn.
     try self.paintDiagnosticRow(batch, r, rv, text);
+    if (rv.last) try self.paintFoldTail(batch, r, rv, text);
+}
+
+/// After the text of a closed fold's line, a dim `⋯ N lines` saying how
+/// much it hides, clipped to the pane.
+pub fn paintFoldTail(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize, rv: RowView, text: []const u8) !void {
+    if (!fold.isClosed(self.buf.ed.buf.closed_folds.items, rv.line)) return;
+    const hidden = self.buf.ed.rowLast(rv.line) - rv.line;
+    if (hidden == 0) return;
+    const end_col = display.width(text, self.displayOpts());
+    const cols = self.textCols();
+    const at = (end_col -| rv.left) + 1;
+    if (end_col < rv.left or at >= cols) return;
+    var buf: [48]u8 = undefined;
+    const tail = std.fmt.bufPrint(&buf, "\u{22ef} {d} line{s}", .{ hidden, if (hidden == 1) "" else "s" }) catch return;
+    try batch.writeText(tail, .{
+        .layer = self.grp.buffer_layer,
+        .row = r,
+        .col = self.gutterWidth() + at,
+        .fg = role(.fg_dim),
+        .bg = role(.bg),
+        .max_cols = cols - at,
+    });
 }
 
 /// Draws every diagnostic starting on the row's buffer line as a
@@ -1370,16 +1445,20 @@ pub fn layoutRows(self: *Ui) !void {
         self.textCols(),
         self.buf.ed.wrap,
         self.displayOpts(),
+        self.buf.ed.hiddenLines(),
     );
 }
 
 /// A screen row of a wrapped buffer: row `sub` of buffer `line`.
 pub const RowPos = struct { line: usize, sub: usize };
 
-/// Screen rows buffer `line` wraps into at the pane's text width. A
-/// line past the end (or one that can't be read) counts as one.
+/// Screen rows buffer `line` takes: none inside a closed fold, one
+/// unwrapped, and however many it wraps into at the pane's text width.
+/// A line past the end (or one that can't be read) counts as one.
 pub fn lineRows(self: *Ui, line: usize) usize {
     if (line >= self.buf.ed.buf.lineCount()) return 1;
+    if (fold.isHidden(self.buf.ed.hiddenLines(), line)) return 0;
+    if (!self.buf.ed.wrap) return 1;
     const text = self.buf.ed.buf.lineText(self.alloc, line) catch return 1;
     defer self.alloc.free(text);
     return softwrap.rowCount(text, self.displayOpts(), self.textCols());
@@ -1388,6 +1467,7 @@ pub fn lineRows(self: *Ui, line: usize) usize {
 /// The wrapped screen row the caret sits on.
 pub fn cursorRowPos(self: *Ui) RowPos {
     const line = self.buf.ed.pos().line;
+    if (!self.buf.ed.wrap) return .{ .line = line, .sub = 0 };
     const text = self.buf.ed.buf.lineText(self.alloc, line) catch return .{ .line = line, .sub = 0 };
     defer self.alloc.free(text);
     const col = self.cursorDisplayCol() catch return .{ .line = line, .sub = 0 };
@@ -1400,11 +1480,20 @@ pub fn rowsBetween(self: *Ui, from: RowPos, to: RowPos, cap: usize) usize {
     if (from.line == to.line) return @min(to.sub -| from.sub, cap);
     var n = self.lineRows(from.line) -| from.sub;
     var line = from.line + 1;
-    while (line < to.line and n < cap) : (line += 1) n += self.lineRows(line);
+    const hidden = self.buf.ed.hiddenLines();
+    while (line < to.line and n < cap) : (line += 1) {
+        // A closed fold's lines are no rows; step over the whole run.
+        if (fold.rangeOf(hidden, line)) |r| {
+            line = r.last;
+            continue;
+        }
+        n += self.lineRows(line);
+    }
     return @min(n + to.sub, cap);
 }
 
 /// The screen row `n` rows above `at`, stopping at the buffer's top.
+/// Lines inside a closed fold take no rows and are stepped over.
 pub fn rowsBack(self: *Ui, at: RowPos, n: usize) RowPos {
     var pos = at;
     var left = n;
@@ -1414,9 +1503,15 @@ pub fn rowsBack(self: *Ui, at: RowPos, n: usize) RowPos {
             break;
         }
         left -= pos.sub + 1;
-        if (pos.line == 0) return .{ .line = 0, .sub = 0 };
-        pos.line -= 1;
-        pos.sub = self.lineRows(pos.line) - 1;
+        while (true) {
+            if (pos.line == 0) return .{ .line = 0, .sub = 0 };
+            pos.line -= 1;
+            const rows = self.lineRows(pos.line);
+            if (rows > 0) {
+                pos.sub = rows - 1;
+                break;
+            }
+        }
     }
     return pos;
 }
@@ -1431,10 +1526,15 @@ pub fn scrollBufferToCursor(self: *Ui) void {
     if (b.rows == 0 or b.cols == 0) return;
     if (self.buf.ed.wrap) return self.scrollWrappedToCursor();
     self.buf.top_sub = 0;
-    const pos = self.buf.ed.pos();
-
-    if (pos.line < self.buf.top_line) self.buf.top_line = pos.line;
-    if (pos.line >= self.buf.top_line + b.rows) self.buf.top_line = pos.line - b.rows + 1;
+    if (self.buf.ed.hasClosedFolds()) {
+        // A closed fold is one row however many lines it holds, so the
+        // view is measured in rows, the way the wrapped one is.
+        self.scrollRowsToCursor();
+    } else {
+        const pos = self.buf.ed.pos();
+        if (pos.line < self.buf.top_line) self.buf.top_line = pos.line;
+        if (pos.line >= self.buf.top_line + b.rows) self.buf.top_line = pos.line - b.rows + 1;
+    }
 
     const col = self.cursorDisplayCol() catch return;
     const cols = self.textCols();
@@ -1446,12 +1546,23 @@ pub fn scrollBufferToCursor(self: *Ui) void {
 /// sideways, and the view moves in screen rows, so a long line can sit
 /// part-way off the top of the pane.
 pub fn scrollWrappedToCursor(self: *Ui) void {
-    const rows = self.grp.buffer_bounds.rows;
     self.buf.left_col = 0;
+    self.scrollRowsToCursor();
+}
+
+/// The vertical half of keeping the caret in view, counted in screen
+/// rows rather than lines: what wrapping and closed folds both need.
+pub fn scrollRowsToCursor(self: *Ui) void {
+    const rows = self.grp.buffer_bounds.rows;
     // An edit or a narrower pane can leave the top row past its
-    // line's last one.
+    // line's last one, and a fold closing can hide the top line.
     if (self.buf.top_line >= self.buf.ed.buf.lineCount()) {
         self.buf.top_line = self.buf.ed.buf.lineCount() - 1;
+        self.buf.top_sub = 0;
+    }
+    const shown = fold.visibleAtOrAbove(self.buf.ed.hiddenLines(), self.buf.top_line);
+    if (shown != self.buf.top_line) {
+        self.buf.top_line = shown;
         self.buf.top_sub = 0;
     }
     self.buf.top_sub = @min(self.buf.top_sub, self.lineRows(self.buf.top_line) - 1);
@@ -1493,7 +1604,14 @@ pub fn scrollGroupTo(self: *Ui, g: *Group, row: usize, col: usize) void {
     const b = g.buffer_bounds;
     if (b.rows == 0) return;
     const slot = g.slot();
-    slot.top_line = row;
+    // A row inside a closed fold isn't on screen. Scrolling down past
+    // one lands below it rather than back on its first line, or the
+    // wheel could never get past a fold longer than one notch.
+    const hidden = slot.ed.hiddenLines();
+    slot.top_line = if (fold.rangeOf(hidden, row)) |r|
+        (if (row > slot.top_line and r.last + 1 < slot.ed.buf.lineCount()) r.last + 1 else r.first - 1)
+    else
+        row;
     // The host scrolls in buffer lines (the bar's extent is the line
     // count), so a wrapped view lands on a line's first row.
     slot.top_sub = 0;
@@ -1501,7 +1619,9 @@ pub fn scrollGroupTo(self: *Ui, g: *Group, row: usize, col: usize) void {
 
     const cur = slot.ed.pos();
     const last = slot.ed.buf.lineCount() -| 1;
-    const clamped_line = std.math.clamp(cur.line, row, @min(self.lastWholeLine(g), last));
+    // From `top_line`, not `row`: the row asked for may have been a
+    // hidden one, and a cursor dragged into a closed fold would open it.
+    const clamped_line = std.math.clamp(cur.line, slot.top_line, @min(self.lastWholeLine(g), last));
     if (clamped_line != cur.line) {
         slot.ed.cursor = slot.ed.buf.offsetOf(.{ .line = clamped_line, .col = cur.col });
     }
@@ -1519,7 +1639,7 @@ pub fn scrollGroupTo(self: *Ui, g: *Group, row: usize, col: usize) void {
 /// `top_line`, even when that one line is taller than the pane.
 pub fn lastWholeLine(self: *Ui, g: *Group) usize {
     const slot = g.slot();
-    if (!slot.ed.wrap) return slot.top_line + g.buffer_bounds.rows -| 1;
+    if (!slot.ed.wrap and !slot.ed.hasClosedFolds()) return slot.top_line + g.buffer_bounds.rows -| 1;
     const focused_grp = self.grp;
     const focused_buf = self.buf;
     self.grp = g;
@@ -2085,16 +2205,26 @@ pub fn layoutRowMap(
     width: usize,
     wrap_on: bool,
     opts: display.Opts,
+    hidden: []const fold.Range,
 ) !void {
     out.clearRetainingCapacity();
     const count = lines.count();
     if (!wrap_on) {
-        for (0..rows) |r| try out.append(alloc, .{ .line = top_line + r, .sub = 0, .left = left, .cols = width, .last = true });
+        var line = top_line;
+        while (out.items.len < rows) : (line += 1) {
+            // A closed fold's lines take no rows: skip to the line after.
+            if (fold.rangeOf(hidden, line)) |r| line = r.last + 1;
+            try out.append(alloc, .{ .line = line, .sub = 0, .left = left, .cols = width, .last = true });
+        }
         return;
     }
     var line = top_line;
     var skip = top_sub;
     while (out.items.len < rows) : (line += 1) {
+        if (fold.rangeOf(hidden, line)) |r| {
+            line = r.last + 1;
+            skip = 0;
+        }
         if (line >= count) {
             try out.append(alloc, .{ .line = line, .sub = 0, .left = 0, .cols = width, .last = true });
             continue;
@@ -2195,20 +2325,21 @@ pub fn gutterWidthFor(mode: editor.LineNumbers, line_count: usize) usize {
 }
 
 /// The text of one gutter cell, `width` display cells wide (a
-/// `gutterWidthFor` result), for buffer line `line` (0-based) with the
-/// caret on `cursor_line`. `past_end` -- the screen row is below the last
-/// buffer line -- gives an all-blank cell, like vim leaves beside its
-/// `~` markers. The number is right-aligned in the leading `width - 1`
-/// cells with the last cell a blank separator; in `.relative` mode the
-/// caret's own line still shows its absolute number. Written into `buf`
-/// (which must be at least `width` bytes) and returned as a slice, so
-/// this needs no allocator.
+/// `gutterWidthFor` result), for buffer line `line` (0-based),
+/// `distance` on-screen lines from the caret's. `past_end` -- the
+/// screen row is below the last buffer line -- gives an all-blank cell,
+/// like vim leaves beside its `~` markers. The number is right-aligned
+/// in the leading `width - 1` cells with the last cell a blank
+/// separator; in `.relative` mode the caret's own line (distance 0)
+/// still shows its absolute number. Written into `buf` (which must be
+/// at least `width` bytes) and returned as a slice, so this needs no
+/// allocator.
 pub fn gutterCellText(
     buf: []u8,
     mode: editor.LineNumbers,
     width: usize,
     line: usize,
-    cursor_line: usize,
+    distance: usize,
     past_end: bool,
 ) []const u8 {
     if (mode == .off or width == 0) return buf[0..0];
@@ -2218,12 +2349,7 @@ pub fn gutterCellText(
     const value: usize = switch (mode) {
         .off => unreachable,
         .absolute => line + 1,
-        .relative => if (line == cursor_line)
-            line + 1
-        else if (line > cursor_line)
-            line - cursor_line
-        else
-            cursor_line - line,
+        .relative => if (distance == 0) line + 1 else distance,
     };
 
     var num: [24]u8 = undefined;
