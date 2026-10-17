@@ -184,34 +184,49 @@ h1 {
 .window {
   margin: 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 6px;
   overflow: hidden;
   background: #0c0c0c;
   box-shadow: var(--shadow);
 }
 
+/* KDE Plasma's Breeze Dark decoration, since glyphwire lives on the Linux
+   desktop: app icon on the left, title centred, then minimise (down
+   chevron), maximise (up chevron) and close (an X in a circle) on the
+   right. The title sits in the middle column of a three-column grid so it
+   stays centred on the bar whatever the two sides hold. */
 .window-bar {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 7px;
-  padding: 10px 14px;
-  background: #121a16;
-  border-bottom: 1px solid #1d2a23;
+  height: 30px;
+  padding: 0 6px 0 8px;
+  background: #2a2e32;
+  border-bottom: 1px solid #1b1e20;
 }
-.window-bar span { width: 11px; height: 11px; border-radius: 50%; background: #2c3d34; }
-.window-bar span:first-child { background: #ff5f57; }
-.window-bar span:nth-child(2) { background: #febc2e; }
-.window-bar span:nth-child(3) { background: #28c840; }
+.wb-icon { width: 16px; height: 16px; }
 .window-bar em {
-  margin-left: 10px;
-  color: #8fae9f;
+  color: #fcfcfc;
+  font: 500 .84rem "Noto Sans", Inter, system-ui, sans-serif;
   font-style: normal;
-  font-size: .82rem;
-  font-family: "JetBrains Mono", monospace;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.wb-buttons { display: flex; justify-content: flex-end; gap: 4px; }
+.wb-buttons svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: #fcfcfc;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.wb-buttons .wb-close circle { fill: #fcfcfc; stroke: none; }
+.wb-buttons .wb-close path { stroke: #2a2e32; stroke-width: 1.5; }
+.window:hover .wb-close circle { fill: #da4453; }
+.window:hover .wb-close path { stroke: #fcfcfc; }
 
 .hero-shot { box-shadow: var(--shadow), var(--glow); }
 
