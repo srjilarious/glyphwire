@@ -253,6 +253,70 @@ fn wordEndOnce(buf: *const Buffer, off: usize, big: bool) usize {
     return i;
 }
 
+/// What a subword boundary is read from. Bytes >= 0x80 count as `lower`,
+/// so a multi-byte codepoint never starts a subword of its own mid-word
+/// and its continuation bytes never split it.
+const SubKind = enum { lower, upper, digit };
+
+fn subKind(b: u8) SubKind {
+    if (std.ascii.isUpper(b)) return .upper;
+    if (std.ascii.isDigit(b)) return .digit;
+    return .lower;
+}
+
+/// Whether `off` starts a subword: a word character (not `_`, which
+/// separates subwords the way a blank separates words) that follows a
+/// non-word character or an underscore, or that a case or digit change
+/// inside the word starts -- `fooBar`, `HTTPServer` (the `S`), `v2Thing`
+/// (both the `2` and the `T`).
+fn isSubwordStart(buf: *const Buffer, off: usize) bool {
+    const b = buf.byteAt(off);
+    if (classOf(b, false) != .word or b == '_') return false;
+    if (off == 0) return true;
+    const prev = buf.byteAt(off - 1);
+    if (classOf(prev, false) != .word or prev == '_') return true;
+    const kp = subKind(prev);
+    const kb = subKind(b);
+    if ((kb == .digit) != (kp == .digit)) return true;
+    if (kb == .upper and kp == .lower) return true;
+    // The last capital of an acronym starts the word after it.
+    if (kb == .upper and kp == .upper and off + 1 < buf.len()) {
+        const next = buf.byteAt(off + 1);
+        return classOf(next, false) == .word and next != '_' and subKind(next) == .lower;
+    }
+    return false;
+}
+
+/// Where Ctrl+Left / Ctrl+Right stop by subword: each subword's start,
+/// the start of a punctuation run (as `w` does), and an empty line.
+fn isSubwordStop(buf: *const Buffer, off: usize) bool {
+    if (isEmptyLine(buf, off)) return true;
+    if (isSubwordStart(buf, off)) return true;
+    if (classOf(buf.byteAt(off), false) != .punct) return false;
+    return off == 0 or classOf(buf.byteAt(off - 1), false) != .punct;
+}
+
+/// VS Code's word-part motion: forward to the next subword start,
+/// crossing lines the way `w` does.
+pub fn subwordForward(buf: *const Buffer, off: usize) usize {
+    const end = buf.len();
+    var i = @min(off, end);
+    if (i >= end) return end;
+    i += 1;
+    while (i < end and !isSubwordStop(buf, i)) i += 1;
+    return i;
+}
+
+/// Back to the previous subword start.
+pub fn subwordBackward(buf: *const Buffer, off: usize) usize {
+    var i = @min(off, buf.len());
+    while (i > 0) {
+        i -= 1;
+        if (isSubwordStop(buf, i)) return i;
+    }
+    return 0;
+}
+
 /// Pulls an offset back onto a legal normal-mode position: on a
 /// character, on a codepoint boundary, within its own line.
 pub fn clampNormal(buf: *const Buffer, off: usize) usize {

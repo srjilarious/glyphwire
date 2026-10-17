@@ -76,6 +76,11 @@ pub const Action = enum {
     zoomGroup,
     jumpBack,
     jumpForward,
+    /// Two-letter labels over every word start on the focused pane's
+    /// visible rows; typing one moves the cursor there (`zoe/jump.zig`).
+    /// A selection is extended to it, and the jumplist remembers where
+    /// the cursor was.
+    jump,
     /// The selection (or the line) to the system clipboard, removed.
     cut,
     /// The system clipboard, pasted after the cursor (vim's `p`), or over
@@ -92,8 +97,13 @@ pub const Action = enum {
     down,
     lineStart,
     lineEnd,
+    /// Whole words, vim's `b` / `w`.
     wordLeft,
     wordRight,
+    /// Word parts, VS Code's: `fooBar`, `foo_bar`, `HTTPServer` and
+    /// `v2Thing` each stop inside the word as well as at its start.
+    subwordLeft,
+    subwordRight,
     fileStart,
     fileEnd,
     pageUp,
@@ -109,6 +119,8 @@ pub const Action = enum {
     selectLineEnd,
     selectWordLeft,
     selectWordRight,
+    selectSubwordLeft,
+    selectSubwordRight,
     selectFileStart,
     selectFileEnd,
 
@@ -146,6 +158,11 @@ pub const Action = enum {
     deleteForward,
     deleteWordBack,
     deleteWordForward,
+    deleteSubwordBack,
+    deleteSubwordForward,
+
+    /// Soft wrap on or off, in every buffer (`:set wrap` / `:set nowrap`).
+    toggleWordWrap,
 
     /// Whether the command palette lists it. Left out: the palette
     /// itself, Ctrl+W's prefix (it waits for a key the palette has just
@@ -155,9 +172,9 @@ pub const Action = enum {
     pub fn inPalette(self: Action) bool {
         return switch (self) {
             .none, .commandPalette, .windowPrefix, .complete => false,
-            .left, .right, .up, .down, .lineStart, .lineEnd, .wordLeft, .wordRight, .fileStart, .fileEnd, .pageUp, .pageDown => false,
-            .selectLeft, .selectRight, .selectUp, .selectDown, .selectLineStart, .selectLineEnd, .selectWordLeft, .selectWordRight, .selectFileStart, .selectFileEnd => false,
-            .newline, .insertTab, .backspace, .deleteForward, .deleteWordBack, .deleteWordForward => false,
+            .left, .right, .up, .down, .lineStart, .lineEnd, .wordLeft, .wordRight, .subwordLeft, .subwordRight, .fileStart, .fileEnd, .pageUp, .pageDown => false,
+            .selectLeft, .selectRight, .selectUp, .selectDown, .selectLineStart, .selectLineEnd, .selectWordLeft, .selectWordRight, .selectSubwordLeft, .selectSubwordRight, .selectFileStart, .selectFileEnd => false,
+            .newline, .insertTab, .backspace, .deleteForward, .deleteWordBack, .deleteWordForward, .deleteSubwordBack, .deleteSubwordForward => false,
             else => true,
         };
     }
@@ -191,6 +208,7 @@ pub const Action = enum {
             .replace => "Find and Replace",
             .paste => "Paste from Clipboard",
             .cut => "Cut to Clipboard",
+            .jump => "Jump to Word",
             else => null,
         };
     }
@@ -244,6 +262,11 @@ pub const global_defaults = [_]Default{
     .{ .chord = "ctrl+j", .action = .focusDown },
     .{ .chord = "ctrl+o", .action = .jumpBack },
     .{ .chord = "ctrl+i", .action = .jumpForward },
+    // Every mode, insert included: Shift+Enter there was only a second
+    // Enter.
+    .{ .chord = "shift+enter", .action = .jump },
+    // VS Code's.
+    .{ .chord = "alt+z", .action = .toggleWordWrap },
     .{ .chord = "ctrl+shift+p", .action = .commandPalette },
     // `paste` has no chord of its own: Ctrl+Shift+V is the host's, which
     // reads the system clipboard and sends it as a `paste` event zoe
@@ -265,8 +288,14 @@ pub const global_defaults = [_]Default{
     .{ .chord = "shift+down", .action = .selectDown },
     .{ .chord = "shift+home", .action = .selectLineStart },
     .{ .chord = "shift+end", .action = .selectLineEnd },
-    .{ .chord = "ctrl+shift+left", .action = .selectWordLeft },
-    .{ .chord = "ctrl+shift+right", .action = .selectWordRight },
+    // Ctrl+arrows move by word part (insert mode's, below), so their
+    // Shift forms select by one; whole words are Alt's.
+    .{ .chord = "ctrl+shift+left", .action = .selectSubwordLeft },
+    .{ .chord = "ctrl+shift+right", .action = .selectSubwordRight },
+    .{ .chord = "alt+left", .action = .wordLeft },
+    .{ .chord = "alt+right", .action = .wordRight },
+    .{ .chord = "shift+alt+left", .action = .selectWordLeft },
+    .{ .chord = "shift+alt+right", .action = .selectWordRight },
     .{ .chord = "ctrl+shift+home", .action = .selectFileStart },
     .{ .chord = "ctrl+shift+end", .action = .selectFileEnd },
 
@@ -300,16 +329,17 @@ pub const visual_defaults = normal_defaults;
 /// the global focus chords.
 pub const insert_defaults = [_]Default{
     .{ .chord = "enter", .action = .newline },
-    .{ .chord = "shift+enter", .action = .newline },
     .{ .chord = "tab", .action = .insertTab },
     .{ .chord = "shift+tab", .action = .dedent },
     .{ .chord = "backspace", .action = .backspace },
     .{ .chord = "shift+backspace", .action = .backspace },
     .{ .chord = "delete", .action = .deleteForward },
-    .{ .chord = "ctrl+backspace", .action = .deleteWordBack },
-    .{ .chord = "ctrl+delete", .action = .deleteWordForward },
-    .{ .chord = "ctrl+left", .action = .wordLeft },
-    .{ .chord = "ctrl+right", .action = .wordRight },
+    // By word part, like the arrows beside them. `deleteWordBack` and
+    // `deleteWordForward` are left for `keys` to bind.
+    .{ .chord = "ctrl+backspace", .action = .deleteSubwordBack },
+    .{ .chord = "ctrl+delete", .action = .deleteSubwordForward },
+    .{ .chord = "ctrl+left", .action = .subwordLeft },
+    .{ .chord = "ctrl+right", .action = .subwordRight },
     .{ .chord = "ctrl+home", .action = .fileStart },
     .{ .chord = "ctrl+end", .action = .fileEnd },
     .{ .chord = "ctrl+space", .action = .complete },

@@ -779,6 +779,26 @@ pub fn renderBufferRow(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usiz
     // re-applied whenever the row under it is redrawn.
     try self.paintDiagnosticRow(batch, r, rv, text);
     if (rv.last) try self.paintFoldTail(batch, r, rv, text);
+    // On top of everything: while they are up the labels are what the
+    // row is being read for.
+    try paintJumpRow(self, batch, r, rv);
+}
+
+/// Shift+Enter's labels on screen row `r`, over the first cells of the
+/// words they stand for, clipped to the row. Only on the group the jump
+/// was started in.
+pub fn paintJumpRow(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize, rv: RowView) !void {
+    const j = if (self.jump) |*j| j else return;
+    if (self.jump_group != self.grp) return;
+    const gutter = self.gutterWidth();
+    for (j.targets.items, 0..) |t, i| {
+        if (t.row != r) continue;
+        var buf: [2]u8 = undefined;
+        const label = j.shown(i, &buf) orelse continue;
+        const room = rv.cols -| t.col;
+        if (room == 0) continue;
+        try writeAt(batch, self.grp.buffer_layer, r, gutter + t.col, label[0..@min(label.len, room)], role(.bg), role(.accent));
+    }
 }
 
 /// After the text of a closed fold's line, a dim `⋯ N lines` saying how

@@ -37,6 +37,7 @@ pub const extlist = @import("extlist.zig");
 pub const fold = @import("fold.zig");
 pub const substitute = @import("substitute.zig");
 pub const findbar = @import("findbar.zig");
+pub const jump = @import("jump.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const GapBuffer = buffer.GapBuffer;

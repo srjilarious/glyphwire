@@ -317,6 +317,183 @@ pub fn motionWordBackwardAndEndTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(motion.wordEnd(&buf, 2, 1, false), 6);
 }
 
+pub fn motionSubwordForwardStopsInsideWordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    //                                        0         1         2
+    //                                        0123456789012345678901234567
+    var buf = try Buffer.initFromText(alloc, "fooBar baz_qux HTTPServer v2x");
+    defer buf.deinit();
+    try testz.expectEqual(motion.subwordForward(&buf, 0), 3); // foo|Bar
+    try testz.expectEqual(motion.subwordForward(&buf, 3), 7); // -> baz
+    try testz.expectEqual(motion.subwordForward(&buf, 7), 11); // baz_|qux
+    try testz.expectEqual(motion.subwordForward(&buf, 11), 15); // -> HTTP
+    try testz.expectEqual(motion.subwordForward(&buf, 15), 19); // HTTP|Server
+    try testz.expectEqual(motion.subwordForward(&buf, 19), 26); // -> v
+    try testz.expectEqual(motion.subwordForward(&buf, 26), 27); // v|2
+    try testz.expectEqual(motion.subwordForward(&buf, 27), 28); // 2|x
+    try testz.expectEqual(motion.subwordForward(&buf, 28), 29); // the end
+}
+
+pub fn motionSubwordBackwardMirrorsForwardTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "fooBar baz_qux HTTPServer");
+    defer buf.deinit();
+    try testz.expectEqual(motion.subwordBackward(&buf, 25), 19);
+    try testz.expectEqual(motion.subwordBackward(&buf, 19), 15);
+    try testz.expectEqual(motion.subwordBackward(&buf, 15), 11);
+    try testz.expectEqual(motion.subwordBackward(&buf, 11), 7);
+    try testz.expectEqual(motion.subwordBackward(&buf, 7), 3);
+    try testz.expectEqual(motion.subwordBackward(&buf, 3), 0);
+    try testz.expectEqual(motion.subwordBackward(&buf, 0), 0);
+}
+
+pub fn motionSubwordStopsOnPunctuationAndEmptyLinesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "a.bC\n\nné");
+    defer buf.deinit();
+    try testz.expectEqual(motion.subwordForward(&buf, 0), 1); // -> .
+    try testz.expectEqual(motion.subwordForward(&buf, 1), 2); // -> b
+    try testz.expectEqual(motion.subwordForward(&buf, 2), 3); // -> C
+    try testz.expectEqual(motion.subwordForward(&buf, 3), 5); // the empty line
+    try testz.expectEqual(motion.subwordForward(&buf, 5), 6); // -> né
+    // A multi-byte letter never starts a part of its own.
+    try testz.expectEqual(motion.subwordForward(&buf, 6), buf.len());
+}
+
+pub fn ctrlBackspaceDeletesAWordPartTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "let fooBarBaz", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "A");
+    _ = try ed.feedKey("backspace", .{ .ctrl = true });
+    try expectText(alloc, &ed.buf, "let fooBar");
+    _ = try ed.feedKey("backspace", .{ .ctrl = true });
+    try expectText(alloc, &ed.buf, "let foo");
+    // The whole-word action is still there for `keys` to bind.
+    _ = try ed.runAction(.deleteWordBack);
+    try expectText(alloc, &ed.buf, "let ");
+}
+
+pub fn ctrlDeleteDeletesAWordPartTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "foo_bar", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i");
+    _ = try ed.feedKey("delete", .{ .ctrl = true });
+    try expectText(alloc, &ed.buf, "bar");
+}
+
+pub fn ctrlArrowsMoveByWordPartAltByWordTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "fooBar baz", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i");
+    _ = try ed.feedKey("right", .{ .ctrl = true });
+    try testz.expectEqual(ed.cursor, 3);
+    _ = try ed.feedKey("right", .{ .alt = true });
+    try testz.expectEqual(ed.cursor, 7);
+    _ = try ed.feedKey("left", .{ .alt = true });
+    try testz.expectEqual(ed.cursor, 0);
+    // Ctrl+Shift selects by part.
+    _ = try ed.feedKey("right", .{ .ctrl = true, .shift = true });
+    try testz.expectEqual(ed.mode, .select);
+    try testz.expectEqual(ed.selectionSpan().?.hi, 3);
+}
+
+pub fn toggleWordWrapFlipsWrapTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "x", null);
+    defer ed.deinit();
+    try testz.expectFalse(ed.wrap);
+    _ = try ed.feedKey("z", .{ .alt = true });
+    try testz.expectTrue(ed.wrap);
+    _ = try ed.runAction(.toggleWordWrap);
+    try testz.expectFalse(ed.wrap);
+}
+
+pub fn jumpToExtendsASelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one two three", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "v");
+    try testz.expectTrue(ed.jumpTo(8));
+    try testz.expectEqual(ed.mode, .visual);
+    try testz.expectEqual(ed.selectionSpan().?.lo, 0);
+    // Normal mode stays on a character.
+    _ = try keys.feed(&ed, "<esc>");
+    try testz.expectTrue(ed.jumpTo(99));
+    try testz.expectEqual(ed.cursor, 12);
+    _ = try keys.feed(&ed, ":");
+    try testz.expectFalse(ed.jumpTo(0));
+}
+
+// ─── Jump labels ─────────────────────────────────────────────────────────
+
+const jump = zoe.jump;
+
+pub fn jumpCollectsWordStartsOnTheRowTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var out: std.ArrayList(jump.Target) = .empty;
+    defer out.deinit(alloc);
+    // A tab is four columns; `.` and blanks start nothing.
+    try jump.collectRow(alloc, &out, "\tab.cd ef", 100, 3, 0, 80, .{ .tab_width = 4 });
+    try testz.expectEqual(out.items.len, 3);
+    try testz.expectEqual(out.items[0].off, 101);
+    try testz.expectEqual(out.items[0].col, 4);
+    try testz.expectEqual(out.items[1].off, 104);
+    try testz.expectEqual(out.items[1].col, 7);
+    try testz.expectEqual(out.items[2].row, 3);
+    // Only the columns the row shows: scrolled right by 5, 3 wide.
+    out.clearRetainingCapacity();
+    try jump.collectRow(alloc, &out, "\tab.cd ef", 100, 0, 5, 3, .{ .tab_width = 4 });
+    try testz.expectEqual(out.items.len, 1);
+    try testz.expectEqual(out.items[0].off, 104);
+    try testz.expectEqual(out.items[0].col, 2);
+}
+
+pub fn jumpLabelsTheNearestFirstTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const cands = [_]jump.Target{
+        .{ .off = 1, .row = 0, .col = 0 },
+        .{ .off = 2, .row = 5, .col = 9 },
+        .{ .off = 3, .row = 5, .col = 2 },
+    };
+    var j = try jump.Jump.init(alloc, &cands, 5, 0);
+    defer j.deinit(alloc);
+    try testz.expectEqual(j.targets.items[0].off, 3);
+    try testz.expectEqual(j.targets.items[1].off, 2);
+    try testz.expectEqual(j.targets.items[2].off, 1);
+    try testz.expectEqualStr(&jump.Jump.labelOf(0), "aa");
+    try testz.expectEqualStr(&jump.Jump.labelOf(1), "as");
+    try testz.expectEqualStr(&jump.Jump.labelOf(jump.alphabet.len), "sa");
+}
+
+pub fn jumpNarrowsBacksUpAndChoosesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cands: std.ArrayList(jump.Target) = .empty;
+    defer cands.deinit(alloc);
+    // Thirty targets on one row: `aa` .. `am`, then `sa` .. `sf`.
+    for (0..30) |i| try cands.append(alloc, .{ .off = i * 10, .row = 0, .col = i * 2 });
+    var j = try jump.Jump.init(alloc, cands.items, 0, 0);
+    defer j.deinit(alloc);
+
+    var buf: [2]u8 = undefined;
+    try testz.expectEqualStr(j.shown(27, &buf).?, "ss");
+    try testz.expectTrue(j.key('s') == .narrowed);
+    // Only the `s` labels are left, each showing its second letter.
+    try testz.expectEqual(j.shown(0, &buf), null);
+    try testz.expectEqualStr(j.shown(27, &buf).?, "s");
+    // Backspace puts the whole set back.
+    try testz.expectTrue(j.back());
+    try testz.expectEqualStr(j.shown(0, &buf).?, "aa");
+    try testz.expectFalse(j.back());
+
+    try testz.expectTrue(j.key('s') == .narrowed);
+    const step = j.key('d');
+    try testz.expectEqual(step.chosen, j.targets.items[28].off);
+}
+
+pub fn jumpMissesALetterNoLabelHasTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const cands = [_]jump.Target{ .{ .off = 1, .row = 0, .col = 0 }, .{ .off = 5, .row = 0, .col = 4 } };
+    var j = try jump.Jump.init(alloc, &cands, 0, 0);
+    defer j.deinit(alloc);
+    // Two targets are `aa` and `as`: nothing starts with `s`.
+    try testz.expectTrue(j.key('s') == .miss);
+    try testz.expectTrue(j.key('1') == .miss);
+    try testz.expectTrue(j.key('a') == .narrowed);
+    try testz.expectTrue(j.key('d') == .miss);
+    try testz.expectEqual(j.key('s').chosen, 5);
+}
+
 pub fn motionFirstNonBlankAndGotoLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var buf = try Buffer.initFromText(alloc, "one\n    two\nthree");
     defer buf.deinit();
@@ -4556,9 +4733,9 @@ pub fn keymapsLookInTheModeTableFirstTest(_: std.Io, alloc: std.mem.Allocator) !
     var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
     defer km.deinit(alloc);
     // Ctrl+Left moves focus everywhere but insert mode, where it is a
-    // word jump.
+    // word-part jump.
     try testz.expectEqual(km.lookup(.normal, "left", .{ .ctrl = true }).?, .focusLeft);
-    try testz.expectEqual(km.lookup(.insert, "left", .{ .ctrl = true }).?, .wordLeft);
+    try testz.expectEqual(km.lookup(.insert, "left", .{ .ctrl = true }).?, .subwordLeft);
     try testz.expectEqual(km.lookup(.global, "s", .{ .ctrl = true }).?, .save);
     // Modifiers match exactly.
     try testz.expectEqual(km.lookup(.normal, "s", .{ .ctrl = true, .shift = true }), null);
@@ -4568,6 +4745,36 @@ pub fn keymapsLookInTheModeTableFirstTest(_: std.Io, alloc: std.mem.Allocator) !
     try testz.expectTrue(actions.Action.complete.isUi());
     try testz.expectFalse(actions.Action.left.isUi());
     try testz.expectFalse(actions.Action.none.isUi());
+}
+
+/// Ctrl+arrows (and their Shift and Backspace / Delete forms) go by word
+/// part; whole words are on Alt.
+pub fn keymapsWordPartsOnCtrlWholeWordsOnAltTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
+    defer km.deinit(alloc);
+    try testz.expectEqual(km.lookup(.insert, "right", .{ .ctrl = true }).?, .subwordRight);
+    try testz.expectEqual(km.lookup(.insert, "backspace", .{ .ctrl = true }).?, .deleteSubwordBack);
+    try testz.expectEqual(km.lookup(.insert, "delete", .{ .ctrl = true }).?, .deleteSubwordForward);
+    try testz.expectEqual(km.lookup(.normal, "left", .{ .ctrl = true, .shift = true }).?, .selectSubwordLeft);
+    try testz.expectEqual(km.lookup(.normal, "left", .{ .alt = true }).?, .wordLeft);
+    try testz.expectEqual(km.lookup(.insert, "right", .{ .alt = true }).?, .wordRight);
+    try testz.expectEqual(km.lookup(.insert, "left", .{ .alt = true, .shift = true }).?, .selectWordLeft);
+}
+
+/// Shift+Enter is the jump in every mode, insert's included, and Alt+Z
+/// is VS Code's word wrap.
+pub fn keymapsJumpAndWordWrapChordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
+    defer km.deinit(alloc);
+    try testz.expectEqual(km.lookup(.normal, "enter", .{ .shift = true }).?, .jump);
+    try testz.expectEqual(km.lookup(.insert, "enter", .{ .shift = true }).?, .jump);
+    try testz.expectEqual(km.lookup(.visual, "enter", .{ .shift = true }).?, .jump);
+    try testz.expectEqual(km.lookup(.normal, "z", .{ .alt = true }).?, .toggleWordWrap);
+    try testz.expectTrue(actions.Action.jump.isUi());
+    try testz.expectTrue(actions.Action.jump.inPalette());
+    try testz.expectTrue(actions.Action.toggleWordWrap.inPalette());
+    try testz.expectFalse(actions.Action.toggleWordWrap.isUi());
+    try testz.expectFalse(actions.Action.subwordLeft.inPalette());
 }
 
 /// Ctrl+B is VS Code's sidebar chord, and Ctrl+N stays for when gmux has

@@ -321,6 +321,10 @@
 --         visual = {},
 --         insert = {
 --             -- ["ctrl+d"] = "deleteWordForward",
+--             -- Ctrl+arrows by whole word rather than word part:
+--             -- ["ctrl+left"] = "wordLeft", ["ctrl+right"] = "wordRight",
+--             -- ["ctrl+backspace"] = "deleteWordBack",
+--             -- ["ctrl+delete"] = "deleteWordForward",
 --         },
 --     },
 --

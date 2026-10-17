@@ -52,6 +52,7 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 | `moveTabLeft` `moveTabRight` `moveTabUp` `moveTabDown` | (unbound; Ctrl+W Shift+H / L / K / J) | Move the shown tab to the group that way, splitting a new group off on that side if there is none. A group left without tabs closes |
 | `zoomGroup` | (unbound; Ctrl+W z) | The focused group fills the editor area, the other groups hidden (the sidebar stays); again to restore (`:zoom`). Splitting, closing or moving to another group unzooms first |
 | `jumpBack` / `jumpForward` | Ctrl+O / Ctrl+I | Jumplist (the way back from `gd`) |
+| `jump` | Shift+Enter | Two-letter labels over every word start on the focused pane's visible rows, the nearest to the cursor first (home row letters). Typing a label's first letter hides the labels it doesn't start and leaves the second letter of the rest; the second moves the cursor there. Backspace takes the first letter back; Escape, any other key, a click or a scroll cancels. Extends a selection, and records a jumplist entry |
 | `cut` | Ctrl+Shift+X | Selection (or line) to the clipboard, removed |
 | `paste` | (unbound; the host's Ctrl+Shift+V) | Clipboard after the cursor, or over a selection |
 | `complete` | Ctrl+Space (insert) | Ask the language servers for completions |
@@ -66,12 +67,22 @@ Ctrl+= font size, Super+F10 theme switcher, Super+F12 job switcher.
 | `left` `right` `up` `down` | Arrows |
 | `lineStart` / `lineEnd` | Home / End |
 | `pageUp` / `pageDown` | PageUp / PageDown (also Ctrl+U / Ctrl+D in normal and visual) |
-| `wordLeft` / `wordRight` | Ctrl+Left / Ctrl+Right (insert) |
+| `subwordLeft` / `subwordRight` | Ctrl+Left / Ctrl+Right (insert) |
+| `wordLeft` / `wordRight` | Alt+Left / Alt+Right |
 | `fileStart` / `fileEnd` | Ctrl+Home / Ctrl+End (insert) |
 | `selectLeft` `selectRight` `selectUp` `selectDown` | Shift+arrows |
 | `selectLineStart` / `selectLineEnd` | Shift+Home / Shift+End |
-| `selectWordLeft` / `selectWordRight` | Ctrl+Shift+Left / Right |
+| `selectSubwordLeft` / `selectSubwordRight` | Ctrl+Shift+Left / Right |
+| `selectWordLeft` / `selectWordRight` | Shift+Alt+Left / Right |
 | `selectFileStart` / `selectFileEnd` | Ctrl+Shift+Home / End |
+
+The `subword…` actions stop at word parts, as VS Code's word-part
+motions do: a lower-to-upper change (`foo|Bar`), the last capital of an
+acronym (`HTTP|Server`), a letter-digit change (`v|2|Thing`) and after an
+underscore (`foo_|bar`), as well as everywhere the `word…` ones stop
+(vim's `b` / `w`). To have Ctrl+arrows go by whole words again, bind
+`wordLeft` / `wordRight` (and `deleteWordBack` / `deleteWordForward`) in
+`keys.insert`.
 
 The `select…` actions start a selection if there isn't one:
 
@@ -97,6 +108,7 @@ The `select…` actions start a selection if there isn't one:
 | `toggleFold` | (unbound; `za`) | Open the fold on the cursor's line if closed, else close the one the cursor is in |
 | `foldAll` / `unfoldAll` | (unbound; `zM` / `zR`) | Every fold closed / open. VS Code's Ctrl+K Ctrl+0 / Ctrl+J aren't the defaults because Ctrl+K is focus-up |
 | `find` / `replace` | Ctrl+F / Ctrl+H | The find widget, without / with its replace row (see Find and replace below) |
+| `toggleWordWrap` | Alt+Z | Soft wrap on or off in every buffer, `:set wrap` / `:set nowrap` |
 
 Each edit is one undo step, including in insert mode, where it is separate
 from the typing around it. The fold actions change no text.
@@ -110,11 +122,12 @@ one.
 
 | Action | Default |
 |---|---|
-| `newline` | Enter, Shift+Enter |
+| `newline` | Enter (Shift+Enter is `jump`) |
 | `insertTab` | Tab (honours `expandtab`; indents a select-mode selection) |
 | `backspace` / `deleteForward` | Backspace (and Shift+Backspace) / Delete |
-| `deleteWordBack` | Ctrl+Backspace (stops at the line's start; at it, joins lines) |
-| `deleteWordForward` | Ctrl+Delete (stops at the line's end; at it, joins lines) |
+| `deleteSubwordBack` | Ctrl+Backspace: back a word part (stops at the line's start; at it, joins lines) |
+| `deleteSubwordForward` | Ctrl+Delete: ahead a word part (stops at the line's end; at it, joins lines) |
+| `deleteWordBack` / `deleteWordForward` | (unbound) The same by whole word |
 
 ### Auto-indent and auto-close
 

@@ -841,6 +841,7 @@ pub const Editor = struct {
             .zoomGroup,
             .jumpBack,
             .jumpForward,
+            .jump,
             .cut,
             .paste,
             .complete,
@@ -854,6 +855,8 @@ pub const Editor = struct {
             .lineEnd => self.plainMove(.line_end),
             .wordLeft => self.plainMove(.word_left),
             .wordRight => self.plainMove(.word_right),
+            .subwordLeft => self.plainMove(.subword_left),
+            .subwordRight => self.plainMove(.subword_right),
             .fileStart => self.plainMove(.file_start),
             .fileEnd => self.plainMove(.file_end),
             .pageUp => self.plainMove(.page_up),
@@ -867,6 +870,8 @@ pub const Editor = struct {
             .selectLineEnd => self.selectMove(.line_end),
             .selectWordLeft => self.selectMove(.word_left),
             .selectWordRight => self.selectMove(.word_right),
+            .selectSubwordLeft => self.selectMove(.subword_left),
+            .selectSubwordRight => self.selectMove(.subword_right),
             .selectFileStart => self.selectMove(.file_start),
             .selectFileEnd => self.selectMove(.file_end),
 
@@ -948,16 +953,25 @@ pub const Editor = struct {
                 .select => try self.visualShift(true, 1),
                 else => {},
             },
-            .backspace, .deleteForward, .deleteWordBack, .deleteWordForward => switch (self.mode) {
+            .backspace, .deleteForward, .deleteWordBack, .deleteWordForward, .deleteSubwordBack, .deleteSubwordForward => switch (self.mode) {
                 .select => try self.dropSelectSpan(),
                 .insert => switch (action) {
                     .backspace => try self.backspace(),
                     .deleteForward => try self.deleteForward(),
-                    .deleteWordBack => try self.deleteWordBack(),
-                    .deleteWordForward => try self.deleteWordForward(),
+                    .deleteWordBack => try self.deleteWordBack(false),
+                    .deleteWordForward => try self.deleteWordForward(false),
+                    .deleteSubwordBack => try self.deleteWordBack(true),
+                    .deleteSubwordForward => try self.deleteWordForward(true),
                     else => unreachable,
                 },
                 else => {},
+            },
+
+            // `:set wrap` is session-wide, and so is this: `zoe/ui.zig`
+            // pushes the change to every buffer.
+            .toggleWordWrap => {
+                self.wrap = !self.wrap;
+                self.setStatus("Word wrap {s}", .{if (self.wrap) "on" else "off"});
             },
         }
         return .none;
@@ -974,6 +988,8 @@ pub const Editor = struct {
         line_end,
         word_left,
         word_right,
+        subword_left,
+        subword_right,
         file_start,
         file_end,
         page_up,
@@ -994,6 +1010,8 @@ pub const Editor = struct {
             // crossing lines like they do.
             .word_left => self.moveTo(motion.wordBackward(buf, self.cursor, 1, false), true),
             .word_right => self.moveTo(motion.wordForward(buf, self.cursor, 1, false), true),
+            .subword_left => self.moveTo(motion.subwordBackward(buf, self.cursor), true),
+            .subword_right => self.moveTo(motion.subwordForward(buf, self.cursor), true),
             .file_start => self.moveTo(0, true),
             // Past the last character in insert mode, so typing appends.
             .file_end => self.moveTo(if (eol) buf.len() else motion.clampNormal(buf, buf.len()), true),
@@ -1072,24 +1090,33 @@ pub const Editor = struct {
         self.moveTo(c.restore(&self.buf), true);
     }
 
-    /// Ctrl+Backspace: delete back to the start of the word, stopping at
-    /// the line's start; at the start, join the line onto the one above
-    /// like Backspace does.
-    fn deleteWordBack(self: *Editor) !void {
+    /// Ctrl+Backspace: delete back to the start of the word (the word
+    /// part, with `sub`), stopping at the line's start; at the start,
+    /// join the line onto the one above like Backspace does.
+    fn deleteWordBack(self: *Editor, sub: bool) !void {
         const start = self.buf.lineStart(self.buf.lineAt(self.cursor));
         if (self.cursor == start) return self.backspace();
-        const target = @max(motion.wordBackward(&self.buf, self.cursor, 1, false), start);
+        const back = if (sub)
+            motion.subwordBackward(&self.buf, self.cursor)
+        else
+            motion.wordBackward(&self.buf, self.cursor, 1, false);
+        const target = @max(back, start);
         try self.buf.delete(target, self.cursor - target);
         self.cursor = target;
         self.syncSticky();
     }
 
-    /// Ctrl+Delete: delete to the start of the next word (`dw`), stopping
-    /// at the line's end; at the end, join the next line on like Delete.
-    fn deleteWordForward(self: *Editor) !void {
+    /// Ctrl+Delete: delete to the start of the next word (`dw`), or of the
+    /// next word part with `sub`, stopping at the line's end; at the end,
+    /// join the next line on like Delete.
+    fn deleteWordForward(self: *Editor, sub: bool) !void {
         const end = self.buf.lineEnd(self.buf.lineAt(self.cursor));
         if (self.cursor >= end) return self.deleteForward();
-        const target = @min(wordTargetForDelete(&self.buf, self.cursor, 1), end);
+        const ahead = if (sub)
+            motion.subwordForward(&self.buf, self.cursor)
+        else
+            wordTargetForDelete(&self.buf, self.cursor, 1);
+        const target = @min(ahead, end);
         try self.buf.delete(self.cursor, target - self.cursor);
         self.syncSticky();
     }
@@ -1145,6 +1172,24 @@ pub const Editor = struct {
     /// a jumplist entry (see `zoe/ui.zig`).
     pub fn setCursor(self: *Editor, offset: usize) void {
         self.moveTo(motion.clampNormal(&self.buf, @min(offset, self.buf.len())), true);
+    }
+
+    /// A picked jump label (`zoe/jump.zig`): the cursor to `offset` the
+    /// way a motion takes it, so a selection up (visual or select mode)
+    /// is extended there rather than dropped. A count or operator typed
+    /// before Shift+Enter is dropped. False in the `:` / `/` lines and
+    /// the find widget, which have no cursor in the buffer to move.
+    pub fn jumpTo(self: *Editor, offset: usize) bool {
+        const at = @min(offset, self.buf.len());
+        switch (self.mode) {
+            .command, .search, .find => return false,
+            .insert, .select => self.moveTo(at, true),
+            .normal, .visual, .visual_line => {
+                self.resetPending();
+                self.moveTo(motion.clampNormal(&self.buf, at), true);
+            },
+        }
+        return true;
     }
 
     /// `zoe --line N`: the cursor onto 1-based line `line`'s first

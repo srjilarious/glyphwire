@@ -83,6 +83,8 @@ const zoe_workspace = @import("workspace.zig");
 const hangup = @import("hangup.zig");
 const askRecover = @import("backupglue.zig").askRecover;
 const backupglue = @import("backupglue.zig");
+const jump_mod = @import("jump.zig");
+const jumpglue = @import("jumpglue.zig");
 const profile = @import("profile.zig");
 const SpanCache = @import("spancache.zig").SpanCache;
 const selection_diff = @import("selection_diff.zig");
@@ -497,7 +499,7 @@ pub const Direction = groups.Direction;
 
 /// A key that only modifies others. The host reports each one as a key
 /// of its own, under its `left_*` / `right_*` name.
-fn isModifierKey(key: []const u8) bool {
+pub fn isModifierKey(key: []const u8) bool {
     const names = [_][]const u8{ "control", "alt", "shift", "super" };
     for (names) |n| {
         if (std.mem.endsWith(u8, key, n) and
@@ -1057,6 +1059,10 @@ pub const Ui = struct {
     /// `text` the host sends for the same key is dropped.
     swallow_window_text: bool = false,
     jumps: JumpList = .{},
+    /// Shift+Enter's labels while they are up, and the group they are
+    /// drawn over (`zoe/jumpglue.zig`).
+    jump: ?jump_mod.Jump = null,
+    jump_group: ?*Group = null,
     /// Ctrl+`: a `gw-shell` drawing into a layer docked along an edge
     /// (above the statusline) or floating in the middle, for running
     /// builds and tests without leaving the editor. It floats outside the split tree like the finder and takes
@@ -1886,6 +1892,7 @@ pub const Ui = struct {
         if (self.completion) |*m| m.deinit();
         if (self.path_menu) |*m| m.deinit();
         self.jumps.deinit(self.alloc);
+        if (self.jump) |*j| j.deinit(self.alloc);
         // Before anything a command could reach: the Lua state goes first.
         if (self.extensions) |rt| rt.deinit();
         self.keymaps.deinit(self.alloc);
@@ -2479,6 +2486,7 @@ pub const Ui = struct {
                 if (!in_buffer) return false;
                 self.jumpStep(action == .jumpBack);
             },
+            .jump => return self.startJump(),
             // Through the system clipboard. (Ctrl+Shift+C is swallowed by
             // glyphwire-host, which broadcasts a `copy_request` instead --
             // see the `.copy_request` arm.)
@@ -2751,6 +2759,12 @@ pub const Ui = struct {
         // `exit` typed into the shell panel (or a shell that died): the
         // panel closes itself and the keyboard is the editor's again.
         if (self.shell.reapIfExited()) self.shellClosed();
+        // The jump labels were placed against the rows on screen; anything
+        // that can move those, or the keyboard, takes them down.
+        if (self.jump != null) switch (ev) {
+            .layout, .resize, .scroll_offset, .mouse_button, .focus => self.cancelJump(),
+            else => {},
+        };
         switch (ev) {
             .layout => |l| {
                 if (l.boundsFor(self.tree_layer)) |b| self.tree_bounds = toBounds(b);
@@ -2931,6 +2945,11 @@ pub const Ui = struct {
                     try self.finderKey(k);
                     return;
                 }
+                // The jump labels too, Shift+Enter's.
+                if (self.jump != null) {
+                    self.jumpKey(k);
+                    return;
+                }
                 // A backup that no longer matches its file is answered
                 // before the buffer takes anything else.
                 if (self.recoverPending() and !isModifierKey(k.key)) {
@@ -3020,7 +3039,13 @@ pub const Ui = struct {
                 if (self.completion != null and self.buf.ed.mode != .insert) self.closeCompletion();
                 if (was_insert) {
                     if (action) |a| switch (a) {
-                        .backspace, .deleteForward, .deleteWordBack, .deleteWordForward => self.afterInsertEdit(null),
+                        .backspace,
+                        .deleteForward,
+                        .deleteWordBack,
+                        .deleteWordForward,
+                        .deleteSubwordBack,
+                        .deleteSubwordForward,
+                        => self.afterInsertEdit(null),
                         else => {},
                     };
                 }
@@ -3036,6 +3061,10 @@ pub const Ui = struct {
                 }
                 if (self.finder.isOpen()) {
                     try self.finder.text(t.text);
+                    return;
+                }
+                if (self.jump != null) {
+                    self.jumpText(t.text);
                     return;
                 }
                 if (self.swallow_space_text) {
@@ -3069,6 +3098,11 @@ pub const Ui = struct {
                 }
                 if (self.finder.isOpen()) {
                     try self.finder.text(t.text);
+                    return;
+                }
+                // Not a label typed: the jump ends, and the paste with it.
+                if (self.jump != null) {
+                    self.cancelJump();
                     return;
                 }
                 if (self.recoverPending()) return;
@@ -5125,6 +5159,12 @@ pub const Ui = struct {
     pub const armBackup = backupglue.armBackup;
     pub const backupDue = backupglue.backupDue;
     pub const hotExitReady = backupglue.hotExitReady;
+
+    // ── Jump labels (jumpglue.zig) ─────────────────────────────────────
+    pub const startJump = jumpglue.startJump;
+    pub const cancelJump = jumpglue.cancelJump;
+    pub const jumpKey = jumpglue.jumpKey;
+    pub const jumpText = jumpglue.jumpText;
     pub const discardBackups = backupglue.discardBackups;
     pub const restoreBackup = backupglue.restoreBackup;
     pub const recoverPending = backupglue.recoverPending;
