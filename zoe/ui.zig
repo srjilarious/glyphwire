@@ -81,6 +81,7 @@ const groups = @import("groups.zig");
 const lsp = @import("lsp.zig");
 const zoe_workspace = @import("workspace.zig");
 const hangup = @import("hangup.zig");
+const remote = @import("remote.zig");
 const askRecover = @import("backupglue.zig").askRecover;
 const backupglue = @import("backupglue.zig");
 const jump_mod = @import("jump.zig");
@@ -732,8 +733,14 @@ pub const Slot = struct {
     /// Another running zoe has this file open with unsaved edits: its
     /// backup is that zoe's, and this one never writes or deletes it.
     backup_foreign: bool = false,
+    /// `zoe --wait` clients that opened this buffer from the shell panel
+    /// (`zoe/remote.zig`): each connection is closed when the tab is,
+    /// which is what lets them exit. Owned.
+    waiters: std.ArrayList(i32) = .empty,
 
     pub fn deinit(self: *Slot, alloc: std.mem.Allocator) void {
+        for (self.waiters.items) |fd| remote.close(fd);
+        self.waiters.deinit(alloc);
         if (self.hl) |*h| h.deinit();
         self.spans.deinit(alloc);
         self.rows.deinit(alloc);
@@ -1142,6 +1149,9 @@ pub const Ui = struct {
     /// The process environment, kept for `:cd` (`$HOME`) and passed on
     /// to the highlighter setup.
     environ: *const std.process.Environ.Map,
+    /// The socket `zoe <file>` in the shell panel reaches this zoe on
+    /// (`zoe/remote.zig`), once `attachRemote` has it. Owned by `main`.
+    remote: ?*remote.Server = null,
     /// The working directory before the last `:cd`, for `:cd -`. Owned.
     prev_cwd: ?[]u8 = null,
 
@@ -2677,6 +2687,9 @@ pub const Ui = struct {
             // since the last turn, so an arriving diagnostic is drawn in the
             // frame it arrived for rather than the one after.
             self.drainLsp();
+            // And whatever `zoe <file>` in the shell panel asked for, which
+            // wakes this the same way.
+            self.drainRemote();
             if (self.anyGroupDirty() or self.tree_dirty != .none or
                 self.status_dirty or self.finder.dirty or self.palette.dirty or self.ext_list.dirty or self.hover_dirty or self.completion_dirty or
                 self.path_menu_dirty or self.tree_edit_dirty or self.tab_tip_dirty or self.tree_scroll_pending != null)
@@ -4730,6 +4743,94 @@ pub const Ui = struct {
         // from, and `:bp` goes back to it.
         try self.grp.buffers.insert(self.alloc, self.grp.active + 1, slot);
         self.setActive(self.grp.active + 1);
+    }
+
+    // ── Opening from the shell panel ────────────────────────────────────
+
+    /// Takes `server`'s requests from now on, and hands its path to the
+    /// shell panel's environment (already in `environ`, which `main` put
+    /// it in) so the shell, and every `zoe` run in it, can find it.
+    pub fn attachRemote(self: *Ui, server: *remote.Server) void {
+        self.remote = server;
+        self.shell.environ_map = self.environ;
+    }
+
+    /// `zoe <file>` / `zoe <dir>` typed into the shell panel
+    /// (`zoe/remote.zig`): everything the socket thread parked since the
+    /// last turn. A file opens as `:e` would, a directory joins the
+    /// sidebar as `:addfolder` would, and the keyboard comes back from
+    /// the panel to that one; the panel stays up, as after a click on the
+    /// panes.
+    pub fn drainRemote(self: *Ui) void {
+        const server = self.remote orelse return;
+        const reqs = server.take() catch return;
+        defer self.alloc.free(reqs);
+        for (reqs) |p| {
+            defer p.deinit(self.alloc);
+            self.openRemote(p) catch |err| {
+                var buf: [128]u8 = undefined;
+                remote.send(p.fd, std.fmt.bufPrint(&buf, "error: {t}\n", .{err}) catch "error\n");
+                remote.close(p.fd);
+            };
+        }
+    }
+
+    /// One request: answered, and its connection closed or, for
+    /// `--wait`, left with the tab to close. An error leaves both to the
+    /// caller.
+    fn openRemote(self: *Ui, p: remote.Pending) !void {
+        const req = p.req;
+        switch (req.kind) {
+            .dir => {
+                try self.addFolder(req.path);
+                self.blurShell();
+                if (!self.tree_visible) try self.setTreeVisible(true);
+                self.setFocus(.tree);
+                // Nothing to wait on: a folder has no tab to close.
+                remote.send(p.fd, "ok\n");
+                remote.close(p.fd);
+            },
+            .file => {
+                // The request's path is absolute and a tab's is whatever
+                // was typed, so an open tab is found by its absolute
+                // spelling and then switched to by its own.
+                const open = self.findAbsolute(req.path);
+                try self.openFile(if (open) |slot| slot.ed.path.? else req.path);
+                // `openFile` refuses a binary file with only a status
+                // message, leaving the tab that was shown.
+                const shown = self.slotAbs(self.buf);
+                if (shown == null or !std.mem.eql(u8, shown.?, req.path)) {
+                    var buf: [512]u8 = undefined;
+                    const why = if (self.buf.ed.status.items.len > 0) self.buf.ed.status.items else "can't open";
+                    remote.send(p.fd, std.fmt.bufPrint(&buf, "error: {s}\n", .{why}) catch "error: can't open\n");
+                    remote.close(p.fd);
+                    return;
+                }
+                if (req.line) |line| {
+                    self.buf.ed.gotoStartLine(line);
+                    self.grp.buffer_dirty = true;
+                }
+                self.blurShell();
+                self.setFocus(.buffer);
+                remote.send(p.fd, "ok\n");
+                if (req.wait) {
+                    self.buf.waiters.append(self.alloc, p.fd) catch remote.close(p.fd);
+                } else {
+                    remote.close(p.fd);
+                }
+            },
+        }
+    }
+
+    /// The open buffer whose file is `abs`, in any group.
+    fn findAbsolute(self: *Ui, abs: []const u8) ?*Slot {
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                const p = self.slotAbs(slot) orelse continue;
+                if (std.mem.eql(u8, p, abs)) return slot;
+            }
+        }
+        return null;
     }
 
     /// A bare `:e` -- re-reads the current buffer from disk, in place.

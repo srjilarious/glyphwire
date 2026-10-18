@@ -240,6 +240,10 @@ pub const Panel = struct {
 
     /// The running shell, once Ctrl+` has started one.
     child: ?std.process.Child = null,
+    /// The environment the shell starts with, when the host program has
+    /// something to add to its own (zoe's `ZOE_SOCK`). Null inherits this
+    /// process's. Borrowed.
+    environ_map: ?*const std.process.Environ.Map = null,
     /// Write end of the control pipe. Closed when the panel is torn down,
     /// which is what tells the shell to leave.
     control_fd: ?i32 = null,
@@ -553,6 +557,7 @@ pub const Panel = struct {
         const child = std.process.spawn(self.io, .{
             .argv = &.{ "gw-shell", "--embed", embed_arg },
             .cwd = .{ .path = cwd },
+            .environ_map = self.environ_map,
             // The panel's output goes on the wire, not down a pipe; what
             // the shell itself logs would land on the screen underneath
             // us, so it goes nowhere.

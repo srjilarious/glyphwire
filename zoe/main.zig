@@ -20,6 +20,7 @@ const interrupt = @import("applib").interrupt;
 const homepath = @import("applib").homepath;
 const cli = @import("applib").cli;
 const workspace = zoe.workspace;
+const remote = zoe.remote;
 
 // const usage =
 //     \\usage: zoe [--keys <script>] [--quiet] [file|directory]
@@ -58,11 +59,6 @@ const workspace = zoe.workspace;
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;
-
-    // Ctrl+C is a vim-style cancel here, and a SIGINT from the shell
-    // would throw away unsaved buffers.
-    // See `applib.interrupt`.
-    interrupt.keep();
 
     var parser = try zargs.ArgParser.init(alloc, .{
         .name = "zoe",
@@ -130,6 +126,12 @@ pub fn main(init: std.process.Init) !void {
         \\is typed; / searches have their own history) and Tab completes a
         \\filename for :e, :w, :sp, :vs and :cd. ~ means $HOME.
         \\
+        \\Typed into zoe's own shell panel (Ctrl+`), `zoe <file>` opens the file
+        \\in that zoe and returns, rather than starting another one, and
+        \\`zoe <dir>` adds the folder to its sidebar. --wait holds until the
+        \\file's tab is closed, for EDITOR='zoe --wait'; --new starts a new zoe
+        \\anyway. A bare zoe, a workspace or several folders always start one.
+        \\
         \\ZOE_PROFILE=<file> writes one timing line per drawn frame (input,
         \\parse, highlight queries, paint, send) to <file>.
         ,
@@ -145,6 +147,16 @@ pub fn main(init: std.process.Init) !void {
                 .description = "Start the cursor on this 1-based line.",
                 .minNumParams = 1,
                 .maxNumParams = 1,
+            },
+            .{
+                .longName = "new",
+                .description = "Start a new zoe even from a zoe's shell panel, instead of opening the file in that one.",
+                .maxNumParams = 0,
+            },
+            .{
+                .longName = "wait",
+                .description = "From a zoe's shell panel: return only once the file's tab there is closed (EDITOR='zoe --wait').",
+                .maxNumParams = 0,
             },
             .{
                 .longName = "quiet",
@@ -217,6 +229,22 @@ pub fn main(init: std.process.Init) !void {
         start_line = std.fmt.parseInt(usize, text, 10) catch cli.fail(io, "zoe: --line needs a number\n", .{});
     }
     const quiet = args.hasOption("quiet");
+
+    // Inside a zoe's shell panel, one file or one directory goes to that
+    // zoe (see `zoe/remote.zig`). Nothing else does: a bare `zoe` or a
+    // workspace is a new session by nature, and `--keys` never has a UI.
+    if (ws == null and script == null and !args.hasOption("new")) {
+        if (path) |p| {
+            if (init.environ_map.get(remote.env_var)) |sock| {
+                if (try forwardOpen(alloc, io, sock, start_cwd, p, start_line, args.hasOption("wait"))) return;
+            }
+        }
+    }
+
+    // Ctrl+C is a vim-style cancel here, and a SIGINT from the shell
+    // would throw away unsaved buffers. After the forwarding above, so
+    // `zoe --wait` still stops on one. See `applib.interrupt`.
+    interrupt.keep();
 
     // A directory argument is a place to work, not a file to open, so it
     // is resolved here rather than deeper in: change into it, and from
@@ -332,6 +360,39 @@ fn isDirectory(io: std.Io, path: []const u8) bool {
     return st.kind == .directory;
 }
 
+/// Sends `path` to the zoe whose shell panel this is. True when that zoe
+/// took it (or refused it, which is reported here): either way this one
+/// is done. False when that zoe has gone, so this one starts in its place.
+fn forwardOpen(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    sock: []const u8,
+    cwd: []const u8,
+    path: []const u8,
+    line: ?usize,
+    wait: bool,
+) !bool {
+    // The other zoe has a cwd of its own, so it gets the path absolute.
+    const abs = try std.fs.path.resolve(alloc, &.{ cwd, path });
+    defer alloc.free(abs);
+    const req: remote.Request = .{
+        .kind = if (isDirectory(io, abs)) .dir else .file,
+        .path = abs,
+        .line = line,
+        .wait = wait,
+    };
+    var reply_buf: [512]u8 = undefined;
+    const answer = remote.forward(alloc, sock, req, &reply_buf) catch |err| switch (err) {
+        error.Unavailable => return false,
+        else => return err,
+    };
+    switch (answer) {
+        .opened => {},
+        .refused => |why| cli.fail(io, "zoe: {s}\n", .{why}),
+    }
+    return true;
+}
+
 /// Connects and runs the UI. False when there's no display server to
 /// connect to, which is the caller's cue to fall back to headless.
 fn runUi(
@@ -340,7 +401,7 @@ fn runUi(
     target: zoe.Target,
     ws: ?*const workspace.Workspace,
     ws_file: ?[]const u8,
-    environ: *const std.process.Environ.Map,
+    environ: *std.process.Environ.Map,
 ) !bool {
     // Two connections: one for requests and drawing, one subscribed for
     // notifications. `layout` and `scroll_offset` are what the split tree
@@ -379,12 +440,20 @@ fn runUi(
         try folders.append(alloc, .{ .path = cwd, .name = workspace.defaultName(cwd) });
     }
 
+    // The socket `zoe <file>` in the shell panel opens files in this zoe
+    // through, its path put where the panel's shell will inherit it.
+    // Best-effort: without it, a `zoe` typed there just starts another.
+    const server: ?*remote.Server = remote.Server.start(alloc, io, environ.get("XDG_RUNTIME_DIR") orelse "/tmp", conn.listener) catch null;
+    defer if (server) |srv| srv.stop();
+    if (server) |srv| try environ.put(remote.env_var, srv.path);
+
     const ui = try zoe.Ui.init(alloc, io, &conn.client, conn.listener, target, folders.items, .{
         .file = ws_file,
         .theme = if (ws) |w| w.theme else null,
         .editors = if (ws) |w| (if (w.editors) |e| e.root else null) else null,
     }, environ);
     defer ui.deinit();
+    if (server) |srv| ui.attachRemote(srv);
 
     // Closing the window sends SIGHUP: catch it so the workspace file
     // still gets written on the way out.

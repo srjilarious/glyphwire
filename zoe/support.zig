@@ -32,6 +32,7 @@ pub const cmdhistory = @import("cmdhistory.zig");
 pub const pathmenu = @import("pathmenu.zig");
 pub const workspace = @import("workspace.zig");
 pub const hangup = @import("hangup.zig");
+pub const remote = @import("remote.zig");
 pub const backup = @import("backup.zig");
 pub const ext = @import("ext.zig");
 pub const extlist = @import("extlist.zig");

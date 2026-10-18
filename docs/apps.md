@@ -54,6 +54,11 @@ A modal text editor: vim's grammar with VS Code's keys alongside it.
 - Ctrl+` drops a `gw-shell` into a panel over the bottom of the window for
   builds and tests. Drag its top edge to resize it; clicking the tree or a
   buffer takes the keyboard back with the panel still up.
+- `zoe <file>` typed in that panel opens the file in the same zoe, the way
+  `code` does from VS Code's terminal, and `zoe <dir>` adds the folder to
+  the sidebar. `--wait` returns only once the tab is closed, for
+  `EDITOR='zoe --wait'`; `--new` starts a separate zoe. A bare `zoe`, a
+  workspace or several folders always start a new one.
 - **Workspaces.** Several directories, a `.zoe-workspace` or a VS Code
   `.code-workspace` open as one session with a sidebar section per folder.
   `:wssave` / `:wsopen` keep the folders, split tree, tabs, focus and

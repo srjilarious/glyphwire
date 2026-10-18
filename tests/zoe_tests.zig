@@ -7034,3 +7034,127 @@ pub fn keymapCtrlHIsReplaceAndAltHIsHiddenTest(_: std.Io, alloc: std.mem.Allocat
     try testz.expectEqual(km.lookup(.insert, "f", .{ .ctrl = true }).?, .find);
     try testz.expectEqual(km.lookup(.normal, "h", .{ .alt = true }).?, .toggleHidden);
 }
+
+// ── Opening a file in the zoe whose shell panel this is ─────────────────
+
+const remote = zoe.remote;
+
+pub fn remoteRequestRoundTripsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const bytes = try remote.encode(alloc, .{ .kind = .file, .path = "/src/main.zig", .line = 42, .wait = true });
+    defer alloc.free(bytes);
+    const req = try remote.decode(bytes);
+    try testz.expectTrue(req.kind == .file);
+    try testz.expectEqualStr(req.path, "/src/main.zig");
+    try testz.expectEqual(req.line.?, 42);
+    try testz.expectTrue(req.wait);
+
+    const dir = try remote.encode(alloc, .{ .kind = .dir, .path = "/home/me/proj" });
+    defer alloc.free(dir);
+    const d = try remote.decode(dir);
+    try testz.expectTrue(d.kind == .dir);
+    try testz.expectTrue(d.line == null);
+    try testz.expectFalse(d.wait);
+}
+
+pub fn remoteDecodeRefusesMalformedRequestsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const bad = [_][]const u8{
+        // A relative path would be resolved against the wrong cwd.
+        "file\x00\x000\x00src/main.zig",
+        "tab\x00\x000\x00/x",
+        "file\x00nine\x000\x00/x",
+        "file\x00\x00yes\x00/x",
+        "file\x00\x00",
+        "file\x00\x000\x00",
+    };
+    for (bad) |b| {
+        if (remote.decode(b)) |_| return error.TestUnexpectedSuccess else |_| {}
+    }
+}
+
+const RemoteClient = struct {
+    sock: []const u8,
+    req: remote.Request,
+    reply_buf: [128]u8 = undefined,
+    answer: ?(anyerror!remote.Answer) = null,
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *RemoteClient, alloc: std.mem.Allocator) void {
+        self.answer = remote.forward(alloc, self.sock, self.req, &self.reply_buf);
+        self.done.store(true, .release);
+    }
+};
+
+/// The one request `server` parks next, waited for.
+fn takeOne(io: std.Io, alloc: std.mem.Allocator, server: *remote.Server) !remote.Pending {
+    for (0..300) |_| {
+        const got = try server.take();
+        defer alloc.free(got);
+        if (got.len > 0) {
+            try testz.expectEqual(got.len, 1);
+            return got[0];
+        }
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    return error.NoRequest;
+}
+
+pub fn remoteForwardOpensAndWaitsForTheTabTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    if (@import("builtin").os.tag != .linux) return;
+    const dir = try std.fmt.allocPrint(alloc, "remote-test-{d}", .{std.Thread.getCurrentId()});
+    defer alloc.free(dir);
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    const server = try remote.Server.start(alloc, io, dir, null);
+    defer server.stop();
+
+    // Plain: answered, and done.
+    {
+        var client: RemoteClient = .{ .sock = server.path, .req = .{ .kind = .file, .path = "/a.txt", .line = 3 } };
+        const t = try std.Thread.spawn(.{}, RemoteClient.run, .{ &client, alloc });
+        const p = try takeOne(io, alloc, server);
+        defer p.deinit(alloc);
+        try testz.expectEqualStr(p.req.path, "/a.txt");
+        try testz.expectEqual(p.req.line.?, 3);
+        remote.send(p.fd, "ok\n");
+        remote.close(p.fd);
+        t.join();
+        try testz.expectTrue((try client.answer.?) == .opened);
+    }
+
+    // `--wait`: still blocked after the answer, released by the close.
+    {
+        var client: RemoteClient = .{ .sock = server.path, .req = .{ .kind = .file, .path = "/b.txt", .wait = true } };
+        const t = try std.Thread.spawn(.{}, RemoteClient.run, .{ &client, alloc });
+        const p = try takeOne(io, alloc, server);
+        defer p.deinit(alloc);
+        try testz.expectTrue(p.req.wait);
+        remote.send(p.fd, "ok\n");
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+        try testz.expectFalse(client.done.load(.acquire));
+        remote.close(p.fd);
+        t.join();
+        try testz.expectTrue((try client.answer.?) == .opened);
+    }
+
+    // Refused: the reason comes back.
+    {
+        var client: RemoteClient = .{ .sock = server.path, .req = .{ .kind = .file, .path = "/c.png" } };
+        const t = try std.Thread.spawn(.{}, RemoteClient.run, .{ &client, alloc });
+        const p = try takeOne(io, alloc, server);
+        defer p.deinit(alloc);
+        remote.send(p.fd, "error: not a text file\n");
+        remote.close(p.fd);
+        t.join();
+        const answer = try client.answer.?;
+        try testz.expectEqualStr(answer.refused, "not a text file");
+    }
+}
+
+pub fn remoteForwardToNoOneIsUnavailableTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf: [64]u8 = undefined;
+    if (remote.forward(alloc, "remote-test-nobody.sock", .{ .kind = .file, .path = "/a" }, &buf)) |_| {
+        return error.TestUnexpectedSuccess;
+    } else |err| try testz.expectTrue(err == error.Unavailable);
+}
