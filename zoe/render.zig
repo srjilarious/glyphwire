@@ -1625,7 +1625,13 @@ pub fn scrollGroupTo(self: *Ui, g: *Group, row: usize, col: usize) void {
     if (clamped_line != cur.line) {
         slot.ed.cursor = slot.ed.buf.offsetOf(.{ .line = clamped_line, .col = cur.col });
     }
-    slot.pushed_bar = .{ slot.ed.buf.lineCount(), b.cols, slot.top_line, slot.left_col };
+    // What the host's bar holds now is `row`, not `top_line`. When a
+    // closed fold moved the view off `row`, the difference makes
+    // `syncBufferScrollbar` push `top_line` back, so the next wheel
+    // step starts from the line on screen rather than from inside the
+    // fold -- otherwise the wheel walks the hidden lines a notch at a
+    // time while the view sits still.
+    slot.pushed_bar = .{ slot.ed.buf.lineCount(), b.cols, row, slot.left_col };
     // The view moved and the cursor may have been dragged with it;
     // the status row shows both.
     g.buffer_dirty = true;
