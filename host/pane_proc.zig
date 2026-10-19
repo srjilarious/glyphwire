@@ -148,8 +148,8 @@ pub const PaneProcs = struct {
         // The dispatcher calls this holding `ctx_mutex`, so the locked
         // variant: `shellCwd` would take it again and hang the host.
         const from = if (cwd.from) |p| self.shellCwdLocked(p, &buf) else null;
-        const token = self.server.session.contextToken(context) orelse return error.UnknownContext;
-        return self.spawn(pane, context, &token, argv, cols, rows, from orelse cwd.path);
+        const grant = self.server.session.contextGrant(context) orelse return error.UnknownContext;
+        return self.spawn(pane, grant, argv, cols, rows, from orelse cwd.path);
     }
 
     fn killThunk(ctx: ?*anyopaque, pane: glyphwire.PaneHandle) void {
@@ -164,8 +164,7 @@ pub const PaneProcs = struct {
     pub fn spawn(
         self: *PaneProcs,
         pane: glyphwire.PaneHandle,
-        context: glyphwire.ContextHandle,
-        token: *const glyphwire.AccessToken,
+        grant: glyphwire.ContextGrant,
         argv: []const []const u8,
         cols: usize,
         rows: usize,
@@ -174,7 +173,7 @@ pub const PaneProcs = struct {
         if (argv.len == 0) return error.EmptyArgv;
         self.killProgram(pane);
 
-        const proc = try self.start(pane, context, token, argv, cols, rows, cwd);
+        const proc = try self.start(pane, grant, argv, cols, rows, cwd);
         errdefer self.stopProc(proc);
         {
             self.mutex.lockUncancelable(self.io);
@@ -200,15 +199,15 @@ pub const PaneProcs = struct {
 
         const context = try server.createShellContext(self.alloc, pane);
         errdefer server.destroyShellContext(self.alloc, context) catch {};
-        const token = blk: {
+        const grant = blk: {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
-            break :blk server.session.contextToken(context) orelse return error.UnknownContext;
+            break :blk server.session.contextGrant(context) orelse return error.UnknownContext;
         };
 
         var handle_buf: [24]u8 = undefined;
         const handle_arg = try std.fmt.bufPrint(&handle_buf, "{d}", .{context});
-        const proc = try self.start(pane, context, &token, &.{ "gw-shell", "--context", handle_arg }, size.cols, size.rows, cwd);
+        const proc = try self.start(pane, grant, &.{ "gw-shell", "--context", handle_arg }, size.cols, size.rows, cwd);
         errdefer self.stopProc(proc);
 
         self.mutex.lockUncancelable(self.io);
@@ -222,8 +221,7 @@ pub const PaneProcs = struct {
     fn start(
         self: *PaneProcs,
         pane: glyphwire.PaneHandle,
-        context: glyphwire.ContextHandle,
-        token: *const glyphwire.AccessToken,
+        grant: glyphwire.ContextGrant,
         argv: []const []const u8,
         cols: usize,
         rows: usize,
@@ -250,7 +248,7 @@ pub const PaneProcs = struct {
             made += 1;
         }
 
-        const env = try self.paneEnv(pane, context, token);
+        const env = try self.paneEnv(pane, grant);
         defer self.freePaneEnv(env);
 
         const cwd_z: ?[:0]u8 = if (cwd) |d| blk: {
@@ -261,7 +259,7 @@ pub const PaneProcs = struct {
         defer if (cwd_z) |d| self.alloc.free(d);
 
         const pty = try Pty.spawnIn(argv_z.ptr, @intCast(cols), @intCast(rows), env.envp.ptr, if (cwd_z) |d| d.ptr else null);
-        proc.* = .{ .pane = pane, .context = context, .pty = pty, .master = pty.master };
+        proc.* = .{ .pane = pane, .context = grant.context, .pty = pty, .master = pty.master };
 
         proc.reader = std.Thread.spawn(.{}, readerLoop, .{ self, proc }) catch |err| blk: {
             std.log.warn("glyphwire-host: pane {d} reader thread failed ({t}); output will not be shown", .{ pane, err });
@@ -322,16 +320,16 @@ pub const PaneProcs = struct {
     /// the same ordered stream is what makes it race-free, rather than
     /// hopeful.
     ///
-    /// `GLYPHWIRE_TOKEN` is `context`'s token: what the child presents with
-    /// `GLYPHWIRE_CTX` to be let in at all (see `core.AccessToken`).
-    fn paneEnv(self: *PaneProcs, pane: glyphwire.PaneHandle, context: glyphwire.ContextHandle, token: *const glyphwire.AccessToken) !PaneEnv {
+    /// `GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN` are `grant`: what the child
+    /// presents to be let in at all (see `core.AccessToken`).
+    fn paneEnv(self: *PaneProcs, pane: glyphwire.PaneHandle, grant: glyphwire.ContextGrant) !PaneEnv {
         const sock = try std.fmt.allocPrintSentinel(self.alloc, "GLYPHWIRE_SOCK={s}", .{self.socket_path}, 0);
         errdefer self.alloc.free(sock);
         const pane_var = try std.fmt.allocPrintSentinel(self.alloc, "GLYPHWIRE_PANE={d}", .{pane}, 0);
         errdefer self.alloc.free(pane_var);
-        const ctx_var = try std.fmt.allocPrintSentinel(self.alloc, "GLYPHWIRE_CTX={d}", .{context}, 0);
+        const ctx_var = try std.fmt.allocPrintSentinel(self.alloc, "GLYPHWIRE_CTX={d}", .{grant.context}, 0);
         errdefer self.alloc.free(ctx_var);
-        const token_var = try std.fmt.allocPrintSentinel(self.alloc, "GLYPHWIRE_TOKEN={s}", .{token}, 0);
+        const token_var = try std.fmt.allocPrintSentinel(self.alloc, "GLYPHWIRE_TOKEN={s}", .{&grant.token}, 0);
         errdefer self.alloc.free(token_var);
 
         // An outer session's variables stay out: this host may have been

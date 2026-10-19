@@ -839,13 +839,8 @@ pub const RequestRoleResult = struct {
 
 /// `attach_pane`: binds this connection to a pane. Sent as a connection's
 /// first message by anything started with `GLYPHWIRE_PANE` set.
-/// `attach_pane`: `token` names which of the pane's contexts this
-/// connection was given, and is what lets it in; only the window manager
-/// may attach without one.
-pub const AttachPaneParams = struct {
-    pane: core.PaneHandle,
-    token: ?[]const u8 = null,
-};
+/// `attach_pane`: the window manager's (see `Dispatcher.bindPane`).
+pub const AttachPaneParams = struct { pane: core.PaneHandle };
 
 /// `create_pane`: a new pane plus the base context it shows.
 /// `scrollback_rows` is that context's root layer's ring, so a terminal
@@ -1216,13 +1211,14 @@ pub const SubscribeParams = struct {
     /// subscribed but not yet bound would, until the binding landed, be
     /// gated against the wrong pane and could receive input meant for
     /// another program. See `InputListener.sendSubscribeAndWaitForAck`.
+    /// The window manager's only, like `attach_pane`.
     pane: ?core.PaneHandle = null,
     /// Optional: attaches to this context at the same time, exactly as
-    /// `attach_context` would, for the same reason `pane` is folded in.
-    /// Takes precedence over `pane` when both are sent.
+    /// `attach_context` would, for the same reason `pane` is folded in --
+    /// what a program's `InputListener` sends. Takes precedence over
+    /// `pane` when both are sent.
     context: ?core.ContextHandle = null,
-    /// The token `context` (or one of `pane`'s contexts) needs; see
-    /// `AttachContextParams` / `AttachPaneParams`.
+    /// The token `context` needs; see `AttachContextParams`.
     token: ?[]const u8 = null,
 };
 

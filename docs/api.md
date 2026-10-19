@@ -60,7 +60,7 @@ the server starts with — the shell's. It's never culled, can't be
 destroyed, and sits permanently at the bottom of the visibility stack.
 
 Every `layer?`-scoped message a connection sends resolves against its
-*current* context. `create_context`, `attach_context` and `attach_pane`
+*current* context. `create_context`, `attach_context` and (for the window manager) `attach_pane`
 set which context that is (per-connection ambient state, not a param on
 every message). A fresh connection is attached to **nothing**: it can't
 draw on, read, or be sent events for any context until it presents a
@@ -75,13 +75,13 @@ Context handles are small counters, so a handle is not a permission.
 Each context carries a random **access token** (`core.AccessToken`, 32
 hex characters, drawn at creation, never changed). A connection may act
 on a context when it **owns** it (created or adopted it), **presented its
-token** (`attach_context`, `attach_pane`, `subscribe`), or holds the
+token** (`attach_context`, `subscribe`), or holds the
 **window-manager role**. Everything context-scoped from a connection that
 can't act on its current context reports `ContextAccessDenied`, and such a
 connection is pushed no events at all. Access is per connection, ends
 with it, and is not ownership (it never keeps a context alive or lets you
 `destroy_context` it). The exempt messages are the way in
-(`create_context`, `attach_context`, `attach_pane`, `subscribe`), ones
+(`create_context`, `attach_context`, `subscribe`), ones
 that check their own target (`destroy_context`, `activate_context`,
 `adopt_context`), and ones that touch no context (`sync`, `batch` itself,
 `get_version`, `get_errors`, the role messages, the window manager's pane
@@ -108,8 +108,8 @@ is how a program launched inside someone else's panel — `gw-ls` run from
 the shell in salacommander's Ctrl+` panel — draws *in the panel* rather
 than on the root layer underneath it, with no layer-aware code of its
 own. Every client library sends it at connect time from
-`GLYPHWIRE_LAYER`, exactly as it sends `attach_pane` from
-`GLYPHWIRE_PANE`. A connection that never attaches one is unaffected:
+`GLYPHWIRE_LAYER`, right behind the `attach_context` it sends from
+`GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN`. A connection that never attaches one is unaffected:
 omitted still means root.
 
 | Message | Kind | Params | Result | Status |
@@ -348,7 +348,7 @@ around itself.
 |---|---|---|---|---|
 | `request_role` | request | `role` (`"window_manager"`), `token?` | `{granted, token?}` | ✅ answers `granted: false` rather than failing when another program holds it, so a second multiplexer can say so cleanly instead of dying on a wire error. An unknown role reports `UnknownRole`. The returned `token` is what this program's *other* connection presents to `join_role` — a manager is two connections (a `Client` that issues these calls and an `InputListener` that receives window commands) and both need the role |
 | `join_role` | notification | `role`, `token` | — | ✅ joins a role this program's other connection already holds. A notification because the joining connection is a subscribed listener with a reader thread running, so it has nowhere to read a response — the same reason `attach_context` is one. A wrong token simply grants nothing |
-| `attach_pane` | notification | `pane, token?` | — | ✅ needs `token`, that of one of the pane's contexts, and lands on that context; without one it lands on the topmost context there this connection already has access to, or reports `ContextAccessDenied`. The window manager needs no token and lands on the pane's top. Needs **no** role: the token is what lets a program in. Client libraries send it at connect time only when `GLYPHWIRE_PANE` is set and `GLYPHWIRE_CTX` isn't (a manager); every program the host starts attaches to its context instead. A subscribing connection folds this into `subscribe`'s `pane` instead (see Input) |
+| `attach_pane` | notification | `pane` | — | ✅ **window manager only** (`NotWindowManager` otherwise): binds this connection to a pane and whatever context is on screen there. A pane handle is a small counter, so naming one is no proof of having been started in it; a program is bound to its pane by attaching to its context (`GLYPHWIRE_CTX`), which lives in exactly one. Client libraries send it at connect time only when `GLYPHWIRE_PANE` is set and `GLYPHWIRE_CTX` isn't. A subscribing connection folds this into `subscribe`'s `pane` instead (see Input) |
 | `create_pane` | request | `scrollback_rows?` | `{pane, context}` | ✅ a pane plus the base context it displays. The pane is **not on screen** until it is placed in the tree, which keeps creation and placement separately undoable. Its base context can never be destroyed while the pane lives |
 | `destroy_pane` | notification | `pane` | — | ✅ stops the program in the pane, then frees the pane and every context in it. The program is stopped first, so it can't draw onto a context about to be freed under it. The root pane reports `RootPaneImmutable` |
 | `focus_pane` | notification | `pane` | — | ✅ which pane raw input goes to. An unmapped pane (one not currently placed in the tree) reports `UnknownPane` rather than swallowing every keystroke into something invisible |
@@ -1140,7 +1140,7 @@ queue, and the `size()`/`scroll()`/`visibleContext()` caches are unchanged.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `subscribe` | request | `events: []str` (e.g. `["key", "text", "mouse_button", "scroll"]`), `context?`, `pane?`, `token?` | acked subscription list | ✅ `context` (+ `token`) attaches exactly as `attach_context` would, and wins over `pane`; a refused token fails the subscribe with `ContextAccessDenied` and arms nothing. `pane` binds this connection to a pane at the same time, exactly as `attach_pane` would. Folded in rather than sent separately because `subscribe` is what arms the broadcast fan-out: a connection subscribed but not yet bound would, until the binding landed, be gated against the wrong pane and could receive another program's keystrokes. One message makes that window impossible rather than merely small. An unknown pane is ignored rather than failing the subscribe |
+| `subscribe` | request | `events: []str` (e.g. `["key", "text", "mouse_button", "scroll"]`), `context?`, `pane?`, `token?` | acked subscription list | ✅ `context` (+ `token`) attaches exactly as `attach_context` would, and wins over `pane`; a refused token fails the subscribe with `ContextAccessDenied` and arms nothing. `pane` (window manager only) binds this connection to a pane at the same time, exactly as `attach_pane` would. Folded in rather than sent separately because `subscribe` is what arms the broadcast fan-out: a connection subscribed but not yet bound would, until the binding landed, be gated against the wrong pane and could receive another program's keystrokes. One message makes that window impossible rather than merely small. An unknown pane is ignored rather than failing the subscribe |
 | `report_key` | notification, client→server | `key, pressed` | — | ✅ **window manager only** over a socket (`NotWindowManager` otherwise), like every `report_*`: anyone else could type into whatever has focus. From whatever process captures input (`glyphwire-host`); see also `Server.reportKey`/`reportKeyRepeat` for a caller reporting in-process rather than over the wire. Deduped against the session's window-wide down-set (a press while already down, or a release while up, is not broadcast), which is why that set is not per-context: a release that arrives after focus moved to another program's context still clears the press it pairs with |
 | `report_text` | notification, client→server | `text` (UTF-8 string, ≥1 codepoint) | — | ✅ committed text input, already resolved through the OS keyboard layout / dead keys / IME — the only correct source for a non-US layout, an AltGr combo or CJK. Fanned straight out as `text`; touches no down-set. In-process path: `Server.reportText`. Empty string is dropped |
 | `report_mouse_button` | notification, client→server | `button, pressed, px, cell, view_offset?, clicks?` | — | ✅ `view_offset` (default 0) is the root layer's scrollback view offset at click time, carried into the `mouse_button` broadcast so a subscriber can resolve `cell` against the right scrolled-back row (see `get_metadata`). `clicks` (default 1) is the press's click count, passed through unchanged |
@@ -1221,8 +1221,9 @@ The agent is invoked as `gw-agent --stdio [--pane N] [--ctx N]
 environment (`GLYPHWIRE_PANE`, `GLYPHWIRE_CTX`, `GLYPHWIRE_REMOTE`) and
 never interpreted there — a pane handle is the *host's* number. That is
 the whole seating handshake: the remote shell binds itself to the right
-rectangle through exactly the `attach_pane` a locally spawned child
-sends, and the agent still parses no protocol. Omitting them (what
+rectangle through exactly the `attach_context` a locally spawned child
+sends (the host lets the session's connections into that context itself,
+so no token travels), and the agent still parses no protocol. Omitting them (what
 `glyphwire --ssh` sends) means the window's own root pane and default
 context. `GLYPHWIRE_REMOTE` is also what a remote shell's prompt reads for
 `{remote}` / `{remote_dest}`.

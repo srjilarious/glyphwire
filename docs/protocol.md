@@ -63,7 +63,7 @@ connects.
 | `GLYPHWIRE_SOCK` | host | Absolute path of the listening socket. **Its presence is the whole discovery protocol.** |
 | `GLYPHWIRE_CTX` | host / shell / embedding program | The context handle this process was started on. A client **SHOULD** send it, with `GLYPHWIRE_TOKEN`, as `attach_context` (or `subscribe`'s `context`) as its first message. |
 | `GLYPHWIRE_TOKEN` | host / shell / embedding program | That context's access token (section 4.2.1): 32 lowercase hex characters. Without it a connection is attached to nothing. |
-| `GLYPHWIRE_PANE` | host / multiplexer | The pane handle this process was seated in. Informational once `GLYPHWIRE_CTX` is set, since a context lives in exactly one pane; a client that has only this (a window manager) **MAY** send it as `attach_pane` or `subscribe`'s `pane`. |
+| `GLYPHWIRE_PANE` | host / multiplexer | The pane handle this process was seated in. Informational: a context lives in exactly one pane, so attaching to `GLYPHWIRE_CTX` already binds the pane. Only a window manager may bind by pane (`attach_pane`, `subscribe`'s `pane`). |
 | `GLYPHWIRE_LAYER` | an embedded shell | The layer this process should draw on: the surface an omitted `layer` resolves to. A client **SHOULD** send it as `attach_layer` immediately after connecting. Unset means the context's root layer. |
 | `GLYPHWIRE_REMOTE` | `gw-agent` | Set inside a remote session. |
 | `GLYPHWIRE_WIRE` | user | `json` or `msgpack`: which encoding (section 2.2) the reference client opens its connections in. Default `msgpack`. Not part of the wire protocol — a host accepts both regardless. |
@@ -330,7 +330,7 @@ response's `message` and as the `code` string in a `get_errors` entry.
 | `UnknownLayer` | any `layer` handle that does not exist, **and** the root handle where a non-root one is required |
 | `LayerPermissionDenied` | `destroy_layer` from a non-owner |
 | `UnknownContext`, `RootContextImmutable`, `ContextPermissionDenied`, `NoContextSession` | context messages |
-| `ContextAccessDenied` | any context-scoped message from a connection without access to its current context (section 4.2.1), and `attach_context` / `attach_pane` / `subscribe` with a missing or wrong token |
+| `ContextAccessDenied` | any context-scoped message from a connection without access to its current context (section 4.2.1), and `attach_context` / `subscribe` with a missing or wrong token |
 | `UnknownPane`, `RootPaneImmutable`, `UnknownPaneSplit`, `InvalidPaneSplitChild`, `PaneSplitChildOutOfRange` | pane messages |
 | `NotWindowManager`, `UnknownRole` | role messages, and `report_*` from a connection without the role |
 | `UnknownSplit`, `InvalidSplitAxis`, `InvalidSplitChild`, `SplitChildOutOfRange` | layer-split messages |
@@ -407,7 +407,7 @@ stack.
 
 **Per-connection current context.** Every `layer?`-scoped message resolves
 against the connection's current context. `create_context`,
-`attach_context` and `attach_pane` set it; it is ambient connection state,
+`attach_context` and (for the window manager) `attach_pane` set it; it is ambient connection state,
 not a parameter on every message. A fresh connection is attached to
 nothing (section 4.2.1).
 
@@ -419,7 +419,7 @@ lowercase hex characters, drawn when the context is made and never
 changed. A connection **has access** to a context when it
 
 - created it (`create_context`) or adopted it (`adopt_context`), or
-- presented its token (`attach_context`, `attach_pane`, `subscribe`), or
+- presented its token (`attach_context`, `subscribe`), or
 - holds the window-manager role (section 6.15), which arranges every pane
   and so sees into all of them.
 
@@ -430,7 +430,7 @@ never keeps a context alive and never lets the connection
 A host **MUST** refuse, with `ContextAccessDenied`, every context-scoped
 message from a connection without access to its current context. The
 messages exempt are the ones that are the way in (`create_context`,
-`attach_context`, `attach_pane`, `subscribe`), check their own target
+`attach_context`, `subscribe`), check their own target
 (`destroy_context`, `activate_context`, `adopt_context`), or touch no
 context (`sync`, `batch` itself, `get_version`, `get_errors`, the role
 messages, and the window manager's pane messages, which check the role).
@@ -1489,8 +1489,8 @@ not against what was last computed.
 
 ### 6.15 Panes and the window-manager role
 
-Pane messages require the `window_manager` role, except `attach_pane`. A
-connection without it gets `NotWindowManager`.
+Pane messages require the `window_manager` role. A connection without it
+gets `NotWindowManager`.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
@@ -1499,7 +1499,7 @@ connection without it gets `NotWindowManager`.
 | `create_pane` | request | `scrollback_rows?` = 0 | `{pane, context}` |
 | `destroy_pane` | notification | `pane` | — |
 | `focus_pane` | notification | `pane` | — |
-| `attach_pane` | notification | `pane`, `token?` | — |
+| `attach_pane` | notification | `pane` | — |
 | `create_pane_split` | request | `axis`, `resizable?` = true | `{split}` |
 | `destroy_pane_split` | notification | `split` | — |
 | `set_pane_split_children` | notification | `split`, `children` | — |
@@ -1525,12 +1525,11 @@ their child shape is `{pane?, split?, weight?, fixed?}` and reports
 `get_pane_split`'s children are `{pane?, split?, weight?, fixed?,
 extent}`.
 
-`attach_pane` binds the issuing connection to a pane. It needs no role,
-but it needs a `token`: that of one of the pane's contexts, which is the
-context the connection lands on (not whatever happens to be on top of the
-pane). Without a token it lands on the topmost context in the pane the
-connection already has access to, or reports `ContextAccessDenied`. The
-window manager may attach to any pane without one, landing on its top.
+`attach_pane` binds the issuing connection to a pane and to whatever is
+on screen there. A pane handle is a small counter and naming one is no
+proof of having been started in it, so it is the window manager's; a
+program is bound to its pane by attaching to its context
+(`GLYPHWIRE_CTX`), which lives in exactly one.
 
 `spawn_in_pane` forks a program with the discovery variables set for that
 pane, `GLYPHWIRE_TOKEN` among them (section 2.1). `argv` **MUST** be non-empty; the first element is resolved through
@@ -1645,8 +1644,8 @@ same. A client that works in pixels re-reads `get_cell_metrics` on every
 `subscribe` **replaces** the connection's subscription set; it is not
 additive. `events` is an array of stream names (section 7.1). Unknown names
 are ignored. `context` (with `token`) atomically attaches the connection
-exactly as `attach_context` would, as it arms the fan-out; `pane` (with
-`token`) does the same as `attach_pane`, and `context` wins when both are
+exactly as `attach_context` would, as it arms the fan-out; `pane` does the
+same as `attach_pane` (the window manager's only), and `context` wins when both are
 sent. An unknown pane is ignored rather than failing the subscribe, since
 the pane may have been destroyed between the spawn and the connect, and an
 unattached connection is sent nothing anyway. A refused token fails the

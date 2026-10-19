@@ -1204,6 +1204,14 @@ pub fn accessTokenMatches(want: *const AccessToken, given: []const u8) bool {
     return std.crypto.timing_safe.eql(AccessToken, want.*, given[0..want.len].*);
 }
 
+/// A context and the token that lets a connection act on it: what
+/// `create_context` hands back, and what glyphwire-host passes along to a
+/// program it starts there (`GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN`).
+pub const ContextGrant = struct {
+    context: ContextHandle,
+    token: AccessToken,
+};
+
 pub const LayerError = error{UnknownLayer};
 
 /// Columns between horizontal tab stops for `\t` handling in

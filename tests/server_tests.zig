@@ -4,6 +4,7 @@
 const std = @import("std");
 const testz = @import("testz");
 const glyphwire = @import("glyphwire");
+const helpers = @import("session_helpers.zig");
 const wire = glyphwire.wire;
 
 fn serveConnections(server: *glyphwire.server.Server, alloc: std.mem.Allocator, count: usize) void {
@@ -96,8 +97,7 @@ pub fn socketWriteTextThenGetPropertyRoundTripTest(io: std.Io, alloc: std.mem.Al
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     // Two client connections are expected: one to write "hello", a second
@@ -146,8 +146,7 @@ pub fn subscribedConnectionReceivesBroadcastKeyEventTest(io: std.Io, alloc: std.
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     // Two genuinely concurrent connections need two threads each blocked
@@ -221,8 +220,7 @@ pub fn reportResizeResizesRootAndBroadcastsToSubscribersTest(io: std.Io, alloc: 
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
@@ -277,8 +275,7 @@ pub fn reportFontStepAlwaysResizesAndCatchesUpBackgroundContextsTest(io: std.Io,
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
@@ -357,8 +354,7 @@ pub fn reportScrollMovesViewOffsetAndBroadcastsToSubscribersTest(io: std.Io, all
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
@@ -415,8 +411,7 @@ pub fn reportLayerScrollMovesANonRootLayersRingTest(io: std.Io, alloc: std.mem.A
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
@@ -468,8 +463,7 @@ pub fn reportLayerScrollOnUnknownLayerIsANoOpTest(io: std.Io, alloc: std.mem.All
     const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-layer-scroll-unknown-test-{d}.sock", .{std.Thread.getCurrentId()});
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     try srv.reportLayerScroll(alloc, 99, null, 1);
@@ -489,8 +483,7 @@ pub fn badNotificationDoesNotSeverTheConnectionTest(io: std.Io, alloc: std.mem.A
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
@@ -552,8 +545,7 @@ pub fn wakeCallbackFiresOnSocketDispatchTest(io: std.Io, alloc: std.mem.Allocato
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     var wake_count: std.atomic.Value(u32) = .init(0);
@@ -601,8 +593,7 @@ pub fn dispatchWorksWithNoWakeCallbackTest(io: std.Io, alloc: std.mem.Allocator)
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveConnections, .{ &srv, alloc, @as(usize, 2) });
@@ -641,8 +632,7 @@ pub fn inputReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allo
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     // Two panes side by side, both mapped, root focused.
@@ -668,7 +658,7 @@ pub fn inputReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allo
     var a_buf: [4096]u8 = undefined;
     var a_w = a.writer(io, &a_buf);
     try wire.writeFrame(&a_w.interface,
-        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key"],"pane":0}}
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key"]}}
     );
     try a_w.interface.flush();
     alloc.free(try readOneFrame(io, alloc, &a, &a_dec));
@@ -682,12 +672,12 @@ pub fn inputReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allo
 
     var b_buf: [4096]u8 = undefined;
     var b_w = b.writer(io, &b_buf);
-    // The other pane's program presents its pane's token, as the host's
-    // `GLYPHWIRE_TOKEN` gives it.
+    // The other pane's program attaches to its context with its token, as
+    // the host's `GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN` give it.
     const b_token = srv.session.contextToken(made.context).?;
     const b_sub = try std.fmt.allocPrint(alloc,
-        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["key"],"pane":1,"token":"{s}"}}}}
-    , .{&b_token});
+        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["key"],"context":{d},"token":"{s}"}}}}
+    , .{ made.context, &b_token });
     defer alloc.free(b_sub);
     try wire.writeFrame(&b_w.interface, b_sub);
     try b_w.interface.flush();
@@ -721,8 +711,7 @@ pub fn paneLayoutSendsEachClientItsOwnSizeTest(io: std.Io, alloc: std.mem.Alloca
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
@@ -736,7 +725,7 @@ pub fn paneLayoutSendsEachClientItsOwnSizeTest(io: std.Io, alloc: std.mem.Alloca
     var write_buf: [4096]u8 = undefined;
     var w = stream.writer(io, &write_buf);
     try wire.writeFrame(&w.interface,
-        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["resize"],"pane":0}}
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["resize"]}}
     );
     try w.interface.flush();
     alloc.free(try readOneFrame(io, alloc, &stream, &decoder));
@@ -777,8 +766,7 @@ pub fn thePrefixSequenceNeverReachesTheProgramTest(io: std.Io, alloc: std.mem.Al
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
@@ -832,8 +820,7 @@ pub fn aShiftedPrefixCommandReachesTheManagerInHostOrderTest(io: std.Io, alloc: 
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const accept_thread = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
@@ -905,8 +892,7 @@ pub fn thePrefixSurvivesAFocusChangeWithAModifierHeldTest(io: std.Io, alloc: std
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     // Two panes side by side, both mapped, root focused.
@@ -959,8 +945,7 @@ pub fn aStaleModifierInAPanesContextDoesNotKillThePrefixTest(io: std.Io, alloc: 
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const made = try srv.session.createPane(0, 0);
@@ -1013,8 +998,7 @@ pub fn selectedLayerFindsANonRootSelectionTest(io: std.Io, alloc: std.mem.Alloca
     const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-selected-layer-test-{d}.sock", .{std.Thread.getCurrentId()});
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const panel = try ctx.createLayer(20, 5, 0);
@@ -1047,8 +1031,7 @@ pub fn selectedLayerReportsRootAsNullTest(io: std.Io, alloc: std.mem.Allocator) 
     const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-selected-root-test-{d}.sock", .{std.Thread.getCurrentId()});
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     _ = try ctx.createLayer(20, 5, 0);
@@ -1079,8 +1062,7 @@ pub fn focusedCellClampedPinsAPointerOutsideThePaneTest(io: std.Io, alloc: std.m
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     // Two panes side by side; the right-hand one takes focus, so its rect
@@ -1138,8 +1120,7 @@ pub fn copyRequestReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.me
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const made = try srv.session.createPane(0, 0);
@@ -1162,7 +1143,7 @@ pub fn copyRequestReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.me
     var a_buf: [4096]u8 = undefined;
     var a_w = a.writer(io, &a_buf);
     try wire.writeFrame(&a_w.interface,
-        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["clipboard","key"],"pane":0}}
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["clipboard","key"]}}
     );
     try a_w.interface.flush();
     alloc.free(try readOneFrame(io, alloc, &a, &a_dec));
@@ -1178,8 +1159,8 @@ pub fn copyRequestReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.me
     var b_w = b.writer(io, &b_buf);
     const b_token = srv.session.contextToken(made.context).?;
     const b_sub = try std.fmt.allocPrint(alloc,
-        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["clipboard","key"],"pane":1,"token":"{s}"}}}}
-    , .{&b_token});
+        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["clipboard","key"],"context":{d},"token":"{s}"}}}}
+    , .{ made.context, &b_token });
     defer alloc.free(b_sub);
     try wire.writeFrame(&b_w.interface, b_sub);
     try b_w.interface.flush();
@@ -1215,8 +1196,7 @@ pub fn windowThemeChangeReachesOnlyFollowersTest(io: std.Io, alloc: std.mem.Allo
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     // Two panes, so the two clients are in two contexts.
@@ -1232,7 +1212,7 @@ pub fn windowThemeChangeReachesOnlyFollowersTest(io: std.Io, alloc: std.mem.Allo
     var a_buf: [4096]u8 = undefined;
     var a_w = a.writer(io, &a_buf);
     try wire.writeFrame(&a_w.interface,
-        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["theme","shutdown"],"pane":0}}
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["theme","shutdown"]}}
     );
     try a_w.interface.flush();
     alloc.free(try readOneFrame(io, alloc, &a, &a_dec));
@@ -1250,8 +1230,8 @@ pub fn windowThemeChangeReachesOnlyFollowersTest(io: std.Io, alloc: std.mem.Allo
     var subscribe_buf: [200]u8 = undefined;
     const b_token = srv.session.contextToken(made.context).?;
     try wire.writeFrame(&b_w.interface, try std.fmt.bufPrint(&subscribe_buf,
-        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["theme","shutdown"],"pane":{d},"token":"{s}"}}}}
-    , .{ made.pane, &b_token }));
+        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["theme","shutdown"],"context":{d},"token":"{s}"}}}}
+    , .{ made.context, &b_token }));
     try wire.writeFrame(&b_w.interface,
         \\{"jsonrpc":"2.0","method":"set_theme","params":{"name":"nord"}}
     );
@@ -1305,10 +1285,11 @@ fn connectToPane(
 
     var buf: [4096]u8 = undefined;
     var w = stream.writer(io, &buf);
-    // Presents the token of what is on the pane, as a program started there
-    // has in its `GLYPHWIRE_TOKEN`.
-    const token = srv.session.contextToken(srv.session.panePtr(pane).?.top()).?;
-    const req = try std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"subscribe\",\"params\":{{\"events\":{s},\"pane\":{d},\"token\":\"{s}\"}}}}", .{ events_json, pane, &token });
+    // Attaches to what is on the pane with its token, as a program started
+    // there does from its `GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN`.
+    const context = srv.session.panePtr(pane).?.top();
+    const token = srv.session.contextToken(context).?;
+    const req = try std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"subscribe\",\"params\":{{\"events\":{s},\"context\":{d},\"token\":\"{s}\"}}}}", .{ events_json, context, &token });
     defer alloc.free(req);
     try wire.writeFrame(&w.interface, req);
     try w.interface.flush();
@@ -1342,8 +1323,7 @@ pub fn layoutReachesOnlyItsOwnContextsClientsTest(io: std.Io, alloc: std.mem.All
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const other = try splitIntoTwoPanes(&srv);
@@ -1402,8 +1382,7 @@ pub fn aKeyTapReachesOnlyTheNamedContextTest(io: std.Io, alloc: std.mem.Allocato
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const other = try splitIntoTwoPanes(&srv);
@@ -1443,8 +1422,7 @@ pub fn aWheelTapReachesOnlyTheNamedContextTest(io: std.Io, alloc: std.mem.Alloca
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const other = try splitIntoTwoPanes(&srv);
@@ -1485,8 +1463,7 @@ pub fn pasteReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allo
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const other = try splitIntoTwoPanes(&srv);
@@ -1529,8 +1506,7 @@ pub fn terminalReplyStaysInItsContextTest(io: std.Io, alloc: std.mem.Allocator) 
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const other = try splitIntoTwoPanes(&srv);
@@ -1581,8 +1557,7 @@ pub fn focusFollowsThePaneAsWellAsTheWindowTest(io: std.Io, alloc: std.mem.Alloc
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const other = try splitIntoTwoPanes(&srv);
@@ -1635,8 +1610,7 @@ pub fn clickToFocusTellsTheManagerTest(io: std.Io, alloc: std.mem.Allocator) !vo
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const other = try splitIntoTwoPanes(&srv);
@@ -1671,8 +1645,7 @@ pub fn destroyContextSendsTheRevealedContextItsOwedLayoutTest(io: std.Io, alloc:
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const layer = try ctx.createLayer(null, null, 0);
@@ -1748,8 +1721,7 @@ pub fn shellContextIsMadeOnTopFlaggedAndDroppedByTheHostTest(io: std.Io, alloc: 
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const handle = try srv.createShellContext(alloc, glyphwire.root_pane_handle);

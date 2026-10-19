@@ -10,6 +10,7 @@
 const std = @import("std");
 const testz = @import("testz");
 const glyphwire = @import("glyphwire");
+const helpers = @import("session_helpers.zig");
 
 /// A style with owned marker glyphs, as `createOutline` requires.
 fn style(alloc: std.mem.Allocator, alt_row_bg: ?glyphwire.Color) !glyphwire.OutlineStyle {
@@ -372,8 +373,7 @@ pub fn outlineOverTheWirePaintsAndTogglesTest(io: std.Io, alloc: std.mem.Allocat
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -418,8 +418,7 @@ pub fn outlineSetAllCollapsedOverTheWireTest(io: std.Io, alloc: std.mem.Allocato
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -459,8 +458,7 @@ pub fn outlineRunColoursSurviveTheWireTest(io: std.Io, alloc: std.mem.Allocator)
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -494,8 +492,7 @@ pub fn outlineUnknownHandleAndBadNodeAreReportedTest(io: std.Io, alloc: std.mem.
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -728,8 +725,7 @@ pub fn outlineSetCollapsedOverTheWireFollowsTheNodeTest(io: std.Io, alloc: std.m
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();

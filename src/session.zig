@@ -1341,24 +1341,17 @@ pub const Session = struct {
         try ctx.members.put(conn, {});
     }
 
-    /// `handle`'s token, or null for an unknown handle. What glyphwire-host
-    /// puts in `GLYPHWIRE_TOKEN` for a program it starts in a context.
+    /// `handle`'s token, or null for an unknown handle.
     pub fn contextToken(self: *Session, handle: ContextHandle) ?core.AccessToken {
         const ctx = self.contexts.get(handle) orelse return null;
         return ctx.token;
     }
 
-    /// The context in `pane_handle` whose token is `token`, or null for an
-    /// unknown pane or a token matching none of them. What `attach_pane`
-    /// lands a connection on: the context it was given the token for,
-    /// rather than whatever happens to be on top of the pane.
-    pub fn paneContextForToken(self: *Session, pane_handle: PaneHandle, token: []const u8) ?ContextHandle {
-        const pane = self.panes.getPtr(pane_handle) orelse return null;
-        for (pane.stack.items) |h| {
-            const ctx = self.contexts.get(h) orelse continue;
-            if (core.accessTokenMatches(&ctx.token, token)) return h;
-        }
-        return null;
+    /// `handle` with its token, or null for an unknown handle. What
+    /// glyphwire-host hands a program it starts on that context.
+    pub fn contextGrant(self: *Session, handle: ContextHandle) ?core.ContextGrant {
+        const token = self.contextToken(handle) orelse return null;
+        return .{ .context = handle, .token = token };
     }
 
     /// Whether `handle` is some pane's base context, i.e. the one that

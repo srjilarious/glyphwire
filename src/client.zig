@@ -188,13 +188,10 @@ pub const Seat = struct {
     }
 };
 
-/// What `create_context` hands back: the new context and the token a
+/// What `createContext` hands back: the new context and the token a
 /// second connection (the paired `InputListener`, a `gw-shell --embed`)
 /// presents to `attachContext` to act on it too.
-pub const ContextGrant = struct {
-    context: core.ContextHandle,
-    token: core.AccessToken,
-};
+pub const ContextGrant = core.ContextGrant;
 
 /// The most recent JSON-RPC error a request on this thread got back --
 /// what `error.RemoteError` stands for. Thread-local because a `Client`

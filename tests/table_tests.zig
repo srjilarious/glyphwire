@@ -4,6 +4,7 @@
 const std = @import("std");
 const testz = @import("testz");
 const glyphwire = @import("glyphwire");
+const helpers = @import("session_helpers.zig");
 
 /// A minimal byte stream `pngDimensions` accepts -- see client_tests.zig's
 /// identical fixture.
@@ -37,8 +38,7 @@ pub fn createTableAndSetRowsPaintsHeaderAndBodyTest(io: std.Io, alloc: std.mem.A
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -94,8 +94,7 @@ pub fn tableColumnHAlignEndRightAlignsTextTest(io: std.Io, alloc: std.mem.Alloca
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -136,8 +135,7 @@ pub fn tableCellIconFillsLineAtDefaultRowHeightTest(io: std.Io, alloc: std.mem.A
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -184,8 +182,7 @@ pub fn tableStyleMaxIconPxCapsBodyIconTest(io: std.Io, alloc: std.mem.Allocator)
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -234,8 +231,7 @@ pub fn tableCellIconFallsBackToFitWithoutCellMetricsTest(io: std.Io, alloc: std.
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -279,8 +275,7 @@ pub fn tableBodyIconCompositesOverAltRowBgTest(io: std.Io, alloc: std.mem.Alloca
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -353,8 +348,7 @@ pub fn tableSetSortReordersRowsByNumericSortKeyTest(io: std.Io, alloc: std.mem.A
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -413,8 +407,7 @@ pub fn tableSetStyleTogglesAltRowBgTest(io: std.Io, alloc: std.mem.Allocator) !v
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -462,8 +455,7 @@ pub fn destroyTableBlanksItsRegionTest(io: std.Io, alloc: std.mem.Allocator) !vo
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -518,8 +510,7 @@ pub fn tableNearLayerBottomScrollsToFitInsteadOfClippingTest(io: std.Io, alloc: 
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -577,8 +568,7 @@ pub fn tableGetStateReportsPaintedExtentTest(io: std.Io, alloc: std.mem.Allocato
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -635,8 +625,7 @@ pub fn createTableOnAnotherConnectionDefaultsToFirstConnectionsCursorTest(io: st
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
@@ -692,8 +681,7 @@ pub fn tableTallerThanLayerDoesNotCrashTest(io: std.Io, alloc: std.mem.Allocator
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -737,8 +725,7 @@ pub fn tableOversizedShowsTailTest(io: std.Io, alloc: std.mem.Allocator) !void {
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -921,8 +908,7 @@ pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Alloc
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -1000,8 +986,7 @@ pub fn tableRepaintAfterScrollKeepsPositionTest(io: std.Io, alloc: std.mem.Alloc
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -1083,8 +1068,7 @@ pub fn tableTopLiveFollowsResizeTest(io: std.Io, alloc: std.mem.Allocator) !void
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -1142,8 +1126,7 @@ pub fn tableCaseInsensitiveColumnFoldsWhenSortedTest(io: std.Io, alloc: std.mem.
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -1189,8 +1172,7 @@ pub fn tableFocusColumnMarksItsBodyCellTest(io: std.Io, alloc: std.mem.Allocator
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -1285,8 +1267,7 @@ pub fn tableWrapColumnGrowsRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
     defer alloc.free(socket_path);
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
-    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
-    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });

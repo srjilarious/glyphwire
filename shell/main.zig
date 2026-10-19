@@ -682,10 +682,11 @@ fn runPrompt(
     var control: ?embed.Control = null;
     defer if (control) |*ctl| ctl.deinit();
     if (embed_opts) |eo| {
-        if (!attachEmbedded(&prompt, listener, alloc, eo, &control)) return;
+        if (!seatedOn("--embed", eo.context)) return;
+        setUpEmbedded(&prompt, alloc, eo, &control);
     }
     if (own_context) |h| {
-        if (!attachOwnContext(&prompt, listener, h)) return;
+        if (!seatedOn("--context", h)) return;
     }
 
     try seedPromptEnv(&prompt, io, alloc);
@@ -708,54 +709,27 @@ fn runPrompt(
     }
 }
 
-/// `--embed`: join the host's context and draw on the layer it made for
-/// us instead of on a context of our own. Both connections attach -- the
-/// drawing one so `layer?`-scoped messages resolve there, the listener so
-/// its input follows that context's visibility. `control` is the caller's,
-/// so it outlives this call. False (already logged) when either attach
-/// failed and the shell should give up.
-fn attachEmbedded(prompt: *Prompt, listener: *glyphwire.InputListener, alloc: std.mem.Allocator, eo: embed.Options, control: *?embed.Control) bool {
-    // The panel's owner put its context's token in our environment.
-    const token = glyphwire.client.processToken() orelse {
-        std.log.err("prompt: --embed: no GLYPHWIRE_TOKEN for context {d}", .{eo.context});
-        return false;
-    };
-    prompt.client.attachContext(eo.context, &token) catch |err| {
-        std.log.err("prompt: --embed: can't attach to context {d}: {t}", .{ eo.context, err });
-        return false;
-    };
-    listener.attachContext(eo.context, &token) catch |err| {
-        std.log.err("prompt: --embed: listener can't attach to context {d}: {t}", .{ eo.context, err });
-        return false;
-    };
+/// Whether this shell's connections are on `context`, the one `flag`
+/// (`--embed` / `--context`) names. Whoever started the shell put that
+/// context and its token in `GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN`, and both
+/// connections attached with them as they connected; this only catches a
+/// launcher whose two disagree, which would leave the shell drawing
+/// somewhere else. False (already logged) when they do.
+fn seatedOn(flag: []const u8, context: glyphwire.ContextHandle) bool {
+    if (glyphwire.client.processContext() == context and glyphwire.client.processToken() != null) return true;
+    std.log.err("prompt: {s}: GLYPHWIRE_CTX / GLYPHWIRE_TOKEN don't name context {d}", .{ flag, context });
+    return false;
+}
+
+/// `--embed`: draw on the layer the host program made for us in its
+/// context, start out of focus, and take its control pipe. `control` is
+/// the caller's, so it outlives this call.
+fn setUpEmbedded(prompt: *Prompt, alloc: std.mem.Allocator, eo: embed.Options, control: *?embed.Control) void {
     prompt.layer = eo.layer;
     // The panel starts out of focus: the host opens it, then says so.
     prompt.focused = false;
     if (eo.control_fd) |fd| control.* = embed.Control.init(alloc, fd);
     prompt.control = if (control.*) |*ctl| ctl else null;
-    return true;
-}
-
-/// `--context`: draw on, and take input for, the context the host made
-/// for this shell. Both connections attach, as `attachEmbedded`'s do, but
-/// on the root layer: the context is this shell's own, the way a pane's
-/// base context is its first shell's. False (already logged) when either
-/// attach failed and the shell should give up.
-fn attachOwnContext(prompt: *Prompt, listener: *glyphwire.InputListener, context: glyphwire.ContextHandle) bool {
-    // The host put the context's token in our environment.
-    const token = glyphwire.client.processToken() orelse {
-        std.log.err("prompt: --context: no GLYPHWIRE_TOKEN for context {d}", .{context});
-        return false;
-    };
-    prompt.client.attachContext(context, &token) catch |err| {
-        std.log.err("prompt: --context: can't attach to context {d}: {t}", .{ context, err });
-        return false;
-    };
-    listener.attachContext(context, &token) catch |err| {
-        std.log.err("prompt: --context: listener can't attach to context {d}: {t}", .{ context, err });
-        return false;
-    };
-    return true;
 }
 
 /// The live environment `sh.setenv` mutates (alongside libc, for

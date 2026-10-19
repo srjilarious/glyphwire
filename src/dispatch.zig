@@ -1011,124 +1011,165 @@ pub const Dispatcher = struct {
         return try self.handleBatch(alloc, envelope.id, envelope.params);
     }
 
-    /// Method name -> handler. A compile-time perfect-hash map built from
-    /// the adapters above; replaces what was a ~60-branch `if/else` chain
-    /// of `std.mem.eql` on `envelope.method`. Adding a message is one row
-    /// here. `dispatchEnvelope` (error recording) and `handleBatch` both
+    /// Who may send a message over a socket. Checked once, in
+    /// `dispatchCatalog`, before the handler runs; an in-process caller
+    /// (`conn_id` null) passes every check.
+    const Access = enum {
+        /// Needs access to the connection's current context (see
+        /// `attached`), or `ContextAccessDenied`. Every message that
+        /// reads, draws on or configures a context: the default.
+        context,
+        /// Needs nothing. The way in (`create_context`, `attach_context`,
+        /// `subscribe`), messages that check their own target
+        /// (`destroy_context`, `activate_context`, `adopt_context`), and
+        /// ones that touch no context (`sync`, `get_version`, the role
+        /// messages). `batch` too, so each sub-message meets its own row.
+        open,
+        /// Needs the window-manager role, or `NotWindowManager`: the pane
+        /// tree, `spawn_in_pane`, the prefix, and synthetic input
+        /// (`report_*`), which anyone else could use to type into whatever
+        /// has focus. The host's own input comes in-process and never
+        /// passes through here.
+        manager,
+    };
+
+    const CatalogEntry = struct {
+        run: CatalogFn,
+        access: Access,
+    };
+
+    /// A catalog row's value, one per `Access`, so each row says who may
+    /// send it.
+    fn needsContext(run: CatalogFn) CatalogEntry {
+        return .{ .run = run, .access = .context };
+    }
+
+    fn open(run: CatalogFn) CatalogEntry {
+        return .{ .run = run, .access = .open };
+    }
+
+    fn needsManager(run: CatalogFn) CatalogEntry {
+        return .{ .run = run, .access = .manager };
+    }
+
+    /// Method name -> handler and who may send it. A compile-time
+    /// perfect-hash map built from the adapters above; replaces what was a
+    /// ~60-branch `if/else` chain of `std.mem.eql` on `envelope.method`.
+    /// Adding a message is one row here, saying who may send it. `dispatchEnvelope` (error recording) and `handleBatch` both
     /// route through `dispatchCatalog`, so a batched sub-message and a
     /// standalone one still hit precisely the same handler.
-    const catalog = std.StaticStringMap(CatalogFn).initComptime(.{
-        .{ "write_text", catResult(handleWriteText) },
-        .{ "insert_cells", catVoid(handleInsertCells) },
-        .{ "delete_cells", catVoid(handleDeleteCells) },
-        .{ "move_content", catVoid(handleMoveContent) },
-        .{ "set_property", catVoid(handleSetProperty) },
-        .{ "get_property", catBytesId(handleGetProperty) },
-        .{ "get_cells", catBytesId(handleGetCells) },
-        .{ "scroll_view", catResultId(handleScrollView) },
-        .{ "create_layer", catBytesId(handleCreateLayer) },
-        .{ "destroy_layer", catVoid(handleDestroyLayer) },
-        .{ "adopt_layer", catVoid(handleAdoptLayer) },
-        .{ "create_context", catResultId(handleCreateContext) },
-        .{ "destroy_context", catResult(handleDestroyContext) },
-        .{ "activate_context", catResult(handleActivateContext) },
-        .{ "attach_context", catVoid(handleAttachContext) },
-        .{ "attach_layer", catVoid(handleAttachLayer) },
-        .{ "adopt_context", catVoid(handleAdoptContext) },
-        .{ "set_context_title", catVoid(handleSetContextTitle) },
-        .{ "set_theme", catVoid(handleSetTheme) },
-        .{ "set_divider_style", catVoid(handleSetDividerStyle) },
-        .{ "get_theme", catBytesIdNoParams(handleGetTheme) },
-        .{ "list_contexts", catBytesIdNoParams(handleListContexts) },
-        .{ "get_version", catBytesIdNoParams(handleGetVersion) },
-        .{ "set_window_scrollbar", catVoid(handleSetWindowScrollbar) },
-        .{ "set_caret_layer", catVoid(handleSetCaretLayer) },
-        .{ "set_caret_visible", catVoid(handleSetCaretVisible) },
-        .{ "set_caret_shape", catVoid(handleSetCaretShape) },
-        .{ "set_key_repeat", catVoid(handleSetKeyRepeat) },
-        .{ "request_role", catBytesId(handleRequestRole) },
-        .{ "join_role", catVoid(handleJoinRole) },
-        .{ "attach_pane", catVoid(handleAttachPane) },
-        .{ "create_pane", catResultId(handleCreatePane) },
-        .{ "destroy_pane", catResult(handleDestroyPane) },
-        .{ "focus_pane", catResult(handleFocusPane) },
-        .{ "create_pane_split", catBytesId(handleCreatePaneSplit) },
-        .{ "destroy_pane_split", catResult(handleDestroyPaneSplit) },
-        .{ "set_pane_split_children", catResult(handleSetPaneSplitChildren) },
-        .{ "replace_pane_split_child", catResult(handleReplacePaneSplitChild) },
-        .{ "get_pane_split", catBytesId(handleGetPaneSplit) },
-        .{ "set_root_pane_split", catResult(handleSetRootPaneSplit) },
-        .{ "move_pane_divider", catResult(handleMovePaneDivider) },
-        .{ "spawn_in_pane", catBytesId(handleSpawnInPane) },
-        .{ "start_remote", catBytesId(handleStartRemote) },
-        .{ "stop_remote", catVoid(handleStopRemote) },
-        .{ "set_window_prefix", catVoid(handleSetWindowPrefix) },
-        .{ "send_window_prefix", catResult(handleSendWindowPrefix) },
-        .{ "create_split", catBytesId(handleCreateSplit) },
-        .{ "destroy_split", catResult(handleDestroySplit) },
-        .{ "set_split_children", catResult(handleSetSplitChildren) },
-        .{ "replace_split_child", catResult(handleReplaceSplitChild) },
-        .{ "get_split", catBytesId(handleGetSplit) },
-        .{ "set_root_split", catResult(handleSetRootSplit) },
-        .{ "move_divider", catResult(handleMoveDivider) },
-        .{ "raise_layer", catVoid(handleRaiseLayer) },
-        .{ "lower_layer", catVoid(handleLowerLayer) },
-        .{ "report_key", catResult(handleReportKey) },
-        .{ "report_text", catResult(handleReportText) },
-        .{ "report_mouse_button", catResult(handleReportMouseButton) },
-        .{ "report_mouse_move", catResult(handleReportMouseMove) },
-        .{ "subscribe", catBytesId(handleSubscribe) },
-        .{ "get_input_state", catBytesIdNoParams(handleGetInputState) },
-        .{ "get_image_info", catBytesId(handleGetImageInfo) },
-        .{ "destroy_image", catVoid(handleDestroyImage) },
-        .{ "draw_image", catVoid(handleDrawImage) },
-        .{ "draw_icon", catVoid(handleDrawIcon) },
-        .{ "tag_metadata", catVoid(handleTagMetadata) },
-        .{ "clear", catVoid(handleClear) },
-        .{ "set_bg", catVoid(handleSetBg) },
-        .{ "set_fg", catVoid(handleSetFg) },
-        .{ "set_underline", catVoid(handleSetUnderline) },
-        .{ "get_cell_metrics", catBytesIdNoParams(handleGetCellMetrics) },
-        .{ "create_metadata", catBytesId(handleCreateMetadata) },
-        .{ "destroy_metadata", catVoid(handleDestroyMetadata) },
-        .{ "get_metadata", catBytesId(handleGetMetadata) },
-        .{ "find_metadata", catBytesId(handleFindMetadata) },
-        .{ "create_table", catBytesId(handleCreateTable) },
-        .{ "destroy_table", catVoid(handleDestroyTable) },
-        .{ "table_set_rows", catVoid(handleTableSetRows) },
-        .{ "table_set_sort", catVoid(handleTableSetSort) },
-        .{ "table_set_style", catVoid(handleTableSetStyle) },
-        .{ "table_get_state", catBytesId(handleTableGetState) },
-        .{ "create_outline", catBytesId(handleCreateOutline) },
-        .{ "destroy_outline", catVoid(handleDestroyOutline) },
-        .{ "outline_set_nodes", catVoid(handleOutlineSetNodes) },
-        .{ "outline_set_collapsed", catResult(handleOutlineSetCollapsed) },
-        .{ "outline_set_all_collapsed", catResult(handleOutlineSetAllCollapsed) },
-        .{ "outline_set_style", catVoid(handleOutlineSetStyle) },
-        .{ "outline_get_state", catBytesId(handleOutlineGetState) },
-        .{ "create_rect", catResultId(handleCreateRect) },
-        .{ "update_rect", catVoid(handleUpdateRect) },
-        .{ "destroy_rect", catVoid(handleDestroyRect) },
-        .{ "set_drop_target", catVoid(handleSetDropTarget) },
-        .{ "start_drag", catVoid(handleStartDrag) },
-        .{ "create_nine_patch", catResultId(handleCreateNinePatch) },
-        .{ "update_nine_patch", catVoid(handleUpdateNinePatch) },
-        .{ "destroy_nine_patch", catVoid(handleDestroyNinePatch) },
-        .{ "set_selection", catResult(handleSetSelection) },
-        .{ "update_selection", catResult(handleUpdateSelection) },
-        .{ "clear_selection", catResult(handleClearSelection) },
-        .{ "get_selection", catBytesId(handleGetSelection) },
-        .{ "get_selection_text", catBytesId(handleGetSelectionText) },
-        .{ "toggle_highlight", catBytesId(handleToggleHighlight) },
-        .{ "activate_at", catResultId(handleActivateAt) },
-        .{ "set_highlight", catBytesId(handleSetHighlight) },
-        .{ "clear_highlight", catBytesId(handleClearHighlight) },
-        .{ "get_highlight", catBytesId(handleGetHighlight) },
-        .{ "set_clipboard", catVoid(handleSetClipboard) },
-        .{ "get_clipboard", catBytesIdNoParams(handleGetClipboard) },
-        .{ "get_errors", catBytesIdNoParams(handleGetErrors) },
-        .{ "sync", catBytesIdNoParams(handleSync) },
-        .{ "batch", &catBatch },
+    const catalog = std.StaticStringMap(CatalogEntry).initComptime(.{
+        .{ "write_text", needsContext(catResult(handleWriteText)) },
+        .{ "insert_cells", needsContext(catVoid(handleInsertCells)) },
+        .{ "delete_cells", needsContext(catVoid(handleDeleteCells)) },
+        .{ "move_content", needsContext(catVoid(handleMoveContent)) },
+        .{ "set_property", needsContext(catVoid(handleSetProperty)) },
+        .{ "get_property", needsContext(catBytesId(handleGetProperty)) },
+        .{ "get_cells", needsContext(catBytesId(handleGetCells)) },
+        .{ "scroll_view", needsContext(catResultId(handleScrollView)) },
+        .{ "create_layer", needsContext(catBytesId(handleCreateLayer)) },
+        .{ "destroy_layer", needsContext(catVoid(handleDestroyLayer)) },
+        .{ "adopt_layer", needsContext(catVoid(handleAdoptLayer)) },
+        .{ "create_context", open(catResultId(handleCreateContext)) },
+        .{ "destroy_context", open(catResult(handleDestroyContext)) },
+        .{ "activate_context", open(catResult(handleActivateContext)) },
+        .{ "attach_context", open(catVoid(handleAttachContext)) },
+        .{ "attach_layer", needsContext(catVoid(handleAttachLayer)) },
+        .{ "adopt_context", open(catVoid(handleAdoptContext)) },
+        .{ "set_context_title", needsContext(catVoid(handleSetContextTitle)) },
+        .{ "set_theme", needsContext(catVoid(handleSetTheme)) },
+        .{ "set_divider_style", needsContext(catVoid(handleSetDividerStyle)) },
+        .{ "get_theme", needsContext(catBytesIdNoParams(handleGetTheme)) },
+        .{ "list_contexts", needsContext(catBytesIdNoParams(handleListContexts)) },
+        .{ "get_version", open(catBytesIdNoParams(handleGetVersion)) },
+        .{ "set_window_scrollbar", needsContext(catVoid(handleSetWindowScrollbar)) },
+        .{ "set_caret_layer", needsContext(catVoid(handleSetCaretLayer)) },
+        .{ "set_caret_visible", needsContext(catVoid(handleSetCaretVisible)) },
+        .{ "set_caret_shape", needsContext(catVoid(handleSetCaretShape)) },
+        .{ "set_key_repeat", needsContext(catVoid(handleSetKeyRepeat)) },
+        .{ "request_role", open(catBytesId(handleRequestRole)) },
+        .{ "join_role", open(catVoid(handleJoinRole)) },
+        .{ "attach_pane", needsManager(catVoid(handleAttachPane)) },
+        .{ "create_pane", needsManager(catResultId(handleCreatePane)) },
+        .{ "destroy_pane", needsManager(catResult(handleDestroyPane)) },
+        .{ "focus_pane", needsManager(catResult(handleFocusPane)) },
+        .{ "create_pane_split", needsManager(catBytesId(handleCreatePaneSplit)) },
+        .{ "destroy_pane_split", needsManager(catResult(handleDestroyPaneSplit)) },
+        .{ "set_pane_split_children", needsManager(catResult(handleSetPaneSplitChildren)) },
+        .{ "replace_pane_split_child", needsManager(catResult(handleReplacePaneSplitChild)) },
+        .{ "get_pane_split", needsManager(catBytesId(handleGetPaneSplit)) },
+        .{ "set_root_pane_split", needsManager(catResult(handleSetRootPaneSplit)) },
+        .{ "move_pane_divider", needsManager(catResult(handleMovePaneDivider)) },
+        .{ "spawn_in_pane", needsManager(catBytesId(handleSpawnInPane)) },
+        .{ "start_remote", needsContext(catBytesId(handleStartRemote)) },
+        .{ "stop_remote", needsContext(catVoid(handleStopRemote)) },
+        .{ "set_window_prefix", needsManager(catVoid(handleSetWindowPrefix)) },
+        .{ "send_window_prefix", needsManager(catResult(handleSendWindowPrefix)) },
+        .{ "create_split", needsContext(catBytesId(handleCreateSplit)) },
+        .{ "destroy_split", needsContext(catResult(handleDestroySplit)) },
+        .{ "set_split_children", needsContext(catResult(handleSetSplitChildren)) },
+        .{ "replace_split_child", needsContext(catResult(handleReplaceSplitChild)) },
+        .{ "get_split", needsContext(catBytesId(handleGetSplit)) },
+        .{ "set_root_split", needsContext(catResult(handleSetRootSplit)) },
+        .{ "move_divider", needsContext(catResult(handleMoveDivider)) },
+        .{ "raise_layer", needsContext(catVoid(handleRaiseLayer)) },
+        .{ "lower_layer", needsContext(catVoid(handleLowerLayer)) },
+        .{ "report_key", needsManager(catResult(handleReportKey)) },
+        .{ "report_text", needsManager(catResult(handleReportText)) },
+        .{ "report_mouse_button", needsManager(catResult(handleReportMouseButton)) },
+        .{ "report_mouse_move", needsManager(catResult(handleReportMouseMove)) },
+        .{ "subscribe", open(catBytesId(handleSubscribe)) },
+        .{ "get_input_state", needsContext(catBytesIdNoParams(handleGetInputState)) },
+        .{ "get_image_info", needsContext(catBytesId(handleGetImageInfo)) },
+        .{ "destroy_image", needsContext(catVoid(handleDestroyImage)) },
+        .{ "draw_image", needsContext(catVoid(handleDrawImage)) },
+        .{ "draw_icon", needsContext(catVoid(handleDrawIcon)) },
+        .{ "tag_metadata", needsContext(catVoid(handleTagMetadata)) },
+        .{ "clear", needsContext(catVoid(handleClear)) },
+        .{ "set_bg", needsContext(catVoid(handleSetBg)) },
+        .{ "set_fg", needsContext(catVoid(handleSetFg)) },
+        .{ "set_underline", needsContext(catVoid(handleSetUnderline)) },
+        .{ "get_cell_metrics", needsContext(catBytesIdNoParams(handleGetCellMetrics)) },
+        .{ "create_metadata", needsContext(catBytesId(handleCreateMetadata)) },
+        .{ "destroy_metadata", needsContext(catVoid(handleDestroyMetadata)) },
+        .{ "get_metadata", needsContext(catBytesId(handleGetMetadata)) },
+        .{ "find_metadata", needsContext(catBytesId(handleFindMetadata)) },
+        .{ "create_table", needsContext(catBytesId(handleCreateTable)) },
+        .{ "destroy_table", needsContext(catVoid(handleDestroyTable)) },
+        .{ "table_set_rows", needsContext(catVoid(handleTableSetRows)) },
+        .{ "table_set_sort", needsContext(catVoid(handleTableSetSort)) },
+        .{ "table_set_style", needsContext(catVoid(handleTableSetStyle)) },
+        .{ "table_get_state", needsContext(catBytesId(handleTableGetState)) },
+        .{ "create_outline", needsContext(catBytesId(handleCreateOutline)) },
+        .{ "destroy_outline", needsContext(catVoid(handleDestroyOutline)) },
+        .{ "outline_set_nodes", needsContext(catVoid(handleOutlineSetNodes)) },
+        .{ "outline_set_collapsed", needsContext(catResult(handleOutlineSetCollapsed)) },
+        .{ "outline_set_all_collapsed", needsContext(catResult(handleOutlineSetAllCollapsed)) },
+        .{ "outline_set_style", needsContext(catVoid(handleOutlineSetStyle)) },
+        .{ "outline_get_state", needsContext(catBytesId(handleOutlineGetState)) },
+        .{ "create_rect", needsContext(catResultId(handleCreateRect)) },
+        .{ "update_rect", needsContext(catVoid(handleUpdateRect)) },
+        .{ "destroy_rect", needsContext(catVoid(handleDestroyRect)) },
+        .{ "set_drop_target", needsContext(catVoid(handleSetDropTarget)) },
+        .{ "start_drag", needsContext(catVoid(handleStartDrag)) },
+        .{ "create_nine_patch", needsContext(catResultId(handleCreateNinePatch)) },
+        .{ "update_nine_patch", needsContext(catVoid(handleUpdateNinePatch)) },
+        .{ "destroy_nine_patch", needsContext(catVoid(handleDestroyNinePatch)) },
+        .{ "set_selection", needsContext(catResult(handleSetSelection)) },
+        .{ "update_selection", needsContext(catResult(handleUpdateSelection)) },
+        .{ "clear_selection", needsContext(catResult(handleClearSelection)) },
+        .{ "get_selection", needsContext(catBytesId(handleGetSelection)) },
+        .{ "get_selection_text", needsContext(catBytesId(handleGetSelectionText)) },
+        .{ "toggle_highlight", needsContext(catBytesId(handleToggleHighlight)) },
+        .{ "activate_at", needsContext(catResultId(handleActivateAt)) },
+        .{ "set_highlight", needsContext(catBytesId(handleSetHighlight)) },
+        .{ "clear_highlight", needsContext(catBytesId(handleClearHighlight)) },
+        .{ "get_highlight", needsContext(catBytesId(handleGetHighlight)) },
+        .{ "set_clipboard", needsContext(catVoid(handleSetClipboard)) },
+        .{ "get_clipboard", needsContext(catBytesIdNoParams(handleGetClipboard)) },
+        .{ "get_errors", open(catBytesIdNoParams(handleGetErrors)) },
+        .{ "sync", open(catBytesIdNoParams(handleSync)) },
+        .{ "batch", open(&catBatch) },
     });
 
     /// Looks the method up in `catalog` and runs its handler. Split from
@@ -1136,41 +1177,16 @@ pub const Dispatcher = struct {
     /// precisely the same handler.
     fn dispatchCatalog(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) !HandleResult {
         self.syncActiveContext();
-        const handler = catalog.get(envelope.method) orelse return DispatchError.UnknownMethod;
-        if (!unattached_ok.has(envelope.method) and !self.attached()) return DispatchError.ContextAccessDenied;
-        if (input_reports.has(envelope.method) and self.conn_id != null) _ = try self.requireManager();
-        return handler(self, alloc, envelope);
+        const entry = catalog.get(envelope.method) orelse return DispatchError.UnknownMethod;
+        switch (entry.access) {
+            .context => if (!self.attached()) return DispatchError.ContextAccessDenied,
+            .open => {},
+            .manager => if (self.conn_id != null) {
+                _ = try self.requireManager();
+            },
+        }
+        return entry.run(self, alloc, envelope);
     }
-
-    /// The messages a connection may send without access to its active
-    /// context. Everything else reads, draws on or configures that
-    /// context and is refused with `ContextAccessDenied` until the
-    /// connection attaches with a token or creates a context of its own.
-    /// These either *are* the way in (`create_context`, `attach_*`,
-    /// `subscribe`), check their own target (`destroy_context`,
-    /// `activate_context`, `adopt_context`), touch no context (`sync`,
-    /// `get_version`, `get_errors`, the role messages), or are the window
-    /// manager's, which check the role and report that instead. `batch`
-    /// is let through so each of its sub-messages meets this gate itself.
-    const unattached_ok = std.StaticStringMap(void).initComptime(.{
-        .{"create_context"},           .{"attach_context"},           .{"attach_pane"},
-        .{"subscribe"},                .{"destroy_context"},          .{"activate_context"},
-        .{"adopt_context"},            .{"sync"},                     .{"batch"},
-        .{"get_version"},              .{"get_errors"},               .{"request_role"},
-        .{"join_role"},                .{"create_pane"},              .{"destroy_pane"},
-        .{"focus_pane"},               .{"create_pane_split"},        .{"destroy_pane_split"},
-        .{"set_pane_split_children"},  .{"replace_pane_split_child"}, .{"get_pane_split"},
-        .{"set_root_pane_split"},      .{"move_pane_divider"},        .{"spawn_in_pane"},
-        .{"set_window_prefix"},        .{"send_window_prefix"},
-    });
-
-    /// Synthetic input. Over a socket only the window manager may send
-    /// it: anyone else could type into whichever program has focus. The
-    /// host's own input comes in-process (`Server.reportKey` and friends)
-    /// and never passes through here.
-    const input_reports = std.StaticStringMap(void).initComptime(.{
-        .{"report_key"}, .{"report_text"}, .{"report_mouse_button"}, .{"report_mouse_move"},
-    });
 
     /// A `batch` sub-message method that can't run inside a batch,
     /// regardless of params: another `batch` (nesting is disallowed) or
@@ -1892,44 +1908,17 @@ pub const Dispatcher = struct {
         self.surface = null;
     }
 
-    /// Binds this connection to `pane_handle`. The window manager and an
-    /// in-process caller may name any pane without a token and land on
-    /// whatever is on screen there, as before. Anyone else needs the
-    /// token of one of the pane's contexts and lands on *that* context --
-    /// the one it was given, not whichever program happens to be on top
-    /// of the pane when it connects -- or, without a token, lands on the
-    /// topmost context there it already has access to.
-    fn bindPane(self: *Dispatcher, session: *core.Session, pane_handle: core.PaneHandle, token: ?[]const u8) !void {
+    /// Binds this connection to `pane_handle` and whatever is on screen
+    /// there. The window manager's only (`requireManager`): it arranges
+    /// every pane and may act on any of them. A program is bound to its
+    /// pane by attaching to its context, which lives in exactly one.
+    fn bindPane(self: *Dispatcher, pane_handle: core.PaneHandle) !void {
+        const session = try self.requireManager();
         const pane = session.panePtr(pane_handle) orelse return DispatchError.UnknownPane;
-        const privileged = if (self.conn_id) |cid| session.isManager(cid) else true;
-        if (privileged and token == null) {
-            const top = pane.top();
-            self.ctx = session.contextPtr(top) orelse return DispatchError.UnknownContext;
-            self.active_pane = pane_handle;
-            self.active_ctx = top;
-            return;
-        }
-        const t = token orelse {
-            // No token, but maybe no need of one: rebinding to a pane this
-            // connection already has a context in lands on the topmost of
-            // those.
-            var i = pane.stack.items.len;
-            while (i > 0) {
-                i -= 1;
-                const h = pane.stack.items[i];
-                if (!self.mayAccess(h)) continue;
-                self.ctx = session.contextPtr(h) orelse continue;
-                self.active_pane = pane_handle;
-                self.active_ctx = h;
-                return;
-            }
-            return DispatchError.ContextAccessDenied;
-        };
-        const target = session.paneContextForToken(pane_handle, t) orelse return DispatchError.ContextAccessDenied;
-        if (self.conn_id) |cid| try session.addContextMember(target, cid);
-        self.ctx = session.contextPtr(target).?;
+        const top = pane.top();
+        self.ctx = session.contextPtr(top) orelse return DispatchError.UnknownContext;
         self.active_pane = pane_handle;
-        self.active_ctx = target;
+        self.active_ctx = top;
     }
 
     /// `attach_layer`: declares this connection's surface -- the layer an
@@ -2126,16 +2115,14 @@ pub const Dispatcher = struct {
         }
     }
 
-    /// `attach_pane`: binds this connection to a pane, and to the context
-    /// there its `token` belongs to (see `bindPane`). Needs no role, but
-    /// does need the token: a pane handle is a small counter, and naming
-    /// one is not proof that you were started in it. The window manager
-    /// may attach to any pane without one.
+    /// `attach_pane`: binds this connection to a pane, and to whatever
+    /// context is on screen there (see `bindPane`). The window manager's:
+    /// a pane handle is a small counter, and naming one is no proof of
+    /// having been started in it.
     fn handleAttachPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
-        const session = self.session orelse return DispatchError.NoContextSession;
         const parsed = try codec.parseParams(protocol.AttachPaneParams, alloc, params_value);
         defer parsed.deinit();
-        try self.bindPane(session, parsed.value.pane, parsed.value.token);
+        try self.bindPane(parsed.value.pane);
     }
 
     /// `create_pane`: a pane and the base context it shows. The pane is
@@ -2986,16 +2973,16 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.SubscribeParams, alloc, params_value);
         defer parsed.deinit();
 
-        // Atomically with arming the fan-out -- see `protocol.SubscribeParams.pane`.
+        // Atomically with arming the fan-out -- see `protocol.SubscribeParams`.
         // An unknown pane is ignored rather than failing the subscribe: the
         // pane may have been destroyed between the spawn and the connect,
         // and an unattached connection is sent nothing anyway. A refused
-        // token is not ignored: it is the caller's to hear about.
+        // token or role is not ignored: it is the caller's to hear about.
         if (self.session) |session| {
             if (parsed.value.context) |context| {
                 try self.bindContext(session, context, parsed.value.token);
             } else if (parsed.value.pane) |pane_handle| {
-                self.bindPane(session, pane_handle, parsed.value.token) catch |err| switch (err) {
+                self.bindPane(pane_handle) catch |err| switch (err) {
                     DispatchError.UnknownPane => {},
                     else => |e| return e,
                 };

@@ -73,14 +73,14 @@ pub const Options = struct {
     /// onto the grid like any other client.
     host_sock: []const u8,
     /// The pane the remote clients are seated in and the context they draw
-    /// on. Handed to `gw-agent`, which puts them in the remote shell's
-    /// environment so it binds itself the way a `spawn_in_pane` child does.
+    /// on. The pane and context handle go to `gw-agent`, which puts them in
+    /// the remote shell's environment so it binds itself the way a
+    /// `spawn_in_pane` child does. The token stays here, for the
+    /// auth-prompt client: it is an ordinary socket connection to the host
+    /// and has to be let in like one, where the remote side's connections
+    /// are let in by `Server.servePreconnected`.
     pane: glyphwire.PaneHandle = glyphwire.root_pane_handle,
-    ctx: glyphwire.ContextHandle,
-    /// `ctx`'s token, for the auth-prompt client: it is an ordinary socket
-    /// connection to the host, and has to be let in like one. The remote
-    /// side never sees it (see `Server.servePreconnected`).
-    token: glyphwire.AccessToken,
+    grant: glyphwire.ContextGrant,
 };
 
 /// Everything a `Remote` needs that outlives the request that asked for
@@ -109,8 +109,7 @@ const OwnedOptions = struct {
                 .agent_path = try a.dupe(u8, src.agent_path),
                 .host_sock = try a.dupe(u8, src.host_sock),
                 .pane = src.pane,
-                .ctx = src.ctx,
-                .token = src.token,
+                .grant = src.grant,
             },
         };
     }
@@ -260,7 +259,7 @@ pub const Remote = struct {
         var pane_buf: [32]u8 = undefined;
         var ctx_buf: [32]u8 = undefined;
         try argv.appendSlice(alloc, &.{ "--pane", try std.fmt.bufPrint(&pane_buf, "{d}", .{opts.pane}) });
-        try argv.appendSlice(alloc, &.{ "--ctx", try std.fmt.bufPrint(&ctx_buf, "{d}", .{opts.ctx}) });
+        try argv.appendSlice(alloc, &.{ "--ctx", try std.fmt.bufPrint(&ctx_buf, "{d}", .{opts.grant.context}) });
         try argv.appendSlice(alloc, &.{ "--name", opts.dest });
 
         var ssh_env = try self.environ.clone(alloc);
@@ -496,7 +495,7 @@ pub const Remotes = struct {
         self.mutex.unlock(self.io);
 
         // Called from `start_remote`'s dispatch, under `ctx_mutex`.
-        const token = self.server.session.contextToken(context) orelse return error.UnknownContext;
+        const grant = self.server.session.contextGrant(context) orelse return error.UnknownContext;
         const remote = try Remote.create(self.alloc, self.io, self.server, null, self.environ, .{
             .dest = dest,
             .remote_command = remote_command orelse "gw-agent",
@@ -504,8 +503,7 @@ pub const Remotes = struct {
             .agent_path = self.agent_path,
             .host_sock = self.host_sock,
             .pane = pane,
-            .ctx = context,
-            .token = token,
+            .grant = grant,
         }, self, id);
 
         // Enrolled before it runs, so the session's own thread can never
@@ -608,7 +606,7 @@ fn demuxLoop(self: *Remote) void {
 
 fn serveChannel(self: *Remote, ch: *mux.Channel) void {
     const stream = glyphwire.ConnStream{ .channel = ch };
-    self.server.servePreconnected(self.alloc, stream, self.opts.ctx) catch |err| {
+    self.server.servePreconnected(self.alloc, stream, self.opts.grant.context) catch |err| {
         std.log.err("glyphwire: remote connection error: {t}", .{err});
     };
     _ = self.removeChannel(ch.id);
@@ -685,7 +683,7 @@ fn askpassResponder(self: *Remote, listener_in: std.Io.net.Server) void {
         // A fresh client per prompt: it disconnects right after, so it
         // never sits subscribed to key/text queueing broadcasts for the
         // rest of the session.
-        var ui = AuthClient.connect(self.io, self.alloc, self.opts.host_sock, .{ .context = self.opts.ctx, .token = self.opts.token }) catch |err| {
+        var ui = AuthClient.connect(self.io, self.alloc, self.opts.host_sock, self.opts.grant) catch |err| {
             std.log.warn("glyphwire: askpass UI unavailable ({t}); ssh prompt cannot be answered", .{err});
             _ = conn.shutdown(io, .send) catch {};
             continue;
@@ -721,10 +719,11 @@ const AuthClient = struct {
     /// rather than over whatever is in the focused one -- and what gets
     /// the typed line delivered to it, since raw input reaches only the
     /// connection whose context is on screen in the focused pane.
-    fn connect(io: std.Io, alloc: std.mem.Allocator, sock: []const u8, seat: glyphwire.Seat) !AuthClient {
+    fn connect(io: std.Io, alloc: std.mem.Allocator, sock: []const u8, grant: glyphwire.ContextGrant) !AuthClient {
         var client = try glyphwire.Client.connect(io, alloc, sock);
         errdefer client.deinit();
-        try client.attachContext(seat.context.?, &seat.token.?);
+        try client.attachContext(grant.context, &grant.token);
+        const seat: glyphwire.Seat = .{ .context = grant.context, .token = grant.token };
         const listener = try glyphwire.InputListener.connectAt(io, alloc, sock, &.{ "text", "key" }, seat);
         return .{ .io = io, .alloc = alloc, .client = client, .listener = listener };
     }

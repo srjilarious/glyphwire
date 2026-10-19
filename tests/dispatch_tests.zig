@@ -4,6 +4,7 @@
 const std = @import("std");
 const testz = @import("testz");
 const glyphwire = @import("glyphwire");
+const helpers = @import("session_helpers.zig");
 const wire = glyphwire.wire;
 const dispatch = glyphwire.dispatch;
 
@@ -396,10 +397,7 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
-    // Synthetic input is the window manager's to send.
-    _ = session.claimManager(7, 0);
+    var d = try helpers.managerConnection(&session, 7);
 
     const press_msg =
         \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"a","pressed":true}}
@@ -434,10 +432,7 @@ pub fn reportKeyStampsModifiersHeldAtRoutingTimeTest(io: std.Io, alloc: std.mem.
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
-    // Synthetic input is the window manager's to send.
-    _ = session.claimManager(7, 0);
+    var d = try helpers.managerConnection(&session, 7);
 
     const ctrl_down = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"left_control","pressed":true}}
@@ -787,10 +782,7 @@ pub fn reportTextQueuesTextBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
-    // Synthetic input is the window manager's to send.
-    _ = session.claimManager(7, 0);
+    var d = try helpers.managerConnection(&session, 7);
 
     // A multi-byte codepoint (an AZERTY 'é') round-trips through JSON into
     // the broadcast body verbatim.
@@ -821,10 +813,7 @@ pub fn reportMouseButtonCarriesClicksTest(io: std.Io, alloc: std.mem.Allocator) 
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
-    // Synthetic input is the window manager's to send.
-    _ = session.claimManager(7, 0);
+    var d = try helpers.managerConnection(&session, 7);
 
     const Notif = struct { params: struct { clicks: u8 } };
 
@@ -853,10 +842,7 @@ pub fn subscribeThenGetInputStateReflectsReportedInputTest(io: std.Io, alloc: st
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
-    // Synthetic input is the window manager's to send.
-    _ = session.claimManager(7, 0);
+    var d = try helpers.managerConnection(&session, 7);
 
     const sub_msg =
         \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key","mouse_button"]}}
@@ -3393,8 +3379,7 @@ pub fn createLayerOverConnectionRecordsOwnerTest(io: std.Io, alloc: std.mem.Allo
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var d = try helpers.attachedConnection(&session, 7);
 
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
@@ -3414,16 +3399,14 @@ pub fn destroyLayerFromNonOwnerConnectionIsRejectedTest(io: std.Io, alloc: std.m
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
 
-    var owner = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var owner = try helpers.attachedConnection(&session, 7);
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
     ;
     const created = try owner.handle(alloc, create);
     if (created.response) |r| alloc.free(r);
 
-    var other = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 8);
+    var other = try helpers.attachedConnection(&session, 8);
     const destroy =
         \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
     ;
@@ -3437,8 +3420,7 @@ pub fn destroyLayerFromOwnerConnectionSucceedsTest(io: std.Io, alloc: std.mem.Al
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var d = try helpers.attachedConnection(&session, 7);
 
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
@@ -3460,16 +3442,14 @@ pub fn adoptLayerLetsSecondConnectionDestroyItTest(io: std.Io, alloc: std.mem.Al
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
 
-    var creator = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var creator = try helpers.attachedConnection(&session, 7);
     const create =
         \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"scrollback_rows":0}}
     ;
     const created = try creator.handle(alloc, create);
     if (created.response) |r| alloc.free(r);
 
-    var adopter = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 8);
+    var adopter = try helpers.attachedConnection(&session, 8);
     const adopt =
         \\{"jsonrpc":"2.0","method":"adopt_layer","params":{"layer":1}}
     ;
@@ -3490,8 +3470,7 @@ pub fn adoptLayerUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !
     defer ctx.deinit();
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 8);
+    var d = try helpers.attachedConnection(&session, 8);
 
     const adopt =
         \\{"jsonrpc":"2.0","method":"adopt_layer","params":{"layer":999}}
@@ -3516,8 +3495,7 @@ pub fn inProcessDispatcherBypassesLayerOwnershipTest(io: std.Io, alloc: std.mem.
 
     // The in-process layer has no owners, so a real connection can't
     // destroy it...
-    var conn = dispatch.Dispatcher.initForConnection(&session, 9, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 9);
+    var conn = try helpers.attachedConnection(&session, 9);
     const destroy =
         \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
     ;
@@ -3671,8 +3649,7 @@ pub fn createContextRetargetsTheConnectionAndBroadcastsTest(io: std.Io, alloc: s
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var d = try helpers.attachedConnection(&session, 7);
 
     const result = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
@@ -3702,10 +3679,7 @@ pub fn keyReleasedAfterAContextSwitchDoesNotSwallowTheNextPressTest(io: std.Io, 
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
-    // Synthetic input is the window manager's to send.
-    _ = session.claimManager(7, 0);
+    var d = try helpers.managerConnection(&session, 7);
 
     const press =
         \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"enter","pressed":true}}
@@ -3747,8 +3721,7 @@ pub fn createContextAndSetWindowScrollbarToggleTheFlagTest(io: std.Io, alloc: st
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var d = try helpers.attachedConnection(&session, 7);
 
     // A pure-TUI client creates its context with the window bar off.
     const created = try d.handle(alloc,
@@ -3773,8 +3746,7 @@ pub fn writeTextAfterCreateContextLandsOnTheNewContextNotRootTest(io: std.Io, al
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var d = try helpers.attachedConnection(&session, 7);
 
     const created = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
@@ -3798,16 +3770,14 @@ pub fn destroyContextFromNonOwnerIsRejectedTest(io: std.Io, alloc: std.mem.Alloc
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    var owner = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var owner = try helpers.attachedConnection(&session, 7);
     const created = try owner.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
     );
     if (created.response) |r| alloc.free(r);
     if (created.broadcast) |b| alloc.free(b.body);
 
-    var other = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 8);
+    var other = try helpers.attachedConnection(&session, 8);
     try testz.expectError(other.handle(alloc,
         \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
     ), dispatch.DispatchError.ContextPermissionDenied);
@@ -3820,8 +3790,7 @@ pub fn destroyContextFromOwnerRestoresThePreviousVisibleTest(io: std.Io, alloc: 
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var d = try helpers.attachedConnection(&session, 7);
 
     const created = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
@@ -3850,8 +3819,7 @@ pub fn activateContextChangesVisibilityNotWhichContextTheConnectionDrawsOnTest(i
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var d = try helpers.attachedConnection(&session, 7);
 
     const created = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
@@ -3888,8 +3856,7 @@ pub fn attachContextRetargetsWithoutOwningTest(io: std.Io, alloc: std.mem.Alloca
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    var creator = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var creator = try helpers.attachedConnection(&session, 7);
     const created = try creator.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
     );
@@ -3898,8 +3865,7 @@ pub fn attachContextRetargetsWithoutOwningTest(io: std.Io, alloc: std.mem.Alloca
 
     // A second connection (a paired listener) attaches -- retargeted, but
     // not an owner, so it can't destroy it.
-    var listener = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 8);
+    var listener = try helpers.attachedConnection(&session, 8);
     _ = try listener.handle(alloc,
         \\{"jsonrpc":"2.0","method":"attach_context","params":{"context":1}}
     );
@@ -4001,16 +3967,14 @@ pub fn adoptContextLetsASecondConnectionDestroyItTest(io: std.Io, alloc: std.mem
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    var creator = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var creator = try helpers.attachedConnection(&session, 7);
     const created = try creator.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"scrollback_rows":0}}
     );
     if (created.response) |r| alloc.free(r);
     if (created.broadcast) |b| alloc.free(b.body);
 
-    var adopter = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 8);
+    var adopter = try helpers.attachedConnection(&session, 8);
     _ = try adopter.handle(alloc,
         \\{"jsonrpc":"2.0","method":"adopt_context","params":{"context":1}}
     );
@@ -4048,15 +4012,13 @@ pub fn createContextTitleIsListedTopFirstWithTheCallersOwnContextTest(io: std.Io
     defer session.deinit();
 
     // The shell: inherits the root context and names it.
-    var shell = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var shell = try helpers.attachedConnection(&session, 7);
     _ = try shell.handle(alloc,
         \\{"jsonrpc":"2.0","method":"set_context_title","params":{"title":"gw-shell"}}
     );
 
     // An editor started from it: its own context, named at creation.
-    var editor = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 8);
+    var editor = try helpers.attachedConnection(&session, 8);
     const created = try editor.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{"title":"zoe main.zig"}}
     );
@@ -4084,10 +4046,8 @@ pub fn activateContextReordersListContextsTest(io: std.Io, alloc: std.mem.Alloca
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    var a = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
-    var b = dispatch.Dispatcher.initForConnection(&session, 8, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 8);
+    var a = try helpers.attachedConnection(&session, 7);
+    var b = try helpers.attachedConnection(&session, 8);
     inline for (.{ &a, &b }) |d| {
         const created = try d.handle(alloc,
             \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{}}
@@ -4140,8 +4100,7 @@ pub fn paneTreeOpsRequireTheWindowManagerRoleTest(io: std.Io, alloc: std.mem.All
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var d = try helpers.attachedConnection(&session, 7);
 
     // A program that merely runs inside a pane must not be able to reshape
     // the window around itself.
@@ -4177,8 +4136,7 @@ pub fn batchedPaneEditReportsPanesChangedTest(io: std.Io, alloc: std.mem.Allocat
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var d = try helpers.attachedConnection(&session, 7);
 
     const role = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"request_role","params":{"role":"window_manager"}}
@@ -4213,10 +4171,8 @@ pub fn requestRoleIsRefusedWhenAnotherConnectionHoldsItTest(io: std.Io, alloc: s
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    var first = dispatch.Dispatcher.initForConnection(&session, 1, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 1);
-    var second = dispatch.Dispatcher.initForConnection(&session, 2, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 2);
+    var first = try helpers.attachedConnection(&session, 1);
+    var second = try helpers.attachedConnection(&session, 2);
 
     const a = try first.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"request_role","params":{"role":"window_manager"}}
@@ -4232,7 +4188,7 @@ pub fn requestRoleIsRefusedWhenAnotherConnectionHoldsItTest(io: std.Io, alloc: s
     try testz.expectTrue(std.mem.indexOf(u8, b.response.?, "\"granted\":false") != null);
 }
 
-pub fn subscribeWithAPaneBindsTheConnectionAtomicallyTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn subscribeWithAContextBindsTheConnectionAtomicallyTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var root = try glyphwire.Context.init(alloc, 40, 10, 0);
     defer root.deinit();
@@ -4241,16 +4197,16 @@ pub fn subscribeWithAPaneBindsTheConnectionAtomicallyTest(io: std.Io, alloc: std
 
     const made = try session.createPane(1, 0);
 
-    // What a program spawned into a pane sends: the pane rides inside
-    // `subscribe`, so there is no window in which it is subscribed but
-    // still bound to the wrong pane.
+    // What a program spawned into a pane's listener sends: its context and
+    // token ride inside `subscribe`, so there is no window in which it is
+    // subscribed but still bound somewhere else.
     var d = dispatch.Dispatcher.initForConnection(&session, 9, null, null);
     try testz.expectEqual(d.active_pane, glyphwire.root_pane_handle);
 
     const token = session.contextToken(made.context).?;
     const msg = try std.fmt.allocPrint(alloc,
-        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["key"],"pane":1,"token":"{s}"}}}}
-    , .{&token});
+        \\{{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{{"events":["key"],"context":{d},"token":"{s}"}}}}
+    , .{ made.context, &token });
     defer alloc.free(msg);
     const resp = try d.handle(alloc, msg);
     defer if (resp.response) |r| alloc.free(r);
@@ -4258,6 +4214,7 @@ pub fn subscribeWithAPaneBindsTheConnectionAtomicallyTest(io: std.Io, alloc: std
     try testz.expectEqual(d.active_pane, made.pane);
     try testz.expectEqual(d.active_ctx, made.context);
     try testz.expectEqual(d.ctx, session.contextPtr(made.context).?);
+    try testz.expectTrue(d.subscriptions.has("key"));
 }
 
 pub fn subscribeWithAnUnknownPaneStillSubscribesTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -4266,11 +4223,11 @@ pub fn subscribeWithAnUnknownPaneStillSubscribesTest(io: std.Io, alloc: std.mem.
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 9, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 9);
+    // Binding by pane is the window manager's.
+    var d = try helpers.managerConnection(&session, 9);
 
     // The pane was destroyed between the spawn and the connect. Leaving the
-    // connection in the focused pane beats refusing to subscribe at all.
+    // connection where it is beats refusing to subscribe at all.
     const resp = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key"],"pane":99}}
     );
@@ -4279,34 +4236,28 @@ pub fn subscribeWithAnUnknownPaneStillSubscribesTest(io: std.Io, alloc: std.mem.
     try testz.expectEqual(d.active_pane, glyphwire.root_pane_handle);
 }
 
-pub fn attachPaneRetargetsAConnectionOntoItsPaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+pub fn attachPaneIsTheWindowManagersTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var root = try glyphwire.Context.init(alloc, 40, 10, 0);
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-
     const made = try session.createPane(1, 0);
-    var d = dispatch.Dispatcher.initForConnection(&session, 9, null, null);
 
-    // No token: naming a pane is not proof of having been started in it.
-    try testz.expectError(d.handle(alloc,
+    // Naming a pane is no proof of having been started in it.
+    var program = try helpers.attachedConnection(&session, 9);
+    try testz.expectError(program.handle(alloc,
         \\{"jsonrpc":"2.0","method":"attach_pane","params":{"pane":1}}
-    ), dispatch.DispatchError.ContextAccessDenied);
-    try testz.expectEqual(d.active_pane, glyphwire.root_pane_handle);
+    ), dispatch.DispatchError.NotWindowManager);
+    try testz.expectEqual(program.active_pane, glyphwire.root_pane_handle);
 
-    const token = session.contextToken(made.context).?;
-    const msg = try std.fmt.allocPrint(alloc,
-        \\{{"jsonrpc":"2.0","method":"attach_pane","params":{{"pane":{d},"token":"{s}"}}}}
-    , .{ made.pane, &token });
-    defer alloc.free(msg);
-    _ = try d.handle(alloc, msg);
-    try testz.expectEqual(d.active_pane, made.pane);
-    try testz.expectEqual(d.active_ctx, made.context);
-    try testz.expectTrue(d.attached());
-
-    // Needs no role: the token is what let it in.
-    try testz.expectTrue(!session.isManager(9));
+    // The manager may, and lands on what is on screen there.
+    var manager = try helpers.managerConnection(&session, 4);
+    _ = try manager.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_pane","params":{"pane":1}}
+    );
+    try testz.expectEqual(manager.active_pane, made.pane);
+    try testz.expectEqual(manager.active_ctx, made.context);
 }
 
 pub fn createContextLandsInTheConnectionsOwnPaneTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -4318,10 +4269,7 @@ pub fn createContextLandsInTheConnectionsOwnPaneTest(io: std.Io, alloc: std.mem.
 
     const made = try session.createPane(1, 0);
     var d = dispatch.Dispatcher.initForConnection(&session, 9, null, null);
-    const token = session.contextToken(made.context).?;
-    const attach = try std.fmt.allocPrint(alloc,
-        \\{{"jsonrpc":"2.0","method":"attach_pane","params":{{"pane":1,"token":"{s}"}}}}
-    , .{&token});
+    const attach = try attachContextMsg(alloc, made.context, &session.contextToken(made.context).?);
     defer alloc.free(attach);
     _ = try d.handle(alloc, attach);
 
@@ -4347,8 +4295,7 @@ pub fn setWindowPrefixRequiresTheRoleAndRegistersTheChordTest(io: std.Io, alloc:
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 4);
+    var d = try helpers.attachedConnection(&session, 4);
 
     try testz.expectError(d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"set_window_prefix","params":{"key":"b"}}
@@ -4385,8 +4332,7 @@ pub fn sendWindowPrefixDeliversTheChordAsAKeystrokeTest(io: std.Io, alloc: std.m
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 4);
+    var d = try helpers.attachedConnection(&session, 4);
     const send =
         \\{"jsonrpc":"2.0","method":"send_window_prefix"}
     ;
@@ -4434,8 +4380,7 @@ pub fn spawnInPaneWithoutASpawnerIsUnsupportedTest(io: std.Io, alloc: std.mem.Al
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 4);
+    var d = try helpers.attachedConnection(&session, 4);
     try testz.expectTrue(session.claimManager(4, 0) != null);
     _ = try session.createPane(4, 0);
 
@@ -4493,8 +4438,8 @@ pub fn spawnInPanePassesTheStartDirectoryTest(io: std.Io, alloc: std.mem.Allocat
 
     var fake: FakeSpawner = .{};
     const sp = fake.spawner();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, &sp, null);
-    try session.addContextMember(session.focusedContextHandle(), 4);
+    var d = try helpers.attachedConnection(&session, 4);
+    d.spawner = &sp;
     try testz.expectTrue(session.claimManager(4, 0) != null);
     _ = try session.createPane(4, 0);
     _ = try session.createPane(4, 0);
@@ -4592,14 +4537,9 @@ pub fn startRemoteUsesTheCallersOwnPaneTest(io: std.Io, alloc: std.mem.Allocator
     try testz.expectTrue(session.claimManager(4, 0) != null);
     const made = try session.createPane(4, 0);
     const pane = made.pane;
-    const token = session.contextToken(made.context).?;
 
     var shell = dispatch.Dispatcher.initForConnection(&session, 5, null, &starter);
-    const attach = try std.fmt.allocPrint(
-        alloc,
-        "{{\"jsonrpc\":\"2.0\",\"method\":\"attach_pane\",\"params\":{{\"pane\":{d},\"token\":\"{s}\"}}}}",
-        .{ pane, &token },
-    );
+    const attach = try attachContextMsg(alloc, made.context, &session.contextToken(made.context).?);
     defer alloc.free(attach);
     _ = try shell.handle(alloc, attach);
 
@@ -4625,8 +4565,8 @@ pub fn startRemoteCarriesSshArgsAndRemoteCommandTest(io: std.Io, alloc: std.mem.
 
     var fake: FakeRemotes = .{};
     const starter = fake.starter();
-    var d = dispatch.Dispatcher.initForConnection(&session, 5, null, &starter);
-    try session.addContextMember(session.focusedContextHandle(), 5);
+    var d = try helpers.attachedConnection(&session, 5);
+    d.remote_starter = &starter;
 
     const res = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"start_remote","params":{"dest":"box","ssh_args":["-p","2222"],"remote_command":"/opt/gw-agent"}}
@@ -4646,8 +4586,8 @@ pub fn startRemoteWithAnEmptyDestFailsTest(io: std.Io, alloc: std.mem.Allocator)
 
     var fake: FakeRemotes = .{};
     const starter = fake.starter();
-    var d = dispatch.Dispatcher.initForConnection(&session, 5, null, &starter);
-    try session.addContextMember(session.focusedContextHandle(), 5);
+    var d = try helpers.attachedConnection(&session, 5);
+    d.remote_starter = &starter;
 
     try testz.expectError(d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"start_remote","params":{"dest":""}}
@@ -4663,8 +4603,7 @@ pub fn startRemoteWithoutAStarterIsUnsupportedTest(io: std.Io, alloc: std.mem.Al
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 5, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 5);
+    var d = try helpers.attachedConnection(&session, 5);
 
     try testz.expectError(d.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"start_remote","params":{"dest":"box"}}
@@ -4683,8 +4622,8 @@ pub fn stopRemoteNamesTheSessionTest(io: std.Io, alloc: std.mem.Allocator) !void
 
     var fake: FakeRemotes = .{};
     const starter = fake.starter();
-    var d = dispatch.Dispatcher.initForConnection(&session, 5, null, &starter);
-    try session.addContextMember(session.focusedContextHandle(), 5);
+    var d = try helpers.attachedConnection(&session, 5);
+    d.remote_starter = &starter;
 
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"stop_remote","params":{"session":7}}
@@ -4704,8 +4643,8 @@ pub fn destroyPaneEndsItsRemoteSessionTest(io: std.Io, alloc: std.mem.Allocator)
 
     var fake: FakeRemotes = .{};
     const starter = fake.starter();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, &starter);
-    try session.addContextMember(session.focusedContextHandle(), 4);
+    var d = try helpers.attachedConnection(&session, 4);
+    d.remote_starter = &starter;
     try testz.expectTrue(session.claimManager(4, 0) != null);
     const pane = (try session.createPane(4, 0)).pane;
 
@@ -4725,8 +4664,7 @@ pub fn paneSplitChildNamingBothTargetsIsRejectedTest(io: std.Io, alloc: std.mem.
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 4);
+    var d = try helpers.attachedConnection(&session, 4);
     try testz.expectTrue(session.claimManager(4, 0) != null);
 
     const created = try d.handle(alloc,
@@ -4752,8 +4690,7 @@ pub fn replaceAndGetPaneSplitTest(io: std.Io, alloc: std.mem.Allocator) !void {
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 4);
+    var d = try helpers.attachedConnection(&session, 4);
     try testz.expectTrue(session.claimManager(4, 0) != null);
     const a = (try session.createPane(4, 0)).pane;
     const b = (try session.createPane(4, 0)).pane;
@@ -4808,8 +4745,7 @@ pub fn createPaneSplitRejectsABadAxisTest(io: std.Io, alloc: std.mem.Allocator) 
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 4, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 4);
+    var d = try helpers.attachedConnection(&session, 4);
     try testz.expectTrue(session.claimManager(4, 0) != null);
 
     try testz.expectError(d.handle(alloc,
@@ -5390,8 +5326,7 @@ pub fn getVersionReportsTheSessionsHostTest(io: std.Io, alloc: std.mem.Allocator
     defer session.deinit();
     session.host_info = .{ .program = "glyphwire", .version = "1.2.3", .suite_version = "0.9.0", .git = "abc1234-dirty" };
 
-    var d = dispatch.Dispatcher.initForConnection(&session, 1, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 1);
+    var d = try helpers.attachedConnection(&session, 1);
     var got = try getVersion(&d, alloc);
     defer got.deinit();
     const v = got.value.result;
@@ -5431,8 +5366,7 @@ pub fn listContextsFlagsEveryShellsContextTest(io: std.Io, alloc: std.mem.Alloca
     defer session.deinit();
 
     // A program's own screen, from a shell on the base context.
-    var program = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var program = try helpers.attachedConnection(&session, 7);
     const created = try program.handle(alloc,
         \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{}}
     );
@@ -5581,8 +5515,7 @@ pub fn synthesizedInputNeedsTheWindowManagerRoleTest(io: std.Io, alloc: std.mem.
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
-    try session.addContextMember(session.focusedContextHandle(), 7);
+    var d = try helpers.attachedConnection(&session, 7);
 
     // Attached is not enough: typing into whatever has focus is the
     // window manager's business.

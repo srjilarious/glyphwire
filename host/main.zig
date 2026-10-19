@@ -457,8 +457,7 @@ pub fn main(init: std.process.Init) !void {
             .agent_path = agent_path,
             .host_sock = socket_path,
             .pane = glyphwire.root_pane_handle,
-            .ctx = glyphwire.root_context_handle,
-            .token = ctx.token,
+            .grant = .{ .context = glyphwire.root_context_handle, .token = ctx.token },
         }, null, 0);
         try remote.launch();
     } else {
