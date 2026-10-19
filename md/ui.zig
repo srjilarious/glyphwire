@@ -177,9 +177,10 @@ pub const Ui = struct {
 
         // A dedicated context, shown immediately; no window scrollbar,
         // since the page layer draws its own.
-        const context = try client.createContext(null, null, 0, false);
+        const grant = try client.createContext(null, null, 0, false);
+        const context = grant.context;
         errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context);
+        try listener.attachContext(context, &grant.token);
         try client.setContextTitle("gwmd");
         // A reader: nothing takes typed text, so no caret.
         try client.setCaretVisible(false);

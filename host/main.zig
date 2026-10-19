@@ -81,9 +81,9 @@ fn wakeRenderLoop(ctx: ?*anyopaque) void {
 }
 
 fn socketPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
-    const dir = environ_map.get("XDG_RUNTIME_DIR") orelse "/tmp";
-    const pid = std.os.linux.getpid();
-    return std.fmt.allocPrint(alloc, "{s}/glyphwire-{d}.sock", .{ dir, pid });
+    var name_buf: [48]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "glyphwire-{d}.sock", .{std.os.linux.getpid()});
+    return glyphwire.runtime_dir.socketPath(alloc, environ_map, name);
 }
 
 extern "c" fn close(fd: c_int) c_int;
@@ -458,6 +458,7 @@ pub fn main(init: std.process.Init) !void {
             .host_sock = socket_path,
             .pane = glyphwire.root_pane_handle,
             .ctx = glyphwire.root_context_handle,
+            .token = ctx.token,
         }, null, 0);
         try remote.launch();
     } else {
@@ -465,6 +466,9 @@ pub fn main(init: std.process.Init) !void {
         for (glyphwire.pty.session_vars) |name| _ = shell_env.swapRemove(name);
         try shell_env.put("GLYPHWIRE_SOCK", socket_path);
         try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+        // What lets the shell, and everything it starts, act on the root
+        // context (see `core.AccessToken`).
+        try shell_env.put("GLYPHWIRE_TOKEN", &ctx.token);
 
         const shell_path = try resolveSibling(arena, io, init.environ_map, "gw-shell");
         const shell_argv = try std.mem.concat(arena, []const u8, &.{ &.{shell_path}, shell_child_argv });

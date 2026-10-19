@@ -523,9 +523,10 @@ pub const Ui = struct {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
 
-        const context = try client.createContext(null, null, 0, false);
+        const grant = try client.createContext(null, null, 0, false);
+        const context = grant.context;
         errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context);
+        try listener.attachContext(context, &grant.token);
         try client.setContextTitle("salacommander");
         // Nothing here takes text at a host caret; the dialog's field
         // draws its own.
@@ -630,7 +631,7 @@ pub const Ui = struct {
             .finder = finder,
             .palette = palette,
             .history_popup = history_popup,
-            .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layers),
+            .shell = shellpanel.Panel.init(alloc, io, client, grant, shell_layers, opts.environ),
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .cfg = cfg,

@@ -182,6 +182,48 @@ pub fn response(format: Format, alloc: std.mem.Allocator, id: std.json.Value, re
     };
 }
 
+/// A failed request's response: `{id, error: {code, message}}`, the
+/// JSON-RPC 2.0 error object on either encoding (MessagePack drops the
+/// `jsonrpc` member, as every other body does). `id` may be JSON null, for
+/// a request whose own `id` couldn't be read.
+pub fn errorResponse(format: Format, alloc: std.mem.Allocator, id: std.json.Value, code: i64, message: []const u8) ![]u8 {
+    const ErrorObject = struct { code: i64, message: []const u8 };
+    const err_obj: ErrorObject = .{ .code = code, .message = message };
+    return switch (format) {
+        .json => encodeAlloc(.json, alloc, struct {
+            jsonrpc: []const u8 = "2.0",
+            id: std.json.Value,
+            @"error": ErrorObject,
+        }{ .id = id, .@"error" = err_obj }, .{}),
+        .msgpack => encodeAlloc(.msgpack, alloc, struct {
+            id: std.json.Value,
+            @"error": ErrorObject,
+        }{ .id = id, .@"error" = err_obj }, .{}),
+    };
+}
+
+/// The `error` member of a response, if it has one -- what a client
+/// checks before parsing `result`. Unknown members (including `result`)
+/// are skipped, so this reads any response body.
+pub const ErrorProbe = struct {
+    @"error": ?struct {
+        code: i64 = 0,
+        message: []const u8 = "",
+    } = null,
+};
+
+/// `body`'s `error` member, or null for a successful response. Strings
+/// are copied, so the result outlives `body`.
+pub fn parseErrorProbe(format: Format, alloc: std.mem.Allocator, body: []const u8) !std.json.Parsed(ErrorProbe) {
+    return switch (format) {
+        .json => try std.json.parseFromSlice(ErrorProbe, alloc, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }),
+        .msgpack => try msgpack.decode(ErrorProbe, alloc, body, .{ .copy_strings = true }),
+    };
+}
+
 /// A `batch` response, `{id, result: {responses: [...]}}`, built by
 /// splicing each sub-response's already-encoded body in as-is -- no
 /// sub-response is decoded and re-encoded to be wrapped.

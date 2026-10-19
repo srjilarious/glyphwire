@@ -373,6 +373,7 @@ pub fn outlineOverTheWirePaintsAndTogglesTest(io: std.Io, alloc: std.mem.Allocat
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -418,6 +419,7 @@ pub fn outlineSetAllCollapsedOverTheWireTest(io: std.Io, alloc: std.mem.Allocato
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -458,6 +460,7 @@ pub fn outlineRunColoursSurviveTheWireTest(io: std.Io, alloc: std.mem.Allocator)
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -492,6 +495,7 @@ pub fn outlineUnknownHandleAndBadNodeAreReportedTest(io: std.Io, alloc: std.mem.
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -725,6 +729,7 @@ pub fn outlineSetCollapsedOverTheWireFollowsTheNodeTest(io: std.Io, alloc: std.m
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();

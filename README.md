@@ -1,9 +1,9 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # glyphwire
 
-![Version Badge](https://img.shields.io/badge/Version-0.26.0-brightgreen)
+![Version Badge](https://img.shields.io/badge/Version-0.27.0-brightgreen)
 ![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0-%23f7a41d?logo=zig)
-![Protocol Badge](https://img.shields.io/badge/Protocol-0.10.0-blueviolet)
+![Protocol Badge](https://img.shields.io/badge/Protocol-0.11.0-blueviolet)
 [![License](https://img.shields.io/badge/License-MPL--2.0%20%7C%20GPL--3.0%20%7C%20CC--BY--4.0-blue)](#license)
 
 A 2D-grid terminal replacement. Programs talk to the display over a local

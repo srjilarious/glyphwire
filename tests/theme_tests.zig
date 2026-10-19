@@ -350,6 +350,7 @@ pub fn wireRoleColoursResolvePerContextThemeTest(_: std.Io, alloc: std.mem.Alloc
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
     var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
+    try session.addContextMember(session.focusedContextHandle(), 7);
 
     _ = try d.handle(alloc,
         \\{"method":"write_text","params":{"text":"k","fg":{"role":"keyword"},"bg":{"slot":9,"a":128}}}
@@ -409,6 +410,7 @@ pub fn wireThemeRoundTripsThroughGetThemeTest(_: std.Io, alloc: std.mem.Allocato
     var session = try glyphwire.Session.init(alloc, &ctx);
     defer session.deinit();
     var d = dispatch.Dispatcher.initForConnection(&session, 7, null, null);
+    try session.addContextMember(session.focusedContextHandle(), 7);
 
     // A partial theme lays over `default`.
     _ = try d.handle(alloc,

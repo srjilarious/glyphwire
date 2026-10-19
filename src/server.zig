@@ -7,6 +7,7 @@ const wire = @import("wire.zig");
 const dispatch = @import("dispatch.zig");
 const rpc = @import("rpc.zig");
 const codec = @import("codec.zig");
+const runtime_dir = @import("runtime_dir.zig");
 const protocol = @import("protocol.zig");
 const conn_stream = @import("conn_stream.zig");
 
@@ -47,6 +48,13 @@ pub const Connection = struct {
     /// `reportResize` uses to send each connection *its own pane's* size
     /// rather than the window's.
     active_pane: core.PaneHandle = core.root_pane_handle,
+    /// Mirrors `Dispatcher.attached` after each `handle`: whether this
+    /// connection may act on `active_ctx`. A connection that may not is
+    /// pushed nothing at all -- no input, no layout, no selection -- so
+    /// a process that merely reached the socket learns nothing about what
+    /// is on screen until it presents a token. Starts false: a fresh
+    /// connection is attached to nothing.
+    attached: bool = false,
     /// The last `focus` value sent to this connection (see
     /// `syncConnectionFocus`). Starts true: a client assumes it has focus
     /// until told otherwise, so a fresh one that does is sent nothing.
@@ -195,6 +203,7 @@ pub const Server = struct {
     pub fn bind(io: std.Io, ctx: *core.Context, socket_path: []const u8) !Server {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
         const listener = try addr.listen(io, .{});
+        runtime_dir.restrictSocket(socket_path);
         const session = try core.Session.init(ctx.alloc, ctx);
         return .{ .io = io, .session = session, .ctx = ctx, .listener = listener };
     }
@@ -237,7 +246,7 @@ pub const Server = struct {
     }
 
     fn serveConnectionThread(self: *Server, alloc: std.mem.Allocator, stream: ConnStream) void {
-        self.serveConnection(alloc, stream) catch |err| {
+        self.serveConnection(alloc, stream, null) catch |err| {
             std.log.err("glyphwire connection error: {t}", .{err});
         };
     }
@@ -247,8 +256,13 @@ pub const Server = struct {
     /// per `gw-agent` trunk channel (`stream` = `.channel`), so a remote
     /// `gw-shell` / `gw-ls` / `zoe` drives this `Server`'s context exactly
     /// as a local socket client would.
-    pub fn servePreconnected(self: *Server, alloc: std.mem.Allocator, stream: ConnStream) !void {
-        try self.serveConnection(alloc, stream);
+    ///
+    /// The peer starts with access to `grant` -- the context the remote
+    /// session was seated on. The user let the session in by logging in
+    /// over `ssh`; making every remote program also carry the context's
+    /// token would only put that secret on a machine that doesn't need it.
+    pub fn servePreconnected(self: *Server, alloc: std.mem.Allocator, stream: ConnStream, grant: core.ContextHandle) !void {
+        try self.serveConnection(alloc, stream, grant);
     }
 
     /// Accepts and serves exactly one connection to completion, on the
@@ -259,10 +273,10 @@ pub const Server = struct {
     /// driving two `acceptOne` calls on two threads.
     pub fn acceptOne(self: *Server, alloc: std.mem.Allocator) !void {
         const stream = try self.listener.accept(self.io);
-        try self.serveConnection(alloc, ConnStream{ .net = stream });
+        try self.serveConnection(alloc, ConnStream{ .net = stream }, null);
     }
 
-    fn serveConnection(self: *Server, alloc: std.mem.Allocator, stream_in: ConnStream) !void {
+    fn serveConnection(self: *Server, alloc: std.mem.Allocator, stream_in: ConnStream, grant: ?core.ContextHandle) !void {
         var stream = stream_in;
         defer stream.close(self.io);
 
@@ -281,7 +295,17 @@ pub const Server = struct {
             defer self.ctx_mutex.unlock(self.io);
             const sp: ?*const dispatch.PaneSpawner = if (self.pane_spawner) |*s| s else null;
             const rs: ?*const dispatch.RemoteStarter = if (self.remote_starter) |*s| s else null;
-            break :blk dispatch.Dispatcher.initForConnection(&self.session, conn.id, sp, rs);
+            var d = dispatch.Dispatcher.initForConnection(&self.session, conn.id, sp, rs);
+            if (grant) |g| {
+                try self.session.addContextMember(g, conn.id);
+                d.ctx = self.session.contextPtr(g).?;
+                d.active_ctx = g;
+                d.active_pane = d.ctx.pane;
+            }
+            conn.active_ctx = d.active_ctx;
+            conn.active_pane = d.active_pane;
+            conn.attached = d.attached();
+            break :blk d;
         };
         var decoder: wire.FrameDecoder = .{ .detect = true };
         defer decoder.deinit(alloc);
@@ -327,7 +351,10 @@ pub const Server = struct {
                     const resp = blk: {
                         self.ctx_mutex.lockUncancelable(self.io);
                         defer self.ctx_mutex.unlock(self.io);
-                        break :blk try d.handleLoadImage(alloc, hdr, raw);
+                        break :blk d.handleLoadImage(alloc, hdr, raw) catch |err| {
+                            std.log.warn("glyphwire: request '{s}' failed: {t}", .{ envelope.method, err });
+                            break :blk try codec.errorResponse(d.format, alloc, envelope.id orelse .null, dispatch.errorCode(err), @errorName(err));
+                        };
                     };
                     defer alloc.free(resp);
                     try conn.sendNative(self.io, resp);
@@ -350,18 +377,23 @@ pub const Server = struct {
 
                 // A notification's dispatch error (e.g. draw_icon naming
                 // an unregistered icon) has no response channel to report
-                // on anyway -- log and move on rather than severing the
-                // whole connection over it. A request's error still
-                // propagates: see dispatch.zig's `isNotification` doc
-                // comment for why.
+                // on -- log and move on rather than severing the whole
+                // connection over it. A request's is answered with a
+                // JSON-RPC error response, and the connection carries on
+                // just the same.
                 const result = handle_result catch |err| result: {
-                    if (envelope.id == null) {
+                    if (envelope.id) |id| {
+                        std.log.warn("glyphwire: request '{s}' failed: {t}", .{ envelope.method, err });
+                        const err_body = try codec.errorResponse(d.format, alloc, id, dispatch.errorCode(err), @errorName(err));
+                        defer alloc.free(err_body);
+                        try conn.sendNative(self.io, err_body);
+                    } else {
                         std.log.warn("glyphwire: notification '{s}' failed: {t}", .{ envelope.method, err });
-                        break :result dispatch.HandleResult{};
                     }
-                    return err;
+                    break :result dispatch.HandleResult{};
                 };
                 conn.subscriptions = d.subscriptions;
+                conn.attached = d.attached();
                 conn.active_ctx = d.active_ctx;
                 conn.active_pane = d.active_pane;
 
@@ -565,6 +597,7 @@ pub const Server = struct {
 
         for (self.connections.items) |other| {
             if (sender != null and other == sender.?) continue;
+            if (!other.attached) continue;
             if (!other.subscriptions.has(event)) continue;
             if (gated and other.active_ctx != focused) continue;
             if (scope) |s| if (other.active_ctx != s) continue;
@@ -829,6 +862,7 @@ pub const Server = struct {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
         for (self.connections.items) |conn| {
+            if (!conn.attached) continue;
             if (!conn.subscriptions.has("focus")) continue;
             const has = window and conn.active_ctx == focused_ctx;
             if (has == conn.focus_sent) continue;
@@ -968,6 +1002,7 @@ pub const Server = struct {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
         for (self.connections.items) |conn| {
+            if (!conn.attached) continue;
             if (!conn.subscriptions.has("theme")) continue;
             if (std.mem.indexOfScalar(core.ContextHandle, followers.items, conn.active_ctx) == null) continue;
             conn.send(self.io, body) catch |err| {
@@ -1025,6 +1060,7 @@ pub const Server = struct {
         defer self.registry_mutex.unlock(self.io);
 
         for (self.connections.items) |conn| {
+            if (!conn.attached) continue;
             if (!conn.subscriptions.has("resize")) continue;
             const size = blk: {
                 self.ctx_mutex.lockUncancelable(self.io);
@@ -1153,6 +1189,7 @@ pub const Server = struct {
         defer self.registry_mutex.unlock(self.io);
         for (self.connections.items) |conn| {
             if (conn.active_ctx != context) continue;
+            if (!conn.attached) continue;
             if (!conn.subscriptions.has(event)) continue;
             conn.send(self.io, down) catch |err| {
                 std.log.err("glyphwire: {s} tap to a connection failed: {t}", .{ event, err });

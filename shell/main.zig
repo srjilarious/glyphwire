@@ -436,11 +436,20 @@ fn assertTermEnv() !void {
 fn spawnOwnServer(io: std.Io, alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
     const socket_path = try socketPath(alloc, environ_map);
 
+    // The root context's token is ours to choose: the server takes it
+    // from its environment rather than drawing its own, so this shell (and
+    // what it runs) can be let in without asking the server for it.
+    const token = glyphwire.newAccessToken();
+    var server_env = try environ_map.clone(alloc);
+    defer server_env.deinit();
+    try server_env.put("GLYPHWIRE_TOKEN", &token);
+
     // Relies on PATH resolution (std.process.spawn resolves argv[0] via the
     // parent's PATH when it contains no '/'), the same way any installed
     // pair of binaries would find each other — no self-exe lookup needed.
     var server_child = try std.process.spawn(io, .{
         .argv = &.{ "glyphwire-server", socket_path },
+        .environ_map = &server_env,
     });
     // Deliberately not waited on here: it keeps running as a background
     // process (later an orphan, reparented by the kernel) after this
@@ -452,13 +461,18 @@ fn spawnOwnServer(io: std.Io, alloc: std.mem.Allocator, environ_map: *const std.
     const socket_path_z = try std.mem.concatWithSentinel(alloc, u8, &.{socket_path}, 0);
     if (c.setenv("GLYPHWIRE_SOCK", socket_path_z, 1) != 0) return error.SetEnvFailed;
     if (c.setenv("GLYPHWIRE_CTX", glyphwire.default_context_id, 1) != 0) return error.SetEnvFailed;
+    const token_z = try std.mem.concatWithSentinel(alloc, u8, &.{&token}, 0);
+    if (c.setenv("GLYPHWIRE_TOKEN", token_z, 1) != 0) return error.SetEnvFailed;
+    // `environ_map` is a snapshot from before these existed, so the
+    // connections this process opens are told directly.
+    glyphwire.client.noteContext(glyphwire.root_context_handle, token);
     return socket_path;
 }
 
 fn socketPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
-    const dir = environ_map.get("XDG_RUNTIME_DIR") orelse "/tmp";
-    const pid = std.os.linux.getpid();
-    return std.fmt.allocPrint(alloc, "{s}/glyphwire-{d}.sock", .{ dir, pid });
+    var name_buf: [48]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "glyphwire-{d}.sock", .{std.os.linux.getpid()});
+    return glyphwire.runtime_dir.socketPath(alloc, environ_map, name);
 }
 
 fn waitForSocketReady(io: std.Io, socket_path: []const u8) !void {
@@ -701,11 +715,16 @@ fn runPrompt(
 /// so it outlives this call. False (already logged) when either attach
 /// failed and the shell should give up.
 fn attachEmbedded(prompt: *Prompt, listener: *glyphwire.InputListener, alloc: std.mem.Allocator, eo: embed.Options, control: *?embed.Control) bool {
-    prompt.client.attachContext(eo.context) catch |err| {
+    // The panel's owner put its context's token in our environment.
+    const token = glyphwire.client.processToken() orelse {
+        std.log.err("prompt: --embed: no GLYPHWIRE_TOKEN for context {d}", .{eo.context});
+        return false;
+    };
+    prompt.client.attachContext(eo.context, &token) catch |err| {
         std.log.err("prompt: --embed: can't attach to context {d}: {t}", .{ eo.context, err });
         return false;
     };
-    listener.attachContext(eo.context) catch |err| {
+    listener.attachContext(eo.context, &token) catch |err| {
         std.log.err("prompt: --embed: listener can't attach to context {d}: {t}", .{ eo.context, err });
         return false;
     };
@@ -723,11 +742,16 @@ fn attachEmbedded(prompt: *Prompt, listener: *glyphwire.InputListener, alloc: st
 /// base context is its first shell's. False (already logged) when either
 /// attach failed and the shell should give up.
 fn attachOwnContext(prompt: *Prompt, listener: *glyphwire.InputListener, context: glyphwire.ContextHandle) bool {
-    prompt.client.attachContext(context) catch |err| {
+    // The host put the context's token in our environment.
+    const token = glyphwire.client.processToken() orelse {
+        std.log.err("prompt: --context: no GLYPHWIRE_TOKEN for context {d}", .{context});
+        return false;
+    };
+    prompt.client.attachContext(context, &token) catch |err| {
         std.log.err("prompt: --context: can't attach to context {d}: {t}", .{ context, err });
         return false;
     };
-    listener.attachContext(context) catch |err| {
+    listener.attachContext(context, &token) catch |err| {
         std.log.err("prompt: --context: listener can't attach to context {d}: {t}", .{ context, err });
         return false;
     };

@@ -1256,9 +1256,10 @@ pub const Ui = struct {
         // scrollbar: zoe's root has no scrollback, and each pane draws
         // its own bar -- the always-on right-edge one would just sit
         // there permanently full.
-        const context = try client.createContext(null, null, 0, false);
+        const grant = try client.createContext(null, null, 0, false);
+        const context = grant.context;
         errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context);
+        try listener.attachContext(context, &grant.token);
         // What the context switcher, the shell's `jobs` and the window
         // title call this one. `render` keeps it on the focused buffer's
         // file from the first frame on (`syncTitle`).
@@ -1404,7 +1405,7 @@ pub const Ui = struct {
             .tab_tip_layer = tab_tip_layer,
             .tab_tip_patch = tab_tip_patch,
             .diags = diag.Store.init(alloc),
-            .shell = shellpanel.Panel.init(alloc, io, client, context, shell_layers),
+            .shell = shellpanel.Panel.init(alloc, io, client, grant, shell_layers, environ),
             .pane_split = pane_split,
             .grp = first_group,
             .layout = try groups.Layout.init(alloc, first_group.id),

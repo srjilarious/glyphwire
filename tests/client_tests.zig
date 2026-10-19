@@ -42,6 +42,7 @@ pub fn clientWriteTextThenGetCellsRoundTripTest(io: std.Io, alloc: std.mem.Alloc
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One client connection makes every call below over the same socket,
@@ -96,6 +97,7 @@ pub fn clientDrawsOnTheSurfaceFromGlyphwireLayerTest(io: std.Io, alloc: std.mem.
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -133,6 +135,7 @@ pub fn clientClearWipesTheWholeLayerByDefaultTest(io: std.Io, alloc: std.mem.All
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -158,6 +161,7 @@ pub fn clientSetCursorThenWriteTextPositionsAtCursorTest(io: std.Io, alloc: std.
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // errdefer, not a plain trailing statement: an early `try` failure
@@ -204,6 +208,7 @@ pub fn clientBatchTypedAddersTargetNamedLayerTest(io: std.Io, alloc: std.mem.All
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -257,6 +262,7 @@ pub fn clientBatchSharesEveryNotificationOpTest(io: std.Io, alloc: std.mem.Alloc
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -297,6 +303,7 @@ pub fn clientBatchResultsSurviveAFailedSubRequestTest(io: std.Io, alloc: std.mem
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -351,6 +358,7 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // Which of these two threads' acceptOne ends up serving the listener's
@@ -377,6 +385,8 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
     try reporter.reportKey("a", true);
     try reporter.reportMouseButton("left", true, .{ .x = 12, .y = 34 }, .{ .row = 1, .col = 2 }, 0, 1);
 
@@ -415,6 +425,7 @@ pub fn inputListenerQueuesMouseButtonEventsTest(_: std.Io, alloc: std.mem.Alloca
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -427,6 +438,8 @@ pub fn inputListenerQueuesMouseButtonEventsTest(_: std.Io, alloc: std.mem.Alloca
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
     try reporter.reportMouseButton("left", true, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0, 1);
     try reporter.reportMouseButton("left", false, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0, 1);
 
@@ -471,6 +484,7 @@ pub fn inputListenerQueuesTextEventsTest(_: std.Io, alloc: std.mem.Allocator) !v
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -483,6 +497,8 @@ pub fn inputListenerQueuesTextEventsTest(_: std.Io, alloc: std.mem.Allocator) !v
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
     try reporter.reportText("a\u{3042}b"); // "a", HIRAGANA A, "b"
 
     var ev: ?glyphwire.InputEvent = null;
@@ -513,6 +529,7 @@ pub fn inputListenerNextKeepsOrderAndEventTimeModsTest(_: std.Io, alloc: std.mem
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -525,6 +542,8 @@ pub fn inputListenerNextKeepsOrderAndEventTimeModsTest(_: std.Io, alloc: std.mem
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
     // A fast Ctrl+W, fully released before anything is consumed.
     try reporter.reportKey("left_control", true);
     try reporter.reportKey("w", true);
@@ -593,6 +612,7 @@ pub fn clientSpeaksBothWireFormatsTest(io: std.Io, alloc: std.mem.Allocator) !vo
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     for ([_]glyphwire.wire.Format{ .json, .msgpack }, 0..) |format, row| {
@@ -635,6 +655,7 @@ pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocato
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // Same connection makes every call below, so one acceptOne suffices --
@@ -695,6 +716,7 @@ pub fn clientCreateUpdateDestroyRectRoundTripTest(io: std.Io, alloc: std.mem.All
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -734,6 +756,7 @@ pub fn clientSetDropTargetRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !v
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -772,6 +795,7 @@ pub fn clientBatchRequestFormReturnsSlottedResultsTest(io: std.Io, alloc: std.me
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -808,6 +832,7 @@ pub fn clientBatchSendSyncedReturnsAfterApplyTest(io: std.Io, alloc: std.mem.All
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -837,6 +862,7 @@ pub fn clientBatchCreatesUpdatesAndDestroysRectsTest(io: std.Io, alloc: std.mem.
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -882,6 +908,7 @@ pub fn clientBatchNotificationFormAppliesWithoutReplyTest(io: std.Io, alloc: std
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -922,6 +949,7 @@ pub fn clientBatchClearThenRedrawInOneBatchTest(io: std.Io, alloc: std.mem.Alloc
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -969,6 +997,7 @@ pub fn clientSelectionAndClipboardRoundTripTest(io: std.Io, alloc: std.mem.Alloc
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread.join();
@@ -1015,6 +1044,7 @@ pub fn clientLayerCulledWhenCreatorDisconnectsTest(io: std.Io, alloc: std.mem.Al
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -1056,6 +1086,7 @@ pub fn clientUpdateImageThenDestroyImageRoundTripTest(io: std.Io, alloc: std.mem
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
@@ -1085,4 +1116,67 @@ pub fn clientUpdateImageThenDestroyImageRoundTripTest(io: std.Io, alloc: std.mem
     try testz.expectEqual(snapshot.rows(), 10);
 
     try testz.expectTrue(ctx.imageInfo(handle) == null);
+}
+
+/// A request the host refuses comes back as a JSON-RPC error on either
+/// encoding, the `Client` turns it into `error.RemoteError` with the
+/// host's name for it, and the connection carries on.
+pub fn clientRequestErrorKeepsTheConnectionTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 10, 4, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
+    defer srv.deinit(alloc);
+
+    for ([_]glyphwire.wire.Format{ .json, .msgpack }) |format| {
+        const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+        defer thread.join();
+
+        var client = try glyphwire.Client.connectAs(io, alloc, socket_path, format);
+        defer client.deinit();
+
+        try testz.expectError(client.getImageInfo(9999), error.RemoteError);
+        const e = glyphwire.client.lastRemoteError();
+        try testz.expectEqualStr(e.name(), "UnknownImage");
+        try testz.expectEqual(e.code, -32000);
+
+        // Still connected: the next request is answered.
+        try testz.expectEqual(try client.getRevision(), 0);
+    }
+}
+
+/// A connection that presents no token can't read the screen, but can
+/// make a context of its own and use that.
+pub fn clientWithoutATokenSeesNothingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 10, 4, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(null, null);
+    defer srv.deinit(alloc);
+    try ctx.root.writeText("secret", .{ .r = 255, .g = 255, .b = 255, .a = 255 }, null);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    try testz.expectError(client.getCells(), error.RemoteError);
+    try testz.expectEqualStr(glyphwire.client.lastRemoteError().name(), "ContextAccessDenied");
+
+    const grant = try client.createContext(null, null, 0, false);
+    try testz.expectEqualStr(&grant.token, &srv.session.contextToken(grant.context).?);
+    var snapshot = try client.getCells();
+    defer snapshot.deinit();
+    // Its own fresh context, not the "secret" underneath.
+    try testz.expectEqualStr(snapshot.cellAt(0, 0).grapheme, "");
 }

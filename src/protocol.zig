@@ -328,7 +328,7 @@ pub const ListContextsResult = struct {
 
 /// The version of this protocol, as `docs/protocol.md`'s header gives
 /// it. Bumped with that document, not with any program.
-pub const protocol_version = "0.10.0";
+pub const protocol_version = "0.11.0";
 
 /// `get_version`'s result: the program serving the session and the
 /// protocol it speaks. `program` is its executable name
@@ -761,7 +761,11 @@ pub const CreateContextParams = struct {
     title: ?[]const u8 = null,
 };
 
-pub const CreateContextResult = struct { context: core.ContextHandle };
+/// `token` is the new context's `core.AccessToken`: what this program
+/// hands its paired `InputListener` (`attach_context`) and anything it
+/// starts that should draw there (`GLYPHWIRE_TOKEN`). A plain string on
+/// the wire; empty from a host older than protocol 0.11.0.
+pub const CreateContextResult = struct { context: core.ContextHandle, token: []const u8 = "" };
 
 /// `set_context_title`: names the issuing connection's active context.
 pub const SetContextTitleParams = struct { title: []const u8 };
@@ -776,6 +780,14 @@ pub const SetThemeParams = struct {
 /// `destroy_context` / `activate_context` / `adopt_context` -- all just
 /// name one context handle.
 pub const ContextHandleParams = struct { context: core.ContextHandle };
+
+/// `attach_context`: `token` is required unless the connection already
+/// owns `context`, holds access to it, or is the window manager (see
+/// `Session.grantContext`).
+pub const AttachContextParams = struct {
+    context: core.ContextHandle,
+    token: ?[]const u8 = null,
+};
 
 /// `set_window_scrollbar`: toggles the always-on window scrollbar on the
 /// issuing connection's active context after the fact -- the runtime
@@ -827,7 +839,13 @@ pub const RequestRoleResult = struct {
 
 /// `attach_pane`: binds this connection to a pane. Sent as a connection's
 /// first message by anything started with `GLYPHWIRE_PANE` set.
-pub const AttachPaneParams = struct { pane: core.PaneHandle };
+/// `attach_pane`: `token` names which of the pane's contexts this
+/// connection was given, and is what lets it in; only the window manager
+/// may attach without one.
+pub const AttachPaneParams = struct {
+    pane: core.PaneHandle,
+    token: ?[]const u8 = null,
+};
 
 /// `create_pane`: a new pane plus the base context it shows.
 /// `scrollback_rows` is that context's root layer's ring, so a terminal
@@ -1199,6 +1217,13 @@ pub const SubscribeParams = struct {
     /// gated against the wrong pane and could receive input meant for
     /// another program. See `InputListener.sendSubscribeAndWaitForAck`.
     pane: ?core.PaneHandle = null,
+    /// Optional: attaches to this context at the same time, exactly as
+    /// `attach_context` would, for the same reason `pane` is folded in.
+    /// Takes precedence over `pane` when both are sent.
+    context: ?core.ContextHandle = null,
+    /// The token `context` (or one of `pane`'s contexts) needs; see
+    /// `AttachContextParams` / `AttachPaneParams`.
+    token: ?[]const u8 = null,
 };
 
 pub const SubscribeResult = struct {
@@ -1564,7 +1589,7 @@ pub const Methods = struct {
     create_context: CreateContextParams,
     destroy_context: ContextHandleParams,
     activate_context: ContextHandleParams,
-    attach_context: ContextHandleParams,
+    attach_context: AttachContextParams,
     adopt_context: ContextHandleParams,
     set_context_title: SetContextTitleParams,
     set_theme: SetThemeParams,

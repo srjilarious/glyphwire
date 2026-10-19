@@ -74,6 +74,7 @@ pub fn demoClientWritesStyledTextOverRealSocketTest(_: std.Io, alloc: std.mem.Al
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One accept loop, not a joined `serveOne` worker -- a fixed worker
@@ -92,6 +93,9 @@ pub fn demoClientWritesStyledTextOverRealSocketTest(_: std.Io, alloc: std.mem.Al
     var environ_map = std.process.Environ.Map.init(alloc);
     defer environ_map.deinit();
     try environ_map.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try environ_map.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try environ_map.put("GLYPHWIRE_TOKEN", &tok);
 
     var child = try spawnChecked(io, .{
         .argv = &.{demo_path},
@@ -172,6 +176,7 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One `serveForever` accept loop rather than a hand-counted set of
@@ -194,6 +199,9 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
 
     // No args: triggers the interactive prompt rather than exec'ing into
@@ -210,6 +218,8 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     // The prompt is now prefixed with the shell's cwd ("{cwd} > "), which
     // the spawned shell inherits from this test process -- `cwd_len`
@@ -286,6 +296,7 @@ pub fn shellPowerlinePromptDrawsSegmentTextOnItsBackgroundTest(_: std.Io, alloc:
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One accept loop, not a fixed count of joined workers -- see
@@ -313,6 +324,9 @@ pub fn shellPowerlinePromptDrawsSegmentTextOnItsBackgroundTest(_: std.Io, alloc:
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try shell_env.put("GLYPHWIRE_NO_HISTORY", "1");
     try shell_env.put("GLYPHWIRE_CONFIG_DIR", cfg_dir);
 
@@ -324,6 +338,8 @@ pub fn shellPowerlinePromptDrawsSegmentTextOnItsBackgroundTest(_: std.Io, alloc:
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     // Segment strip is cols [0,2) on row 0; the input "> " follows it.
     try waitForCell(&reporter, 0, 0, "A");
@@ -371,6 +387,7 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One accept loop, not a fixed count of joined workers -- see
@@ -385,6 +402,9 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
 
     var shell_child = try spawnChecked(io, .{
@@ -395,6 +415,8 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     const text_col = cwd_len + 3;
@@ -447,6 +469,7 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One accept loop, not a fixed count of joined workers -- see
@@ -461,6 +484,9 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
 
     var shell_child = try spawnChecked(io, .{
@@ -471,6 +497,8 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     const text_col = cwd_len + 3;
@@ -555,6 +583,7 @@ pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: st
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
@@ -566,6 +595,9 @@ pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: st
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
 
     var shell_child = try spawnChecked(io, .{
@@ -576,6 +608,8 @@ pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: st
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     const text_col = cwd_len + 3;
@@ -647,6 +681,7 @@ pub fn shellCtrlBackspaceAndDeleteRemoveWholeWordsTest(_: std.Io, alloc: std.mem
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
@@ -658,6 +693,9 @@ pub fn shellCtrlBackspaceAndDeleteRemoveWholeWordsTest(_: std.Io, alloc: std.mem
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
 
     var shell_child = try spawnChecked(io, .{
@@ -668,6 +706,8 @@ pub fn shellCtrlBackspaceAndDeleteRemoveWholeWordsTest(_: std.Io, alloc: std.mem
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     const text_col = cwd_len + 3;
@@ -744,6 +784,7 @@ pub fn shellCtrlRLoadsResultFdLineIntoPromptTest(_: std.Io, alloc: std.mem.Alloc
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
@@ -771,6 +812,9 @@ pub fn shellCtrlRLoadsResultFdLineIntoPromptTest(_: std.Io, alloc: std.mem.Alloc
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
     // `runCommand` resolves `gw-hist` via `execvp`'s `PATH` search, same
     // as any other bare command name (see shell/main.zig's top doc
@@ -793,6 +837,8 @@ pub fn shellCtrlRLoadsResultFdLineIntoPromptTest(_: std.Io, alloc: std.mem.Alloc
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     const text_col = cwd_len + 3;
@@ -843,6 +889,7 @@ pub fn shellCtrlRSeedsGwHistWithTypedLineTest(_: std.Io, alloc: std.mem.Allocato
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
@@ -866,6 +913,9 @@ pub fn shellCtrlRSeedsGwHistWithTypedLineTest(_: std.Io, alloc: std.mem.Allocato
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
     try shell_env.put("GLYPHWIRE_BIN_DIR", fake_bin);
     const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
@@ -881,6 +931,8 @@ pub fn shellCtrlRSeedsGwHistWithTypedLineTest(_: std.Io, alloc: std.mem.Allocato
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     const text_col = cwd_len + 3;
@@ -926,6 +978,7 @@ pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One accept loop, not a fixed count of joined workers -- see
@@ -940,6 +993,9 @@ pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
     // `echo` lives on the system PATH, not under zig-out/bin -- forward
     // it explicitly, same as shellCapturesPlainCommandStdoutTest.
@@ -956,6 +1012,8 @@ pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     try waitForCell(&reporter, 0, arrow_col, ">");
@@ -1011,6 +1069,7 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One accept loop, not a fixed worker count -- see
@@ -1027,6 +1086,9 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
     // `/usr/bin/echo` isn't under `zig-out/bin`, so the real inherited
     // PATH has to be forwarded explicitly -- an explicit `environ_map`
@@ -1045,6 +1107,8 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     try waitForCell(&reporter, 0, arrow_col, ">");
@@ -1096,6 +1160,7 @@ pub fn shellRunsATwoStagePipelineTest(_: std.Io, alloc: std.mem.Allocator) !void
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One accept loop, not a fixed count of joined workers -- see
@@ -1110,6 +1175,9 @@ pub fn shellRunsATwoStagePipelineTest(_: std.Io, alloc: std.mem.Allocator) !void
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
     const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
     const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
@@ -1124,6 +1192,8 @@ pub fn shellRunsATwoStagePipelineTest(_: std.Io, alloc: std.mem.Allocator) !void
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     try waitForCell(&reporter, 0, arrow_col, ">");
@@ -1165,6 +1235,7 @@ pub fn shellRedirectsStdoutToAFileTest(_: std.Io, alloc: std.mem.Allocator) !voi
     defer std.Io.Dir.deleteFileAbsolute(io, out_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One accept loop, not a fixed count of joined workers -- see
@@ -1179,6 +1250,9 @@ pub fn shellRedirectsStdoutToAFileTest(_: std.Io, alloc: std.mem.Allocator) !voi
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
     const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
     const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
@@ -1193,6 +1267,8 @@ pub fn shellRedirectsStdoutToAFileTest(_: std.Io, alloc: std.mem.Allocator) !voi
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     try waitForCell(&reporter, 0, arrow_col, ">");
@@ -1238,6 +1314,7 @@ pub fn shellPowerlinePromptStableAfterOutputScrollTest(_: std.Io, alloc: std.mem
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     // One accept loop, not a fixed count of joined workers -- see
     // shellPromptEchoesTypedInputTest for why the count is a hang footgun.
@@ -1281,6 +1358,9 @@ pub fn shellPowerlinePromptStableAfterOutputScrollTest(_: std.Io, alloc: std.mem
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try shell_env.put("GLYPHWIRE_NO_HISTORY", "1");
     try shell_env.put("GLYPHWIRE_CONFIG_DIR", cfg_dir);
     const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
@@ -1293,6 +1373,8 @@ pub fn shellPowerlinePromptStableAfterOutputScrollTest(_: std.Io, alloc: std.mem
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     // First prompt: the "> " input row of the 2-line prompt is row 1.
     try waitForCell(&reporter, 1, 0, ">");
@@ -1375,6 +1457,7 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // serveForever (not a fixed count of acceptOne threads, the pattern
@@ -1407,6 +1490,9 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
     // Explicit environ_map replaces the child's whole environment (unlike
     // a plain inherited spawn), so HOME has to be threaded through by
@@ -1429,6 +1515,8 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     try waitForCell(&reporter, 0, arrow_col, ">");
@@ -1553,6 +1641,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     // serveForever, not a fixed accept-thread count -- see
     // shellExpandsTildeInCommandArgsTest's comment on why: this test also
@@ -1567,6 +1656,9 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
     const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
     const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
@@ -1581,6 +1673,8 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     try waitForCell(&reporter, 0, arrow_col, ">");
@@ -1708,6 +1802,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
@@ -1719,6 +1814,9 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
     const path_env = if (std.c.getenv("PATH")) |p| std.mem.sliceTo(p, 0) else "";
     const new_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin:{s}", .{ cwd_buf[0..cwd_len], path_env });
@@ -1733,6 +1831,8 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     try waitForCell(&reporter, 0, arrow_col, ">");
@@ -1849,6 +1949,7 @@ pub fn shellCdDotDotAfterSymlinkStaysPhysicallyInSyncTest(_: std.Io, alloc: std.
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
@@ -1860,6 +1961,9 @@ pub fn shellCdDotDotAfterSymlinkStaysPhysicallyInSyncTest(_: std.Io, alloc: std.
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
     // `pwd` is a shell builtin in most real shells but not this one, so it
     // resolves to the real coreutils binary -- needs the real PATH, same
@@ -1877,6 +1981,8 @@ pub fn shellCdDotDotAfterSymlinkStaysPhysicallyInSyncTest(_: std.Io, alloc: std.
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
 
     const arrow_col = cwd_len + 1;
     try waitForCell(&reporter, 0, arrow_col, ">");
@@ -1950,6 +2056,7 @@ pub fn clientDrawsIntoGlyphwireLayerOverRealSocketTest(_: std.Io, alloc: std.mem
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
@@ -1961,6 +2068,9 @@ pub fn clientDrawsIntoGlyphwireLayerOverRealSocketTest(_: std.Io, alloc: std.mem
     var environ_map = std.process.Environ.Map.init(alloc);
     defer environ_map.deinit();
     try environ_map.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try environ_map.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try environ_map.put("GLYPHWIRE_TOKEN", &tok);
     const layer_text = try std.fmt.allocPrint(alloc, "{d}", .{panel});
     defer alloc.free(layer_text);
     try environ_map.put("GLYPHWIRE_LAYER", layer_text);
@@ -2010,6 +2120,7 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One accept loop -- see the demo test above; `child.wait` plus the
@@ -2024,6 +2135,9 @@ pub fn lsClientWritesEntriesOverRealSocketTest(_: std.Io, alloc: std.mem.Allocat
     var environ_map = std.process.Environ.Map.init(alloc);
     defer environ_map.deinit();
     try environ_map.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try environ_map.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try environ_map.put("GLYPHWIRE_TOKEN", &tok);
 
     var child = try spawnChecked(io, .{
         .argv = &.{ ls_path, tmp_name },
@@ -2084,6 +2198,7 @@ pub fn lsMultipleOperandsGroupsLooseFilesThenDirsTest(_: std.Io, alloc: std.mem.
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
 
     // One accept loop -- see the demo test above; `child.wait` plus the
@@ -2103,6 +2218,9 @@ pub fn lsMultipleOperandsGroupsLooseFilesThenDirsTest(_: std.Io, alloc: std.mem.
     var environ_map = std.process.Environ.Map.init(alloc);
     defer environ_map.deinit();
     try environ_map.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try environ_map.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try environ_map.put("GLYPHWIRE_TOKEN", &tok);
 
     var child = try spawnChecked(io, .{
         .argv = &.{ ls_path, file_operand, dir_operand },
@@ -2185,6 +2303,7 @@ pub fn shellWithContextFlagDrawsOnThatContextNotTheVisibleOneTest(_: std.Io, all
     defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     var srv = try glyphwire.server.Server.bind(io, &ctx, socket_path);
+    glyphwire.client.noteContext(glyphwire.root_context_handle, ctx.token);
     defer srv.deinit(alloc);
     _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
 
@@ -2199,6 +2318,9 @@ pub fn shellWithContextFlagDrawsOnThatContextNotTheVisibleOneTest(_: std.Io, all
     var shell_env = std.process.Environ.Map.init(alloc);
     defer shell_env.deinit();
     try shell_env.put("GLYPHWIRE_SOCK", socket_path);
+    // The root context and its token, as glyphwire-host hands its shell.
+    try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
+    if (glyphwire.client.processToken()) |tok| try shell_env.put("GLYPHWIRE_TOKEN", &tok);
     try sandboxShellConfig(&shell_env, alloc);
 
     var handle_buf: [16]u8 = undefined;
@@ -2211,6 +2333,8 @@ pub fn shellWithContextFlagDrawsOnThatContextNotTheVisibleOneTest(_: std.Io, all
 
     var reporter = try glyphwire.Client.connect(io, alloc, socket_path);
     defer reporter.deinit();
+    // Synthetic input over a socket is the window manager's to send.
+    _ = try reporter.requestWindowManager();
     try reporter.attachContext(shell_ctx);
 
     const arrow_col = cwd_len + 1;

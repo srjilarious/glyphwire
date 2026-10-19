@@ -131,6 +131,7 @@ pub fn buildEnvWithout(alloc: std.mem.Allocator, drop: []const []const u8, extra
 pub const session_vars = [_][]const u8{
     "GLYPHWIRE_PANE",
     "GLYPHWIRE_CTX",
+    "GLYPHWIRE_TOKEN",
     "GLYPHWIRE_LAYER",
     "GLYPHWIRE_RESULT_FD",
 };

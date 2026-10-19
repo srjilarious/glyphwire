@@ -29,6 +29,12 @@ pub fn main(init: std.process.Init) !void {
     const default_scrollback_rows = 1000;
     var ctx = try glyphwire.Context.init(init.gpa, cols, rows, default_scrollback_rows);
     defer ctx.deinit();
+    // A launcher that wants to connect (standalone `gw-shell`) picks the
+    // root context's token and hands it over here; otherwise the fresh one
+    // `Context.init` drew stands, and only a client given it gets in.
+    if (init.environ_map.get("GLYPHWIRE_TOKEN")) |t| {
+        if (t.len == ctx.token.len) @memcpy(&ctx.token, t);
+    }
 
     var srv = try glyphwire.server.Server.bind(init.io, &ctx, socket_path);
     srv.session.host_info = .of(build_info);

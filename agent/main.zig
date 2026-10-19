@@ -150,6 +150,7 @@ fn runStdio(init: std.process.Init, seat: Seat) !void {
     const addr = try std.Io.net.UnixAddress.init(sock_path);
     var listener = try addr.listen(io, .{});
     defer listener.deinit(io);
+    glyphwire.runtime_dir.restrictSocket(sock_path);
 
     // The remote shell (and everything it spawns) talks to us, not to a
     // real terminal: its own stdio is nulled so nothing it prints can
@@ -271,9 +272,9 @@ fn writeAllStream(io: std.Io, sock: std.Io.net.Stream, bytes: []const u8) !void 
 }
 
 fn socketPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
-    const dir = environ_map.get("XDG_RUNTIME_DIR") orelse "/tmp";
-    const pid = std.os.linux.getpid();
-    return std.fmt.allocPrint(alloc, "{s}/glyphwire-agent-{d}.sock", .{ dir, pid });
+    var name_buf: [48]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "glyphwire-agent-{d}.sock", .{std.os.linux.getpid()});
+    return glyphwire.runtime_dir.socketPath(alloc, environ_map, name);
 }
 
 // ─── --askpass: the SSH_ASKPASS helper ─────────────────────────────────

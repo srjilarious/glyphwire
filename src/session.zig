@@ -48,6 +48,13 @@ pub const ContextError = error{
     RootContextImmutable,
 };
 
+/// `Session.grantContext`'s failures.
+pub const AccessError = error{
+    UnknownContext,
+    /// The token presented isn't the context's (see `Session.grantContext`).
+    ContextAccessDenied,
+};
+
 // ─── Profiler snapshot ─────────────────────────────────────────────────
 //
 // A plain-data view of glyphwire-host's frame-timing profiler (see
@@ -1305,6 +1312,55 @@ pub const Session = struct {
         return ctx.hasOwner(conn);
     }
 
+    /// Whether `conn` may act on `handle` at all -- read it, draw on it,
+    /// take its input: it owns the context (`create_context` /
+    /// `adopt_context`) or presented its token (`grantContext`). False for
+    /// an unknown handle. The window manager's bypass is the dispatcher's
+    /// to apply, not this.
+    pub fn mayAccess(self: *Session, handle: ContextHandle, conn: ConnId) bool {
+        const ctx = self.contexts.get(handle) orelse return false;
+        return ctx.hasOwner(conn) or ctx.members.contains(conn);
+    }
+
+    /// Records that `conn` presented `token` for `handle`, and may act on
+    /// it from now on (see `Context.members`). `UnknownContext` for an
+    /// unknown handle, `ContextAccessDenied` for a wrong token -- the two
+    /// are kept apart because a guessable handle is no secret, only the
+    /// token is.
+    pub fn grantContext(self: *Session, handle: ContextHandle, conn: ConnId, token: []const u8) (AccessError || std.mem.Allocator.Error)!void {
+        const ctx = self.contexts.get(handle) orelse return AccessError.UnknownContext;
+        if (!core.accessTokenMatches(&ctx.token, token)) return AccessError.ContextAccessDenied;
+        try ctx.members.put(conn, {});
+    }
+
+    /// `grantContext` without a token, for a caller that is itself the
+    /// authority: glyphwire-host opening a connection on a pane's behalf
+    /// (`host/remote.zig`'s auth prompt), and tests.
+    pub fn addContextMember(self: *Session, handle: ContextHandle, conn: ConnId) !void {
+        const ctx = self.contexts.get(handle) orelse return ContextError.UnknownContext;
+        try ctx.members.put(conn, {});
+    }
+
+    /// `handle`'s token, or null for an unknown handle. What glyphwire-host
+    /// puts in `GLYPHWIRE_TOKEN` for a program it starts in a context.
+    pub fn contextToken(self: *Session, handle: ContextHandle) ?core.AccessToken {
+        const ctx = self.contexts.get(handle) orelse return null;
+        return ctx.token;
+    }
+
+    /// The context in `pane_handle` whose token is `token`, or null for an
+    /// unknown pane or a token matching none of them. What `attach_pane`
+    /// lands a connection on: the context it was given the token for,
+    /// rather than whatever happens to be on top of the pane.
+    pub fn paneContextForToken(self: *Session, pane_handle: PaneHandle, token: []const u8) ?ContextHandle {
+        const pane = self.panes.getPtr(pane_handle) orelse return null;
+        for (pane.stack.items) |h| {
+            const ctx = self.contexts.get(h) orelse continue;
+            if (core.accessTokenMatches(&ctx.token, token)) return h;
+        }
+        return null;
+    }
+
     /// Whether `handle` is some pane's base context, i.e. the one that
     /// can't be destroyed while that pane lives. True for the root
     /// context.
@@ -1384,8 +1440,11 @@ pub const Session = struct {
 
         var it = self.contexts.iterator();
         while (it.next()) |e| {
-            if (self.isBaseContext(e.key_ptr.*)) continue;
             const ctx = e.value_ptr.*;
+            // Access granted by token goes with the connection, on every
+            // context including the bases.
+            _ = ctx.members.remove(conn);
+            if (self.isBaseContext(e.key_ptr.*)) continue;
             if (!ctx.connection_owned) continue;
             _ = ctx.owners.remove(conn);
             if (ctx.owners.count() == 0) try culled_contexts.append(self.alloc, e.key_ptr.*);

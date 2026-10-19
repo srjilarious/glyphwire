@@ -117,6 +117,12 @@ pub const DispatchError = error{
     /// `LayerPermissionDenied`: `destroy_context` is a notification, so
     /// server.zig logs this and the context is left intact.
     ContextPermissionDenied,
+    /// A socket connection acted on a context it has no access to: it
+    /// never created it, never presented its token (`attach_context` /
+    /// `attach_pane` / `subscribe`), and isn't the window manager. Also
+    /// what every context-scoped message reports from a connection that
+    /// hasn't attached to anything yet, and what a wrong token reports.
+    ContextAccessDenied,
     /// A context-management message reached a `Dispatcher` with no
     /// `Session` behind it (a bare `Dispatcher.init` -- tests, or a
     /// headless caller from before multi-context). Nothing in production
@@ -649,6 +655,24 @@ pub fn imagePayloadHeader(alloc: std.mem.Allocator, envelope: Envelope) !?LoadIm
     return .{ .id = id, .format = format, .bytes = bytes, .target = target, .data = data };
 }
 
+/// The JSON-RPC error `code` a failed request is answered with (see
+/// `codec.errorResponse`); its `message` is always the error's name.
+/// `-32601` for a method the host doesn't have, `-32600` for a
+/// request-only method sent as a notification's opposite, `-32603` for
+/// running out of memory, `-32000` (the first implementation-defined
+/// server error) for any `DispatchError` -- the host understood the
+/// request and refused it -- and `-32602` for everything else, which is
+/// the params failing to decode into the method's shape.
+pub fn errorCode(err: anyerror) i64 {
+    if (err == error.UnknownMethod) return -32601;
+    if (err == error.NotARequest) return -32600;
+    if (err == error.OutOfMemory) return -32603;
+    inline for (@typeInfo(DispatchError).error_set.error_names.?) |name| {
+        if (err == @field(anyerror, name)) return -32000;
+    }
+    return -32602;
+}
+
 /// Peeks at a decoded frame body to determine whether it's a notification
 /// (no `id`) rather than a request. Used by server.zig to decide whether a
 /// `Dispatcher.handle` error should just be logged or propagated: a
@@ -656,10 +680,9 @@ pub fn imagePayloadHeader(alloc: std.mem.Allocator, envelope: Envelope) !?LoadIm
 /// JSON-RPC, that's a server-side log line, not a wire message -- see
 /// decisions.md's latent-robustness-gap note), so severing the whole
 /// connection over e.g. one `draw_icon` naming an unregistered icon would
-/// be a disproportionate failure mode. A request needs *some* response;
-/// until real JSON-RPC error responses land (roadmap.md's Milestone 0),
-/// severing the connection is the least-bad fallback there rather than
-/// leaving the client's request hanging forever with no reply.
+/// be a disproportionate failure mode. A request is answered with a
+/// JSON-RPC error response instead (`codec.errorResponse`, `errorCode`),
+/// and the connection carries on.
 pub fn isNotification(alloc: std.mem.Allocator, body: []const u8) !bool {
     const parsed = try codec.parseEnvelope(.json, alloc, body);
     defer parsed.deinit();
@@ -707,9 +730,10 @@ const ErrorEntry = struct {
 pub const Dispatcher = struct {
     /// The context this connection is currently acting on -- every
     /// `layer?`-scoped message resolves against it. It starts as the
-    /// context that was visible when the connection was accepted (a
-    /// connection *inherits* the visible context) and is retargeted by
-    /// `create_context` to the new context. `activate_context` does
+    /// context that was visible when the connection was accepted -- but
+    /// with no access to it (see `attached`), so a fresh connection can't
+    /// touch it -- and is retargeted by `create_context`, `attach_context`
+    /// and `attach_pane`. `activate_context` does
     /// *not* move it -- that message only changes which context is on
     /// screen, so a client can background itself and keep drawing. A
     /// cached pointer, kept live against `session` by `syncActiveContext`
@@ -827,6 +851,21 @@ pub const Dispatcher = struct {
             return;
         }
         if (session.panePtr(self.active_pane)) |pane| {
+            // The topmost context there this connection may still act on
+            // (a full-screen program falling back to the shell context it
+            // was started on); failing that the pane's top, which the
+            // access gate then keeps it from touching.
+            var i = pane.stack.items.len;
+            while (i > 0) {
+                i -= 1;
+                const h = pane.stack.items[i];
+                if (!self.mayAccess(h)) continue;
+                if (session.contextPtr(h)) |c| {
+                    self.active_ctx = h;
+                    self.ctx = c;
+                    return;
+                }
+            }
             if (session.contextPtr(pane.top())) |c| {
                 self.active_ctx = pane.top();
                 self.ctx = c;
@@ -1098,8 +1137,40 @@ pub const Dispatcher = struct {
     fn dispatchCatalog(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) !HandleResult {
         self.syncActiveContext();
         const handler = catalog.get(envelope.method) orelse return DispatchError.UnknownMethod;
+        if (!unattached_ok.has(envelope.method) and !self.attached()) return DispatchError.ContextAccessDenied;
+        if (input_reports.has(envelope.method) and self.conn_id != null) _ = try self.requireManager();
         return handler(self, alloc, envelope);
     }
+
+    /// The messages a connection may send without access to its active
+    /// context. Everything else reads, draws on or configures that
+    /// context and is refused with `ContextAccessDenied` until the
+    /// connection attaches with a token or creates a context of its own.
+    /// These either *are* the way in (`create_context`, `attach_*`,
+    /// `subscribe`), check their own target (`destroy_context`,
+    /// `activate_context`, `adopt_context`), touch no context (`sync`,
+    /// `get_version`, `get_errors`, the role messages), or are the window
+    /// manager's, which check the role and report that instead. `batch`
+    /// is let through so each of its sub-messages meets this gate itself.
+    const unattached_ok = std.StaticStringMap(void).initComptime(.{
+        .{"create_context"},           .{"attach_context"},           .{"attach_pane"},
+        .{"subscribe"},                .{"destroy_context"},          .{"activate_context"},
+        .{"adopt_context"},            .{"sync"},                     .{"batch"},
+        .{"get_version"},              .{"get_errors"},               .{"request_role"},
+        .{"join_role"},                .{"create_pane"},              .{"destroy_pane"},
+        .{"focus_pane"},               .{"create_pane_split"},        .{"destroy_pane_split"},
+        .{"set_pane_split_children"},  .{"replace_pane_split_child"}, .{"get_pane_split"},
+        .{"set_root_pane_split"},      .{"move_pane_divider"},        .{"spawn_in_pane"},
+        .{"set_window_prefix"},        .{"send_window_prefix"},
+    });
+
+    /// Synthetic input. Over a socket only the window manager may send
+    /// it: anyone else could type into whichever program has focus. The
+    /// host's own input comes in-process (`Server.reportKey` and friends)
+    /// and never passes through here.
+    const input_reports = std.StaticStringMap(void).initComptime(.{
+        .{"report_key"}, .{"report_text"}, .{"report_mouse_button"}, .{"report_mouse_move"},
+    });
 
     /// A `batch` sub-message method that can't run inside a batch,
     /// regardless of params: another `batch` (nesting is disallowed) or
@@ -1223,6 +1294,9 @@ pub const Dispatcher = struct {
     /// handle it was given, so a caller can use one response shape for
     /// both and a page reader's update loop reads like its first load.
     pub fn handleLoadImage(self: *Dispatcher, alloc: std.mem.Allocator, hdr: LoadImageHeader, raw_bytes: []const u8) ![]u8 {
+        // Past `dispatchCatalog`, so it meets the access gate here.
+        self.syncActiveContext();
+        if (!self.attached()) return DispatchError.ContextAccessDenied;
         const image_handle = if (hdr.target) |target| blk: {
             try self.ctx.updateImage(target, hdr.format, raw_bytes);
             break :blk target;
@@ -1690,7 +1764,10 @@ pub const Dispatcher = struct {
         if (p.title) |t| try self.ctx.setTitle(t);
 
         var result = try self.contextBroadcast(alloc);
-        result.response = try self.respond(alloc, id, protocol.CreateContextResult{ .context = new_handle });
+        result.response = try self.respond(alloc, id, protocol.CreateContextResult{
+            .context = new_handle,
+            .token = &self.ctx.token,
+        });
         return result;
     }
 
@@ -1732,11 +1809,21 @@ pub const Dispatcher = struct {
     /// activating the root context, and un-backgrounds by activating its
     /// own handle again. `UnknownContext` for an unknown handle; a no-op
     /// if it's already visible.
+    ///
+    /// Any context *in this connection's own pane* may be raised, not
+    /// only ones it has access to: which of a pane's programs is on top
+    /// is the pane's job control (a shell's `fg` raises a context its job
+    /// made), and raising one reveals nothing to the caller. Another
+    /// pane's context needs access, like everything else.
     fn handleActivateContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
         const session = self.session orelse return DispatchError.NoContextSession;
         const parsed = try codec.parseParams(protocol.ContextHandleParams, alloc, params_value);
         defer parsed.deinit();
-        session.activateContext(parsed.value.context) catch return DispatchError.UnknownContext;
+        const target = parsed.value.context;
+        const target_ctx = session.contextPtr(target) orelse return DispatchError.UnknownContext;
+        const own_pane = self.attached() and target_ctx.pane == self.active_pane;
+        if (!own_pane and !self.mayAccess(target)) return DispatchError.ContextAccessDenied;
+        session.activateContext(target) catch return DispatchError.UnknownContext;
         return try self.contextBroadcast(alloc);
     }
 
@@ -1745,26 +1832,104 @@ pub const Dispatcher = struct {
     /// `layer?`-scoped message resolves against it, and, for a subscribed
     /// connection, the raw input streams it receives now follow that
     /// context's visibility. The primitive a paired `InputListener` uses
-    /// to join the context its `Client` created, and the same mechanism a
-    /// future `GLYPHWIRE_CTX`-inheriting connection would use at startup.
-    /// `UnknownContext` for an unknown handle; ownership is untouched
-    /// (attaching isn't adopting). A no-op for a sessionless dispatcher's
-    /// caller other than the error.
+    /// to join the context its `Client` created, and what every client
+    /// sends at connect time from `GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN`.
+    /// `UnknownContext` for an unknown handle, `ContextAccessDenied` for a
+    /// missing or wrong token (see `bindContext`); ownership is untouched
+    /// (attaching isn't adopting).
     fn handleAttachContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
-        const parsed = try codec.parseParams(protocol.ContextHandleParams, alloc, params_value);
+        const parsed = try codec.parseParams(protocol.AttachContextParams, alloc, params_value);
         defer parsed.deinit();
-        const target = parsed.value.context;
-        self.ctx = session.contextPtr(target) orelse return DispatchError.UnknownContext;
+        try self.bindContext(session, parsed.value.context, parsed.value.token);
+    }
+
+    /// Whether this connection may act on `context`: it owns it or holds
+    /// access to it (`Session.mayAccess`), or it is the window manager,
+    /// which arranges every pane and so sees into all of them. An
+    /// in-process caller (`conn_id` null) and a sessionless dispatcher
+    /// always may: they *are* the host.
+    fn mayAccess(self: *const Dispatcher, context: core.ContextHandle) bool {
+        const session = self.session orelse return true;
+        const cid = self.conn_id orelse return true;
+        if (session.isManager(cid)) return true;
+        return session.mayAccess(context, cid);
+    }
+
+    /// Whether this connection may act on its own active context -- the
+    /// gate every context-scoped message passes (`dispatchCatalog`), and
+    /// what server.zig mirrors onto `Connection.attached` to keep pushed
+    /// events away from a connection that has no business seeing them. A
+    /// fresh connection is not attached to anything until it presents a
+    /// token or creates a context of its own.
+    pub fn attached(self: *const Dispatcher) bool {
+        return self.mayAccess(self.active_ctx);
+    }
+
+    /// Retargets this connection onto `target`, first granting it access
+    /// with `token` when it doesn't already have it. The grant is checked
+    /// before anything moves, so a refused attach leaves the connection
+    /// exactly where it was.
+    fn bindContext(self: *Dispatcher, session: *core.Session, target: core.ContextHandle, token: ?[]const u8) !void {
+        const target_ctx = session.contextPtr(target) orelse return DispatchError.UnknownContext;
+        if (!self.mayAccess(target)) {
+            const t = token orelse return DispatchError.ContextAccessDenied;
+            session.grantContext(target, self.conn_id.?, t) catch |err| return switch (err) {
+                error.ContextAccessDenied => DispatchError.ContextAccessDenied,
+                error.UnknownContext => DispatchError.UnknownContext,
+                else => |e| e,
+            };
+        }
+        self.ctx = target_ctx;
         self.active_ctx = target;
         // Follow the context into its pane: attaching to a context means
         // joining wherever it lives, and anything this connection creates
         // afterwards belongs there too.
-        self.active_pane = self.ctx.pane;
+        self.active_pane = target_ctx.pane;
         // A layer handle is only meaningful in the context that owns it,
         // so the surface doesn't travel; the new context's root is where
         // an omitted `layer` lands until this connection says otherwise.
         self.surface = null;
+    }
+
+    /// Binds this connection to `pane_handle`. The window manager and an
+    /// in-process caller may name any pane without a token and land on
+    /// whatever is on screen there, as before. Anyone else needs the
+    /// token of one of the pane's contexts and lands on *that* context --
+    /// the one it was given, not whichever program happens to be on top
+    /// of the pane when it connects -- or, without a token, lands on the
+    /// topmost context there it already has access to.
+    fn bindPane(self: *Dispatcher, session: *core.Session, pane_handle: core.PaneHandle, token: ?[]const u8) !void {
+        const pane = session.panePtr(pane_handle) orelse return DispatchError.UnknownPane;
+        const privileged = if (self.conn_id) |cid| session.isManager(cid) else true;
+        if (privileged and token == null) {
+            const top = pane.top();
+            self.ctx = session.contextPtr(top) orelse return DispatchError.UnknownContext;
+            self.active_pane = pane_handle;
+            self.active_ctx = top;
+            return;
+        }
+        const t = token orelse {
+            // No token, but maybe no need of one: rebinding to a pane this
+            // connection already has a context in lands on the topmost of
+            // those.
+            var i = pane.stack.items.len;
+            while (i > 0) {
+                i -= 1;
+                const h = pane.stack.items[i];
+                if (!self.mayAccess(h)) continue;
+                self.ctx = session.contextPtr(h) orelse continue;
+                self.active_pane = pane_handle;
+                self.active_ctx = h;
+                return;
+            }
+            return DispatchError.ContextAccessDenied;
+        };
+        const target = session.paneContextForToken(pane_handle, t) orelse return DispatchError.ContextAccessDenied;
+        if (self.conn_id) |cid| try session.addContextMember(target, cid);
+        self.ctx = session.contextPtr(target).?;
+        self.active_pane = pane_handle;
+        self.active_ctx = target;
     }
 
     /// `attach_layer`: declares this connection's surface -- the layer an
@@ -1789,13 +1954,19 @@ pub const Dispatcher = struct {
     /// it outlives its original creator disconnecting (and this
     /// connection may then `destroy_context` it). `UnknownContext` for an
     /// unknown or root handle; a no-op for an in-process caller. The
-    /// context-level mirror of `adopt_layer`.
+    /// context-level mirror of `adopt_layer`. Only a connection that
+    /// already has access may adopt (`ContextAccessDenied` otherwise):
+    /// adopting is taking on responsibility for a context you were given,
+    /// not a way in.
     fn handleAdoptContext(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
         const parsed = try codec.parseParams(protocol.ContextHandleParams, alloc, params_value);
         defer parsed.deinit();
+        const target = parsed.value.context;
+        if (session.contextPtr(target) == null) return DispatchError.UnknownContext;
+        if (!self.mayAccess(target)) return DispatchError.ContextAccessDenied;
         if (self.conn_id) |cid| {
-            session.addContextOwner(parsed.value.context, cid) catch return DispatchError.UnknownContext;
+            session.addContextOwner(target, cid) catch return DispatchError.UnknownContext;
         }
     }
 
@@ -1955,21 +2126,16 @@ pub const Dispatcher = struct {
         }
     }
 
-    /// `attach_pane`: binds this connection to a pane, and to whatever
-    /// context is on screen there. What a program spawned into a pane
-    /// sends first, from `GLYPHWIRE_PANE` (see `Dispatcher.active_pane`).
-    /// Needs no role: declaring where you live is not a privilege, and a
-    /// program can only ever be pointed at its own pane by the manager
-    /// that spawned it.
+    /// `attach_pane`: binds this connection to a pane, and to the context
+    /// there its `token` belongs to (see `bindPane`). Needs no role, but
+    /// does need the token: a pane handle is a small counter, and naming
+    /// one is not proof that you were started in it. The window manager
+    /// may attach to any pane without one.
     fn handleAttachPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const session = self.session orelse return DispatchError.NoContextSession;
         const parsed = try codec.parseParams(protocol.AttachPaneParams, alloc, params_value);
         defer parsed.deinit();
-        const target = parsed.value.pane;
-        const pane = session.panePtr(target) orelse return DispatchError.UnknownPane;
-        self.active_pane = target;
-        self.active_ctx = pane.top();
-        self.ctx = session.contextPtr(self.active_ctx) orelse return DispatchError.UnknownContext;
+        try self.bindPane(session, parsed.value.pane, parsed.value.token);
     }
 
     /// `create_pane`: a pane and the base context it shows. The pane is
@@ -2819,22 +2985,23 @@ pub const Dispatcher = struct {
     fn handleSubscribe(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const parsed = try codec.parseParams(protocol.SubscribeParams, alloc, params_value);
         defer parsed.deinit();
-        self.subscriptions = Subscriptions.setFromEvents(parsed.value.events);
 
         // Atomically with arming the fan-out -- see `protocol.SubscribeParams.pane`.
         // An unknown pane is ignored rather than failing the subscribe: the
         // pane may have been destroyed between the spawn and the connect,
-        // and leaving the connection in the focused pane is a better
-        // outcome than refusing to subscribe at all.
-        if (parsed.value.pane) |pane_handle| {
-            if (self.session) |session| {
-                if (session.panePtr(pane_handle)) |pane| {
-                    self.active_pane = pane_handle;
-                    self.active_ctx = pane.top();
-                    if (session.contextPtr(self.active_ctx)) |c| self.ctx = c;
-                }
+        // and an unattached connection is sent nothing anyway. A refused
+        // token is not ignored: it is the caller's to hear about.
+        if (self.session) |session| {
+            if (parsed.value.context) |context| {
+                try self.bindContext(session, context, parsed.value.token);
+            } else if (parsed.value.pane) |pane_handle| {
+                self.bindPane(session, pane_handle, parsed.value.token) catch |err| switch (err) {
+                    DispatchError.UnknownPane => {},
+                    else => |e| return e,
+                };
             }
         }
+        self.subscriptions = Subscriptions.setFromEvents(parsed.value.events);
 
         return try self.respond(alloc, id, protocol.SubscribeResult{ .subscribed = parsed.value.events });
     }

@@ -85,6 +85,7 @@ pub fn processWireFormat() wire.Format {
 pub fn notePaneFromEnviron(environ_map: *const std.process.Environ.Map) void {
     noteSurfaceFromEnviron(environ_map);
     noteWireFormatFromEnviron(environ_map);
+    noteContextFromEnviron(environ_map);
     const raw = environ_map.get("GLYPHWIRE_PANE") orelse return;
     process_pane = std.fmt.parseInt(core.PaneHandle, raw, 10) catch null;
 }
@@ -127,6 +128,112 @@ pub fn processPane() ?core.PaneHandle {
 
 fn paneFromEnv() ?core.PaneHandle {
     return process_pane;
+}
+
+/// The context this process was started on (`GLYPHWIRE_CTX`) and the
+/// token that lets it in (`GLYPHWIRE_TOKEN`) -- see `core.AccessToken`.
+/// Process-global for the reason `process_pane` is: a program's `Client`
+/// and its `InputListener` both have to present them. Every connection
+/// this process opens attaches to `process_context` as its first message;
+/// without one it is attached to nothing, and the host refuses whatever
+/// it sends until it `createContext`s a context of its own.
+var process_context: ?core.ContextHandle = null;
+var process_token: ?core.AccessToken = null;
+
+/// Records `GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN` from an environment map
+/// -- called by `notePaneFromEnviron`, so `connectFromEnv` picks them up
+/// too. A token of the wrong length is ignored, as if it were unset.
+pub fn noteContextFromEnviron(environ_map: *const std.process.Environ.Map) void {
+    if (environ_map.get("GLYPHWIRE_CTX")) |raw| {
+        process_context = std.fmt.parseInt(core.ContextHandle, raw, 10) catch null;
+    }
+    if (environ_map.get("GLYPHWIRE_TOKEN")) |raw| {
+        if (raw.len == @sizeOf(core.AccessToken)) process_token = raw[0..@sizeOf(core.AccessToken)].*;
+    }
+}
+
+/// Sets the context and token every later `connect` attaches with, for a
+/// program that has them without an environment variable: a test serving
+/// its own `Server`, or `gw-shell` starting its own headless one. A null
+/// `token` attaches without one, which only works for a connection the
+/// host already granted access (a remote session's).
+pub fn noteContext(context: ?core.ContextHandle, token: ?core.AccessToken) void {
+    process_context = context;
+    process_token = token;
+}
+
+/// The context this process attaches to by default, and its token.
+pub fn processContext() ?core.ContextHandle {
+    return process_context;
+}
+
+pub fn processToken() ?core.AccessToken {
+    return process_token;
+}
+
+/// Where a new connection binds itself first: a context (with the token
+/// that lets it in), a pane, or nothing. `fromProcess` is what
+/// `Client.connect` and `InputListener.connect` use.
+pub const Seat = struct {
+    context: ?core.ContextHandle = null,
+    token: ?core.AccessToken = null,
+    pane: ?core.PaneHandle = null,
+
+    /// This process's own `GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN` /
+    /// `GLYPHWIRE_PANE`. The context wins when there is one: it names
+    /// exactly where the program was started, where a pane only says
+    /// which rectangle.
+    pub fn fromProcess() Seat {
+        return .{ .context = process_context, .token = process_token, .pane = process_pane };
+    }
+};
+
+/// What `create_context` hands back: the new context and the token a
+/// second connection (the paired `InputListener`, a `gw-shell --embed`)
+/// presents to `attachContext` to act on it too.
+pub const ContextGrant = struct {
+    context: core.ContextHandle,
+    token: core.AccessToken,
+};
+
+/// The most recent JSON-RPC error a request on this thread got back --
+/// what `error.RemoteError` stands for. Thread-local because a `Client`
+/// is used from one thread, and a caller that wants the detail reads it
+/// right after the failing call.
+pub const RemoteErrorInfo = struct {
+    code: i64 = 0,
+    name_buf: [64]u8 = undefined,
+    name_len: u8 = 0,
+
+    /// The host's name for the failure (`"ContextAccessDenied"`,
+    /// `"UnknownLayer"`, ...).
+    pub fn name(self: *const RemoteErrorInfo) []const u8 {
+        return self.name_buf[0..self.name_len];
+    }
+
+    fn set(self: *RemoteErrorInfo, code: i64, message: []const u8) void {
+        self.code = code;
+        const n = @min(message.len, self.name_buf.len);
+        @memcpy(self.name_buf[0..n], message[0..n]);
+        self.name_len = @intCast(n);
+    }
+};
+
+threadlocal var last_remote_error: RemoteErrorInfo = .{};
+
+/// The error behind the last `error.RemoteError` on this thread.
+pub fn lastRemoteError() *const RemoteErrorInfo {
+    return &last_remote_error;
+}
+
+/// Reads `body` as a response and fails with `error.RemoteError` when it
+/// is an error response, recording which in `last_remote_error`.
+fn checkRemoteError(format: wire.Format, alloc: std.mem.Allocator, body: []const u8) !void {
+    const probe = codec.parseErrorProbe(format, alloc, body) catch return;
+    defer probe.deinit();
+    const e = probe.value.@"error" orelse return;
+    last_remote_error.set(e.code, e.message);
+    return error.RemoteError;
 }
 
 /// A glyphwire client: wraps connecting to `GLYPHWIRE_SOCK`, encoding and
@@ -205,25 +312,36 @@ pub const Client = struct {
         // A write that fails here means the connection is already gone;
         // the first real message will surface that.
         client.writePreamble() catch {};
-        client.attachPaneFromEnv();
+        client.attachSeat(.fromProcess());
         client.attachSurfaceFromEnv();
         return client;
     }
 
-    /// Binds this connection to the pane named by `GLYPHWIRE_PANE`, if it
-    /// is set. A no-op otherwise, which is every program that has the
-    /// window to itself.
+    /// Binds this connection to where the program was started: its
+    /// `GLYPHWIRE_CTX` with `GLYPHWIRE_TOKEN`, or failing a context its
+    /// `GLYPHWIRE_PANE` (what a window manager seated nowhere in
+    /// particular has). A no-op with neither, which leaves the connection
+    /// attached to nothing until it `createContext`s.
     ///
-    /// Called from `connect`, so *every* client is pane-correct with no
-    /// code of its own -- the property that lets an unmodified `gw-shell`
-    /// or `zoe` run inside a pane. It is deliberately the connection's
-    /// first message: everything else this client sends is ordered behind
-    /// it on the same stream, so there is no window during which the
-    /// connection is bound to the wrong pane. Failure is logged rather
-    /// than propagated, because a write that fails here means the
-    /// connection is already gone and the next call will surface it.
-    pub fn attachPaneFromEnv(self: *Client) void {
-        const pane = paneFromEnv() orelse return;
+    /// Called from `connect`, so *every* client is pane- and context-
+    /// correct with no code of its own -- the property that lets an
+    /// unmodified `gw-shell` or `zoe` run inside a pane. It is
+    /// deliberately the connection's first message: everything else this
+    /// client sends is ordered behind it on the same stream, so there is
+    /// no window during which the connection is bound to the wrong place.
+    /// Failure is logged rather than propagated, because a write that
+    /// fails here means the connection is already gone and the next call
+    /// will surface it; a refused token shows up as the next request's
+    /// `error.RemoteError`.
+    pub fn attachSeat(self: *Client, seat: Seat) void {
+        if (seat.context) |context| {
+            const token: ?[]const u8 = if (seat.token) |*t| t else null;
+            self.notify("attach_context", .{ .context = context, .token = token }) catch |err| {
+                std.log.warn("glyphwire: attach_context({d}) failed: {t}", .{ context, err });
+            };
+            return;
+        }
+        const pane = seat.pane orelse return;
         self.attachPane(pane) catch |err| {
             std.log.warn("glyphwire: attach_pane({d}) failed: {t}", .{ pane, err });
         };
@@ -859,7 +977,7 @@ pub const Client = struct {
         height: ?usize,
         scrollback_rows: usize,
         window_scrollbar: bool,
-    ) !core.ContextHandle {
+    ) !ContextGrant {
         var parsed = try self.request(protocol.CreateContextResult, "create_context", .{
             .width = width,
             .height = height,
@@ -867,7 +985,11 @@ pub const Client = struct {
             .window_scrollbar = window_scrollbar,
         });
         defer parsed.deinit();
-        return parsed.value.result.context;
+        const r = parsed.value.result;
+        // A host older than protocol 0.11.0 sends no token and checks none.
+        var token: core.AccessToken = @splat('0');
+        if (r.token.len == token.len) @memcpy(&token, r.token);
+        return .{ .context = r.context, .token = token };
     }
 
     /// `get_theme` -- a request. This connection's active context's
@@ -906,8 +1028,11 @@ pub const Client = struct {
     /// already does this for the context it makes; use `attachContext`
     /// for a second connection that needs to act on the same context (a
     /// paired `InputListener` -- see `InputListener.attachContext`).
-    pub fn attachContext(self: *Client, context: core.ContextHandle) !void {
-        try self.notify("attach_context", .{ .context = context });
+    /// `token` is the context's (`ContextGrant.token`, `GLYPHWIRE_TOKEN`);
+    /// a wrong one leaves this connection where it was, and the next
+    /// request it makes fails with `error.RemoteError`.
+    pub fn attachContext(self: *Client, context: core.ContextHandle, token: *const core.AccessToken) !void {
+        try self.notify("attach_context", .{ .context = context, .token = token });
     }
 
     // ── Panes ───────────────────────────────────────────────────────────
@@ -917,10 +1042,11 @@ pub const Client = struct {
     // of it, and doesn't need to know panes exist. See session.zig's Panes
     // section.
 
-    /// `attach_pane`: binds this connection to a pane. Called automatically
-    /// at connect time when `GLYPHWIRE_PANE` is set (see
-    /// `attachPaneFromEnv`), so a program seated in a pane by
-    /// `spawn_in_pane` needs no code of its own.
+    /// `attach_pane`: binds this connection to a pane without a token --
+    /// only the window manager may. Called at connect time when
+    /// `GLYPHWIRE_PANE` is set and `GLYPHWIRE_CTX` isn't (see
+    /// `attachSeat`); every program the host starts has both, and
+    /// attaches to its context instead.
     pub fn attachPane(self: *Client, pane: core.PaneHandle) !void {
         try self.notify("attach_pane", .{ .pane = pane });
     }
@@ -1714,6 +1840,7 @@ pub const Client = struct {
 
         const resp_body = try self.readFrame();
         defer self.alloc.free(resp_body);
+        try checkRemoteError(self.format, self.alloc, resp_body);
 
         // Strings are copied: resp_body is freed right after this returns,
         // so string fields (including RenderCell.grapheme, read well after
@@ -2880,24 +3007,23 @@ pub const InputListener = struct {
         socket_path: []const u8,
         events: []const []const u8,
     ) !*InputListener {
-        return connectInPane(io, alloc, socket_path, events, paneFromEnv());
+        return connectAt(io, alloc, socket_path, events, .fromProcess());
     }
 
-    /// `connect`, but for a listener whose pane isn't the process's own
-    /// `GLYPHWIRE_PANE` -- glyphwire-host opening a connection on behalf of
-    /// one particular pane (`host/remote.zig`'s `ssh` auth prompt), where
-    /// the host process is seated in no pane at all.
+    /// `connect`, but for a listener whose seat isn't the process's own
+    /// -- glyphwire-host opening a connection on behalf of one particular
+    /// pane (`host/remote.zig`'s `ssh` auth prompt), where the host
+    /// process is seated in no pane at all.
     ///
     /// A parameter rather than a call after connecting, for the reason
-    /// `sendSubscribeAndWaitForAck` spells out: the pane has to ride inside
-    /// `subscribe`, or the connection is briefly subscribed while gated
-    /// against the wrong pane.
-    pub fn connectInPane(
+    /// `sendSubscribeAndWaitForAck` spells out: the seat has to ride inside
+    /// `subscribe`, or the connection is briefly subscribed somewhere else.
+    pub fn connectAt(
         io: std.Io,
         alloc: std.mem.Allocator,
         socket_path: []const u8,
         events: []const []const u8,
-        pane: ?core.PaneHandle,
+        seat: Seat,
     ) !*InputListener {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
         const stream = try addr.connect(io);
@@ -2914,7 +3040,7 @@ pub const InputListener = struct {
         };
         errdefer self.state.deinit();
 
-        try self.sendSubscribeAndWaitForAck(events, pane);
+        try self.sendSubscribeAndWaitForAck(events, seat);
 
         // Joined by deinit, unlike most background threads in this
         // codebase: `state`/`mutex` must outlive the last access this
@@ -3251,8 +3377,8 @@ pub const InputListener = struct {
     /// receiving keystrokes meant for whatever is now on screen.
     /// Fire-and-forget (a notification, no ack); safe to call while the
     /// reader thread is running (nothing else writes this connection).
-    pub fn attachContext(self: *InputListener, context: core.ContextHandle) !void {
-        const body = try codec.notification(self.format, self.alloc, "attach_context", protocol.ContextHandleParams{ .context = context }, .{});
+    pub fn attachContext(self: *InputListener, context: core.ContextHandle, token: *const core.AccessToken) !void {
+        const body = try codec.notification(self.format, self.alloc, "attach_context", protocol.AttachContextParams{ .context = context, .token = token }, .{});
         defer self.alloc.free(body);
         try self.writeBody(body);
     }
@@ -3291,8 +3417,15 @@ pub const InputListener = struct {
     /// could receive keystrokes meant for another program. Folding the two
     /// into one message makes that window impossible rather than merely
     /// small.
-    fn sendSubscribeAndWaitForAck(self: *InputListener, events: []const []const u8, pane: ?core.PaneHandle) !void {
-        const body = try codec.request(self.format, self.alloc, 1, "subscribe", protocol.SubscribeParams{ .events = events, .pane = pane }, .{});
+    fn sendSubscribeAndWaitForAck(self: *InputListener, events: []const []const u8, seat: Seat) !void {
+        const token: ?[]const u8 = if (seat.token) |*t| t else null;
+        const params: protocol.SubscribeParams = .{
+            .events = events,
+            .context = seat.context,
+            .pane = if (seat.context == null) seat.pane else null,
+            .token = token,
+        };
+        const body = try codec.request(self.format, self.alloc, 1, "subscribe", params, .{ .omit_nulls = true });
         defer self.alloc.free(body);
 
         // The connection's first bytes: the preamble rides in front of
@@ -3313,7 +3446,8 @@ pub const InputListener = struct {
             if (n == 0) return error.ConnectionClosed;
             try decoder.feed(self.alloc, read_buf[0..n]);
             if (try decoder.next(self.alloc)) |ack| {
-                self.alloc.free(ack);
+                defer self.alloc.free(ack);
+                try checkRemoteError(self.format, self.alloc, ack);
                 return;
             }
         }

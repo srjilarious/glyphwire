@@ -493,9 +493,10 @@ pub const Ui = struct {
         // layer call on `client` targets it, not the shell's. No window
         // scrollbar: the reader's root holds no scrollback, and the page
         // layer draws its own bars when it has something to scroll.
-        const context = try client.createContext(null, null, 0, false);
+        const grant = try client.createContext(null, null, 0, false);
+        const context = grant.context;
         errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context);
+        try listener.attachContext(context, &grant.token);
         try client.setContextTitle("gw-read");
         if (start.theme) |t| try client.setTheme(&t);
         // Nothing here takes typed text, so there's nowhere for a caret

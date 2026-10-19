@@ -143,8 +143,8 @@ pub const Server = struct {
     pending: std.ArrayList(Pending) = .empty,
 
     /// Binds `<dir>/zoe-<pid>.sock` and starts accepting on it. `dir` is
-    /// `$XDG_RUNTIME_DIR`, or `/tmp` without one, like the host's own
-    /// socket. `error.Unsupported` off Linux.
+    /// `glyphwire.runtime_dir.runtimeDir`, like the host's own socket, and
+    /// the socket is owner-only like the host's. `error.Unsupported` off Linux.
     pub fn start(alloc: std.mem.Allocator, io: std.Io, dir: []const u8, listener: ?*glyphwire.InputListener) !*Server {
         if (builtin.os.tag != .linux) return error.Unsupported;
 
@@ -165,6 +165,7 @@ pub const Server = struct {
         if (linux.errno(linux.bind(listen_fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) != .SUCCESS)
             return error.BindFailed;
         errdefer _ = linux.unlink(path.ptr);
+        if (linux.errno(linux.chmod(path.ptr, 0o600)) != .SUCCESS) return error.BindFailed;
         if (linux.errno(linux.listen(listen_fd, 8)) != .SUCCESS) return error.ListenFailed;
 
         const efd_rc = linux.eventfd(0, linux.EFD.CLOEXEC);

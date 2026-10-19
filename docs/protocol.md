@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.10.0 — pre-1.0 draft.**
+**Version 0.11.0 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -42,11 +42,9 @@ rejecting the message. This is the sole forward-compatibility mechanism in
 
 ### 1.1 Status of this version
 
-The protocol is pre-1.0 and **not yet stable**. Two areas are known to be
-underspecified and are called out where they arise:
+The protocol is pre-1.0 and **not yet stable**. One area is known to be
+underspecified and is called out where it arises:
 
-- **Error responses do not exist on the wire** (section 3.4). A failed
-  request severs the connection.
 - **There is no version negotiation** (section 10). A client can ask
   which host and protocol version it is talking to (`get_version`,
   section 6.18), but nothing adapts to the answer.
@@ -63,12 +61,21 @@ connects.
 | Variable | Set by | Meaning |
 |---|---|---|
 | `GLYPHWIRE_SOCK` | host | Absolute path of the listening socket. **Its presence is the whole discovery protocol.** |
-| `GLYPHWIRE_CTX` | host / shell | Opaque session id. Reserved; no current message consumes it. |
-| `GLYPHWIRE_PANE` | host / multiplexer | The pane handle this process was seated in. A client **SHOULD** pass it as `subscribe`'s `pane` (section 6.18). |
+| `GLYPHWIRE_CTX` | host / shell / embedding program | The context handle this process was started on. A client **SHOULD** send it, with `GLYPHWIRE_TOKEN`, as `attach_context` (or `subscribe`'s `context`) as its first message. |
+| `GLYPHWIRE_TOKEN` | host / shell / embedding program | That context's access token (section 4.2.1): 32 lowercase hex characters. Without it a connection is attached to nothing. |
+| `GLYPHWIRE_PANE` | host / multiplexer | The pane handle this process was seated in. Informational once `GLYPHWIRE_CTX` is set, since a context lives in exactly one pane; a client that has only this (a window manager) **MAY** send it as `attach_pane` or `subscribe`'s `pane`. |
 | `GLYPHWIRE_LAYER` | an embedded shell | The layer this process should draw on: the surface an omitted `layer` resolves to. A client **SHOULD** send it as `attach_layer` immediately after connecting. Unset means the context's root layer. |
 | `GLYPHWIRE_REMOTE` | `gw-agent` | Set inside a remote session. |
 | `GLYPHWIRE_WIRE` | user | `json` or `msgpack`: which encoding (section 2.2) the reference client opens its connections in. Default `msgpack`. Not part of the wire protocol — a host accepts both regardless. |
 | `GLYPHWIRE_CONFIG_DIR` | user | Overrides the config directory. Not part of the wire protocol. |
+
+The socket is the outer wall of a session. A host **MUST** create it
+where only its own user can reach it: in `$XDG_RUNTIME_DIR`, or failing
+that in a directory of its own that is mode `0700` and owned by the user
+(the reference host uses `/tmp/glyphwire-<uid>` and refuses one that
+isn't), and **SHOULD** make the socket itself `0600`. Every other socket a
+session opens (the reference host's `ssh` askpass relay, `gw-agent`'s,
+zoe's) follows the same rule.
 
 A program that does not find `GLYPHWIRE_SOCK` **MUST** fall back to plain
 stdout rather than failing. A program **MUST NOT** partially assume the
@@ -271,30 +278,41 @@ Both conventions are noted per message as `layer?` and `row?`/`col?`.
 
 ### 3.4 Error model
 
-This section describes what an implementation actually does today. It is
-the least finished part of the protocol.
-
-**There are no JSON-RPC error responses.** A host never emits an envelope
-containing an `error` member. Instead:
-
 | Situation | Host behaviour |
 |---|---|
-| A **request** whose handler fails | The host **MUST** close the connection. There is no reply. |
+| A **request** whose handler fails | The host **MUST** answer with an error response (below) and keep the connection open. |
 | A **notification** whose handler fails | The host **MUST** apply nothing, keep the connection open, and log. The client is not told. |
 | A notification failing on a connection subscribed to `"error"` | As above, plus the failure is recorded in a per-connection ring the client drains with `get_errors` (section 6.18). |
-| An unparseable frame body | Treated as a failed message of unknown kind. |
+| An unparseable frame body | Logged and skipped; the connection stays open. Framing is length-prefixed, so one bad body cannot desynchronise the stream. |
 
-Severing on a failed request is a deliberate least-bad choice: a client
-awaiting a response that will never come would otherwise hang forever.
+**Error responses** are JSON-RPC 2.0 error objects, the same shape on both
+encodings (MessagePack drops `jsonrpc`, as every body does):
 
-**Client guidance.** Because a failed request is fatal to the connection, a
-client **SHOULD** validate handles locally, and **SHOULD** prefer the
-notification form for anything speculative. A client that wants visibility
-into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
-`get_errors`.
+```json
+{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"UnknownLayer"}}
+```
 
-**Error codes** are the names in the table below. They appear only as the
-`code` string in a `get_errors` entry — never in an envelope.
+`message` is always the error's **name** from the table below, so a client
+switches on it rather than on prose. `code` classifies it:
+
+| `code` | Meaning |
+|---|---|
+| `-32601` | `UnknownMethod`: the host has no such method |
+| `-32600` | `NotARequest`: a request-only method sent without an `id` |
+| `-32602` | the params didn't decode into the method's shape (a missing field, a wrong type); `message` is the decoder's name for it |
+| `-32603` | the host ran out of memory |
+| `-32000` | the host understood the request and refused it: every name in the table below |
+
+A request sub-message inside a `batch` that fails is still simply absent
+from the batch's `responses` (section 6.19).
+
+**Client guidance.** A failed request costs nothing but its answer, so a
+client **MAY** use requests to probe (does this image handle still exist?).
+A client that wants visibility into its own failed *notifications*
+**SHOULD** `subscribe` to `"error"` and poll `get_errors`.
+
+**Error names** are the names in the table below. They appear as an error
+response's `message` and as the `code` string in a `get_errors` entry.
 
 | Code | Raised by |
 |---|---|
@@ -312,8 +330,9 @@ into its own mistakes **SHOULD** `subscribe` to `"error"` and poll
 | `UnknownLayer` | any `layer` handle that does not exist, **and** the root handle where a non-root one is required |
 | `LayerPermissionDenied` | `destroy_layer` from a non-owner |
 | `UnknownContext`, `RootContextImmutable`, `ContextPermissionDenied`, `NoContextSession` | context messages |
+| `ContextAccessDenied` | any context-scoped message from a connection without access to its current context (section 4.2.1), and `attach_context` / `attach_pane` / `subscribe` with a missing or wrong token |
 | `UnknownPane`, `RootPaneImmutable`, `UnknownPaneSplit`, `InvalidPaneSplitChild`, `PaneSplitChildOutOfRange` | pane messages |
-| `NotWindowManager`, `UnknownRole` | role messages |
+| `NotWindowManager`, `UnknownRole` | role messages, and `report_*` from a connection without the role |
 | `UnknownSplit`, `InvalidSplitAxis`, `InvalidSplitChild`, `SplitChildOutOfRange` | layer-split messages |
 | `UnknownImage`, `UnknownIcon`, `ImageIsIcon`, `InvalidIconOption`, `UnsupportedImageFormat` | image / icon messages |
 | `MissingImageData` | `load_image` / `update_image` on a MessagePack connection without a `data` member |
@@ -386,11 +405,47 @@ and reappear when it exits.
 culled, cannot be destroyed, and sits permanently at the bottom of the
 stack.
 
-**Per-connection current context.** A connection inherits whichever context
-is visible at accept time. Every `layer?`-scoped message resolves against
-the connection's current context. `create_context` and `attach_context`
-change it; it is ambient connection state, not a parameter on every
-message.
+**Per-connection current context.** Every `layer?`-scoped message resolves
+against the connection's current context. `create_context`,
+`attach_context` and `attach_pane` set it; it is ambient connection state,
+not a parameter on every message. A fresh connection is attached to
+nothing (section 4.2.1).
+
+#### 4.2.1 Access
+
+Context handles are small counters anyone can guess, so a handle is not a
+permission. Every context has an **access token**: 16 random bytes as 32
+lowercase hex characters, drawn when the context is made and never
+changed. A connection **has access** to a context when it
+
+- created it (`create_context`) or adopted it (`adopt_context`), or
+- presented its token (`attach_context`, `attach_pane`, `subscribe`), or
+- holds the window-manager role (section 6.15), which arranges every pane
+  and so sees into all of them.
+
+Access is per connection and ends when it closes. It is not ownership: it
+never keeps a context alive and never lets the connection
+`destroy_context` it.
+
+A host **MUST** refuse, with `ContextAccessDenied`, every context-scoped
+message from a connection without access to its current context. The
+messages exempt are the ones that are the way in (`create_context`,
+`attach_context`, `attach_pane`, `subscribe`), check their own target
+(`destroy_context`, `activate_context`, `adopt_context`), or touch no
+context (`sync`, `batch` itself, `get_version`, `get_errors`, the role
+messages, and the window manager's pane messages, which check the role).
+A host **MUST NOT** push any notification to a connection without access
+to its current context.
+
+The host hands a program its token the way it hands it the socket: in
+`GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN` (section 2.1). A shell's children
+inherit them, so a program run from a shell draws inline on the shell's
+context. A program that makes a context gets its token in
+`create_context`'s reply, and passes it on to its own second connection,
+or in the environment of a shell it embeds. The reference host also
+grants a remote session's connections (section 6.16) access to the
+context the session was seated on, so the token never leaves the
+machine.
 
 **Per-connection surface.** Within that context, an omitted `layer`
 resolves to the connection's surface: the root layer, unless the
@@ -649,10 +704,10 @@ Each entry gives the method, its kind, its params and its result.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `create_context` | request | `width?`, `height?`, `scrollback_rows?` = 0, `window_scrollbar?` = true, `title?` | `{context}` |
+| `create_context` | request | `width?`, `height?`, `scrollback_rows?` = 0, `window_scrollbar?` = true, `title?` | `{context, token}` |
 | `destroy_context` | notification | `context` | — |
 | `activate_context` | notification | `context` | — |
-| `attach_context` | notification | `context` | — |
+| `attach_context` | notification | `context`, `token?` | — |
 | `attach_layer` | notification | `layer?` | — |
 | `adopt_context` | notification | `context` | — |
 | `set_context_title` | notification | `title` | — |
@@ -666,7 +721,8 @@ Each entry gives the method, its kind, its params and its result.
 | `set_caret_shape` | notification | `shape?` | — |
 
 `create_context` allocates a context, **shows it immediately**, and
-retargets the issuing connection onto it. `width`/`height` default to the
+retargets the issuing connection onto it. It needs no access to anything,
+and `token` is the new context's (section 4.2.1). `width`/`height` default to the
 visible context's root layer size. `window_scrollbar` is whether the host
 draws its right-edge scrollbar for this context; a TUI whose panes carry
 their own scrollbars passes `false`. In a single-pane window such a
@@ -682,7 +738,11 @@ auto-restore. Ownership-checked. The root context reports
 
 `activate_context` makes a context visible **without** changing what the
 issuing connection draws on. A client backgrounds itself by activating
-context `0` and restores itself by activating its own handle.
+context `0` and restores itself by activating its own handle. A connection
+with access to its current context **MAY** raise any context in its own
+pane, access or not: that is the pane's job control (a shell's `fg`
+raises a context its job made) and reveals nothing. Another pane's
+context needs access.
 
 `set_context_title` names the issuing connection's current context
 (`create_context`'s `title` does the same at creation). Display only: the
@@ -733,8 +793,15 @@ spawned (section 4.2, *Switching between programs*). A host older than
 0.9.0 omits it; read that as false.
 
 `attach_context` retargets the issuing connection onto an existing
-context; ownership is untouched. This is how a paired input listener joins
-the context its drawing connection created.
+context; ownership is untouched. `token` is required unless the
+connection already has access (section 4.2.1); a missing or wrong one is
+`ContextAccessDenied` and leaves the connection where it was. This is how
+a paired input listener joins the context its drawing connection created,
+and what every client sends first from `GLYPHWIRE_CTX` /
+`GLYPHWIRE_TOKEN`.
+
+`adopt_context` needs access first: adopting takes on responsibility for
+a context you were given, it is not a way in.
 
 `attach_layer` declares the connection's surface within that context —
 the layer an omitted `layer` field resolves to. `null`, or the root
@@ -1422,8 +1489,8 @@ not against what was last computed.
 
 ### 6.15 Panes and the window-manager role
 
-Pane messages require the `window_manager` role. A connection without it
-gets `NotWindowManager`.
+Pane messages require the `window_manager` role, except `attach_pane`. A
+connection without it gets `NotWindowManager`.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
@@ -1432,7 +1499,7 @@ gets `NotWindowManager`.
 | `create_pane` | request | `scrollback_rows?` = 0 | `{pane, context}` |
 | `destroy_pane` | notification | `pane` | — |
 | `focus_pane` | notification | `pane` | — |
-| `attach_pane` | notification | `pane` | — |
+| `attach_pane` | notification | `pane`, `token?` | — |
 | `create_pane_split` | request | `axis`, `resizable?` = true | `{split}` |
 | `destroy_pane_split` | notification | `split` | — |
 | `set_pane_split_children` | notification | `split`, `children` | — |
@@ -1458,11 +1525,15 @@ their child shape is `{pane?, split?, weight?, fixed?}` and reports
 `get_pane_split`'s children are `{pane?, split?, weight?, fixed?,
 extent}`.
 
-`attach_pane` binds the issuing connection to a pane — what a program
-spawned into a pane sends first, from `GLYPHWIRE_PANE`.
+`attach_pane` binds the issuing connection to a pane. It needs no role,
+but it needs a `token`: that of one of the pane's contexts, which is the
+context the connection lands on (not whatever happens to be on top of the
+pane). Without a token it lands on the topmost context in the pane the
+connection already has access to, or reports `ContextAccessDenied`. The
+window manager may attach to any pane without one, landing on its top.
 
 `spawn_in_pane` forks a program with the discovery variables set for that
-pane. `argv` **MUST** be non-empty; the first element is resolved through
+pane, `GLYPHWIRE_TOKEN` among them (section 2.1). `argv` **MUST** be non-empty; the first element is resolved through
 `PATH`. A host with no spawner — the headless server — reports
 `SpawnUnsupported`; a failed fork or exec reports `SpawnFailed`.
 
@@ -1522,7 +1593,10 @@ connections and it is the listener that waits.
 ### 6.17 Input reporting
 
 These let a client inject input as though the user produced it — used by
-the host's own in-process path and by test harnesses.
+the host's own in-process path and by test harnesses. Over a socket they
+require the `window_manager` role (`NotWindowManager` otherwise): anyone
+else could type into whichever program has focus. A host's own input never
+crosses the socket.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
@@ -1557,7 +1631,7 @@ the change from the next press, never mid-hold.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `subscribe` | request | `events`, `pane?` | `{subscribed}` |
+| `subscribe` | request | `events`, `context?`, `pane?`, `token?` | `{subscribed}` |
 | `get_cell_metrics` | request | — | `{cell_px_w, cell_px_h}` |
 | `get_errors` | request | — | `{errors, dropped}` |
 | `get_version` | request | — | `{program, version, suite_version, git, protocol}` |
@@ -1570,10 +1644,13 @@ same. A client that works in pixels re-reads `get_cell_metrics` on every
 
 `subscribe` **replaces** the connection's subscription set; it is not
 additive. `events` is an array of stream names (section 7.1). Unknown names
-are ignored. `pane` atomically binds the connection to a pane as it arms
-the fan-out — an unknown pane is ignored rather than failing the
-subscribe, since the pane may have been destroyed between the spawn and
-the connect, and staying in the focused pane beats refusing to subscribe.
+are ignored. `context` (with `token`) atomically attaches the connection
+exactly as `attach_context` would, as it arms the fan-out; `pane` (with
+`token`) does the same as `attach_pane`, and `context` wins when both are
+sent. An unknown pane is ignored rather than failing the subscribe, since
+the pane may have been destroyed between the spawn and the connect, and an
+unattached connection is sent nothing anyway. A refused token fails the
+`subscribe` with `ContextAccessDenied` and arms nothing.
 
 `get_errors` drains the ring described in section 3.4 and returns
 `{errors: [{method, code, seq}], dropped}`. `seq` is a per-connection
@@ -1846,6 +1923,10 @@ client **SHOULD** ignore a name it does not recognise.
 The smallest useful client, in full:
 
 ```
+→ Content-Length: 118
+→
+→ {"jsonrpc":"2.0","method":"attach_context","params":{"context":0,"token":"3f9c…"}}
+
 → Content-Length: 94
 →
 → {"jsonrpc":"2.0","method":"write_text","params":{"text":"hello\n","fg":{"r":0,"g":255,"b":0}}}
@@ -1859,9 +1940,10 @@ The smallest useful client, in full:
 ← {"jsonrpc":"2.0","id":1,"result":{"revision":12}}
 ```
 
-Connect to `$GLYPHWIRE_SOCK`, write text, then issue one request before
-closing so the host is known to have applied it (section 3.2). That is a
-complete, conforming client.
+Connect to `$GLYPHWIRE_SOCK`, attach with `$GLYPHWIRE_CTX` /
+`$GLYPHWIRE_TOKEN` (section 4.2.1), write text, then issue one request
+before closing so the host is known to have applied it (section 3.2).
+That is a complete, conforming client.
 
 A client that also wants input adds:
 
@@ -1891,17 +1973,19 @@ What a client can rely on today:
 - **Unknown params are ignored.** A host **MUST** ignore `params` members
   it does not recognise, so a newer client's extra fields degrade to the
   older behaviour rather than failing.
-- **Unknown methods fail.** There is no soft failure for a method a host
-  does not implement: as a notification it is silently dropped
-  (`UnknownMethod` in the error ring), as a request it severs the
-  connection. A client using a method that might be absent **MUST** send it
-  as a notification, or be prepared to reconnect.
+- **Unknown methods fail softly.** As a notification a method a host does
+  not implement is silently dropped (`UnknownMethod` in the error ring);
+  as a request it is answered with a `-32601` error response (section
+  3.4). A host older than 0.11.0 instead severed the connection on a
+  failed request, so a client that may meet one **SHOULD** probe with a
+  notification.
 - **Nothing else is guaranteed.** Message shapes, handle semantics and
   stream names **MAY** change in any 0.x release.
 
 The practical consequence: a client that wants to probe for a feature
-should `subscribe` to `"error"`, send the message as a notification, and
-check `get_errors` for `UnknownMethod`.
+sends it as a request and checks for a `-32601` error; against a host
+older than 0.11.0 it should `subscribe` to `"error"`, send the message as
+a notification, and check `get_errors` for `UnknownMethod`.
 
 ## 11. Design rationale in brief
 

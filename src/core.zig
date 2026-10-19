@@ -1172,6 +1172,38 @@ pub const root_layer_handle: LayerHandle = 0;
 /// auto-culled.
 pub const ConnId = u64;
 
+/// The secret that lets a connection act on a context it didn't create:
+/// 16 random bytes as 32 lowercase hex characters, so it travels as a
+/// plain string on either wire encoding and in an environment variable
+/// (`GLYPHWIRE_TOKEN`). Every context gets one at `Context.init`. A
+/// context handle is a small counter anyone can guess; the token is what
+/// `attach_context` / `attach_pane` / `subscribe` check before a
+/// connection may read, draw on or take input for a context (see
+/// `Session.grantContext`).
+pub const AccessToken = [32]u8;
+
+/// A fresh `AccessToken` from the kernel's CSPRNG. `getrandom` without
+/// flags blocks only until the pool is first seeded, which has long
+/// happened by the time anything opens a window; a short read is retried.
+pub fn newAccessToken() AccessToken {
+    var raw: [16]u8 = undefined;
+    var filled: usize = 0;
+    while (filled < raw.len) {
+        const rc = std.os.linux.getrandom(raw[filled..].ptr, raw.len - filled, 0);
+        if (std.os.linux.errno(rc) != .SUCCESS) continue;
+        filled += rc;
+    }
+    return std.fmt.bytesToHex(raw, .lower);
+}
+
+/// Whether `given` is `want`, in time independent of where they differ,
+/// so a client probing tokens learns nothing from how fast it is refused.
+/// Anything that isn't exactly `AccessToken`'s length is simply wrong.
+pub fn accessTokenMatches(want: *const AccessToken, given: []const u8) bool {
+    if (given.len != want.len) return false;
+    return std.crypto.timing_safe.eql(AccessToken, want.*, given[0..want.len].*);
+}
+
 pub const LayerError = error{UnknownLayer};
 
 /// Columns between horizontal tab stops for `\t` handling in

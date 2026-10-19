@@ -316,9 +316,10 @@ const Ui = struct {
         // targets this, not the shell's, and it composites over the
         // shell the way `read`/`zoe`'s own contexts do. `destroy_context`
         // restores the shell's context underneath on the way out.
-        const context = try client.createContext(null, null, 0, false);
+        const grant = try client.createContext(null, null, 0, false);
+        const context = grant.context;
         errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context);
+        try listener.attachContext(context, &grant.token);
         try client.setContextTitle("gw-hist");
 
         const size = try client.getSize();

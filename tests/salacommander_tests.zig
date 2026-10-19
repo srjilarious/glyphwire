@@ -1484,7 +1484,7 @@ pub fn shellPanelConfigTest(_: std.Io, alloc: std.mem.Allocator) !void {
 pub fn shellPanelHitTestIsItsRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     const Panel = @import("applib").shellpanel.Panel;
     // `contains` reads only what `place` recorded; no client is touched.
-    var p = Panel.init(alloc, io, undefined, 0, .{ .frame = 0, .shell = 1 });
+    var p = Panel.init(alloc, io, undefined, .{ .context = 0, .token = @splat('0') }, .{ .frame = 0, .shell = 1 }, null);
     p.bounds = .{ .row = 20, .col = 0, .cols = 600, .rows = 8 };
     // Hidden, it covers nothing.
     try testz.expectFalse(p.contains(.{ .row = 22, .col = 5 }));

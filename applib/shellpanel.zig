@@ -232,6 +232,9 @@ pub const Panel = struct {
     /// then gets a flat one-cell border in the shell's own colour.
     frame_patch: ?glyphwire.NinePatchHandle = null,
     context: glyphwire.ContextHandle,
+    /// `context`'s token, handed to the shell in `GLYPHWIRE_TOKEN` so it
+    /// may draw on our context (see `glyphwire.AccessToken`).
+    token: glyphwire.AccessToken,
 
     /// Where the panel sits, and how much of the window it takes when
     /// floating. See `setPosition`.
@@ -240,9 +243,10 @@ pub const Panel = struct {
 
     /// The running shell, once Ctrl+` has started one.
     child: ?std.process.Child = null,
-    /// The environment the shell starts with, when the host program has
-    /// something to add to its own (zoe's `ZOE_SOCK`). Null inherits this
-    /// process's. Borrowed.
+    /// The environment the shell starts with: the host program's own,
+    /// plus whatever it adds (zoe's `ZOE_SOCK`). `start` lays the panel's
+    /// `GLYPHWIRE_CTX` / `GLYPHWIRE_TOKEN` over a copy, which is why it
+    /// can't just be inherited. Borrowed; null starts no shell.
     environ_map: ?*const std.process.Environ.Map = null,
     /// Write end of the control pipe. Closed when the panel is torn down,
     /// which is what tells the shell to leave.
@@ -273,14 +277,17 @@ pub const Panel = struct {
         alloc: std.mem.Allocator,
         io: std.Io,
         client: *glyphwire.Client,
-        context: glyphwire.ContextHandle,
+        grant: glyphwire.ContextGrant,
         layers: Layers,
+        environ_map: ?*const std.process.Environ.Map,
     ) Panel {
         return .{
             .alloc = alloc,
             .io = io,
             .client = client,
-            .context = context,
+            .context = grant.context,
+            .token = grant.token,
+            .environ_map = environ_map,
             .layer = layers.shell,
             .frame_layer = layers.frame,
         };
@@ -554,10 +561,20 @@ pub const Panel = struct {
         var arg_buf: [96]u8 = undefined;
         const embed_arg = try std.fmt.bufPrint(&arg_buf, "{d},{d},{d}", .{ self.context, self.layer, fds[0] });
 
+        // The shell draws on our context, so it is seated there: these
+        // replace the ones this program was itself started with, which
+        // name the context underneath us.
+        const base_env = self.environ_map orelse return error.NoEnvironment;
+        var env = try base_env.clone(self.alloc);
+        defer env.deinit();
+        var ctx_buf: [24]u8 = undefined;
+        try env.put("GLYPHWIRE_CTX", try std.fmt.bufPrint(&ctx_buf, "{d}", .{self.context}));
+        try env.put("GLYPHWIRE_TOKEN", &self.token);
+
         const child = std.process.spawn(self.io, .{
             .argv = &.{ "gw-shell", "--embed", embed_arg },
             .cwd = .{ .path = cwd },
-            .environ_map = self.environ_map,
+            .environ_map = &env,
             // The panel's output goes on the wire, not down a pipe; what
             // the shell itself logs would land on the screen underneath
             // us, so it goes nowhere.

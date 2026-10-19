@@ -59,13 +59,48 @@ The **root context** (handle `0`, `core.root_context_handle`) is the one
 the server starts with — the shell's. It's never culled, can't be
 destroyed, and sits permanently at the bottom of the visibility stack.
 
-A connection **inherits** whichever context is visible when it's
-accepted, and every `layer?`-scoped message it sends resolves against
-its *current* context. `create_context` and `attach_context` change
-which context that is (per-connection ambient state, not a param on
-every message). `GLYPHWIRE_CTX` is set by the host/shell but nothing
-parses it yet — inherit-the-visible + `attach_context` is the discovery
-path for now.
+Every `layer?`-scoped message a connection sends resolves against its
+*current* context. `create_context`, `attach_context` and `attach_pane`
+set which context that is (per-connection ambient state, not a param on
+every message). A fresh connection is attached to **nothing**: it can't
+draw on, read, or be sent events for any context until it presents a
+token or makes a context of its own (see **Context access** below).
+Every client library attaches as its first message from `GLYPHWIRE_CTX`
++ `GLYPHWIRE_TOKEN`, which glyphwire-host sets for its shell and every
+program it starts in a pane, and a shell's children inherit.
+
+### Context access
+
+Context handles are small counters, so a handle is not a permission.
+Each context carries a random **access token** (`core.AccessToken`, 32
+hex characters, drawn at creation, never changed). A connection may act
+on a context when it **owns** it (created or adopted it), **presented its
+token** (`attach_context`, `attach_pane`, `subscribe`), or holds the
+**window-manager role**. Everything context-scoped from a connection that
+can't act on its current context reports `ContextAccessDenied`, and such a
+connection is pushed no events at all. Access is per connection, ends
+with it, and is not ownership (it never keeps a context alive or lets you
+`destroy_context` it). The exempt messages are the way in
+(`create_context`, `attach_context`, `attach_pane`, `subscribe`), ones
+that check their own target (`destroy_context`, `activate_context`,
+`adopt_context`), and ones that touch no context (`sync`, `batch` itself,
+`get_version`, `get_errors`, the role messages, the window manager's pane
+messages).
+
+Who hands out tokens: the host, in `GLYPHWIRE_TOKEN` (its shell gets the
+root context's, a `spawn_in_pane` child its pane's, a switcher-spawned
+shell its own context's); `create_context`'s reply, which a program
+passes to its `InputListener` and to a `gw-shell --embed` panel's
+environment; and a standalone `gw-shell`, which picks the root token for
+the headless `glyphwire-server` it starts. A remote session's connections
+(`start_remote` / `--ssh`) are granted the context the session was
+seated on by the host itself, so the token never goes to the remote
+machine.
+
+The socket is the outer wall: it lives in `$XDG_RUNTIME_DIR`, or a `0700`
+`/tmp/glyphwire-<uid>` the host makes (and refuses if it is anyone else's
+or open to others), and is `0600` itself (`glyphwire.runtime_dir`). The
+askpass, `gw-agent` and zoe sockets follow the same rule.
 
 Within that context, an omitted `layer` means the connection's
 **surface**: the root layer, unless it sent `attach_layer` (below). That
@@ -79,13 +114,13 @@ omitted still means root.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| *(inherit)* | — | — | — | ✅ a new connection acts on whatever context is visible at accept time |
-| `create_context` | request | `width?, height?, scrollback_rows?, window_scrollbar?, title?` | `{context}` (handle) | ✅ allocates a fresh context (its root layer defaults to the visible context's size), **shows it immediately**, and retargets the issuing connection onto it — later `layer?`-scoped messages from this connection now draw on the new context, not the shell's. The connection becomes its first **owner**: the context (and everything in it) is culled once every owning connection disconnects, so a full-screen program that dies without `destroy_context` doesn't leave its surface stuck on screen. Icons/images resolve through the root context's catalog, so `draw_icon` names the host registered still work. `window_scrollbar` (default `true`) is whether glyphwire-host draws its always-on right-edge scrollbar for this context — a pure-TUI client whose panes carry their own `scrollbars` passes `false` so the window doesn't show a permanently full, inert bar. With one pane filling the window, such a context also reclaims the bar's gutter, so showing or hiding it emits a `resize` (about one column). Under a pane tree (`set_root_pane_split`) the gutter is always reserved and the flag decides only whether the bar is *painted*, so a context switch or focus move in one pane emits no `resize` and can't reflow the contexts in the other panes. Toggle it later with `set_window_scrollbar` |
+| *(fresh connection)* | — | — | — | ✅ attached to nothing until it presents a token or creates a context (see Context access) |
+| `create_context` | request | `width?, height?, scrollback_rows?, window_scrollbar?, title?` | `{context, token}` | ✅ `token` is the new context's access token: hand it to your `InputListener` (`attach_context`) and to anything you start that should draw there (`GLYPHWIRE_TOKEN`). `Client.createContext` returns both as a `ContextGrant`. Needs no prior access. Allocates a fresh context (its root layer defaults to the visible context's size), **shows it immediately**, and retargets the issuing connection onto it — later `layer?`-scoped messages from this connection now draw on the new context, not the shell's. The connection becomes its first **owner**: the context (and everything in it) is culled once every owning connection disconnects, so a full-screen program that dies without `destroy_context` doesn't leave its surface stuck on screen. Icons/images resolve through the root context's catalog, so `draw_icon` names the host registered still work. `window_scrollbar` (default `true`) is whether glyphwire-host draws its always-on right-edge scrollbar for this context — a pure-TUI client whose panes carry their own `scrollbars` passes `false` so the window doesn't show a permanently full, inert bar. With one pane filling the window, such a context also reclaims the bar's gutter, so showing or hiding it emits a `resize` (about one column). Under a pane tree (`set_root_pane_split`) the gutter is always reserved and the flag decides only whether the bar is *painted*, so a context switch or focus move in one pane emits no `resize` and can't reflow the contexts in the other panes. Toggle it later with `set_window_scrollbar` |
 | `destroy_context` | notification | `context` | — | ✅ frees a context and every layer/split/table/image in it; if it was visible, visibility pops to whatever context was under it (the alt-screen auto-restore). **Ownership-checked** like `destroy_layer`: honored only from a connection that owns the context (created it, or `adopt_context`'d it) — a non-owner's call reports `ContextPermissionDenied` and nothing is touched. The root context reports `RootContextImmutable`; an unknown handle `UnknownContext`. An in-process caller bypasses the check |
-| `activate_context` | notification | `context` | — | ✅ makes `context` the visible one **without** changing which context the issuing connection draws on — a client backgrounds itself by activating the root context (handle `0`) and restores itself by activating its own handle again. Moves the handle to the top of the visibility stack (it's there once, wherever it was). `UnknownContext` for an unknown handle; a no-op if it's already visible |
-| `attach_context` | notification | `context` | — | ✅ retargets the issuing connection onto an *existing* context (`create_context` does this for a new one) — every later `layer?`-scoped message resolves against it, and, for a subscribed connection, the raw input streams it receives now follow that context's visibility. The primitive a paired `InputListener` uses to join the context its `Client` created. Ownership is untouched (attaching isn't adopting). `UnknownContext` for an unknown handle |
+| `activate_context` | notification | `context` | — | ✅ any context in this connection's own pane (job control: a shell's `fg` raises its job's context), or one it has access to; another pane's without access is `ContextAccessDenied`. Makes `context` the visible one **without** changing which context the issuing connection draws on — a client backgrounds itself by activating the root context (handle `0`) and restores itself by activating its own handle again. Moves the handle to the top of the visibility stack (it's there once, wherever it was). `UnknownContext` for an unknown handle; a no-op if it's already visible |
+| `attach_context` | notification | `context, token?` | — | ✅ `token` is required unless this connection already has access to `context` (or is the window manager); a missing or wrong one is `ContextAccessDenied` and moves nothing. Retargets the issuing connection onto an *existing* context (`create_context` does this for a new one) — every later `layer?`-scoped message resolves against it, and, for a subscribed connection, the raw input streams it receives now follow that context's visibility. The primitive a paired `InputListener` uses to join the context its `Client` created. Ownership is untouched (attaching isn't adopting). `UnknownContext` for an unknown handle |
 | `attach_layer` | notification | `layer?` | — | ✅ declares the issuing connection's **surface**: the layer every later message that omits `layer` resolves to, in place of the context's root. `null` (or the root handle) restores root. Needs no role — like `attach_pane`, saying where you live is not a privilege — and is untouched by ownership: attaching is not adopting, and the layer's creator is still the one who may destroy it. Changing context (`create_context` / `attach_context`) clears it, since a layer handle only means anything inside the context that owns it, and a surface whose layer is destroyed falls back to root rather than failing every later message. `UnknownLayer` for a handle this context doesn't have. What `gw-shell --embed` passes its children as `GLYPHWIRE_LAYER`, so an unmodified client draws into the panel it was launched from |
-| `adopt_context` | notification | `context` | — | ✅ adds the issuing connection to `context`'s owner set, so it outlives its original creator disconnecting as long as this connection stays up (and this connection may then `destroy_context` it). The context-level mirror of `adopt_layer`. `UnknownContext` for an unknown or root handle |
+| `adopt_context` | notification | `context` | — | ✅ needs access first (`ContextAccessDenied` otherwise): adopting takes on a context you were given, it is not a way in. Adds the issuing connection to `context`'s owner set, so it outlives its original creator disconnecting as long as this connection stays up (and this connection may then `destroy_context` it). The context-level mirror of `adopt_layer`. `UnknownContext` for an unknown or root handle |
 | `set_context_title` | notification | `title` | — | ✅ names the issuing connection's active context (`core.Context.title`) — what glyphwire-host's context switcher (Super+F12) lists and `gw-shell`'s `jobs` prints. `create_context`'s `title` sets it at creation. Needs no ownership, so a shell can name the context it inherited. Capped at 128 bytes, cut on a UTF-8 boundary. Every full-screen client sends it right after `create_context`: `salacommander`, `gw-read`, `gwmd`, `gw-view`, `gw-hist`. glyphwire-host shows the focused pane's on-screen context title as the OS window title, `Glyphwire - <title>` (`host/window_title.zig`), so three programs keep it current: `gw-shell` (`gw-shell <cwd>` at the prompt, the command line as typed while one runs, e.g. `sudo htop -d 5`; never when `--embed`ded, since that context belongs to the host program), `zoe` (`zoe <focused buffer's file>`, or its cwd for an unnamed buffer) and `salacommander` (`salacommander <active pane's dir>`), each sending only when the text changed |
 | `set_theme` | notification | `name?, theme?` | — | ✅ gives the issuing connection's active context its **own theme** (`core.Context.theme`, `theme_own`): every slot and role reference in its cells resolves against it from then on, and a window-theme change passes it by. `name` picks a built-in (`UnknownTheme` otherwise); `theme` is a whole theme the client resolved itself — `{name?, dark?, panel_style?, slots?: [color×24], roles?: {name: color}}`, laid over `default`, a slot being a fixed colour (a reference is `InvalidColor`) and a role any of the three colour forms (see Theme below). Neither: back to the window theme. No ownership needed, like a title. What `zoe`, salacommander, gw-read and gw-shell send when their own config names a `theme`, and zoe's `:theme` |
 | `set_divider_style` | notification | `style?, chars?` | — | ✅ how glyphwire-host draws the bands of the issuing connection's active context's **own** split tree (`core.Context.divider_style`). By default those follow `host.conf.lua`'s `pane_divider_style` / `pane_divider_chars`, the same as the bands between panes; this overrides them for this context alone and never touches the pane bands. `style` is a preset: `"single"`, `"heavy"`, `"double"` or `"block"` (`UnknownDividerStyle` otherwise). `chars` is `{h?, v?, cross?, t_down?, t_up?, t_left?, t_right?, tl?, tr?, bl?, br?}`, each exactly one cell wide (`InvalidDividerChar` otherwise), laid over the preset, or over the host's style when `style` is absent; over `block` the rest come from `single`. Replaces any earlier override wholesale, and neither param goes back to the host's style. A bad value leaves the setting unchanged. Glyph bands are drawn in the context theme's `divider` role on its `bg`, with junctions where bands meet; `block` is a solid band in `divider`. No ownership needed, like a theme. What `zoe` and salacommander send when their own config sets `divider_style` / `divider_chars` |
@@ -313,7 +348,7 @@ around itself.
 |---|---|---|---|---|
 | `request_role` | request | `role` (`"window_manager"`), `token?` | `{granted, token?}` | ✅ answers `granted: false` rather than failing when another program holds it, so a second multiplexer can say so cleanly instead of dying on a wire error. An unknown role reports `UnknownRole`. The returned `token` is what this program's *other* connection presents to `join_role` — a manager is two connections (a `Client` that issues these calls and an `InputListener` that receives window commands) and both need the role |
 | `join_role` | notification | `role`, `token` | — | ✅ joins a role this program's other connection already holds. A notification because the joining connection is a subscribed listener with a reader thread running, so it has nowhere to read a response — the same reason `attach_context` is one. A wrong token simply grants nothing |
-| `attach_pane` | notification | `pane` | — | ✅ binds this connection to a pane, and to whatever context is on screen there. Needs **no** role: declaring where you live is not a privilege. Sent automatically at connect time from `GLYPHWIRE_PANE`, so a program seated in a pane needs no pane-aware code of its own. A subscribing connection folds this into `subscribe`'s `pane` instead (see Input) |
+| `attach_pane` | notification | `pane, token?` | — | ✅ needs `token`, that of one of the pane's contexts, and lands on that context; without one it lands on the topmost context there this connection already has access to, or reports `ContextAccessDenied`. The window manager needs no token and lands on the pane's top. Needs **no** role: the token is what lets a program in. Client libraries send it at connect time only when `GLYPHWIRE_PANE` is set and `GLYPHWIRE_CTX` isn't (a manager); every program the host starts attaches to its context instead. A subscribing connection folds this into `subscribe`'s `pane` instead (see Input) |
 | `create_pane` | request | `scrollback_rows?` | `{pane, context}` | ✅ a pane plus the base context it displays. The pane is **not on screen** until it is placed in the tree, which keeps creation and placement separately undoable. Its base context can never be destroyed while the pane lives |
 | `destroy_pane` | notification | `pane` | — | ✅ stops the program in the pane, then frees the pane and every context in it. The program is stopped first, so it can't draw onto a context about to be freed under it. The root pane reports `RootPaneImmutable` |
 | `focus_pane` | notification | `pane` | — | ✅ which pane raw input goes to. An unmapped pane (one not currently placed in the tree) reports `UnknownPane` rather than swallowing every keystroke into something invisible |
@@ -1051,13 +1086,24 @@ band at a time. See decisions.md's Batch section for the reasoning.
 
 ## Error reporting
 
-A notification that fails in its handler is otherwise invisible to its
-sender — there's no response, and (unlike a failed request) the
-connection isn't severed; the server just logs it. A connection that
+A **request** that fails is answered with a JSON-RPC error response, on
+either encoding, and the connection carries on:
+`{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"UnknownLayer"}}`
+(MessagePack drops `jsonrpc`). `message` is the error's name — a
+`DispatchError` such as `ContextAccessDenied`, or the param decoder's
+(`MissingField`) — and `code` is `-32601` for an unknown method, `-32600`
+for a request-only method sent without an `id`, `-32602` for params that
+didn't decode, `-32603` for out of memory and `-32000` for everything the
+host understood and refused (`dispatch.errorCode`). The Zig `Client`
+returns `error.RemoteError` and keeps the detail in
+`glyphwire.client.lastRemoteError()` (`code`, `name()`), per thread.
+A failed request sub-message inside a `batch` is still just absent from
+`responses`.
+
+A **notification** that fails in its handler is invisible to its sender —
+there's no response to put it in; the server logs it. A connection that
 wants to know can **subscribe to `"error"`** and pull the failures it
-caused with `get_errors`. No JSON-RPC error *responses* exist yet
-(roadmap Milestone 0) — this is the interim visibility path. See
-decisions.md's Error reporting section.
+caused with `get_errors`.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
@@ -1094,8 +1140,8 @@ queue, and the `size()`/`scroll()`/`visibleContext()` caches are unchanged.
 
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
-| `subscribe` | request | `events: []str` (e.g. `["key", "text", "mouse_button", "scroll"]`), `pane?` | acked subscription list | ✅ `pane` binds this connection to a pane at the same time, exactly as `attach_pane` would. Folded in rather than sent separately because `subscribe` is what arms the broadcast fan-out: a connection subscribed but not yet bound would, until the binding landed, be gated against the wrong pane and could receive another program's keystrokes. One message makes that window impossible rather than merely small. An unknown pane is ignored rather than failing the subscribe |
-| `report_key` | notification, client→server | `key, pressed` | — | ✅ from whatever process captures input (`glyphwire-host`); see also `Server.reportKey`/`reportKeyRepeat` for a caller reporting in-process rather than over the wire. Deduped against the session's window-wide down-set (a press while already down, or a release while up, is not broadcast), which is why that set is not per-context: a release that arrives after focus moved to another program's context still clears the press it pairs with |
+| `subscribe` | request | `events: []str` (e.g. `["key", "text", "mouse_button", "scroll"]`), `context?`, `pane?`, `token?` | acked subscription list | ✅ `context` (+ `token`) attaches exactly as `attach_context` would, and wins over `pane`; a refused token fails the subscribe with `ContextAccessDenied` and arms nothing. `pane` binds this connection to a pane at the same time, exactly as `attach_pane` would. Folded in rather than sent separately because `subscribe` is what arms the broadcast fan-out: a connection subscribed but not yet bound would, until the binding landed, be gated against the wrong pane and could receive another program's keystrokes. One message makes that window impossible rather than merely small. An unknown pane is ignored rather than failing the subscribe |
+| `report_key` | notification, client→server | `key, pressed` | — | ✅ **window manager only** over a socket (`NotWindowManager` otherwise), like every `report_*`: anyone else could type into whatever has focus. From whatever process captures input (`glyphwire-host`); see also `Server.reportKey`/`reportKeyRepeat` for a caller reporting in-process rather than over the wire. Deduped against the session's window-wide down-set (a press while already down, or a release while up, is not broadcast), which is why that set is not per-context: a release that arrives after focus moved to another program's context still clears the press it pairs with |
 | `report_text` | notification, client→server | `text` (UTF-8 string, ≥1 codepoint) | — | ✅ committed text input, already resolved through the OS keyboard layout / dead keys / IME — the only correct source for a non-US layout, an AltGr combo or CJK. Fanned straight out as `text`; touches no down-set. In-process path: `Server.reportText`. Empty string is dropped |
 | `report_mouse_button` | notification, client→server | `button, pressed, px, cell, view_offset?, clicks?` | — | ✅ `view_offset` (default 0) is the root layer's scrollback view offset at click time, carried into the `mouse_button` broadcast so a subscriber can resolve `cell` against the right scrolled-back row (see `get_metadata`). `clicks` (default 1) is the press's click count, passed through unchanged |
 | `report_mouse_move` | notification, client→server | `px, cell` | — | ✅ updates `get_input_state`'s cursor fields every call; also fans out a `mouse_move` broadcast, but only when `cell` changed (per-pixel motion within one cell is dropped). In-process path: `Server.reportMouseMove` |

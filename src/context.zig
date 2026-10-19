@@ -363,6 +363,17 @@ pub const Context = struct {
     /// context, which has no lifecycle.
     owners: std.AutoHashMap(ConnId, void),
     connection_owned: bool = false,
+    /// The secret a connection presents to act on this context without
+    /// owning it (see `core.AccessToken`). Drawn fresh in `init` and never
+    /// changed. Handed out by `create_context`'s reply and, for a context
+    /// a program is launched into, in its `GLYPHWIRE_TOKEN`.
+    token: core.AccessToken,
+    /// The connections that presented `token` (`Session.grantContext`):
+    /// they may read, draw on and take input for this context like an
+    /// owner, but holding access is not owning it -- it never keeps the
+    /// context alive and never lets them `destroy_context` it. Dropped
+    /// per connection when it disconnects (`Session.reapConnection`).
+    members: std.AutoHashMap(ConnId, void),
     /// Made by glyphwire-host for a shell its context switcher spawned
     /// (`Server.createShellContext`). Like a base context it belongs to a
     /// shell rather than to a program that shell is waiting on, which is
@@ -434,11 +445,14 @@ pub const Context = struct {
             .nine_patch_styles = std.StringHashMap(NinePatchStyle).init(alloc),
             .metadata = std.AutoHashMap(MetadataHandle, Metadata).init(alloc),
             .owners = std.AutoHashMap(ConnId, void).init(alloc),
+            .token = core.newAccessToken(),
+            .members = std.AutoHashMap(ConnId, void).init(alloc),
         };
     }
 
     pub fn deinit(self: *Context) void {
         self.owners.deinit();
+        self.members.deinit();
         self.root.deinit();
         var layer_it = self.layers.valueIterator();
         while (layer_it.next()) |l| l.deinit();

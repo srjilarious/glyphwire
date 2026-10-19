@@ -443,7 +443,11 @@ fn runUi(
     // The socket `zoe <file>` in the shell panel opens files in this zoe
     // through, its path put where the panel's shell will inherit it.
     // Best-effort: without it, a `zoe` typed there just starts another.
-    const server: ?*remote.Server = remote.Server.start(alloc, io, environ.get("XDG_RUNTIME_DIR") orelse "/tmp", conn.listener) catch null;
+    const server: ?*remote.Server = blk: {
+        const dir = glyphwire.runtime_dir.runtimeDir(alloc, environ) catch break :blk null;
+        defer alloc.free(dir);
+        break :blk remote.Server.start(alloc, io, dir, conn.listener) catch null;
+    };
     defer if (server) |srv| srv.stop();
     if (server) |srv| try environ.put(remote.env_var, srv.path);
 
