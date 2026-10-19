@@ -67,6 +67,9 @@ pub const Host = struct {
         open: *const fn (ctx: *anyopaque, path: []const u8) anyerror!void,
         /// Puts `text` in the statusline.
         message: *const fn (ctx: *anyopaque, text: []const u8) void,
+        /// Whether the buffer showing `path` (absolute) has unsaved
+        /// edits, or null when no buffer shows it.
+        modified: *const fn (ctx: *anyopaque, path: []const u8) ?bool,
     };
 };
 
@@ -527,6 +530,7 @@ const api = [_]ziglua.FnReg{
     .{ .name = "message", .func = entry(apiMessage) },
     .{ .name = "expand", .func = entry(apiExpand) },
     .{ .name = "exists", .func = entry(apiExists) },
+    .{ .name = "modified", .func = entry(apiModified) },
     .{ .name = "mkdir", .func = entry(apiMkdir) },
     .{ .name = "list_dir", .func = entry(apiListDir) },
 };
@@ -713,6 +717,19 @@ fn apiExists(lua: *Lua) Raise!i32 {
         return 1;
     };
     lua.pushBoolean(true);
+    return 1;
+}
+
+/// `zoe.modified(path)`: whether the buffer showing `path` (`~`
+/// expanded, made absolute) has unsaved edits; nil when none shows it.
+fn apiModified(lua: *Lua) Raise!i32 {
+    const rt = runtimeOf(lua);
+    const path = try str(lua, 1, "modified");
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const expanded = homepath.expandHome(path, rt.home, &home_buf);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const full = homepath.absoluteBuf(rt.io, expanded, &abs_buf) orelse expanded;
+    if (rt.host.vtable.modified(rt.host.ctx, full)) |dirty| lua.pushBoolean(dirty) else lua.pushNil();
     return 1;
 }
 

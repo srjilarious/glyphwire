@@ -108,6 +108,7 @@ many lines it touched.
 | `zoe.message(text)` | Shows `text` in the statusline. |
 | `zoe.expand(path)` | Returns `path` with a leading `~` expanded to `$HOME`. |
 | `zoe.exists(path)` | Returns true when anything exists at `path`. |
+| `zoe.modified(path)` | Returns true when a buffer shows `path` with unsaved edits, false when one shows it saved, and nil when none does. `~` is expanded. Check it before writing to a file zoe may have open: a saved buffer reloads when its file changes on disk, a modified one only warns. |
 | `zoe.mkdir(path)` | Creates `path` and any missing parents. Returns `true`, or `nil, err`. |
 | `zoe.list_dir(path)` | Returns a sorted list of the names in directory `path` (files and directories, without `.` and `..`), or `nil, err`. |
 

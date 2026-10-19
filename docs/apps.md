@@ -120,7 +120,9 @@ A modal text editor: vim's grammar with VS Code's keys alongside it.
 - Lua extensions add commands to the palette and the key tables
   ([zoe-extensions.md](zoe-extensions.md)). The bundled `task_journal`
   keeps a todo list and dated journal in Markdown, compatible with the
-  Task Journal VS Code extension.
+  Task Journal VS Code extension. A new entry carries forward the last
+  one's unfinished tasks and its tracking section, and a monthly backlog
+  does the same from the month before.
 - Draws in the window's theme, or its own, switched live with `:theme`.
 
 ## gmux

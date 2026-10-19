@@ -4715,6 +4715,7 @@ pub const Ui = struct {
         .editor = extEditor,
         .open = extOpen,
         .message = extMessage,
+        .modified = extModified,
     };
 
     fn extEditor(ctx: *anyopaque) ?*Editor {
@@ -4735,6 +4736,21 @@ pub const Ui = struct {
         const self: *Ui = @ptrCast(@alignCast(ctx));
         self.buf.ed.setStatus("{s}", .{text});
         self.status_dirty = true;
+    }
+
+    fn extModified(ctx: *anyopaque, path: []const u8) ?bool {
+        const self: *Ui = @ptrCast(@alignCast(ctx));
+        // Compared as absolute paths: a buffer opened with `:e` may hold
+        // its path relative to the cwd.
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                const p = slot.ed.path orelse continue;
+                var buf: [std.fs.max_path_bytes]u8 = undefined;
+                const full = homepath.absoluteBuf(self.io, p, &buf) orelse p;
+                if (std.mem.eql(u8, full, path)) return slot.ed.buf.dirty;
+            }
+        }
+        return null;
     }
 
     // ── Buffers ─────────────────────────────────────────────────────────

@@ -20,6 +20,14 @@
 --               tags            = {},
 --               -- The VS Code extension's chords (ctrl+meta+alt there).
 --               default_keys    = true,
+--               -- Carry unfinished work into a new entry or backlog.
+--               carry_forward   = true,
+--               -- "move" takes it out of the old file, "copy" leaves it.
+--               carry_mode      = "move",
+--               -- The line that opens and closes the tracking section.
+--               tracking_marker = "#-------",
+--               -- $yyyy, $mm
+--               backlog_template = "# Backlog $yyyy/$mm\n",
 --           },
 --       },
 --   }
@@ -28,10 +36,20 @@
 --   journalToday, journalTomorrow  open (creating) that day's entry
 --   journalPrevious, journalNext   step through the entries, wrapping;
 --                                  from outside the journal, the latest
+--   journalBacklog                 open (creating) this month's backlog,
+--                                  <data_directory>/backlog/YYYY-MM.md
 --   taskIncrease, taskDecrease     step the cursor line's progress state,
 --                                  making it a task first if it isn't one
 --   taskToggle                     done <-> not started
 --   taskTag0 .. taskTag9           toggle tags[1] .. tags[10] on the line
+--
+-- Carrying forward: a new entry for today or later starts with what the
+-- latest earlier entry left open, and a new month's backlog with what the
+-- latest earlier backlog left open. That is the tracking section (from
+-- one `tracking_marker` line to the next, whatever is in it) and every
+-- top-level task not in the last progress state, with the more indented
+-- lines under it. "move" rewrites the old file without them, so it
+-- refuses while that file has unsaved edits in zoe.
 --
 -- docs/zoe-extensions.md describes the `zoe` API this is written against.
 
@@ -54,6 +72,15 @@ local tag_pattern = opt("tag_pattern", "($) ", "string")
 local tag_separator = opt("tag_separator", ", ", "string")
 local tags = opt("tags", {}, "table")
 local default_keys = opt("default_keys", true, "boolean")
+local carry_forward = opt("carry_forward", true, "boolean")
+local carry_mode = opt("carry_mode", "move", "string")
+local tracking_marker = opt("tracking_marker", "#-------", "string")
+local backlog_template = opt("backlog_template", "# Backlog $yyyy/$mm\n", "string")
+
+if carry_mode ~= "move" and carry_mode ~= "copy" then
+    error('task_journal.carry_mode must be "move" or "copy"', 0)
+end
+if tracking_marker:match("^%s*$") then error("task_journal.tracking_marker is empty", 0) end
 
 if #states == 0 then error("task_journal.progress_states is empty", 0) end
 
@@ -220,18 +247,130 @@ local function header(t)
     return replace_all(s, "$date", yyyy .. "/" .. mm .. "/" .. dd)
 end
 
--- Opens the entry for the day `t` falls on, writing its header first
--- when it is new.
-local function open_entry(t)
-    local dir = journal_dir()
+---- Carrying forward ---------------------------------------------------
+
+local function read_lines(path)
+    local f, err = io.open(path, "r")
+    if not f then error(err, 0) end
+    local text = f:read("a")
+    f:close()
+    local lines = {}
+    for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+    -- A file ending in a newline leaves one empty piece after it.
+    if lines[#lines] == "" then lines[#lines] = nil end
+    return lines
+end
+
+local function write_file(path, text)
+    local f, err = io.open(path, "w")
+    if not f then error(err, 0) end
+    f:write(text)
+    f:close()
+end
+
+local function is_marker(line)
+    return trim(line) == trim(tracking_marker)
+end
+
+-- What `lines` leaves open: the tracking section's lines (markers
+-- included) and the unfinished top-level tasks' lines, each with the more
+-- indented lines under it. `taken[n]` is true for every line either one
+-- holds. A tracking section without its closing marker isn't one.
+local function open_items(lines)
+    local tracking, tasks, taken = {}, {}, {}
+    local n = 1
+    while n <= #lines do
+        local line = lines[n]
+        if #tracking == 0 and is_marker(line) then
+            local close
+            for m = n + 1, #lines do
+                if is_marker(lines[m]) then
+                    close = m
+                    break
+                end
+            end
+            if close then
+                for m = n, close do
+                    tracking[#tracking + 1] = lines[m]
+                    taken[m] = true
+                end
+                n = close + 1
+                goto continue
+            end
+        end
+        do
+            local t = parse_task(line)
+            if t.valid and t.indent == "" and t.current ~= #states then
+                tasks[#tasks + 1] = line
+                taken[n] = true
+                while n + 1 <= #lines and lines[n + 1]:match("^%s+%S") do
+                    n = n + 1
+                    tasks[#tasks + 1] = lines[n]
+                    taken[n] = true
+                end
+            end
+        end
+        n = n + 1
+        ::continue::
+    end
+    return tracking, tasks, taken
+end
+
+-- The newest file in `dir` whose name matches `pattern` and sorts before
+-- `name`, as a full path, or nil.
+local function latest_before(dir, pattern, name)
+    local found
+    for _, f in ipairs(zoe.list_dir(dir) or {}) do
+        if f:match(pattern) and f < name then found = f end
+    end
+    return found and (dir .. "/" .. found)
+end
+
+-- `head` followed by what `source` leaves open: tracking section first,
+-- then the tasks. In "move" mode `source` is rewritten without them.
+local function carried(head, source)
+    if not carry_forward or not source then return head end
+    if carry_mode == "move" and zoe.modified(source) then
+        error(("%s has unsaved changes; save it first"):format(source:match("[^/]+$")), 0)
+    end
+    local lines = read_lines(source)
+    local tracking, tasks, taken = open_items(lines)
+    if #tracking == 0 and #tasks == 0 then return head end
+
+    if carry_mode == "move" then
+        local kept = {}
+        for n, line in ipairs(lines) do
+            if not taken[n] then kept[#kept + 1] = line end
+        end
+        write_file(source, #kept > 0 and table.concat(kept, "\n") .. "\n" or "")
+    end
+
+    local parts = {}
+    if #tracking > 0 then parts[#parts + 1] = table.concat(tracking, "\n") end
+    if #tasks > 0 then parts[#parts + 1] = table.concat(tasks, "\n") end
+    if head ~= "" and head:sub(-1) ~= "\n" then head = head .. "\n" end
+    return head .. "\n" .. table.concat(parts, "\n\n") .. "\n"
+end
+
+local function ensure_dir(dir)
     local ok, err = zoe.mkdir(dir)
     if not ok then error(("can't create %s (%s)"):format(dir, err), 0) end
-    local path = dir .. "/" .. os.date("%Y-%m-%d", t) .. ".md"
+end
+
+-- Opens the entry for the day `t` falls on, writing it first when it is
+-- new. One for today or later starts with what the entry before it left
+-- open; a past day's never takes from an older one.
+local function open_entry(t)
+    local dir = journal_dir()
+    ensure_dir(dir)
+    local name = os.date("%Y-%m-%d", t) .. ".md"
+    local path = dir .. "/" .. name
     if not zoe.exists(path) then
-        local f, ferr = io.open(path, "w")
-        if not f then error(ferr, 0) end
-        f:write(header(t))
-        f:close()
+        local source
+        if name >= os.date("%Y-%m-%d") .. ".md" then
+            source = latest_before(dir, "^%d%d%d%d%-%d%d%-%d%d%.md$", name)
+        end
+        write_file(path, carried(header(t), source))
     end
     zoe.open(path)
 end
@@ -277,6 +416,24 @@ local function step_entry(delta)
     zoe.open(dir .. "/" .. files[target])
 end
 
+local function backlog_header(t)
+    local d = os.date("*t", t)
+    local s = replace_all(backlog_template, "$mm", ("%02d"):format(d.month))
+    return replace_all(s, "$yyyy", tostring(d.year))
+end
+
+zoe.command("journalBacklog", function()
+    local dir = journal_dir() .. "/backlog"
+    ensure_dir(dir)
+    local name = os.date("%Y-%m") .. ".md"
+    local path = dir .. "/" .. name
+    if not zoe.exists(path) then
+        local source = latest_before(dir, "^%d%d%d%d%-%d%d%.md$", name)
+        write_file(path, carried(backlog_header(os.time()), source))
+    end
+    zoe.open(path)
+end, "Task Journal: Backlog for This Month")
+
 zoe.command("journalPrevious", function() step_entry(-1) end, "Task Journal: Previous Journal Entry")
 zoe.command("journalNext", function() step_entry(1) end, "Task Journal: Next Journal Entry")
 
@@ -285,6 +442,7 @@ if default_keys then
     zoe.bind("global", "ctrl+alt+super+m", "journalTomorrow")
     zoe.bind("global", "ctrl+alt+super+p", "journalPrevious")
     zoe.bind("global", "ctrl+alt+super+n", "journalNext")
+    zoe.bind("global", "ctrl+alt+super+b", "journalBacklog")
     zoe.bind("global", "ctrl+alt+super+[", "taskDecrease")
     zoe.bind("global", "ctrl+alt+super+]", "taskIncrease")
     zoe.bind("global", "ctrl+alt+super+\\", "taskToggle")

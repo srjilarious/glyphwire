@@ -40,7 +40,15 @@ const Fake = struct {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
-    const vtable: ext.Host.VTable = .{ .editor = editor, .open = open, .message = say };
+    const vtable: ext.Host.VTable = .{ .editor = editor, .open = open, .message = say, .modified = modified };
+
+    /// The fake's one buffer stands for every open file.
+    fn modified(ctx: *anyopaque, path: []const u8) ?bool {
+        const self: *Fake = @ptrCast(@alignCast(ctx));
+        const p = self.ed.path orelse return null;
+        if (!std.mem.eql(u8, p, path)) return null;
+        return self.ed.buf.dirty;
+    }
 
     fn editor(ctx: *anyopaque) ?*Editor {
         const self: *Fake = @ptrCast(@alignCast(ctx));
@@ -586,6 +594,142 @@ pub fn journalStepWithNoEntriesSaysSoTest(io: std.Io, alloc: std.mem.Allocator) 
     try run(rt, "journalNext");
     try testz.expectTrue(std.mem.startsWith(u8, fake.message.items, "No journal entries in "));
     try testz.expectEqual(fake.opened.items.len, @as(usize, 0));
+}
+
+/// An entry with a tracking section, finished and unfinished tasks, and
+/// the lines under them.
+const carry_source =
+    \\H
+    \\
+    \\#-------
+    \\follow up with Sam
+    \\- [✓] done tracked task
+    \\#-------
+    \\
+    \\- [ ] open
+    \\  - [✓] done sub
+    \\  note under open
+    \\- [✓] finished
+    \\  - [ ] open sub of finished
+    \\- [◑] half
+    \\plain line
+    \\
+;
+
+/// What a new entry made from `carry_source` holds.
+const carry_new =
+    \\H
+    \\
+    \\#-------
+    \\follow up with Sam
+    \\- [✓] done tracked task
+    \\#-------
+    \\
+    \\- [ ] open
+    \\  - [✓] done sub
+    \\  note under open
+    \\- [◑] half
+    \\
+;
+
+fn carryJournal(io: std.Io, alloc: std.mem.Allocator, fake: *Fake, s: *Scratch, extra: []const u8) !*ext.Runtime {
+    const opts = try std.fmt.allocPrint(alloc, "data_directory = \"{s}\", entry_template = \"H\\n\", backlog_template = \"B\\n\"{s}", .{ s.path, extra });
+    defer alloc.free(opts);
+    return journal(io, alloc, fake, opts);
+}
+
+pub fn journalTodayMovesOpenItemsForwardTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "carry-move");
+    defer s.deinit();
+    try s.file("2000-01-01.md", "H\n- [ ] older, not the latest\n");
+    try s.file("2000-01-02.md", carry_source);
+    var fake = try Fake.init(io, alloc, "");
+    defer fake.deinit();
+    const rt = try carryJournal(io, alloc, &fake, &s, "");
+    defer rt.deinit();
+
+    try run(rt, "journalToday");
+    try testz.expectEqualStr(fake.message.items, "");
+    try expectText(&fake, carry_new);
+    // Moved: the old entry keeps only what was finished or not a task.
+    const old = try s.read("2000-01-02.md");
+    defer alloc.free(old);
+    try testz.expectEqualStr(old, "H\n\n\n- [✓] finished\n  - [ ] open sub of finished\nplain line\n");
+    const older = try s.read("2000-01-01.md");
+    defer alloc.free(older);
+    try testz.expectEqualStr(older, "H\n- [ ] older, not the latest\n");
+
+    // Tomorrow's takes them on from today's.
+    try run(rt, "journalTomorrow");
+    try expectText(&fake, carry_new);
+}
+
+pub fn journalCarryCanCopyOrBeOffTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "carry-copy");
+    defer s.deinit();
+    try s.file("2000-01-02.md", carry_source);
+    var fake = try Fake.init(io, alloc, "");
+    defer fake.deinit();
+    const rt = try carryJournal(io, alloc, &fake, &s, ", carry_mode = \"copy\"");
+    defer rt.deinit();
+    try run(rt, "journalToday");
+    try expectText(&fake, carry_new);
+    const old = try s.read("2000-01-02.md");
+    defer alloc.free(old);
+    try testz.expectEqualStr(old, carry_source);
+
+    var s2 = try Scratch.init(io, alloc, "carry-off");
+    defer s2.deinit();
+    try s2.file("2000-01-02.md", carry_source);
+    const off = try carryJournal(io, alloc, &fake, &s2, ", carry_forward = false");
+    defer off.deinit();
+    try run(off, "journalToday");
+    try expectText(&fake, "H\n");
+}
+
+pub fn journalMoveRefusesAnUnsavedSourceTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "carry-dirty");
+    defer s.deinit();
+    try s.file("2000-01-02.md", carry_source);
+    var fake = try Fake.init(io, alloc, "");
+    defer fake.deinit();
+    const rt = try carryJournal(io, alloc, &fake, &s, "");
+    defer rt.deinit();
+    const source = try std.fs.path.join(alloc, &.{ s.path, "2000-01-02.md" });
+    defer alloc.free(source);
+    try fake.ed.loadText(carry_source, source);
+    fake.ed.buf.dirty = true;
+
+    try run(rt, "journalToday");
+    try testz.expectEqualStr(fake.message.items, "journalToday: 2000-01-02.md has unsaved changes; save it first");
+    const old = try s.read("2000-01-02.md");
+    defer alloc.free(old);
+    try testz.expectEqualStr(old, carry_source);
+}
+
+pub fn journalBacklogCarriesFromTheLatestOneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "backlog");
+    defer s.deinit();
+    try s.dir.createDirPath(io, "backlog");
+    try s.file("backlog/1999-11.md", "B\n- [ ] too old\n");
+    try s.file("backlog/2000-01.md", "B\n- [ ] someday\n- [✓] did it\n");
+    var fake = try Fake.init(io, alloc, "");
+    defer fake.deinit();
+    const rt = try carryJournal(io, alloc, &fake, &s, "");
+    defer rt.deinit();
+
+    try run(rt, "journalBacklog");
+    try testz.expectEqualStr(fake.message.items, "");
+    const name = std.fs.path.basename(fake.lastOpened());
+    try testz.expectEqual(name.len, @as(usize, "YYYY-MM.md".len));
+    try expectText(&fake, "B\n\n- [ ] someday\n");
+    const old = try s.read("backlog/2000-01.md");
+    defer alloc.free(old);
+    try testz.expectEqualStr(old, "B\n- [✓] did it\n");
+
+    // The backlog isn't a journal entry to step through.
+    try run(rt, "journalPrevious");
+    try testz.expectTrue(std.mem.startsWith(u8, fake.message.items, "No journal entries in "));
 }
 
 // ── The extension list ──────────────────────────────────────────────────
