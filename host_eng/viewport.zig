@@ -6,6 +6,7 @@
 //! backend -- `WindowState`, which is not, lives in `window.zig` next
 //! door.
 
+const std = @import("std");
 const gl = @import("zopengl").bindings;
 const zmath = @import("zmath");
 const common = @import("engine/common.zig");
@@ -71,6 +72,33 @@ pub const Viewport = struct {
         gl.viewport(self.viewport_px.l, gl_y, self.viewport_px.width(), self.viewport_px.height());
         gl.scissor(self.viewport_px.l, gl_y, self.viewport_px.width(), self.viewport_px.height());
         gl.enable(gl.SCISSOR_TEST);
+    }
+
+    /// Narrows the scissor to a rect in logical coordinates (`l`/`t`
+    /// inclusive, `r`/`b` exclusive), so nothing drawn until the next
+    /// `clipTo` or `unclip` lands outside it. Kept inside the viewport
+    /// rectangle, the scissor `apply` sets; an empty or inverted rect
+    /// clips everything away.
+    pub fn clipTo(self: *const Viewport, l: f32, t: f32, r: f32, b: f32) void {
+        const vl: f32 = @floatFromInt(self.viewport_px.l);
+        const vt: f32 = @floatFromInt(self.viewport_px.t);
+        const fl = @max(self.viewport_px.l, toPx(vl + l * self.scale.x));
+        const ft = @max(self.viewport_px.t, toPx(vt + t * self.scale.y));
+        const fr = @min(self.viewport_px.r, toPx(vl + r * self.scale.x));
+        const fb = @min(self.viewport_px.b, toPx(vt + b * self.scale.y));
+        const w = @max(0, fr - fl);
+        const h = @max(0, fb - ft);
+        gl.scissor(fl, self.framebuffer_size.y - ft - h, w, h);
+    }
+
+    /// Back to the whole viewport rectangle after a `clipTo`.
+    pub fn unclip(self: *const Viewport) void {
+        const gl_y: i32 = self.framebuffer_size.y - self.viewport_px.b;
+        gl.scissor(self.viewport_px.l, gl_y, self.viewport_px.width(), self.viewport_px.height());
+    }
+
+    fn toPx(v: f32) i32 {
+        return @intFromFloat(@round(std.math.clamp(v, -1.0e9, 1.0e9)));
     }
 
     /// Orthographic projection for the logical coordinate space. Uses

@@ -9,6 +9,7 @@ pub const search = @import("search.zig");
 pub const editor = @import("editor.zig");
 pub const keys = @import("keys.zig");
 pub const actions = @import("actions.zig");
+pub const excommands = @import("excommands.zig");
 pub const display = @import("display.zig");
 pub const wrap = @import("wrap.zig");
 pub const tree = @import("tree.zig");

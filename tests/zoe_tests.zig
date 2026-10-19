@@ -4871,6 +4871,48 @@ pub fn keymapsJumpAndWordWrapChordsTest(_: std.Io, alloc: std.mem.Allocator) !vo
     try testz.expectFalse(actions.Action.subwordLeft.inPalette());
 }
 
+// ─── `:` commands in the palette (excommands.zig) ───────────────────────
+
+const excommands = zoe.excommands;
+
+pub fn excommandsThatRunAreAllEditorCommandsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Picked from the palette, each of these runs as typed: none may be
+    // a name `runCommand` doesn't know.
+    for (excommands.commands) |c| {
+        if (c.prefill != null) continue;
+        var ed = try Editor.initFromText(alloc, "x", null);
+        defer ed.deinit();
+        _ = try ed.runCommandLine(c.name);
+        try testz.expectFalse(std.mem.startsWith(u8, ed.status.items, "E492:"));
+        try testz.expectEqual(ed.mode, .normal);
+    }
+}
+
+pub fn excommandsMergedWithAnActionAreInThePaletteTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A merged row is the action's, so the action has to be listed.
+    for (excommands.commands) |c| {
+        if (c.action) |a| try testz.expectTrue(a.inPalette());
+    }
+    try testz.expectEqualStr(excommands.forAction(.closeTab).?, "bd");
+    try testz.expectEqualStr(excommands.forAction(.save).?, "w");
+    try testz.expectTrue(excommands.forAction(.toggleTree) == null);
+}
+
+pub fn openCommandLineLeavesInsertModeWithTheTextUpTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "A");
+    try testz.expectEqual(ed.mode, .insert);
+    try ed.openCommandLine("addfolder ");
+    try testz.expectEqual(ed.mode, .command);
+    try testz.expectEqualStr(ed.cmdline.text(), "addfolder ");
+    // The rest typed and run is the command as if typed whole.
+    switch (try keys.feed(&ed, "/tmp<cr>")) {
+        .add_folder => |dir| try testz.expectEqualStr(dir.?, "/tmp"),
+        else => try testz.fail(),
+    }
+}
+
 /// Ctrl+B is VS Code's sidebar chord, and Ctrl+N stays for when gmux has
 /// Ctrl+B as its prefix.
 pub fn sidebarToggleHasBothChordsTest(_: std.Io, alloc: std.mem.Allocator) !void {

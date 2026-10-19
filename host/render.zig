@@ -1771,7 +1771,7 @@ pub const Renderer = struct {
         return &slot.*.?;
     }
 
-    fn drawLayerBatches(self: *Renderer, eng: *Engine, key: BatchKey) void {
+    fn drawLayerBatches(self: *Renderer, eng: *Engine, key: BatchKey, clip: LayerClip) void {
         const lb = self.layer_batches.get(key) orelse return;
         if (!lb.built) return;
         const mvp = eng.projMat;
@@ -1785,7 +1785,11 @@ pub const Renderer = struct {
         // backgrounds, foreground/overlay icons, non-atlas icons, text,
         // overlay rects (`create_rect`) last so they sit on top of
         // everything else the layer paints.
+        // The shadow falls outside the layer by design, so only the pane
+        // bounds it; everything after stays inside the layer's own rect.
+        clipTo(eng, clip.pane);
         for (lb.shadow.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
+        clipTo(eng, clip.layer);
         self.drawBatch(&lb.base, mvp);
         for (lb.nine_patches.items) |*t| self.drawBatchTinted(&t.batch, mvp, a);
         self.drawBatch(&lb.color_bg, mvp);
@@ -1805,6 +1809,19 @@ pub const Renderer = struct {
         // the layer's topmost thing by contract.
         self.drawBatch(&lb.underline, mvp);
         self.drawBatch(&lb.rects, mvp);
+        clipTo(eng, clip.pane);
+    }
+
+    /// Where one layer's batches may land (`drawLayerBatches`): its
+    /// pane's rect, and its own viewport rect inside that.
+    const LayerClip = struct {
+        pane: geometry.RectPx,
+        layer: geometry.RectPx,
+    };
+
+    /// The GL scissor narrowed to `r`, in window pixels.
+    fn clipTo(eng: *Engine, r: geometry.RectPx) void {
+        eng.viewport.clipTo(r.x, r.y, r.x + r.w, r.y + r.h);
     }
 
     /// Draws one static batch, skipping it when empty, and -- while
@@ -1868,8 +1885,9 @@ pub const Renderer = struct {
                 if (!pane.mapped) continue;
                 const ctx_handle = pane.top();
                 const ctx = server.session.contextPtr(ctx_handle) orelse continue;
-                self.drawOneContext(eng, ctx_handle, ctx, ctx_handle == focused_ctx);
+                self.drawOneContext(eng, ctx_handle, ctx, ctx_handle == focused_ctx, geometry.cellRectPx(pane.rect));
             }
+            eng.viewport.unclip();
         }
 
         // Chrome: its own begin/end so these GL draws sit over every
@@ -1910,13 +1928,23 @@ pub const Renderer = struct {
         ctx_handle: glyphwire.ContextHandle,
         ctx: *glyphwire.Context,
         focused: bool,
+        /// The pane's rect in window pixels. Nothing this context draws
+        /// lands outside it, and nothing a layer draws lands outside the
+        /// layer either: a glyph or icon taller than its cell (gw-ls's
+        /// icons in zoe's shell panel) is cut at the edge rather than
+        /// spilling over its neighbour.
+        pane_px: geometry.RectPx,
     ) void {
         const origin = geometry.contextOrigin(ctx);
         // Pin the root view to the live tail while a full-screen program
         // owns the screen (`rootOwned`).
         const root_view: usize = if (scroll.rootOwned(&ctx.root)) 0 else ctx.root.view_scroll;
 
-        self.drawLayerBatches(eng, .{ .context = ctx_handle, .layer = glyphwire.root_layer_handle });
+        clipTo(eng, pane_px);
+        self.drawLayerBatches(eng, .{ .context = ctx_handle, .layer = glyphwire.root_layer_handle }, .{
+            .pane = pane_px,
+            .layer = geometry.intersect(pane_px, geometry.layerRectIn(origin, ctx.root.pos, ctx.root.viewportCols(), ctx.root.viewportRows())),
+        });
         // This context's own split bands, before any of its layers: the
         // split layers sit either side of a band and never over one, so
         // nothing is lost by drawing them first -- and a layer that
@@ -1951,7 +1979,10 @@ pub const Renderer = struct {
         for (ctx.layer_order.items) |handle| {
             const layer = ctx.layers.getPtr(handle) orelse continue;
             if (!layer.visible) continue;
-            self.drawLayerBatches(eng, .{ .context = ctx_handle, .layer = handle });
+            self.drawLayerBatches(eng, .{ .context = ctx_handle, .layer = handle }, .{
+                .pane = pane_px,
+                .layer = geometry.intersect(pane_px, geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows())),
+            });
             // Right after the layer's own content, not in the chrome pass:
             // a popup created later has to cover the bars of whatever it
             // floats over, the same as it covers that layer's cells.

@@ -3295,6 +3295,23 @@ pub const Editor = struct {
         if (self.cmd_history) |h| h.endBrowse();
     }
 
+    /// The `:` line put up holding `text`, the caret at its end, for the
+    /// command palette: whatever mode the editor was in is left first,
+    /// the way Escape leaves it.
+    pub fn openCommandLine(self: *Editor, text: []const u8) !void {
+        if (self.mode != .normal) self.escape();
+        self.resetPending();
+        self.settleUndo();
+        self.startCommandLine();
+        try self.cmdline.setText(self.alloc, text);
+    }
+
+    /// `openCommandLine`, then run, as if Enter followed.
+    pub fn runCommandLine(self: *Editor, text: []const u8) !Outcome {
+        try self.openCommandLine(text);
+        return self.runCommand();
+    }
+
     /// Up and Down on the `:` or `/` line: walk `hist` and put the entry
     /// on the line. Returns whether the key was one of the two (true even
     /// when there was nothing further to go to, so the line's own

@@ -460,6 +460,14 @@ explicit order; `raise_layer` and `lower_layer` reorder the rest.
 A created layer has a pixel-precise position relative to its parent, or a
 sticky cell position (section 6.3's `cell_position`).
 
+Nothing a layer draws lands outside its viewport rect, and nothing a
+context draws lands outside its pane: the host clips each layer to its
+own rect intersected with the pane's, so a glyph or icon taller than its
+cell is cut at the edge rather than painting over a neighbour. A layer's
+`shadow` is the one exception, bounded by the pane only, since it lies
+outside the layer by design. The layer's own scrollbars and its
+`resize_edge` band are drawn with the pane's clip too.
+
 ### 4.4 Cell
 
 A cell holds:

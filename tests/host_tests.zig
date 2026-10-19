@@ -144,6 +144,34 @@ pub fn themeNamesPutsConfigThemesFirstOnceTest(_: std.Io, alloc: std.mem.Allocat
     }
 }
 
+// ─── geometry.intersect ───────────────────────────────────────────────
+
+pub fn intersectKeepsTheOverlapTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A layer hanging off its pane's top-left corner is cut to the pane.
+    const pane: geometry.RectPx = .{ .x = 100, .y = 50, .w = 400, .h = 300 };
+    const layer: geometry.RectPx = .{ .x = 80, .y = 30, .w = 100, .h = 100 };
+    const r = geometry.intersect(pane, layer);
+    try testz.expectEqual(r.x, 100.0);
+    try testz.expectEqual(r.y, 50.0);
+    try testz.expectEqual(r.w, 80.0);
+    try testz.expectEqual(r.h, 80.0);
+
+    // One wholly inside the other is itself.
+    const inner: geometry.RectPx = .{ .x = 120, .y = 60, .w = 10, .h = 20 };
+    const same = geometry.intersect(pane, inner);
+    try testz.expectEqual(same.x, 120.0);
+    try testz.expectEqual(same.w, 10.0);
+    try testz.expectEqual(same.h, 20.0);
+}
+
+pub fn intersectOfDisjointRectsIsEmptyTest(_: std.Io, _: std.mem.Allocator) !void {
+    const a: geometry.RectPx = .{ .x = 0, .y = 0, .w = 50, .h = 50 };
+    const b: geometry.RectPx = .{ .x = 60, .y = 10, .w = 50, .h = 50 };
+    const r = geometry.intersect(a, b);
+    try testz.expectEqual(r.w, 0.0);
+    try testz.expectTrue(!r.contains(60, 20));
+}
+
 // ─── geometry.resizeEdge* ─────────────────────────────────────────────
 
 pub fn resizeEdgeBandSitsOnTheLayersTopTest(_: std.Io, _: std.mem.Allocator) !void {

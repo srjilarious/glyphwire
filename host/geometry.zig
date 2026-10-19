@@ -218,6 +218,17 @@ pub const RectPx = struct {
     }
 };
 
+/// The overlap of two rects, zero-sized (at `a`'s corner, clamped) when
+/// they don't meet. The renderer's clip: a layer's draws are scissored
+/// to its own rect intersected with its pane's (`Renderer.drawOneContext`).
+pub fn intersect(a: RectPx, b: RectPx) RectPx {
+    const l = @max(a.x, b.x);
+    const t = @max(a.y, b.y);
+    const r = @min(a.x + a.w, b.x + b.w);
+    const btm = @min(a.y + a.h, b.y + b.h);
+    return .{ .x = l, .y = t, .w = @max(0, r - l), .h = @max(0, btm - t) };
+}
+
 /// Thickness of a pane's scrollbar. Thinner than the window's own bar:
 /// it sits *inside* the content rather than in a reserved gutter, so it
 /// should cost as few columns of text as possible.

@@ -39,7 +39,7 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 |---|---|---|
 | `save` | Ctrl+S | `:w`, leaving the mode and selection alone |
 | `findFile` | Ctrl+P | Fuzzy file finder |
-| `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key, by name, with its chord in the current mode. Recently run ones list first |
+| `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key, and every `:` command, by name, with its `:` form and its chord in the current mode (`Close Tab  :bd  Ctrl+F4`). Typing `bd` or `:bd` finds it too. A `:` command that takes an argument (`:addfolder`, `:wsopen`, `:theme`) puts the `:` line up for it; the rest run. Recently run ones list first |
 | `listExtensions` | (unbound; `:extensions`) | Every extension zoe could load, built in or in `~/.config/glyphwire/zoe/extensions/`, and whether it loaded. Enter on one with a user file opens it |
 | `toggleTree` | Ctrl+B, Ctrl+N | Show / hide the file tree. Ctrl+B is VS Code's chord; under gmux it is the prefix, so use Ctrl+N or gmux's Ctrl+B Ctrl+B |
 | `revealInTree` | Ctrl+Shift+E | Find the focused group's file in the tree: shows the tree if hidden, opens the folders down to it and puts the cursor on it. The keyboard stays where it was |
@@ -247,6 +247,9 @@ All normal-mode motions move the free end. Then:
 | `v` / `V` | Switch kind, or leave if already that kind |
 
 ### Command line (`:`)
+
+Every command below is in the Ctrl+Shift+P palette too, under a name
+("Add Folder to Workspace" is `:addfolder`).
 
 Line editing: Home / Ctrl+A, End / Ctrl+E, Ctrl+Left / Right (by path
 segment), Ctrl+Backspace, Ctrl+U, Ctrl+K, Backspace on an empty line leaves.

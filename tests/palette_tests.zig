@@ -126,6 +126,31 @@ pub fn queryMatchesTheLabelOrTheNameTest(_: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectEqual(selectedId(&l).?, 3);
 }
 
+pub fn queryMatchesTheCommandLineWithOrWithoutItsColonTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var l = palette.List.init(alloc);
+    defer l.deinit();
+    try l.add(0, "save", null, null);
+    try l.addWithCommand(1, "closeTab", null, null, ":bd");
+    try l.addWithCommand(2, "addfolder", "Add Folder to Workspace", null, ":addfolder");
+    try testz.expectEqualStr(l.commands.items[0].command, "");
+    try testz.expectEqualStr(l.commands.items[1].command, ":bd");
+
+    // Neither the label nor the name holds "bd" in order; the command does.
+    for ([_][]const u8{ "bd", ":bd" }) |q| {
+        l.query.clear();
+        _ = try l.query.insert(alloc, q);
+        try l.refilter();
+        try testz.expectEqual(l.matchCount(), 1);
+        try testz.expectEqual(selectedId(&l).?, 1);
+    }
+
+    // The label still finds a command-line-only entry.
+    l.query.clear();
+    _ = try l.query.insert(alloc, "folder to work");
+    try l.refilter();
+    try testz.expectEqual(selectedId(&l).?, 2);
+}
+
 pub fn queryRanksTighterMatchesFirstTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var l = try sampleList(alloc);
     defer l.deinit();

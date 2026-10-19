@@ -126,6 +126,10 @@ pub const Command = struct {
     /// The chord that runs it, formatted (`Ctrl+Shift+P`), owned. Empty
     /// when nothing binds it.
     chord: []u8,
+    /// The program's own command line for it, as typed there (zoe's
+    /// `:addfolder`), owned. Shown before the chord and matched like the
+    /// label. Empty when it has none.
+    command: []u8,
 };
 
 /// A command that matched the query, and how well.
@@ -156,6 +160,7 @@ pub const List = struct {
             self.alloc.free(c.name);
             self.alloc.free(c.label);
             self.alloc.free(c.chord);
+            self.alloc.free(c.command);
         }
         self.commands.deinit(self.alloc);
         self.matches.deinit(self.alloc);
@@ -166,6 +171,14 @@ pub const List = struct {
     /// words (`labelFromName`) when `label` is null. `chord` is what runs
     /// it now, shown at the row's right end.
     pub fn add(self: *List, id: u32, name: []const u8, label: ?[]const u8, chord: ?keybind.Chord) !void {
+        return self.addWithCommand(id, name, label, chord, "");
+    }
+
+    /// `add`, for an action that can also be typed on the program's
+    /// command line: `command` is that line as typed (`:bd`), shown and
+    /// matched alongside the label. A command-line-only entry passes
+    /// null for `chord`.
+    pub fn addWithCommand(self: *List, id: u32, name: []const u8, label: ?[]const u8, chord: ?keybind.Chord, command: []const u8) !void {
         var label_buf: [max_label_len]u8 = undefined;
         var chord_buf: [64]u8 = undefined;
         const shown = label orelse labelFromName(&label_buf, name);
@@ -177,7 +190,9 @@ pub const List = struct {
         errdefer self.alloc.free(owned_label);
         const owned_chord = try self.alloc.dupe(u8, chord_text);
         errdefer self.alloc.free(owned_chord);
-        try self.commands.append(self.alloc, .{ .id = id, .name = owned_name, .label = owned_label, .chord = owned_chord });
+        const owned_command = try self.alloc.dupe(u8, command);
+        errdefer self.alloc.free(owned_command);
+        try self.commands.append(self.alloc, .{ .id = id, .name = owned_name, .label = owned_label, .chord = owned_chord, .command = owned_command });
     }
 
     /// Rebuilds `matches` for the current query and puts the cursor back
@@ -197,12 +212,18 @@ pub const List = struct {
         self.list.reset();
     }
 
-    /// The label or the name, whichever matches tighter; null if neither.
+    /// The label, the name or the command line, whichever matches
+    /// tightest; null if none does. The command line is matched with and
+    /// without its leading `:`, so `bd` and `:bd` both find `:bd`.
     fn bestScore(c: Command, q: []const u8) ?usize {
-        const by_label = fuzzy.score(c.label, q);
-        const by_name = fuzzy.score(c.name, q);
-        if (by_label) |l| return if (by_name) |n| @min(l, n) else l;
-        return by_name;
+        var best: ?usize = null;
+        const bare = if (c.command.len > 0 and !std.ascii.isAlphanumeric(c.command[0])) c.command[1..] else c.command;
+        for ([_][]const u8{ c.label, c.name, c.command, bare }) |field| {
+            if (field.len == 0) continue;
+            const s = fuzzy.score(field, q) orelse continue;
+            best = if (best) |b| @min(b, s) else s;
+        }
+        return best;
     }
 
     fn lessThanMatch(_: void, a: Match, b: Match) bool {
@@ -406,8 +427,9 @@ pub const Popup = struct {
         try self.chrome.drawQuery(b, 0, &l.query, cols -| tail_w);
     }
 
-    /// One command per row: its label, and its chord dimmed at the right
-    /// end -- the palette doubles as the way to learn the keys.
+    /// One command per row: its label, and its command line and chord
+    /// dimmed at the right end -- the palette doubles as the way to learn
+    /// the keys and the commands.
     fn renderList(self: *Popup, b: *Batch, l: *const List, cols: usize, rows: usize) !void {
         const s = self.chrome.style;
         if (l.matchCount() == 0) return self.chrome.drawEmpty(b);
@@ -418,9 +440,11 @@ pub const Popup = struct {
             const fg = if (is_selected) s.selected_fg else s.text_fg;
             const chord_fg = if (is_selected) s.selected_fg else s.dim_fg;
             const bg: ?Color = if (is_selected) s.selected_bg else null;
-            // The chord plus a cell either side; the label stops short of
-            // it, and a palette too narrow for both keeps the label.
-            const chord_w = glyphwire.stringWidth(c.chord);
+            // The command line and the chord, two cells apart, plus a cell
+            // either side; the label stops short of them, and a palette
+            // too narrow for both keeps the label.
+            const gap = if (c.command.len > 0 and c.chord.len > 0) "  " else "";
+            const chord_w = glyphwire.stringWidth(c.command) + gap.len + glyphwire.stringWidth(c.chord);
             const chord_cols = if (chord_w > 0 and chord_w + 4 < cols) chord_w + 2 else 0;
             try b.writeSpans(&.{
                 .{ .text = " " },
@@ -429,6 +453,8 @@ pub const Popup = struct {
             if (chord_cols > 0) {
                 try b.writeSpans(&.{
                     .{ .text = " " },
+                    .{ .text = c.command },
+                    .{ .text = gap },
                     .{ .text = c.chord },
                     .{ .text = " " },
                 }, .{ .layer = self.chrome.list_layer, .row = i, .col = cols - chord_cols, .fg = chord_fg, .bg = bg, .max_cols = chord_cols });

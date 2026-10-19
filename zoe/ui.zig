@@ -69,6 +69,7 @@ const themes = @import("applib").theme;
 pub const role = glyphwire.Color.role;
 const langconf = @import("langconf.zig");
 const actions = @import("actions.zig");
+const excommands = @import("excommands.zig");
 const ext = @import("ext.zig");
 const extlist = @import("extlist.zig");
 const findbar = @import("findbar.zig");
@@ -4515,7 +4516,9 @@ pub const Ui = struct {
 
     /// Ctrl+Shift+P. Lists every action `inPalette` admits, each with the
     /// chord that runs it where the keyboard is now -- the tree reads the
-    /// global table, a buffer its mode's.
+    /// global table, a buffer its mode's -- and its `:` form when it has
+    /// one; then every `:` command that isn't an action's
+    /// (`excommands.zig`), then the extensions' commands.
     pub fn openPalette(self: *Ui) !void {
         // Modal, like the finder: a tree search left running under it
         // would have nothing to type into, and the hover and completion
@@ -4528,9 +4531,15 @@ pub const Ui = struct {
         const scope = self.keyScope();
         var list = palette_mod.List.init(self.alloc);
         errdefer list.deinit();
+        var line_buf: [64]u8 = undefined;
         for (std.enums.values(actions.Action)) |a| {
             if (!a.inPalette()) continue;
-            try list.add(@intFromEnum(a), @tagName(a), a.paletteLabel(), self.keymaps.chordFor(scope, a));
+            const line = if (excommands.forAction(a)) |n| exLine(&line_buf, n) else "";
+            try list.addWithCommand(@intFromEnum(a), @tagName(a), a.paletteLabel(), self.keymaps.chordFor(scope, a), line);
+        }
+        for (excommands.commands, 0..) |c, i| {
+            if (c.action != null) continue;
+            try list.addWithCommand(ex_palette_base + @as(u32, @intCast(i)), c.name, c.label, null, exLine(&line_buf, c.name));
         }
         // Extension commands after the actions, numbered on from them.
         if (self.extensions) |rt| for (rt.commands.items, 0..) |c, i| {
@@ -4540,8 +4549,15 @@ pub const Ui = struct {
         try self.palette.open(list);
     }
 
-    /// The first palette id that is an extension command, not an action.
-    const ext_palette_base: u32 = std.enums.values(actions.Action).len;
+    /// The first palette id that is a `:` command, not an action.
+    const ex_palette_base: u32 = std.enums.values(actions.Action).len;
+    /// The first palette id that is an extension command.
+    const ext_palette_base: u32 = ex_palette_base + excommands.commands.len;
+
+    /// `name` as the palette shows a `:` command: `:addfolder`.
+    fn exLine(buf: []u8, name: []const u8) []const u8 {
+        return std.fmt.bufPrint(buf, ":{s}", .{name}) catch name;
+    }
 
     /// The keymap table a key is looked up in where the keyboard is: the
     /// tree has no mode of its own and reads the global one.
@@ -4559,6 +4575,7 @@ pub const Ui = struct {
         self.palette.close();
         self.status_dirty = true;
         if (id >= ext_palette_base) return self.runExtCommand(id - ext_palette_base);
+        if (id >= ex_palette_base) return self.runPaletteEx(excommands.commands[id - ex_palette_base]);
         const action: actions.Action = @enumFromInt(id);
         if (action.isUi()) {
             if (!try self.performUi(action)) self.paletteNotHere(action);
@@ -4566,6 +4583,19 @@ pub const Ui = struct {
         }
         if (self.focus != .buffer) return self.paletteNotHere(action);
         try self.applyOutcome(try self.buf.ed.runAction(action));
+        try self.syncPathMenu();
+    }
+
+    /// A `:` command picked from the palette, on the focused buffer's
+    /// `:` line whether the keyboard was in the buffer or the tree. One
+    /// that wants an argument waits there for it; the rest run.
+    fn runPaletteEx(self: *Ui, c: excommands.ExCommand) !void {
+        if (self.focus != .buffer) self.setFocus(.buffer);
+        if (c.prefill) |text| {
+            try self.buf.ed.openCommandLine(text);
+        } else {
+            try self.applyOutcome(try self.buf.ed.runCommandLine(c.name));
+        }
         try self.syncPathMenu();
     }
 
