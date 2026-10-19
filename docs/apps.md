@@ -79,8 +79,12 @@ A modal text editor: vim's grammar with VS Code's keys alongside it.
 - Alt+Up/Down move lines past their neighbour, Shift+Alt+Up/Down copy
   them.
 - VS Code keys alongside the vim ones: Ctrl+S, Ctrl+Z / Ctrl+Shift+Z,
-  Ctrl+/ for line comments, Ctrl+Backspace/Delete by word, Shift+arrows to
-  select.
+  Ctrl+/ for line comments, Shift+arrows to select.
+- Ctrl+Left/Right (and Ctrl+Backspace/Delete) move by word part, stopping
+  at camelCase, acronym, digit and underscore boundaries; Alt+Left/Right
+  move by whole word.
+- Shift+Enter labels every visible word with two letters; typing a label
+  jumps there. Alt+Z toggles word wrap.
 - Enter, `o` and `O` keep the indent (a level deeper after an opening
   bracket), and brackets and quotes close themselves.
 - Indented blocks fold with `za` / `zc` / `zo` / `zM` / `zR`,

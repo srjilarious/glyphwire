@@ -99,7 +99,7 @@ Each is an ordinary client of the protocol, versioned on its own.
 | App | Version | What it is |
 |---|---|---|
 | **`gw-shell`** | 0.10.2 | The shell `glyphwire` spawns. Pipelines, Lua config, fish-style autosuggestions, fish and Lua completions, powerline prompt, Ctrl+R / Alt+C through `gw-hist`, `gwssh`. |
-| **`zoe`** | 0.18.0 | Modal editor: vim grammar with VS Code keys alongside. Split editor groups, workspaces, tree-sitter highlighting, LSP (diagnostics, hover, goto, completion), find and replace, folding, Lua extensions, unsaved-change backups. Keys in [`docs/zoe-keys.md`](docs/zoe-keys.md). |
+| **`zoe`** | 0.19.0 | Modal editor: vim grammar with VS Code keys alongside. Split editor groups, workspaces, tree-sitter highlighting, LSP (diagnostics, hover, goto, completion), find and replace, folding, Lua extensions, unsaved-change backups. Keys in [`docs/zoe-keys.md`](docs/zoe-keys.md). |
 | **`gmux`** | 0.10.0 | Multiplexer as a pure window manager: it draws nothing and never touches a program's I/O, it only asks the server for panes. |
 | **`salacommander`** | 0.10.0 | Two-pane file manager: icons, tabs, sudo operations, trash, permission editing, drag and drop within and out of the window. |
 | **`gwmd`** | 0.8.0 | Markdown reader: scaled headings, GFM tables as native tables, inline images, links. |
@@ -153,7 +153,7 @@ Each program also has its own run step (`zig build zoe`, `zig build gwmd`,
 
 Every program answers `--version` (or `-V`) with its own version, the
 glyphwire release and the `git describe` it was built from, e.g. `zoe
-0.18.0 (glyphwire 0.20.0, a9ed435)`. Each program's number is a line in
+0.19.0 (glyphwire 0.21.0, 1b122a9)`. Each program's number is a line in
 `program_versions` at the top of `build.zig`, bumped when that program
 changes in a release, and the release's own number is `build.zig.zon`'s
 `version`. A client can ask the host the same with the `get_version`
