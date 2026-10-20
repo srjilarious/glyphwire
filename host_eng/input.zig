@@ -437,13 +437,13 @@ pub const Keyboard = struct {
     /// repeats.
     repeat: KeyRepeat = .{},
     /// The keyboard's clock, in ms: the time `tickRepeatsAt` was last
-    /// run at. The engine loop feeds it wall time (SDL's tick counter,
-    /// the same base as an event's timestamp); `set` stamps a press at it.
+    /// run at. The engine loop feeds it wall time (`SDL_GetTicksNS`, the
+    /// clock `handleEvent` stamps presses with); `set` stamps a press at it.
     now_ms: f64 = 0,
     /// Per-key press time, and the hold time its next repeat is due at,
     /// both in ms and both only meaningful while the key is down. The
-    /// hold is measured from the press *event's* own timestamp, not
-    /// counted up in tick steps: the loop runs its catch-up ticks after
+    /// hold is measured from when the press was drained from the event
+    /// queue, not counted up in tick steps: the loop runs its catch-up ticks after
     /// draining the events, so counting would credit a fresh press with
     /// the idle time before it happened. Every key is tracked; which
     /// keys a repeat actually *means* something for is the application's
@@ -486,7 +486,7 @@ pub const Keyboard = struct {
         self.setAt(key, down_value, self.now_ms);
     }
 
-    /// Records a key going down or up at `at_ms` (the event's timestamp),
+    /// Records a key going down or up at `at_ms` (when it was drained),
     /// latching the edge into `pressed_bits` / `released_bits`. A
     /// key-down for a key already down -- the OS auto-repeating it -- is
     /// no edge and leaves its hold alone.
@@ -909,10 +909,15 @@ pub const InputManager = struct {
             sdl.SDL_EVENT_KEY_DOWN, sdl.SDL_EVENT_KEY_UP => {
                 const key = mapKey(event.key.key);
                 if (self.key_debug) logKeyEvent(event.key, key);
-                // Stamped with the event's own time (SDL's tick counter,
-                // in ns), not the tick that drains it -- see
-                // `Keyboard.pressed_at_ms`.
-                const at_ms = @as(f64, @floatFromInt(event.key.timestamp)) / 1_000_000.0;
+                // Stamped with the time it is drained, on the same clock
+                // the loop's "now" is read from -- see
+                // `Keyboard.pressed_at_ms`. Not `event.key.timestamp`:
+                // on Wayland SDL derives that from the compositor's clock
+                // through one offset shared with pointer and touch events
+                // (which may use another clock source), so it can sit far
+                // from `SDL_GetTicksNS` -- a press stamped seconds in the
+                // past is past its initial delay on its very first tick.
+                const at_ms = @as(f64, @floatFromInt(sdl.SDL_GetTicksNS())) / 1_000_000.0;
                 if (key != .unknown) self.keyboard.setAt(key, event.key.down, at_ms);
                 self.keyboard.mods = event.key.mod;
                 // The down/up bitset alone can't say which key typed the
@@ -974,8 +979,8 @@ pub const InputManager = struct {
 
     /// Per-tick input refresh, run before the app's own update: resolves
     /// the mouse position into logical space and moves the keyboard's
-    /// typematic repeat clock to `now_ms` -- wall time, on the same base
-    /// as an event's timestamp, and the same for every tick of one frame
+    /// typematic repeat clock to `now_ms` -- wall time, on the clock
+    /// presses are stamped with, and the same for every tick of one frame
     /// (see `Keyboard.tickRepeatsAt`). Repeats are ticked here, ahead of
     /// `app.update`, so `keyboard.repeated` answers for the same tick the
     /// app reads `pressed`/`released` on.
