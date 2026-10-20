@@ -72,6 +72,7 @@ const actions = @import("actions.zig");
 const excommands = @import("excommands.zig");
 const ext = @import("ext.zig");
 const extlist = @import("extlist.zig");
+const themepicker = @import("themepicker.zig");
 const findbar = @import("findbar.zig");
 
 /// Where the find widget is on screen: its top-left window cell and its
@@ -965,6 +966,17 @@ pub const Ui = struct {
     /// `:extensions`: every extension and what became of it, modal like
     /// the palette and stacked over it.
     ext_list: extlist.Popup,
+    /// `:themes`: the palette's popup over every theme, modal the same
+    /// way. The highlighted one is applied as the cursor moves.
+    theme_picker: palette_mod.Popup,
+    /// The picker's rows, by palette id. Owned; empty while it's closed.
+    theme_choices: []themepicker.Choice = &.{},
+    /// What was showing when the picker opened, and whether it was this
+    /// editor's own or the window's: Escape puts it back.
+    theme_before: themes.Stored = undefined,
+    theme_before_own: bool = false,
+    /// The choice the picker last applied; null until it applies one.
+    theme_previewed: ?u32 = null,
 
     /// The language servers, and everything they have said. The pool is
     /// null when `config.lsp.enabled` is false; it exists but holds no
@@ -1324,6 +1336,8 @@ pub const Ui = struct {
         errdefer palette.deinit();
         var ext_list = try extlist.Popup.init(client, extListStyle(&th));
         errdefer ext_list.deinit();
+        var theme_picker = try palette_mod.Popup.init(alloc, client, themepicker.style(paletteStyle(&th)));
+        errdefer theme_picker.deinit();
         // The hover popup, floating like the finder's layers and placed
         // against the cursor rather than the pane -- `hoverRect`.
         const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
@@ -1396,6 +1410,7 @@ pub const Ui = struct {
             .finder = finder,
             .palette = palette,
             .ext_list = ext_list,
+            .theme_picker = theme_picker,
             .hover_layer = hover_layer,
             .hover_panel_patch = hover_panel_patch,
             .completion_layer = completion_layer,
@@ -1928,6 +1943,8 @@ pub const Ui = struct {
         self.finder.deinit();
         self.palette.deinit();
         self.ext_list.deinit();
+        self.theme_picker.deinit();
+        if (self.theme_choices.len > 0) self.alloc.free(self.theme_choices);
         if (self.find) |*f| f.deinit(self.alloc);
         if (self.tree_edit) |*te| te.deinit(self.alloc);
         if (self.prev_cwd) |p| self.alloc.free(p);
@@ -2474,6 +2491,7 @@ pub const Ui = struct {
             .findFile => try self.openFinder(),
             .commandPalette => try self.openPalette(),
             .listExtensions => try self.openExtList(),
+            .selectTheme => try self.openThemePicker(),
             .toggleTree => try self.toggleTree(),
             // Dotfiles and everything `.gitignore` excludes, in one flag --
             // the sidebar, both tree searches and Ctrl+P alike. Global so
@@ -2693,7 +2711,7 @@ pub const Ui = struct {
             // wakes this the same way.
             self.drainRemote();
             if (self.anyGroupDirty() or self.tree_dirty != .none or
-                self.status_dirty or self.finder.dirty or self.palette.dirty or self.ext_list.dirty or self.hover_dirty or self.completion_dirty or
+                self.status_dirty or self.finder.dirty or self.palette.dirty or self.ext_list.dirty or self.theme_picker.dirty or self.hover_dirty or self.completion_dirty or
                 self.path_menu_dirty or self.tree_edit_dirty or self.tab_tip_dirty or self.tree_scroll_pending != null)
                 try self.render();
             if (self.quit) break;
@@ -2816,6 +2834,7 @@ pub const Ui = struct {
                 if (self.finder.isOpen()) self.finder.dirty = true;
                 if (self.palette.isOpen()) self.palette.dirty = true;
                 if (self.ext_list.isOpen()) self.ext_list.dirty = true;
+                if (self.theme_picker.isOpen()) self.theme_picker.dirty = true;
                 self.replaceShell();
             },
             // The shell panel's top edge was dragged. It floats over the
@@ -2850,6 +2869,7 @@ pub const Ui = struct {
                 if (self.finder.isOpen()) self.finder.dirty = true;
                 if (self.palette.isOpen()) self.palette.dirty = true;
                 if (self.ext_list.isOpen()) self.ext_list.dirty = true;
+                if (self.theme_picker.isOpen()) self.theme_picker.dirty = true;
                 self.replaceShell();
             },
             .scroll_offset => |so| {
@@ -2858,6 +2878,7 @@ pub const Ui = struct {
                 _ = self.finder.scrolled(so);
                 _ = self.palette.scrolled(so);
                 _ = self.ext_list.scrolled(so);
+                _ = self.theme_picker.scrolled(so);
                 if (so.layer == self.tree_layer) self.tree_scroll = .{ .row = so.row, .col = so.col };
                 // A wheel or thumb drag over the buffer pane: the host moved
                 // the virtual offset and told us where. Follow it, and drag
@@ -2959,6 +2980,10 @@ pub const Ui = struct {
                 // The Ctrl+P and Ctrl+Shift+P popups (and the extension
                 // list) are modal: while one is open it is the only
                 // thing reading keys, so nothing below here runs.
+                if (self.theme_picker.isOpen()) {
+                    try self.themePickerKey(k);
+                    return;
+                }
                 if (self.ext_list.isOpen()) {
                     try self.extListKey(k);
                     return;
@@ -3080,6 +3105,10 @@ pub const Ui = struct {
                 // Typed text is the shell's while its panel has focus -- it
                 // has a line editor of its own.
                 if (self.shell.isFocused()) return;
+                if (self.theme_picker.isOpen()) {
+                    try self.themePickerText(t.text);
+                    return;
+                }
                 if (self.ext_list.isOpen()) return;
                 if (self.palette.isOpen()) {
                     try self.palette.text(t.text);
@@ -3117,6 +3146,10 @@ pub const Ui = struct {
             },
             .paste => |t| {
                 if (self.shell.isFocused()) return;
+                if (self.theme_picker.isOpen()) {
+                    try self.themePickerText(t.text);
+                    return;
+                }
                 if (self.ext_list.isOpen()) return;
                 if (self.palette.isOpen()) {
                     try self.palette.text(t.text);
@@ -3344,6 +3377,10 @@ pub const Ui = struct {
         // moves its cursor behind it is a trap. The release that follows
         // lands here with the popup already closed and nothing dragging,
         // so it does nothing.
+        if (self.theme_picker.isOpen()) {
+            if (ev.pressed) try self.themePickerOutcome(self.theme_picker.click(ev.cell));
+            return;
+        }
         if (self.ext_list.isOpen()) {
             if (ev.pressed and self.ext_list.click(ev.cell) == .accept) try self.acceptExtList();
             return;
@@ -3635,7 +3672,7 @@ pub const Ui = struct {
         var over_group: ?*Group = null;
         const over: ?usize = blk: {
             // A drag and the modal popups own the pointer while they last.
-            if (self.drag != null or self.tab_drag != null or self.finder.isOpen() or self.palette.isOpen() or self.ext_list.isOpen()) break :blk null;
+            if (self.drag != null or self.tab_drag != null or self.finder.isOpen() or self.palette.isOpen() or self.ext_list.isOpen() or self.theme_picker.isOpen()) break :blk null;
             const g = self.groupAt(cell) orelse break :blk null;
             const h = tabAt(g, cell) orelse break :blk null;
             if (h.index >= g.buffers.items.len) break :blk null;
@@ -3885,6 +3922,7 @@ pub const Ui = struct {
             .lsp_status => |arg| self.lspStatus(arg),
             .diag_list => self.diagList(),
             .extensions_list => try self.openExtList(),
+            .theme_picker => try self.openThemePicker(),
             .recover => try self.recoverAll(),
             .theme => |arg| self.themeCommand(arg),
             .shell_position => |arg| self.shellPositionCommand(arg),
@@ -5407,6 +5445,111 @@ pub const Ui = struct {
         self.buf.ed.setStatus("theme: {s}", .{self.th.name()});
     }
 
+    // ── Theme picker ────────────────────────────────────────────────────
+
+    /// `:themes`: every theme `:theme` could switch to, in the palette's
+    /// popup with the cursor on the one showing. Modal like the palette,
+    /// which it closes.
+    pub fn openThemePicker(self: *Ui) !void {
+        if (self.theme_picker.isOpen()) return;
+        self.cancelFind();
+        _ = self.closeHover();
+        self.closeCompletion();
+        if (self.finder.isOpen()) self.finder.close();
+        if (self.palette.isOpen()) self.palette.close();
+        if (self.ext_list.isOpen()) self.ext_list.close();
+
+        const shared: []const themes.Custom = if (self.hl_config) |*cfg| cfg.shared_themes.customs else &.{};
+        const own: []const themes.Custom = if (self.hl_config) |*cfg| cfg.themes.customs else &.{};
+        const list = try themepicker.choices(self.alloc, shared, own);
+        errdefer self.alloc.free(list);
+        try self.theme_picker.open(try themepicker.paletteList(self.alloc, list));
+        self.theme_choices = list;
+        self.theme_before = self.th;
+        self.theme_before_own = self.theme_own;
+        self.theme_previewed = null;
+
+        // The cursor on the current theme. The popup hasn't been placed
+        // yet, so the rows it will show are estimated from the window.
+        const current = themepicker.indexOf(list, self.th.name()) orelse return;
+        const l = &self.theme_picker.list.?;
+        for (0..l.matchCount()) |row| {
+            if (l.matchAt(row).?.id != current) continue;
+            l.list.selected = row;
+            const style = self.theme_picker.chrome.style;
+            l.follow(@max(@min(style.max_rows, self.winSize().rows) -| 3, 1));
+            break;
+        }
+    }
+
+    /// A keystroke while the picker is open. The chord that opens it
+    /// closes it again, as Escape does.
+    fn themePickerKey(self: *Ui, k: glyphwire.KeyEvent) !void {
+        if (self.keymaps.lookup(self.keyScope(), k.key, k.mods) == .selectTheme) {
+            self.theme_picker.close();
+            return self.themePickerOutcome(.closed);
+        }
+        try self.themePickerOutcome(try self.theme_picker.key(k));
+    }
+
+    /// Typing narrows the list, and the best match is shown at once.
+    fn themePickerText(self: *Ui, t: []const u8) !void {
+        try self.theme_picker.text(t);
+        try self.themePickerOutcome(.handled);
+    }
+
+    /// After the popup took a key or a click: the highlighted theme
+    /// shown, kept on `.accept`, and on `.closed` (the popup already
+    /// shut) the one from before put back.
+    fn themePickerOutcome(self: *Ui, outcome: palette_mod.Outcome) !void {
+        self.status_dirty = true;
+        switch (outcome) {
+            .handled => self.previewTheme(),
+            .accept => {
+                self.previewTheme();
+                self.theme_picker.close();
+                // Picking the theme already showing changes nothing, so
+                // one that follows the window keeps following it.
+                if (self.theme_previewed != null) self.theme_own = true;
+                self.endThemePicker();
+                self.buf.ed.setStatus("theme: {s}", .{self.th.name()});
+            },
+            .closed => {
+                if (self.theme_previewed != null) {
+                    var before = self.theme_before;
+                    const restored = if (self.theme_before_own) blk: {
+                        var t = before.theme;
+                        t.name = before.name();
+                        t.panel_style = before.panelStyle();
+                        break :blk self.applyTheme(t);
+                    } else self.followWindowTheme();
+                    restored catch |err| self.buf.ed.setStatus("E: theme switch failed ({t})", .{err});
+                    self.theme_own = self.theme_before_own;
+                }
+                self.endThemePicker();
+            },
+        }
+    }
+
+    /// Applies the highlighted theme unless it is already the one
+    /// applied (or showing, before anything was).
+    fn previewTheme(self: *Ui) void {
+        const id = self.theme_picker.selected() orelse return;
+        if (self.theme_previewed == id) return;
+        const choice = &self.theme_choices[id];
+        if (self.theme_previewed == null and std.mem.eql(u8, choice.name, self.th.name())) return;
+        self.theme_previewed = id;
+        self.applyTheme(choice.theme) catch |err| {
+            self.buf.ed.setStatus("E: theme switch failed ({t})", .{err});
+        };
+    }
+
+    fn endThemePicker(self: *Ui) void {
+        if (self.theme_choices.len > 0) self.alloc.free(self.theme_choices);
+        self.theme_choices = &.{};
+        self.theme_previewed = null;
+    }
+
     /// `:shell <position>` moves the Ctrl+` panel (`bottom`, `top`,
     /// `left`, `right`, `float`) for the rest of the run, open or not;
     /// `:shell` alone names where it is. The float size stays the
@@ -5476,6 +5619,7 @@ pub const Ui = struct {
         try self.finder.setStyle(finderStyle(&self.th));
         try self.palette.setStyle(paletteStyle(&self.th));
         try self.ext_list.setStyle(extListStyle(&self.th));
+        try self.theme_picker.setStyle(themepicker.style(paletteStyle(&self.th)));
 
         self.tree_dirty = .full;
         self.status_dirty = true;

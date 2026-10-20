@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Where a pane has been, for the session: Alt+Left/Right step back and
-//! forward through it the way a browser does, and Alt+Down lists it.
+//! Where a pane has been, kept across runs with its tab (`session.zig`):
+//! Alt+Left/Right step back and forward through it the way a browser
+//! does, and Alt+Down lists it.
 //!
 //! Two lists, because the two jobs want different shapes:
 //!

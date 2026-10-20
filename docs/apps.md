@@ -123,7 +123,7 @@ A modal text editor: vim's grammar with VS Code's keys alongside it.
   Task Journal VS Code extension. A new entry carries forward the last
   one's unfinished tasks and its tracking section, and a monthly backlog
   does the same from the month before.
-- Draws in the window's theme, or its own, switched live with `:theme`.
+- Draws in the window's theme, or its own, switched live with `:theme` or picked from `:themes`.
 
 ## gmux
 
@@ -162,6 +162,8 @@ A two-pane file manager in the Norton / Midnight Commander tradition.
 - Tabs per pane (Ctrl+T, Ctrl+Tab, Ctrl+W), a Ctrl+` shell panel that
   follows the active pane, and a key bar that shows what each F-key does
   under the held modifier. Every key is a rebindable action.
+- Quitting remembers every tab and its history; the next launch reopens
+  them (`restore_session = false` turns it off).
 
 ## gwmd
 

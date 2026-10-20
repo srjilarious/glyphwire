@@ -213,6 +213,9 @@ pub const Outcome = union(enum) {
     /// `:extensions` -- the extension list popup. The extensions are
     /// `zoe/ui.zig`'s, like the language servers.
     extensions_list,
+    /// `:themes` -- the theme picker. The themes are `zoe/ui.zig`'s, like
+    /// `theme`'s.
+    theme_picker,
     /// `:recover` -- open every unsaved-change backup no buffer has.
     /// The backups are `zoe/ui.zig`'s (`zoe/backup.zig`).
     recover,
@@ -821,6 +824,7 @@ pub const Editor = struct {
             .findFile,
             .commandPalette,
             .listExtensions,
+            .selectTheme,
             .toggleTree,
             .toggleHidden,
             .revealInTree,
@@ -3443,6 +3447,7 @@ pub const Editor = struct {
         if (eq(u8, name, "lsp")) return .{ .lsp_status = arg_opt };
         if (eq(u8, name, "diag") or eq(u8, name, "diagnostics")) return .diag_list;
         if (eq(u8, name, "extensions")) return .extensions_list;
+        if (eq(u8, name, "themes")) return .theme_picker;
         if (eq(u8, name, "recover")) return .recover;
         if (eq(u8, name, "theme") or eq(u8, name, "colo") or eq(u8, name, "colorscheme")) return .{ .theme = arg_opt };
         if (eq(u8, name, "shell")) return .{ .shell_position = arg_opt };

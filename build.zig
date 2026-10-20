@@ -25,9 +25,9 @@ const program_versions = [_]struct { name: []const u8, version: []const u8 }{
     .{ .name = "gw-view", .version = "0.8.1" },
     .{ .name = "gwmd", .version = "0.8.1" },
     .{ .name = "glyphwire-notify", .version = "0.8.0" },
-    .{ .name = "zoe", .version = "0.22.1" },
+    .{ .name = "zoe", .version = "0.23.0" },
     .{ .name = "gmux", .version = "0.11.0" },
-    .{ .name = "salacommander", .version = "0.10.1" },
+    .{ .name = "salacommander", .version = "0.11.0" },
 };
 
 pub fn build(b: *std.Build) void {

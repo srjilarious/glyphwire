@@ -42,6 +42,10 @@ pub const Action = enum {
     /// Every extension zoe could load and whether it did, in a popup
     /// (`zoe/extlist.zig`); `:extensions` too.
     listExtensions,
+    /// Every theme `:theme` can switch to, in the palette's popup, the
+    /// highlighted one applied as the cursor moves (`zoe/themepicker.zig`);
+    /// `:themes` too.
+    selectTheme,
     toggleTree,
     /// Dotfiles and `.gitignore`d paths, in the tree and the finder.
     toggleHidden,
@@ -209,6 +213,7 @@ pub const Action = enum {
             .paste => "Paste from Clipboard",
             .cut => "Cut to Clipboard",
             .jump => "Jump to Word",
+            .selectTheme => "Select Color Theme",
             else => null,
         };
     }

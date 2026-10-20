@@ -3,7 +3,8 @@
 
 //! Each side's tabs: several directories kept open in one pane, Ctrl+T to
 //! add one, Ctrl+Tab / Ctrl+Shift+Tab to walk them and Ctrl+W (or a middle
-//! click on the strip) to close one. Session-only, like the panes' history.
+//! click on the strip) to close one. Reopened at the next launch with the
+//! panes' history (`session.zig`).
 //!
 //! The shown tab is not stored here. `Ui.panes[i]` stays the pane on
 //! screen, so everything that already works on `&self.panes[i]` keeps

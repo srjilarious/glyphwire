@@ -109,7 +109,8 @@ pub const Pane = struct {
     view: ViewMode = .small,
     show_hidden: bool = false,
     sort: Sort = .{},
-    /// Where this pane has been this session (see the module doc).
+    /// Where this pane has been, carried across runs by `session.zig`
+    /// (see the module doc).
     history: DirHistory,
     /// Bumped each time the pane shows a directory -- a `load`, Back or
     /// Forward, never a `reload` -- so something that waits can tell

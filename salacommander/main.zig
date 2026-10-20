@@ -22,8 +22,9 @@
 //! table (see `openaction.zig`). It needs a glyphwire session; there is
 //! no text-mode fallback.
 //!
-//! `salacommander [LEFT [RIGHT]]` -- both sides default to the current
-//! directory.
+//! `salacommander [LEFT [RIGHT]]` -- both sides reopen the tabs the last
+//! run left (`session.zig`), or with none the current directory; a
+//! directory given opens in that side's shown tab.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -79,8 +80,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const positional = args.positional.items;
-    const left: []const u8 = if (positional.len > 0) positional[0] else ".";
-    const right: []const u8 = if (positional.len > 1) positional[1] else left;
+    const left: ?[]const u8 = if (positional.len > 0) positional[0] else null;
+    const right: ?[]const u8 = if (positional.len > 1) positional[1] else null;
 
     var cfg: sala.config.Config = cfg: {
         const dir = glyphwire.configDirPath(alloc, init.environ_map) catch break :cfg .{};
@@ -90,6 +91,20 @@ pub fn main(init: std.process.Init) !void {
     if (args.hasOption("large")) cfg.view = .large;
     if (args.hasOption("small")) cfg.view = .small;
     if (args.hasOption("hidden")) cfg.show_hidden = true;
+
+    // The last run's tabs. `-L` / `-S` / `-a` beat what each tab was
+    // left with, as they beat the config.
+    var loaded: ?sala.session.Loaded = if (cfg.restore_session) blk: {
+        const dir = (sala.session.dirPath(alloc, init.environ_map) catch null) orelse break :blk null;
+        defer alloc.free(dir);
+        break :blk sala.session.load(alloc, io, dir);
+    } else null;
+    defer if (loaded) |*l| l.deinit();
+    if (loaded) |*l| for (l.session().sides) |side| for (side.tabs) |*t| {
+        if (args.hasOption("large")) t.view = .large;
+        if (args.hasOption("small")) t.view = .small;
+        if (args.hasOption("hidden")) t.show_hidden = true;
+    };
 
     // `salacommander.conf.lua`'s own `theme`, if it names one; otherwise
     // the window's. Borrows from `theme_arena`.
@@ -127,13 +142,15 @@ pub fn main(init: std.process.Init) !void {
     const ui = sala.Ui.init(alloc, io, &conn.client, conn.listener, .{
         .left = left,
         .right = right,
+        .session = if (loaded) |*l| l.session() else null,
         .home = init.environ_map.get("HOME"),
         .environ = init.environ_map,
         .profile = init.environ_map.get("GLYPHWIRE_SALA_PROFILE") != null,
         .cfg = cfg,
         .theme = own_theme,
     }) catch |err|
-        cli.fail(io, "salacommander: can't open {s}: {t}\n", .{ left, err });
+        cli.fail(io, "salacommander: can't open {s}: {t}\n", .{ left orelse ".", err });
     defer ui.deinit();
     try ui.run();
+    ui.saveSession();
 }

@@ -99,6 +99,11 @@ pub fn render(self: *Ui) !void {
         const w = self.winSize();
         try self.ext_list.render(&batch, .{ .cols = w.cols, .rows = w.rows });
     }
+    // The theme picker, placed like the palette whose popup it is.
+    if (self.theme_picker.dirty) {
+        const w = self.winSize();
+        try self.theme_picker.render(&batch, .{ .cols = w.cols, .rows = w.rows });
+    }
     if (self.hover_dirty) try self.renderHover(&batch);
     // Placed against the word being typed, so it follows a buffer
     // repaint (a scroll, a wrap) as well as its own changes.

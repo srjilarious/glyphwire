@@ -330,6 +330,7 @@ pub fn main(init: std.process.Init) !void {
             .lsp_status,
             .diag_list,
             .extensions_list,
+            .theme_picker,
             .recover,
             .theme,
             .shell_position,

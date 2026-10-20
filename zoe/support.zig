@@ -37,6 +37,7 @@ pub const remote = @import("remote.zig");
 pub const backup = @import("backup.zig");
 pub const ext = @import("ext.zig");
 pub const extlist = @import("extlist.zig");
+pub const themepicker = @import("themepicker.zig");
 pub const fold = @import("fold.zig");
 pub const substitute = @import("substitute.zig");
 pub const findbar = @import("findbar.zig");

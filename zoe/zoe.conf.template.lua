@@ -270,6 +270,7 @@
 --     -- every role -- and it may name a theme theme.lua defines.
 --     -- `:theme <name>` switches at runtime, `:theme window` goes back to
 --     -- the window's, and `:theme` alone names the current one.
+--     -- `:themes` lists them all, previewing each as the cursor moves.
 --     theme = nil,
 --
 --     ---- Dividers -----------------------------------------------------

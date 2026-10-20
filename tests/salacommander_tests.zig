@@ -2340,3 +2340,105 @@ pub fn pollExitWaitsForNothingAndSeesSignalsTest(_: std.Io, alloc: std.mem.Alloc
     try testz.expectTrue(term == .signal);
     try testz.expectEqual(term.signal, std.posix.SIG.TERM);
 }
+
+// ─── Session (`session.zig`) ────────────────────────────────────────────
+
+const session = sala.session;
+
+pub fn sessionRoundTripsTabsAndHistoryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "session");
+    defer s.deinit();
+    try s.mkdir("a/inner");
+    try s.mkdir("b");
+    try s.file("b/note.txt", "");
+    const a = try s.abs("a");
+    defer alloc.free(a);
+    const inner = try s.abs("a/inner");
+    defer alloc.free(inner);
+    const b = try s.abs("b");
+    defer alloc.free(b);
+
+    // Left: one tab that went a -> a/inner -> back to a, sorted by size.
+    // Right: two tabs, the second (b, cursor on note.txt) shown.
+    var shown: [2]Pane = .{ try Pane.init(alloc, io, a, .{}), try Pane.init(alloc, io, s.path, .{ .view = .large }) };
+    var sets: [2]tabs.TabSet(Pane) = .{ .{}, .{} };
+    defer {
+        for (&shown) |*p| p.deinit();
+        for (&sets) |*set| {
+            for (set.others.items) |*p| p.deinit();
+            set.deinit(alloc);
+        }
+    }
+    try shown[0].load(inner);
+    try testz.expectTrue(try shown[0].back());
+    shown[0].setSort(.{ .key = .size, .dir = .descending });
+    try sets[1].open(alloc, &shown[1], try Pane.init(alloc, io, b, .{ .show_hidden = true }));
+    shown[1].list.selected = shown[1].rowOf("note.txt").?;
+
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const json = try session.serialize(alloc, try session.capture(arena.allocator(), &shown, &sets, 1));
+    defer alloc.free(json);
+
+    var loaded = session.parse(alloc, json) orelse return error.TestUnexpectedResult;
+    defer loaded.deinit();
+    const back = loaded.session();
+    try testz.expectEqual(back.active, 1);
+
+    var left = (try session.openSide(alloc, io, &back.sides[0])) orelse return error.TestUnexpectedResult;
+    defer left.deinit(alloc);
+    try testz.expectEqual(left.set.count(), 1);
+    try testz.expectEqualStr(left.shown.path, a);
+    try testz.expectTrue(left.shown.sort.key == .size and left.shown.sort.dir == .descending);
+    // Back from `a` goes nowhere, and Forward still reaches a/inner.
+    try testz.expectTrue(left.shown.history.backTarget() == null);
+    try testz.expectEqualStr(left.shown.history.forwardTarget().?.path, inner);
+    try testz.expectEqual(left.shown.history.recent.items.len, 2);
+
+    var right = (try session.openSide(alloc, io, &back.sides[1])) orelse return error.TestUnexpectedResult;
+    defer right.deinit(alloc);
+    try testz.expectEqual(right.set.count(), 2);
+    try testz.expectEqual(right.set.active, 1);
+    try testz.expectEqualStr(right.shown.path, b);
+    try testz.expectTrue(right.shown.show_hidden);
+    try testz.expectEqualStr(rowName(&right.shown, right.shown.list.selected), "note.txt");
+    try testz.expectEqualStr(right.set.others.items[0].path, s.path);
+    try testz.expectTrue(right.set.others.items[0].view == .large);
+}
+
+pub fn sessionDropsTabsWhoseDirectoryIsGoneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "session-gone");
+    defer s.deinit();
+    const gone = try s.abs("gone");
+    defer alloc.free(gone);
+
+    var two = [_]session.Tab{ .{ .path = s.path }, .{ .path = gone } };
+    // The shown one is the one gone: its neighbour is all there is.
+    var r = (try session.openSide(alloc, io, &.{ .tabs = &two, .active = 1 })) orelse return error.TestUnexpectedResult;
+    defer r.deinit(alloc);
+    try testz.expectEqual(r.set.count(), 1);
+    try testz.expectEqualStr(r.shown.path, s.path);
+
+    var none = [_]session.Tab{.{ .path = gone }};
+    try testz.expectTrue((try session.openSide(alloc, io, &.{ .tabs = &none })) == null);
+}
+
+pub fn sessionParseRefusesOtherShapesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    for ([_][]const u8{
+        "",
+        "[]",
+        "{\"version\": 2, \"sides\": [{}, {}]}",
+        "{\"version\": 1, \"sides\": [{}]}",
+        "{\"version\": 1, \"sides\": [{\"tabs\": [{\"path\": \"/\", \"view\": \"huge\"}]}, {}]}",
+    }) |json| {
+        if (session.parse(alloc, json)) |l| {
+            var owned = l;
+            owned.deinit();
+            return error.TestUnexpectedResult;
+        }
+    }
+    // A field from a later version is passed over.
+    var ok = session.parse(alloc, "{\"version\": 1, \"active\": 1, \"sides\": [{}, {\"tabs\": [{\"path\": \"/\", \"future\": 3}]}]}") orelse return error.TestUnexpectedResult;
+    defer ok.deinit();
+    try testz.expectEqual(ok.session().sides[1].tabs.len, 1);
+}

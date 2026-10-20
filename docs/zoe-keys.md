@@ -41,6 +41,7 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 | `findFile` | Ctrl+P | Fuzzy file finder |
 | `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key, and every `:` command, by name, with its `:` form and its chord in the current mode (`Close Tab  :bd  Ctrl+F4`). Typing `bd` or `:bd` finds it too. A `:` command that takes an argument (`:addfolder`, `:wsopen`, `:theme`) puts the `:` line up for it; the rest run. Recently run ones list first |
 | `listExtensions` | (unbound; `:extensions`) | Every extension zoe could load, built in or in `~/.config/glyphwire/zoe/extensions/`, and whether it loaded. Enter on one with a user file opens it |
+| `selectTheme` | (unbound; `:themes`) | Every theme `:theme` can switch to (built-ins, `theme.lua`'s, `zoe.conf.lua`'s), filtered by typing like the palette; `light` or `dark` finds those. The highlighted one is applied as the cursor moves, Enter keeps it for this run (`:wssave` records it), Escape or a click outside puts back the one from before |
 | `toggleTree` | Ctrl+B, Ctrl+N | Show / hide the file tree. Ctrl+B is VS Code's chord; under gmux it is the prefix, so use Ctrl+N or gmux's Ctrl+B Ctrl+B |
 | `revealInTree` | Ctrl+Shift+E | Find the focused group's file in the tree: shows the tree if hidden, opens the folders down to it and puts the cursor on it. The keyboard stays where it was |
 | `toggleHidden` | Alt+H | Dotfiles and `.gitignore`d paths in the tree; dotfiles only in the finder and `/` search. Was Ctrl+H, which is now replace |
@@ -295,6 +296,7 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:set autoindent=on\|off`, `autoclose=on\|off` | Auto-indent; closing brackets and quotes |
 | `:set foldcolumn=on\|off` | The fold markers' gutter column |
 | `:theme [name]` (`:colo`) | Switch colour theme |
+| `:themes` | Pick a theme from a list, previewing each |
 | `:shell [bottom\|top\|left\|right\|float]` | Move the Ctrl+` shell panel (bare: report where it is) |
 | `:lsp`, `:lsp restart` | Language server status / restart |
 | `:diag` | List diagnostics |

@@ -7200,3 +7200,60 @@ pub fn remoteForwardToNoOneIsUnavailableTest(_: std.Io, alloc: std.mem.Allocator
         return error.TestUnexpectedSuccess;
     } else |err| try testz.expectTrue(err == error.Unavailable);
 }
+
+// ── Theme picker (`zoe/themepicker.zig`) ────────────────────────────────
+
+const themepicker = zoe.themepicker;
+const theme_mod = @import("applib").theme;
+
+pub fn themePickerListsBuiltInsInOrderTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const list = try themepicker.choices(alloc, &.{}, &.{});
+    defer alloc.free(list);
+    try testz.expectEqual(list.len, theme_mod.builtins.len);
+    for (list, theme_mod.builtins) |c, s| {
+        try testz.expectEqualStr(c.name, s.name);
+        try testz.expectTrue(c.origin == .built_in);
+    }
+    var buf: [64]u8 = undefined;
+    const i = themepicker.indexOf(list, "vscode-light").?;
+    try testz.expectEqualStr(themepicker.detail(&buf, &list[i]), "light");
+}
+
+pub fn themePickerConfigThemesTakeOverByNameTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const shared = [_]theme_mod.Custom{
+        .{ .name = "nord", .base = "nord" },
+        .{ .name = "mine", .base = "github-light" },
+        // Its base chain never reaches a built-in: left out.
+        .{ .name = "lost", .base = "nowhere" },
+    };
+    const own = [_]theme_mod.Custom{
+        .{ .name = "mine", .base = "dracula" },
+        .{ .name = "zoe-only", .base = "mine" },
+    };
+    const list = try themepicker.choices(alloc, &shared, &own);
+    defer alloc.free(list);
+
+    try testz.expectEqual(list.len, theme_mod.builtins.len + 2);
+    try testz.expectTrue(themepicker.indexOf(list, "lost") == null);
+
+    // A shadowed built-in keeps its place under the config's origin.
+    const nord = themepicker.indexOf(list, "nord").?;
+    try testz.expectEqualStr(theme_mod.builtins[nord].name, "nord");
+    try testz.expectTrue(list[nord].origin == .shared);
+
+    // `zoe.conf.lua`'s over `theme.lua`'s, at `theme.lua`'s place.
+    const mine = themepicker.indexOf(list, "mine").?;
+    try testz.expectEqual(mine, theme_mod.builtins.len);
+    try testz.expectTrue(list[mine].origin == .own);
+    try testz.expectTrue(list[mine].theme.dark);
+    var buf: [64]u8 = undefined;
+    try testz.expectEqualStr(themepicker.detail(&buf, &list[mine]), "dark, zoe.conf.lua");
+    try testz.expectEqual(themepicker.indexOf(list, "zoe-only").?, theme_mod.builtins.len + 1);
+
+    // The detail column is matched, so a config's name finds its themes.
+    var pl = try themepicker.paletteList(alloc, list);
+    defer pl.deinit();
+    _ = try pl.query.insert(alloc, "zoe.conf");
+    try pl.refilter();
+    try testz.expectEqual(pl.matchCount(), 2);
+}

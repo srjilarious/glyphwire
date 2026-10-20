@@ -73,6 +73,7 @@ const config_mod = @import("config.zig");
 const openaction = @import("openaction.zig");
 const drag_mod = @import("drag.zig");
 const tabs_mod = @import("tabs.zig");
+const session_mod = @import("session.zig");
 const sudo = @import("sudo.zig");
 const shellpanel = @import("applib").shellpanel;
 const wordsplit = @import("applib").wordsplit;
@@ -483,8 +484,14 @@ pub const Ui = struct {
     quit: bool = false,
 
     pub const InitOptions = struct {
-        left: []const u8,
-        right: []const u8,
+        /// The command line's directories. Null for one not given: the
+        /// restored tab, or with none the cwd (the right side the left's).
+        left: ?[]const u8 = null,
+        right: ?[]const u8 = null,
+        /// The last run's tabs and histories (`session.zig`), reopened
+        /// before `left` / `right` are loaded over the shown tabs.
+        /// Borrowed for the call.
+        session: ?*const session_mod.Session = null,
         home: ?[]const u8,
         /// See `Ui.environ`.
         environ: ?*const std.process.Environ.Map = null,
@@ -515,10 +522,22 @@ pub const Ui = struct {
         try menu_keymap.apply(alloc, cfg.menu_keys);
 
         const pane_opts: pane_mod.Options = .{ .show_hidden = cfg.show_hidden, .view = cfg.view };
-        var left = try Pane.init(alloc, io, opts.left, pane_opts);
-        errdefer left.deinit();
-        var right = try Pane.init(alloc, io, opts.right, pane_opts);
-        errdefer right.deinit();
+        var sides: [2]?session_mod.Restored = .{ null, null };
+        errdefer for (&sides) |*s| if (s.*) |*r| r.deinit(alloc);
+        if (opts.session) |s| for (s.sides[0..2], &sides) |*side, *out| {
+            out.* = session_mod.openSide(alloc, io, side) catch null;
+        };
+        // A directory on the command line is a new visit in the restored
+        // tab, so Back still goes where the tab was.
+        const dirs = [2]?[]const u8{ opts.left, opts.right };
+        for (&sides, dirs) |*s, dir| {
+            if (s.*) |*r| {
+                if (dir) |d| try r.shown.load(d);
+            } else {
+                s.* = .{ .shown = try Pane.init(alloc, io, dir orelse dirs[0] orelse ".", pane_opts) };
+            }
+        }
+        const active: usize = if (opts.left != null) 0 else if (opts.session) |s| @min(s.active, 1) else 0;
 
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
@@ -637,7 +656,9 @@ pub const Ui = struct {
             .cfg = cfg,
             .keymap = keymap,
             .menu_keymap = menu_keymap,
-            .panes = .{ left, right },
+            .panes = .{ sides[0].?.shown, sides[1].?.shown },
+            .tab_sets = .{ sides[0].?.set, sides[1].?.set },
+            .active = active,
         };
 
         // The panes side by side over the one-row key bar. The pane split
@@ -692,6 +713,25 @@ pub const Ui = struct {
         self.launched.deinit(alloc);
         self.client.destroyContext(self.context) catch {};
         alloc.destroy(self);
+    }
+
+    /// Writes both sides' tabs and histories for the next launch to
+    /// reopen (`session.zig`), unless `restore_session` is off. Best
+    /// effort: a failure is logged, and the quit goes ahead.
+    pub fn saveSession(self: *Ui) void {
+        if (!self.cfg.restore_session) return;
+        const env = self.environ orelse return;
+        const dir = (session_mod.dirPath(self.alloc, env) catch return) orelse return;
+        defer self.alloc.free(dir);
+        var arena: std.heap.ArenaAllocator = .init(self.alloc);
+        defer arena.deinit();
+        const s = session_mod.capture(arena.allocator(), &self.panes, &self.tab_sets, self.active) catch |err| {
+            std.log.warn("salacommander: session not saved: {t}", .{err});
+            return;
+        };
+        session_mod.save(self.alloc, self.io, dir, s) catch |err| {
+            std.log.warn("salacommander: session not saved to {s}: {t}", .{ dir, err });
+        };
     }
 
     // ── Loop ────────────────────────────────────────────────────────────

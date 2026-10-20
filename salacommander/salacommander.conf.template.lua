@@ -30,6 +30,13 @@
 --     -- Show dotfiles. Ctrl+H toggles it per pane.
 --     show_hidden = false,
 --
+--     -- Reopen the last run's tabs, each with its directory, cursor,
+--     -- view, sort and Back/Forward/Alt+Down history. Saved on quit to
+--     -- $XDG_STATE_HOME/glyphwire/salacommander/session.json (else
+--     -- ~/.local/state/...); with two open, the last to quit wins. A
+--     -- directory on the command line opens in the restored left tab.
+--     restore_session = true,
+--
 --     -- Icon height caps in pixels (8..128), as in ls.conf.lua. The
 --     -- rows a view has still bound them: one cell tall in "small",
 --     -- two in "large".

@@ -75,6 +75,9 @@ pub const Config = struct {
     /// `shell_float_percent`: how much of the window a floating panel
     /// takes, each way. Default 80; clamped to 10..100.
     shell_float_percent: u8 = shellpanel.default_float_percent,
+    /// `restore_session`: reopen the last run's tabs and folder history
+    /// at startup, and save them on quit (`session.zig`). Default true.
+    restore_session: bool = true,
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
         alloc.free(self.keys);
@@ -142,6 +145,7 @@ const Apply = struct {
         const cfg = self.cfg;
         if (conf.enumValue(lua, pane_mod.ViewMode, "view")) |v| cfg.view = v;
         if (conf.boolean(lua, "show_hidden")) |v| cfg.show_hidden = v;
+        if (conf.boolean(lua, "restore_session")) |v| cfg.restore_session = v;
         if (conf.uint(lua, u32, "large_icon_px", icon_px)) |v| cfg.large_icon_px = v;
         if (conf.uint(lua, u32, "small_icon_px", icon_px)) |v| cfg.small_icon_px = v;
         // 0 is not "a screenful", it is nothing, so the floor is 1 -- the
