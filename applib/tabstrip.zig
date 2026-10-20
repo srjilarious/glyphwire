@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 //! A one-row tab strip's scrolling, shared by zoe's buffer tabs and
 //! salacommander's directory tabs.
