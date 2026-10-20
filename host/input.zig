@@ -114,20 +114,31 @@ pub const KeyInput = struct {
             const key = @field(app_mod.Key, field_name);
             if (self.swallowsKey(key, kb, profile_toggle)) {
                 // Consumed elsewhere; don't forward it.
-            } else if (kb.pressed(key) and switcher_took) {
-                // The switcher's.
-            } else if (kb.pressed(key)) {
-                any_pressed = true;
-                self.app.server.reportKey(self.app.alloc, field_name, true) catch |err| {
-                    std.log.err("reportKey({s}, true) failed: {t}", .{ field_name, err });
-                };
-            } else if (kb.released(key)) {
-                self.app.server.reportKey(self.app.alloc, field_name, false) catch |err| {
-                    std.log.err("reportKey({s}, false) failed: {t}", .{ field_name, err });
-                };
+            } else {
+                // A key can both go down and come up in one tick, when
+                // the two events landed in one batch. Which came first
+                // is read off where it ended: still down means it was
+                // let up and pressed again (the up goes first, or the
+                // session would dedupe the press against the old hold),
+                // up means a tap.
+                const pressed = kb.pressed(key) and !switcher_took;
+                const released = kb.released(key);
+                const pressed_last = kb.down(key);
+                if (released and pressed_last) self.reportKeyEdge(field_name, false);
+                if (pressed) {
+                    any_pressed = true;
+                    self.reportKeyEdge(field_name, true);
+                }
+                if (released and !pressed_last) self.reportKeyEdge(field_name, false);
             }
         }
         return any_pressed;
+    }
+
+    fn reportKeyEdge(self: *KeyInput, field_name: []const u8, down: bool) void {
+        self.app.server.reportKey(self.app.alloc, field_name, down) catch |err| {
+            std.log.err("reportKey({s}, {}) failed: {t}", .{ field_name, down, err });
+        };
     }
 
     /// Whether Ctrl+Alt+Shift is held with profiling enabled, i.e.
@@ -408,17 +419,15 @@ pub const KeyInput = struct {
 /// How long the event loop may sleep before a held key's next typematic
 /// repeat comes due, or null when nothing repeatable is held.
 ///
-/// The host blocks in `waitEvents` when idle and the hold timers only
-/// advance while the loop runs -- so without this deadline a held key
-/// sleeps through its whole schedule until something else (the caret
-/// blink, the OS's own first key-repeat event) happens to wake the loop,
-/// which then catches up several repeats' worth of simulated time in one
-/// frame. That reads as a burst of motion, a pause, then an uneven
-/// cadence. Waking on the schedule keeps the repeats evenly spaced.
+/// The host blocks in `waitEvents` when idle and repeats are only checked
+/// while the loop runs -- so without this deadline a held key sleeps
+/// through its schedule until something else (the caret blink, the OS's
+/// own first key-repeat event) happens to wake the loop, and the repeats
+/// it slept through are dropped (`Keyboard.tickRepeatsAt`). That reads
+/// as a stutter. Waking on the schedule keeps the repeats evenly spaced.
 ///
-/// Floored at one update step: the loop advances the hold timers in
-/// fixed steps, so waking sooner would only spin through iterations that
-/// can't move the clock far enough to fire anything.
+/// Floored at one update step: waking sooner would only spin through
+/// iterations that can't fire anything yet.
 pub fn repeatTimeoutMs(eng: *Engine) ?f64 {
     const kb = &eng.inputs.keyboard;
     const ctrl = kb.ctrl();

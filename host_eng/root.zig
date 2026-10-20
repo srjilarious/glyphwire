@@ -155,9 +155,16 @@ pub fn AppRunner(comptime AppData: type, comptime engOpts: EngineOptions) type {
             self.engine.pollEvents();
             self.engine.refreshWindowState();
 
+            // The keyboard's repeat clock runs on wall time, read after the
+            // drain so no event it just took is stamped later than "now",
+            // and shared by every tick below: the catch-up ticks simulate
+            // time *before* those events landed, so stepping the clock
+            // through them would hold a fresh press for the idle time
+            // ahead of it. See `Keyboard.pressed_at_ms`.
+            const input_now_ms = @as(f64, @floatFromInt(sdl.SDL_GetTicksNS())) / 1_000_000.0;
             while (self.lag > UpdateStepMs) {
                 self.lag -= UpdateStepMs;
-                self.engine.inputs.update(self.engine.window, self.engine.window_state.scale_factor, &self.engine.viewport, UpdateStepMs);
+                self.engine.inputs.update(self.engine.window, self.engine.window_state.scale_factor, &self.engine.viewport, input_now_ms);
                 const keep_running = app.update(self.engine, UpdateStepMs);
                 self.engine.inputs.finishTick();
                 if (!keep_running) return false;

@@ -68,20 +68,6 @@ pub fn keyboardClearDropsHeldKeysTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectFalse(kb.shift());
 }
 
-pub fn keyboardClearLeavesNoReleaseEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
-    // The resync clears `prev` alongside `curr`. If it only cleared
-    // `curr`, the tick after focus loss would report a `released` edge for
-    // every key that had been held, and `host/input.zig` would forward a
-    // key-up the shell never saw a key-down for.
-    var kb = host_eng.input.Keyboard{};
-    kb.set(.a, true);
-    kb.finishTick(); // `a` is now down in both curr and prev
-
-    kb.clear();
-    try testz.expectFalse(kb.released(.a));
-    try testz.expectFalse(kb.pressed(.a));
-}
-
 pub fn keyboardClearDropsCompositionTest(_: std.Io, _: std.mem.Allocator) !void {
     // A composition in flight when focus leaves has no way to finish: the
     // IME's commit lands in whatever window took focus. Dropping it here
@@ -184,10 +170,11 @@ pub fn modifiersFollowPhysicalKeysTest(_: std.Io, _: std.mem.Allocator) !void {
 
 // ─── typematic repeat ─────────────────────────────────────────────────
 
-/// One tick of the engine loop's key handling: the press/hold state is
-/// already in `curr`, `tickRepeats` republishes this tick's repeat bits,
-/// then `finishTick` rolls `curr` into `prev` for the next tick's edge
-/// comparison.
+/// One tick of the engine loop's key handling: the press/hold state and
+/// this tick's edges are already recorded, `tickRepeats` moves the clock
+/// on and republishes this tick's repeat bits, then `finishTick` drops
+/// the edges. A `set` stamps its press at the clock as it stands, so a
+/// key's hold counts from the `set`, not from the tick after it.
 fn repeatTick(kb: *host_eng.input.Keyboard, delta_ms: f64) void {
     kb.tickRepeats(delta_ms);
     kb.finishTick();
@@ -203,8 +190,8 @@ pub fn keyRepeatWaitsOutInitialDelayTest(_: std.Io, _: std.mem.Allocator) !void 
     try testz.expectFalse(kb.repeated(.page_down));
     kb.finishTick();
 
-    // Still inside the initial hold.
-    repeatTick(&kb, 80);
+    // Still inside the initial hold (86ms in).
+    repeatTick(&kb, 70);
     try testz.expectFalse(kb.repeated(.page_down));
 
     // Crossing the delay fires the first repeat, then one per interval.
@@ -243,7 +230,7 @@ pub fn keyRepeatReleaseResetsHoldTest(_: std.Io, _: std.mem.Allocator) !void {
     // picking up where the last hold left off.
     kb.set(.left, true);
     repeatTick(&kb, 16);
-    kb.tickRepeats(90);
+    kb.tickRepeats(70);
     try testz.expectFalse(kb.repeated(.left));
 }
 
@@ -267,19 +254,120 @@ pub fn keyRepeatDueMsTracksTheScheduleTest(_: std.Io, _: std.mem.Allocator) !voi
     try testz.expectEqual(kb.repeatDueMs(.down), null);
 
     kb.set(.down, true);
-    repeatTick(&kb, 16); // the press tick starts the schedule
-    try testz.expectEqual(kb.repeatDueMs(.down).?, 100.0);
+    repeatTick(&kb, 16); // the press tick starts the schedule, 16ms in
+    try testz.expectEqual(kb.repeatDueMs(.down).?, 84.0);
 
     repeatTick(&kb, 60);
-    try testz.expectEqual(kb.repeatDueMs(.down).?, 40.0);
+    try testz.expectEqual(kb.repeatDueMs(.down).?, 24.0);
 
     // After the first repeat the deadline is one interval out.
-    repeatTick(&kb, 40);
+    repeatTick(&kb, 24);
     try testz.expectEqual(kb.repeatDueMs(.down).?, 20.0);
 
     kb.set(.down, false);
     repeatTick(&kb, 16);
     try testz.expectEqual(kb.repeatDueMs(.down), null);
+}
+
+pub fn keyRepeatReleaseAndRepressInOneBatchRestartsHoldTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Down let up and pressed again before the loop drained either event
+    // -- the reported bug. A level-only keyboard never saw `curr` change,
+    // so the old hold, long past its delay, went on repeating straight
+    // through the new press. Both edges have to land, and the new press
+    // has to wait the full initial hold.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 100, .interval_ms = 20 };
+
+    kb.set(.down, true);
+    repeatTick(&kb, 16);
+    kb.tickRepeats(200);
+    try testz.expectTrue(kb.repeated(.down));
+    kb.finishTick();
+
+    kb.set(.down, false);
+    kb.set(.down, true);
+    kb.tickRepeats(16);
+    try testz.expectTrue(kb.released(.down));
+    try testz.expectTrue(kb.pressed(.down));
+    try testz.expectTrue(kb.down(.down));
+    try testz.expectFalse(kb.repeated(.down));
+    kb.finishTick();
+
+    repeatTick(&kb, 50);
+    try testz.expectFalse(kb.repeated(.down));
+    try testz.expectFalse(kb.pressed(.down));
+}
+
+pub fn keyTapInOneBatchKeepsBothEdgesTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Down and up inside one batch: the tap still happened, and `down`
+    // being false says the release came last.
+    var kb = host_eng.input.Keyboard{};
+    kb.set(.enter, true);
+    kb.set(.enter, false);
+    kb.tickRepeats(16);
+    try testz.expectTrue(kb.pressed(.enter));
+    try testz.expectTrue(kb.released(.enter));
+    try testz.expectFalse(kb.down(.enter));
+    kb.finishTick();
+    try testz.expectFalse(kb.pressed(.enter));
+    try testz.expectFalse(kb.released(.enter));
+}
+
+pub fn keyRepeatOsRepeatDownIsNoEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
+    // The desktop's own auto-repeat key-downs for a held key are neither
+    // a press nor a restart of its hold.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 100, .interval_ms = 20 };
+    kb.set(.down, true);
+    repeatTick(&kb, 16);
+    kb.setAt(.down, true, 90);
+    kb.tickRepeats(100);
+    try testz.expectFalse(kb.pressed(.down));
+    try testz.expectTrue(kb.repeated(.down));
+}
+
+pub fn keyRepeatHoldCountsFromThePressEventTest(_: std.Io, _: std.mem.Allocator) !void {
+    // The loop wakes from idle on a press and runs its catch-up ticks
+    // *after* draining it, all at one "now". The press must not be
+    // credited with the idle time those ticks stand for.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 50, .interval_ms = 20 };
+
+    kb.setAt(.down, true, 1000);
+    for (0..12) |_| {
+        kb.tickRepeatsAt(1001);
+        try testz.expectFalse(kb.repeated(.down));
+        kb.finishTick();
+    }
+    try testz.expectEqual(kb.repeatDueMs(.down).?, 49.0);
+
+    kb.tickRepeatsAt(1050);
+    try testz.expectTrue(kb.repeated(.down));
+}
+
+pub fn keyRepeatStallDropsMissedRepeatsTest(_: std.Io, _: std.mem.Allocator) !void {
+    // A stall with a key held fires it once, not once per interval it
+    // slept through, and the schedule resumes one interval from now.
+    var kb = host_eng.input.Keyboard{};
+    kb.repeat = .{ .delay_ms = 100, .interval_ms = 20 };
+
+    kb.set(.down, true);
+    repeatTick(&kb, 16);
+    kb.tickRepeats(500);
+    try testz.expectTrue(kb.repeated(.down));
+    kb.finishTick();
+    try testz.expectEqual(kb.repeatDueMs(.down).?, 20.0);
+
+    // The rest of that frame's catch-up ticks share its clock.
+    for (0..10) |_| {
+        kb.tickRepeats(0);
+        try testz.expectFalse(kb.repeated(.down));
+        kb.finishTick();
+    }
+    repeatTick(&kb, 10);
+    try testz.expectFalse(kb.repeated(.down));
+    kb.tickRepeats(10);
+    try testz.expectTrue(kb.repeated(.down));
 }
 
 pub fn keyRepeatDueMsIsNullWhenDisabledTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -479,6 +567,24 @@ pub fn keyRepeatClearDropsPendingRepeatTest(_: std.Io, _: std.mem.Allocator) !vo
     try testz.expectFalse(kb.repeated(.up));
     kb.tickRepeats(1000);
     try testz.expectFalse(kb.repeated(.up));
+}
+
+pub fn keyClearReleasesHeldKeysTest(_: std.Io, _: std.mem.Allocator) !void {
+    // Focus loss lets every held key up -- as a release edge, so the
+    // program that heard the press hears the release as well. Without it
+    // the session's down-set keeps the key, and dedupes its next press
+    // after refocus into nothing. A release for a key the session never
+    // saw go down is dropped there, so this can't send a stray key-up.
+    var kb = host_eng.input.Keyboard{};
+    kb.set(.down, true);
+    repeatTick(&kb, 16);
+
+    kb.clear();
+    try testz.expectFalse(kb.down(.down));
+    try testz.expectTrue(kb.released(.down));
+    try testz.expectFalse(kb.released(.up));
+    kb.finishTick();
+    try testz.expectFalse(kb.released(.down));
 }
 
 // ─── colour emoji font (CBDT/CBLC) ────────────────────────────────────

@@ -1783,6 +1783,11 @@ keyboard layout, dead keys and IME composition — which for a non-US
 layout, an AltGr combination or a CJK IME is not derivable from the key
 name. A client editing a line subscribes to both and inserts from `text`.
 A typematic repeat arrives as another `key_down`; nothing distinguishes it.
+The host times a hold from the press itself and never sends repeats as a
+burst: if it stalls with a key held, the repeats it slept through are
+dropped, not delivered late. A key let up and pressed again faster than
+the host drew a frame still arrives as `key_up` then `key_down`, and a key
+held when the window loses focus gets its `key_up` then.
 
 **`mods`** is `{ctrl, alt, shift, super}` as held when the host generated
 the event, left and right folded. Read chords from it, not from a live

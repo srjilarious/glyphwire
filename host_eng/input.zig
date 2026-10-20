@@ -223,6 +223,23 @@ fn logKeyEvent(ev: sdl.SDL_KeyboardEvent, mapped: Key) void {
     );
 }
 
+/// The other half of `logKeyEvent`'s trace, once a tick: every repeat
+/// `Keyboard.tickRepeatsAt` just fired, with how long its key had been
+/// held, and every key whose press and release both landed in this tick
+/// (a tap, or a release and re-press, inside one event batch). Repeats
+/// are logged for every key, including ones the host never forwards.
+fn logKeyTick(kb: *const Keyboard) void {
+    for (0..NumKeys) |idx| {
+        const key: Key = @enumFromInt(idx);
+        if (kb.repeat_bits.isSet(idx)) {
+            std.log.info("key repeat {t}: held={d:.1}ms", .{ key, kb.heldMs(idx) });
+        }
+        if (kb.pressed_bits.isSet(idx) and kb.released_bits.isSet(idx)) {
+            std.log.info("key {t}: pressed and released in one tick, now {s}", .{ key, if (kb.curr.isSet(idx)) "down" else "up" });
+        }
+    }
+}
+
 fn keyIndex(key: Key) usize {
     return @intFromEnum(key);
 }
@@ -384,7 +401,16 @@ pub const KeyRepeat = struct {
 
 pub const Keyboard = struct {
     curr: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
-    prev: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
+    /// Keys that went down / came up since the last `finishTick`,
+    /// recorded as the events arrive rather than read off a diff of
+    /// `curr` between ticks. A diff can't see a key that went up and
+    /// down again inside one event batch -- release Down and press it
+    /// again while the loop is busy drawing a frame, and `curr` never
+    /// changes: the release and the fresh press both vanish, and the old
+    /// hold, long past its initial delay, carries straight on repeating.
+    /// Both bits set means both happened; `curr` says which came last.
+    pressed_bits: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
+    released_bits: std.StaticBitSet(NumKeys) = std.StaticBitSet(NumKeys).empty,
     mods: sdl.SDL_Keymod = 0,
     text_buf: FixedBuffer(1024) = .{},
 
@@ -410,11 +436,19 @@ pub const Keyboard = struct {
     /// started, so a mid-hold retime can't fire a burst of catch-up
     /// repeats.
     repeat: KeyRepeat = .{},
-    /// Per-key hold time, and the hold time its next repeat is due at,
-    /// both in ms and both only meaningful while the key is down. Every
-    /// key is tracked; which keys a repeat actually *means* something for
-    /// is the application's call -- `repeated` is only a query.
-    held_ms: [NumKeys]f64 = @splat(0),
+    /// The keyboard's clock, in ms: the time `tickRepeatsAt` was last
+    /// run at. The engine loop feeds it wall time (SDL's tick counter,
+    /// the same base as an event's timestamp); `set` stamps a press at it.
+    now_ms: f64 = 0,
+    /// Per-key press time, and the hold time its next repeat is due at,
+    /// both in ms and both only meaningful while the key is down. The
+    /// hold is measured from the press *event's* own timestamp, not
+    /// counted up in tick steps: the loop runs its catch-up ticks after
+    /// draining the events, so counting would credit a fresh press with
+    /// the idle time before it happened. Every key is tracked; which
+    /// keys a repeat actually *means* something for is the application's
+    /// call -- `repeated` is only a query.
+    pressed_at_ms: [NumKeys]f64 = @splat(0),
     next_repeat_ms: [NumKeys]f64 = @splat(0),
     /// Keys whose repeat fired during this tick's `tickRepeats`. Cleared
     /// at the start of each tick, like `pressed`/`released`'s edges.
@@ -446,11 +480,26 @@ pub const Keyboard = struct {
     last_down_key: ?Key = null,
     last_down_was_os_repeat: bool = false,
 
+    /// Records a key going down or up at the keyboard's current clock.
+    /// See `setAt`.
     pub fn set(self: *Keyboard, key: Key, down_value: bool) void {
+        self.setAt(key, down_value, self.now_ms);
+    }
+
+    /// Records a key going down or up at `at_ms` (the event's timestamp),
+    /// latching the edge into `pressed_bits` / `released_bits`. A
+    /// key-down for a key already down -- the OS auto-repeating it -- is
+    /// no edge and leaves its hold alone.
+    pub fn setAt(self: *Keyboard, key: Key, down_value: bool, at_ms: f64) void {
+        const idx = keyIndex(key);
+        if (down_value == self.curr.isSet(idx)) return;
         if (down_value) {
-            self.curr.set(keyIndex(key));
+            self.curr.set(idx);
+            self.pressed_bits.set(idx);
+            self.pressed_at_ms[idx] = at_ms;
         } else {
-            self.curr.unset(keyIndex(key));
+            self.curr.unset(idx);
+            self.released_bits.set(idx);
         }
     }
 
@@ -458,14 +507,16 @@ pub const Keyboard = struct {
         return self.curr.isSet(keyIndex(key));
     }
 
+    /// Whether `key` went down this tick. Can be true together with
+    /// `released` -- a tap, or a release and re-press, inside one event
+    /// batch -- and `down` then says which came last.
     pub fn pressed(self: *const Keyboard, key: Key) bool {
-        const idx = keyIndex(key);
-        return self.curr.isSet(idx) and !self.prev.isSet(idx);
+        return self.pressed_bits.isSet(keyIndex(key));
     }
 
+    /// Whether `key` came up this tick. See `pressed`.
     pub fn released(self: *const Keyboard, key: Key) bool {
-        const idx = keyIndex(key);
-        return !self.curr.isSet(idx) and self.prev.isSet(idx);
+        return self.released_bits.isSet(keyIndex(key));
     }
 
     /// Whether `key`'s typematic repeat fired this tick -- the held-key
@@ -490,7 +541,7 @@ pub const Keyboard = struct {
         const idx = keyIndex(key);
         if (!self.curr.isSet(idx)) return null;
         if (self.repeat_suppressed.isSet(idx)) return null;
-        return @max(0, self.next_repeat_ms[idx] - self.held_ms[idx]);
+        return @max(0, self.next_repeat_ms[idx] - self.heldMs(idx));
     }
 
     /// Stops everything currently held from repeating until it is
@@ -510,39 +561,53 @@ pub const Keyboard = struct {
         self.clearTextRepeat();
     }
 
-    /// Advances every held key's hold timer by `delta_ms` and republishes
-    /// `repeat_bits` for this tick. A key pressed this tick starts its
-    /// schedule over at `repeat.delay_ms`; a key that is up has its timer
-    /// cleared, so a re-press always waits the full initial hold again.
-    ///
-    /// At most one repeat per key per tick: an `interval_ms` shorter than
-    /// the update step then repeats every tick rather than firing a burst
-    /// to catch up, which is what a held key should feel like when the
-    /// loop is busy.
+    /// How long the key at `idx` has been held as of `now_ms`.
+    fn heldMs(self: *const Keyboard, idx: usize) f64 {
+        return @max(0, self.now_ms - self.pressed_at_ms[idx]);
+    }
+
+    /// `tickRepeatsAt`, `delta_ms` past the keyboard's current clock.
     pub fn tickRepeats(self: *Keyboard, delta_ms: f64) void {
+        self.tickRepeatsAt(self.now_ms + delta_ms);
+    }
+
+    /// Moves the keyboard's clock to `now_ms` and republishes
+    /// `repeat_bits` for this tick. A key pressed this tick starts its
+    /// schedule over at `repeat.delay_ms`, measured from its press; a key
+    /// that is up has its schedule cleared, so a re-press always waits
+    /// the full initial hold again.
+    ///
+    /// At most one repeat per key per tick, and a stall drops the repeats
+    /// it slept through rather than firing them as a burst: the schedule
+    /// picks up one interval from now. A program that redraws on every
+    /// repeat would otherwise take a hitch as a jump of several lines
+    /// at once, and overshoot what the user was scrolling to. The engine
+    /// loop runs every tick of one frame at the same `now_ms`, so a frame
+    /// that catches up on several ticks still fires a key once.
+    pub fn tickRepeatsAt(self: *Keyboard, now_ms: f64) void {
+        self.now_ms = now_ms;
         self.repeat_bits = std.StaticBitSet(NumKeys).empty;
         for (0..NumKeys) |idx| {
             if (!self.curr.isSet(idx)) {
-                self.held_ms[idx] = 0;
                 self.next_repeat_ms[idx] = 0;
                 self.repeat_suppressed.unset(idx);
                 continue;
             }
-            if (!self.prev.isSet(idx)) {
+            if (self.pressed_bits.isSet(idx)) {
                 // The press edge itself -- start the hold schedule, and
                 // lift any suppression: a fresh press is exactly what
                 // `cancelRepeats` was waiting for.
-                self.held_ms[idx] = 0;
                 self.next_repeat_ms[idx] = self.repeat.delay_ms;
                 self.repeat_suppressed.unset(idx);
                 continue;
             }
             if (self.repeat_suppressed.isSet(idx)) continue;
             if (!self.repeat.enabled) continue;
-            self.held_ms[idx] += delta_ms;
-            if (self.held_ms[idx] < self.next_repeat_ms[idx]) continue;
+            const held = self.heldMs(idx);
+            if (held < self.next_repeat_ms[idx]) continue;
             self.repeat_bits.set(idx);
-            self.next_repeat_ms[idx] = self.held_ms[idx] + self.repeat.interval_ms;
+            self.next_repeat_ms[idx] += self.repeat.interval_ms;
+            if (self.next_repeat_ms[idx] <= held) self.next_repeat_ms[idx] = held + self.repeat.interval_ms;
         }
     }
 
@@ -705,29 +770,31 @@ pub const Keyboard = struct {
         self.preedit_cursor = -1;
     }
 
-    /// Ends the tick: the current key state becomes the previous state for
-    /// next tick's edge detection, and this tick's typed text is dropped.
-    /// The preedit deliberately survives -- it belongs to the IME's
-    /// composition, not to one tick.
+    /// Ends the tick: this tick's press/release edges and typed text are
+    /// dropped. The preedit deliberately survives -- it belongs to the
+    /// IME's composition, not to one tick.
     pub fn finishTick(self: *Keyboard) void {
-        self.prev = self.curr;
+        self.pressed_bits = std.StaticBitSet(NumKeys).empty;
+        self.released_bits = std.StaticBitSet(NumKeys).empty;
         self.text_buf.clear();
     }
 
     /// Drops every key, the modifier bits and any composition in flight.
     /// Called when the window loses focus: this state is event-driven, so
     /// a key held as focus leaves never sees its key-up and would stay
-    /// down forever. `prev` is cleared alongside `curr` so the resync
-    /// doesn't read as a `released` edge on the next tick.
+    /// down forever. Every key that was down reads as `released` on the
+    /// next tick, so whoever was told about the press hears the release
+    /// too -- glyphwire's session dedupes a press of a key it thinks is
+    /// still down, so a missing release would eat that key's next press.
     pub fn clear(self: *Keyboard) void {
+        self.released_bits.setUnion(self.curr);
         self.curr = std.StaticBitSet(NumKeys).empty;
-        self.prev = self.curr;
         self.mods = 0;
         self.text_buf.clear();
         self.clearPreedit();
         self.repeat_bits = std.StaticBitSet(NumKeys).empty;
         self.repeat_suppressed = std.StaticBitSet(NumKeys).empty;
-        self.held_ms = @splat(0);
+        self.pressed_at_ms = @splat(0);
         self.next_repeat_ms = @splat(0);
         self.clearTextRepeat();
         self.pending_press = null;
@@ -842,7 +909,11 @@ pub const InputManager = struct {
             sdl.SDL_EVENT_KEY_DOWN, sdl.SDL_EVENT_KEY_UP => {
                 const key = mapKey(event.key.key);
                 if (self.key_debug) logKeyEvent(event.key, key);
-                if (key != .unknown) self.keyboard.set(key, event.key.down);
+                // Stamped with the event's own time (SDL's tick counter,
+                // in ns), not the tick that drains it -- see
+                // `Keyboard.pressed_at_ms`.
+                const at_ms = @as(f64, @floatFromInt(event.key.timestamp)) / 1_000_000.0;
+                if (key != .unknown) self.keyboard.setAt(key, event.key.down, at_ms);
                 self.keyboard.mods = event.key.mod;
                 // The down/up bitset alone can't say which key typed the
                 // text event that follows, nor whether this key-down was
@@ -902,20 +973,22 @@ pub const InputManager = struct {
     }
 
     /// Per-tick input refresh, run before the app's own update: resolves
-    /// the mouse position into logical space and advances the keyboard's
-    /// typematic repeat timers by `delta_ms` (the loop's fixed update
-    /// step). Repeats are ticked here, ahead of `app.update`, so
-    /// `keyboard.repeated` answers for the same tick the app reads
-    /// `pressed`/`released` on.
+    /// the mouse position into logical space and moves the keyboard's
+    /// typematic repeat clock to `now_ms` -- wall time, on the same base
+    /// as an event's timestamp, and the same for every tick of one frame
+    /// (see `Keyboard.tickRepeatsAt`). Repeats are ticked here, ahead of
+    /// `app.update`, so `keyboard.repeated` answers for the same tick the
+    /// app reads `pressed`/`released` on.
     pub fn update(
         self: *InputManager,
         window: *@import("platform_sdl.zig").Window,
         scale_factor: core.Vec2F,
         viewport: *const core.Viewport,
-        delta_ms: f64,
+        now_ms: f64,
     ) void {
         _ = window;
-        self.keyboard.tickRepeats(delta_ms);
+        self.keyboard.tickRepeatsAt(now_ms);
+        if (self.key_debug) logKeyTick(&self.keyboard);
         if (self.mouse_enabled) {
             const raw = self.mouse.rawPos();
             const fb = core.Vec2F{ .x = raw.x * scale_factor.x, .y = raw.y * scale_factor.y };

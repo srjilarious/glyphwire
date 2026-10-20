@@ -644,9 +644,9 @@ pub const App = struct {
         // A resize still settling needs the loop back on its own clock to
         // commit it once the OS event stream goes quiet.
         wait = softMin(wait, self.window_sizing.settleTimeoutMs());
-        // A held key's next typematic repeat: its hold timer only moves
-        // while the loop runs, so sleeping past the schedule would land
-        // the backlog in one frame instead of an even cadence.
+        // A held key's next typematic repeat: repeats are only checked
+        // while the loop runs, so sleeping past the schedule would drop
+        // the ones it slept through instead of keeping an even cadence.
         wait = softMin(wait, input_mod.repeatTimeoutMs(eng));
         wait = softMin(wait, self.drag_out.idleTimeoutMs());
         wait = softMin(wait, self.pane_focus.idleTimeoutMs(self.panes.hasPaneBands()));
