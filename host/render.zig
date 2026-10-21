@@ -2090,12 +2090,12 @@ pub const Renderer = struct {
             const r = c.row + 1 + (i - lay.first);
             const selected = i == view.selected;
             if (selected) fillCells(eng, .{ .row = r, .col = c.col, .rows = 1, .cols = c.cols }, sel_bg);
-            var num_buf: [4]u8 = undefined;
-            const num = if (i < 9) std.fmt.bufPrint(&num_buf, "{d}", .{i + 1}) catch " " else " ";
-            _ = drawCellText(eng, num, c.col + 1, r, inner, if (selected) sel_fg else dim_fg);
-            const text_cols = inner -| modal_list.number_cols;
-            const used = drawCellText(eng, row.text, c.col + 1 + modal_list.number_cols, r, text_cols, if (selected) sel_fg else text_fg);
-            _ = drawCellText(eng, row.tag, c.col + 1 + modal_list.number_cols + used, r, text_cols -| used, if (selected) sel_fg else dim_fg);
+            if (modal_list.label(i)) |key| {
+                _ = drawCellText(eng, &.{key}, c.col + 1, r, inner, if (selected) sel_fg else dim_fg);
+            }
+            const text_cols = inner -| modal_list.label_cols;
+            const used = drawCellText(eng, row.text, c.col + 1 + modal_list.label_cols, r, text_cols, if (selected) sel_fg else text_fg);
+            _ = drawCellText(eng, row.tag, c.col + 1 + modal_list.label_cols + used, r, text_cols -| used, if (selected) sel_fg else dim_fg);
         }
         _ = drawCellText(eng, view.foot, c.col + 1, c.row + c.rows - 1, inner, dim_fg);
     }

@@ -51,6 +51,78 @@ pub fn modalListLayoutScrollsToTheSelectionTest(_: std.Io, _: std.mem.Allocator)
     try testz.expectTrue(modal_list.layout(.{ .rows = 4, .cols = 40 }, view) == null);
 }
 
+/// A keyboard for `modal_list.readAction`: the keys pressed this frame
+/// and the keys whose typematic repeat fired, by name, and the
+/// modifiers held.
+const FakeKeyboard = struct {
+    down: []const []const u8 = &.{},
+    repeats: []const []const u8 = &.{},
+    shift_held: bool = false,
+    ctrl_held: bool = false,
+
+    fn has(list: []const []const u8, name: []const u8) bool {
+        for (list) |k| {
+            if (std.mem.eql(u8, k, name)) return true;
+        }
+        return false;
+    }
+    pub fn pressed(self: FakeKeyboard, comptime key: @EnumLiteral()) bool {
+        return has(self.down, @tagName(key));
+    }
+    pub fn repeated(self: FakeKeyboard, comptime key: @EnumLiteral()) bool {
+        return has(self.repeats, @tagName(key));
+    }
+    pub fn shift(self: FakeKeyboard) bool {
+        return self.shift_held;
+    }
+    pub fn ctrl(self: FakeKeyboard) bool {
+        return self.ctrl_held;
+    }
+    pub fn alt(_: FakeKeyboard) bool {
+        return false;
+    }
+    pub fn super(_: FakeKeyboard) bool {
+        return false;
+    }
+};
+
+fn expectAction(kb: FakeKeyboard, want: modal_list.Action) !void {
+    try testz.expectTrue(std.meta.eql(modal_list.readAction(kb, false), want));
+}
+
+pub fn modalListLabelsRunDigitsThenFreeLettersTest(_: std.Io, _: std.mem.Allocator) !void {
+    try testz.expectEqual(modal_list.label(0).?, '1');
+    try testz.expectEqual(modal_list.label(8).?, '9');
+    try testz.expectEqual(modal_list.label(9).?, 'a');
+    // j, k and n already mean something in the dialogs.
+    for (modal_list.labels) |c| {
+        try testz.expectTrue(c != 'j' and c != 'k' and c != 'n');
+    }
+    try testz.expectTrue(modal_list.label(modal_list.labels.len) == null);
+}
+
+pub fn modalListReadActionPicksByLabelTest(_: std.Io, _: std.mem.Allocator) !void {
+    try expectAction(.{ .down = &.{"three"} }, .{ .pick = 2 });
+    try expectAction(.{ .down = &.{"kp_1"} }, .{ .pick = 0 });
+    try expectAction(.{ .down = &.{"a"} }, .{ .pick = 9 });
+    // l follows i: j and k are skipped.
+    try expectAction(.{ .down = &.{"l"} }, .{ .pick = 18 });
+    try expectAction(.{ .down = &.{"z"} }, .{ .pick = modal_list.labels.len - 1 });
+    // j still moves rather than picking.
+    try expectAction(.{ .down = &.{"j"} }, .{ .move = 1 });
+    // A chord is not a label.
+    try expectAction(.{ .down = &.{"a"}, .ctrl_held = true }, .none);
+}
+
+pub fn modalListReadActionMovesOnRepeatTest(_: std.Io, _: std.mem.Allocator) !void {
+    try expectAction(.{ .repeats = &.{"down"} }, .{ .move = 1 });
+    try expectAction(.{ .repeats = &.{"up"} }, .{ .move = -1 });
+    try expectAction(.{ .repeats = &.{"k"} }, .{ .move = -1 });
+    try expectAction(.{ .repeats = &.{"tab"}, .shift_held = true }, .{ .move = -1 });
+    // A repeat never picks or closes: only the movement keys keep firing.
+    try expectAction(.{ .repeats = &.{ "a", "escape", "enter" } }, .none);
+}
+
 pub fn themeNamesPutsConfigThemesFirstOnceTest(_: std.Io, alloc: std.mem.Allocator) !void {
     const customs = [_]glyphwire.theme.Custom{
         .{ .name = "mine", .base = "nord" },

@@ -30,8 +30,9 @@ const Engine = app_mod.Engine;
 /// front, pops up over the current screen instead of replacing it, and
 /// the keys that drive it never reach a program at all.
 ///
-/// Keys while open are `modal_list.readAction`'s: Up/Down move, Enter
-/// switches, 1..9 switch straight to that row, Escape closes; plus `n`
+/// Keys while open are `modal_list.readAction`'s: Up/Down move (held,
+/// they keep moving), Enter switches, a row's label (1..9, then letters)
+/// switches straight to that row, Escape closes; plus `n`
 /// for a new shell. Drawn by `Renderer.drawListDialog` from `view`, like
 /// the theme switcher. It opens with the *second* program selected, so
 /// the chord then Enter flips between the two most recent programs.

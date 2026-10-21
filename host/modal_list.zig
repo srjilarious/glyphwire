@@ -10,7 +10,8 @@
 //! look of zoe's file finder (`applib/finderpopup.zig`).
 //!
 //! The keys are shared too (`readAction`): Up/Down (k/j, Tab/Shift+Tab,
-//! or the opening chord again) move, Enter picks, 1..9 pick that row,
+//! or the opening chord again) move, and keep moving while held; Enter
+//! picks, a row's label (`labels`: 1..9, then letters) picks that row,
 //! Escape closes.
 //!
 //! Pure apart from `readAction`'s duck-typed keyboard, so the geometry
@@ -59,9 +60,21 @@ pub const Layout = struct {
     visible: usize,
 };
 
-/// Text columns a row needs before the entry text: the row number and a
-/// gap ("1  ").
-pub const number_cols = 3;
+/// The keys that pick a row straight away, in row order: the digits,
+/// then the letters the dialogs don't already use -- j and k move, and n
+/// is the context switcher's new shell. Fixed per entry, not per screen:
+/// row 10 is always `a`, however far the list has scrolled, and rows past
+/// the last label have none.
+pub const labels = "123456789abcdefghilmopqrstuvwxyz";
+
+/// Row `index`'s label key, or null past the end of `labels`.
+pub fn label(index: usize) ?u8 {
+    return if (index < labels.len) labels[index] else null;
+}
+
+/// Text columns a row needs before the entry text: its label and a gap
+/// ("a  ").
+pub const label_cols = 3;
 
 /// Where `view` goes inside `area` (the pane): sized to its longest line,
 /// centred across, a third of the way down, never outside the pane. Null
@@ -71,7 +84,7 @@ pub fn layout(area: Rect, view: View) ?Layout {
 
     var want: usize = @max(glyphwire.stringWidth(view.title), glyphwire.stringWidth(view.foot));
     for (view.rows) |r| {
-        want = @max(want, number_cols + glyphwire.stringWidth(r.text) + glyphwire.stringWidth(r.tag));
+        want = @max(want, label_cols + glyphwire.stringWidth(r.text) + glyphwire.stringWidth(r.tag));
     }
     // A cell of margin either side inside the frame, and the frame's own
     // cell either side outside it.
@@ -106,28 +119,51 @@ pub const Action = union(enum) {
     /// Enter: the selected row.
     commit,
     move: isize,
-    /// 1..9: that row, straight away.
+    /// A row's label key (`labels`): that row, straight away.
     pick: usize,
 };
 
-/// `kb` is the engine's keyboard (`pressed`, `shift`); `chord_hit` is
-/// whether this frame pressed the dialog's own chord, which steps down
-/// like Tab so holding the modifier and tapping the key walks the list.
+/// `kb` is the engine's keyboard (`pressed`, `repeated`, and the
+/// modifier reads); `chord_hit` is whether this frame pressed the
+/// dialog's own chord, which steps down like Tab so holding the modifier
+/// and tapping the key walks the list.
 pub fn readAction(kb: anytype, chord_hit: bool) Action {
     if (chord_hit) return .{ .move = 1 };
     if (kb.pressed(.escape)) return .close;
     if (kb.pressed(.enter) or kb.pressed(.kp_enter)) return .commit;
-    if (kb.pressed(.up) or kb.pressed(.k) or (kb.pressed(.tab) and kb.shift())) return .{ .move = -1 };
-    if (kb.pressed(.down) or kb.pressed(.j) or kb.pressed(.tab)) return .{ .move = 1 };
-    const digits = .{
-        .{ .one, .kp_1 },   .{ .two, .kp_2 },   .{ .three, .kp_3 },
-        .{ .four, .kp_4 },  .{ .five, .kp_5 },  .{ .six, .kp_6 },
-        .{ .seven, .kp_7 }, .{ .eight, .kp_8 }, .{ .nine, .kp_9 },
-    };
-    inline for (digits, 0..) |d, i| {
-        if (kb.pressed(d[0]) or kb.pressed(d[1])) return .{ .pick = i };
+    // The movement keys take the engine's typematic repeat as well as the
+    // press, so a held Down walks the list rather than stopping after one.
+    if (pressedOrRepeated(kb, .up) or pressedOrRepeated(kb, .k) or
+        (pressedOrRepeated(kb, .tab) and kb.shift())) return .{ .move = -1 };
+    if (pressedOrRepeated(kb, .down) or pressedOrRepeated(kb, .j) or
+        pressedOrRepeated(kb, .tab)) return .{ .move = 1 };
+    // A label is a plain key: Ctrl/Alt/Super with one is some other chord.
+    if (kb.ctrl() or kb.alt() or kb.super()) return .none;
+    inline for (label_keys, 0..) |keys, i| {
+        inline for (keys) |key| {
+            if (kb.pressed(key)) return .{ .pick = i };
+        }
     }
     return .none;
+}
+
+fn pressedOrRepeated(kb: anytype, comptime key: @EnumLiteral()) bool {
+    return kb.pressed(key) or kb.repeated(key);
+}
+
+/// The keys behind each of `labels`, in the same order: a digit on
+/// either the main row or the keypad, then each letter's own key.
+const label_keys = .{
+    .{ .one, .kp_1 },   .{ .two, .kp_2 },   .{ .three, .kp_3 },
+    .{ .four, .kp_4 },  .{ .five, .kp_5 },  .{ .six, .kp_6 },
+    .{ .seven, .kp_7 }, .{ .eight, .kp_8 }, .{ .nine, .kp_9 },
+    .{.a}, .{.b}, .{.c}, .{.d}, .{.e}, .{.f}, .{.g}, .{.h}, .{.i}, .{.l}, .{.m},
+    .{.o}, .{.p}, .{.q}, .{.r}, .{.s}, .{.t}, .{.u}, .{.v}, .{.w}, .{.x}, .{.y},
+    .{.z},
+};
+
+comptime {
+    std.debug.assert(label_keys.len == labels.len);
 }
 
 /// The theme switcher's list: `theme.lua`'s own themes first, in the
