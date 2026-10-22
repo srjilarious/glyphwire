@@ -515,6 +515,7 @@ pub fn main(init: std.process.Init) !void {
     app.theme_switcher.chord = host_cfg.theme_switcher;
     app.renderer.pane_divider = host_cfg.pane_divider;
     app.renderer.drop_target_opacity = host_cfg.drop_target_opacity;
+    app.pane_focus.cfg = host_cfg.pane_focus;
     try app.theme_switcher.setThemes(arena, shared_themes.customs);
 
     // `spawn_in_pane`: a window manager asks the *host* to start programs,
@@ -523,7 +524,8 @@ pub fn main(init: std.process.Init) !void {
     var pane_procs = pane_proc_mod.PaneProcs.init(alloc, io, &srv, socket_path, init.environ_map);
     defer pane_procs.deinit();
     app.pane_procs = &pane_procs;
-    app.root_shell_pid = root_shell_pid;
+    // Null under `--ssh`: there is no local first shell to read.
+    pane_procs.root_shell_pid = root_shell_pid;
     srv.setPaneSpawner(pane_procs.spawner());
 
     // The render loop only repaints on demand (`EngOptions.redrawOnDemand`)

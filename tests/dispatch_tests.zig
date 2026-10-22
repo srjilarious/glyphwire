@@ -4381,6 +4381,75 @@ pub fn spawnInPaneWithoutASpawnerIsUnsupportedTest(io: std.Io, alloc: std.mem.Al
     ), error.SpawnUnsupported);
 }
 
+/// A `PaneSpawner` that forks nothing and records where it was asked to
+/// start the child.
+const FakeSpawner = struct {
+    calls: usize = 0,
+    path: [64]u8 = undefined,
+    path_len: ?usize = null,
+    from: ?glyphwire.PaneHandle = null,
+
+    fn spawner(self: *FakeSpawner) dispatch.PaneSpawner {
+        return .{ .ctx = self, .spawn_fn = spawnFn, .kill_fn = killFn };
+    }
+
+    fn spawnFn(
+        ctx: ?*anyopaque,
+        _: glyphwire.PaneHandle,
+        _: glyphwire.ContextHandle,
+        _: []const []const u8,
+        _: usize,
+        _: usize,
+        cwd: dispatch.SpawnCwd,
+    ) anyerror!i32 {
+        const self: *FakeSpawner = @ptrCast(@alignCast(ctx.?));
+        self.calls += 1;
+        self.path_len = null;
+        if (cwd.path) |p| {
+            const n = @min(p.len, self.path.len);
+            @memcpy(self.path[0..n], p[0..n]);
+            self.path_len = n;
+        }
+        self.from = cwd.from;
+        return 1234;
+    }
+
+    fn killFn(_: ?*anyopaque, _: glyphwire.PaneHandle) void {}
+};
+
+/// `spawn_in_pane`'s `cwd` and `cwd_from` reach the spawner as given,
+/// and a request with neither leaves the directory to the host.
+pub fn spawnInPanePassesTheStartDirectoryTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var fake: FakeSpawner = .{};
+    const sp = fake.spawner();
+    var d = dispatch.Dispatcher.initForConnection(&session, 4, &sp, null);
+    try testz.expectTrue(session.claimManager(4, 0) != null);
+    _ = try session.createPane(4, 0);
+    _ = try session.createPane(4, 0);
+
+    const plain = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"spawn_in_pane","params":{"pane":1,"argv":["true"]}}
+    );
+    if (plain.response) |r| alloc.free(r);
+    try testz.expectEqual(fake.calls, 1);
+    try testz.expectTrue(fake.path_len == null);
+    try testz.expectTrue(fake.from == null);
+
+    const placed = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"spawn_in_pane","params":{"pane":2,"argv":["true"],"cwd":"/srv/work","cwd_from":1}}
+    );
+    if (placed.response) |r| alloc.free(r);
+    try testz.expectEqual(fake.calls, 2);
+    try testz.expectEqualStr(fake.path[0..fake.path_len.?], "/srv/work");
+    try testz.expectEqual(fake.from.?, 1);
+}
+
 // ─── start_remote / stop_remote ──────────────────────────────────────
 
 /// A `RemoteStarter` that spawns nothing and just records what it was

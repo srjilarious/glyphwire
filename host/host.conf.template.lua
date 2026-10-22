@@ -154,6 +154,20 @@
 --     -- Clamped to 0.05..1.
 --     drop_target_opacity = 0.25,
 --
+--     -- The focused pane's highlight, drawn on the pane dividers around
+--     -- it (so a lone pane, or a side at the window's edge, shows none):
+--     -- "none", "solid" (pane_focus_color held steady), or "pulse"
+--     -- (eased to pane_focus_pulse_color and back, each way taking
+--     -- pane_focus_pulse_seconds, clamped to 0.1..60). Colours are a
+--     -- palette slot ("bright_blue"), a theme role ("accent"), or
+--     -- "#rrggbb"; the defaults are the theme's `pane_focus` and
+--     -- `pane_focus_pulse` roles. An unfocused window holds the first
+--     -- colour still.
+--     pane_focus_highlight = "pulse",
+--     pane_focus_color = "pane_focus",
+--     pane_focus_pulse_color = "pane_focus_pulse",
+--     pane_focus_pulse_seconds = 3,
+--
 --     ---- Grid --------------------------------------------------------
 --
 --     -- Initial grid size in cells. The window opens this many cells

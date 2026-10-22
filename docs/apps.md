@@ -125,7 +125,11 @@ server for panes and places them.
   `z` zooms, `H` / `J` / `K` / `L` resize, `q` quits, and `Ctrl-B` again
   sends one `Ctrl-B` through.
 - Dividers are host-drawn and draggable, and keep their ratios when panes
-  split or close.
+  split or close. The host highlights the dividers around the focused
+  pane, solid or slowly pulsing (`pane_focus_highlight` in
+  `host.conf.lua`).
+- The first pane starts where gmux was started, and a split starts in
+  the directory of the shell in the pane it was split from.
 
 ## salacommander
 

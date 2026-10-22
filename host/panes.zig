@@ -181,6 +181,15 @@ pub const Panes = struct {
         self.pane_scratch.deinit(alloc);
     }
 
+    /// Whether the cache, as last built, holds any band between panes:
+    /// what the focused pane's highlight has to colour.
+    pub fn hasPaneBands(self: *const Panes) bool {
+        for (self.bands.items) |b| {
+            if (b.level == .pane) return true;
+        }
+        return false;
+    }
+
     /// Refreshes the band cache if either layout has moved since it was
     /// built. The caller must hold `ctx_mutex`.
     pub fn syncLocked(self: *Panes) void {

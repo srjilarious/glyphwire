@@ -16,3 +16,4 @@ pub const redraw = @import("redraw.zig");
 pub const profiler = @import("profiler.zig");
 pub const shadow = @import("shadow.zig");
 pub const modal_list = @import("modal_list.zig");
+pub const pane_focus = @import("pane_focus.zig");

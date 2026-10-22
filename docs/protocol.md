@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.9.0 — pre-1.0 draft.**
+**Version 0.10.0 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -588,7 +588,7 @@ append-only):
 | Status | `success`, `message`, `message_error`, `diag_error`, `diag_warning`, `diag_info`, `diag_hint` |
 | Search | `match`, `match_bg`, `match_current_bg` |
 | Files | `file`, `dir`, `symlink`, `exec`, `special`, `hidden`, `hidden_dir`, `marked` |
-| Chrome | `sidebar_bg`, `status_bg`, `status_fg`, `mode`, `tab_bar_bg`, `tab_bg`, `shell_bg`, `whitespace`, `title_bg`, `title_fg`, `title_inactive_bg`, `title_inactive_fg`, `list_cursor_bg`, `list_cursor_inactive_bg`, `list_cursor_fg`, `list_cursor_inactive_fg`, `keybar_bg`, `keybar_key`, `keybar_label_bg`, `keybar_label`, `suggestion`, `divider`, `pane_divider`, `drop_target` |
+| Chrome | `sidebar_bg`, `status_bg`, `status_fg`, `mode`, `tab_bar_bg`, `tab_bg`, `shell_bg`, `whitespace`, `title_bg`, `title_fg`, `title_inactive_bg`, `title_inactive_fg`, `list_cursor_bg`, `list_cursor_inactive_bg`, `list_cursor_fg`, `list_cursor_inactive_fg`, `keybar_bg`, `keybar_key`, `keybar_label_bg`, `keybar_label`, `suggestion`, `divider`, `pane_divider`, `drop_target`, `pane_focus`, `pane_focus_pulse` |
 | Popups and dialogs | `popup_bg`, `popup_fg`, `popup_code_bg`, `popup_rule`, `popup_border`, `popup_selected_bg`, `popup_label`, `popup_kind`, `popup_detail`, `finder_header_bg`, `finder_header_fg`, `finder_selected_bg`, `finder_selected_fg`, `dialog_bg`, `dialog_fg`, `dialog_title_bg`, `dialog_title_fg`, `danger_bg`, `input_bg`, `button_bg`, `button_focus_bg` |
 | Documents | `heading1`–`heading6`, `strong`, `emphasis`, `strike`, `code`, `code_bg`, `code_block`, `code_block_bg`, `quote`, `list_marker`, `rule` |
 | Tables | `table_header`, `table_header_bg`, `table_alt_row_bg`, `outline_marker` |
@@ -602,7 +602,9 @@ enough that only this reads on it. `divider` and `pane_divider` are the
 host's own: the band between split layers (the context's theme) and
 between panes (the window theme's). Both are drawn in the host's
 `pane_divider_style`; a program may restyle its own split bands with
-`set_divider_style`.
+`set_divider_style`. `pane_focus` and `pane_focus_pulse` are the focused
+pane's highlight on the pane dividers around it, held steady or pulsed
+between (glyphwire-host: `host.conf.lua`'s `pane_focus_highlight`).
 
 **Whose theme.** The host has a **window theme**, read at startup from
 `theme.lua` in the config directory (`config = { theme = "nord" }`, or a
@@ -1430,7 +1432,7 @@ gets `NotWindowManager`.
 | `get_pane_split` | request | `split` | `{axis, resizable, children}` |
 | `set_root_pane_split` | notification | `split?` | — |
 | `move_pane_divider` | notification | `split`, `index`, `delta` | — |
-| `spawn_in_pane` | request | `pane`, `argv`, `cols?`, `rows?` | `{pid}` |
+| `spawn_in_pane` | request | `pane`, `argv`, `cols?`, `rows?`, `cwd?`, `cwd_from?` | `{pid}` |
 | `set_window_prefix` | notification | `key?`, `ctrl?` = true, `alt?` = false, `shift?` = false | — |
 | `send_window_prefix` | notification | — | — |
 
@@ -1454,8 +1456,20 @@ spawned into a pane sends first, from `GLYPHWIRE_PANE`.
 `spawn_in_pane` forks a program with the discovery variables set for that
 pane. `argv` **MUST** be non-empty; the first element is resolved through
 `PATH`. A host with no spawner — the headless server — reports
-`SpawnUnsupported`; a failed fork or exec reports `SpawnFailed`. When the
-program exits, `pane_exit` is delivered to `panes` subscribers, once
+`SpawnUnsupported`; a failed fork or exec reports `SpawnFailed`.
+
+The program starts in `cwd` when given, else in the host's own directory.
+`cwd_from` names a pane whose shell's working directory wins over `cwd`:
+the shell nearest the top of that pane's context stack that the host
+started (a program's own screen is passed over for the shell beneath it).
+When the host can read no such directory it falls back to `cwd`. The host
+resolves `cwd_from` rather than the manager because only the host knows
+which process in a pane is the shell; it is how a manager makes a new
+pane follow the one it was split from. A directory that cannot be entered
+is not an error: the program starts where the host is, as a shell started
+from a deleted directory does.
+
+When the program exits, `pane_exit` is delivered to `panes` subscribers, once
 nothing else holds the pane open (section 4.2, *Several shells in one
 pane*).
 

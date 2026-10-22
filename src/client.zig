@@ -977,24 +977,41 @@ pub const Client = struct {
         return .{ .parsed = parsed };
     }
 
+    /// `spawnInPane`'s optional params, all defaulting to the host's
+    /// choice.
+    pub const SpawnOptions = struct {
+        cols: ?usize = null,
+        rows: ?usize = null,
+        cwd: ?[]const u8 = null,
+        cwd_from: ?core.PaneHandle = null,
+    };
+
     /// `spawn_in_pane`: starts a program seated in a pane, and answers its
     /// pid. The host handles the fork, the PTY, the environment that lets
     /// the child find its pane, and the reaping -- see
     /// `dispatch.PaneSpawner` for why that isn't the manager's job.
     ///
-    /// `cols`/`rows` default to the pane's own size, which is almost always
-    /// what a program should get.
+    /// `opts.cols`/`opts.rows` default to the pane's own size, which is
+    /// almost always what a program should get; `opts.cwd` and
+    /// `opts.cwd_from` pick the directory it starts in (see
+    /// `protocol.SpawnInPaneParams`).
     pub fn spawnInPane(
         self: *Client,
         pane: core.PaneHandle,
         argv: []const []const u8,
-        cols: ?usize,
-        rows: ?usize,
+        opts: SpawnOptions,
     ) !i64 {
         var parsed = try self.request(
             protocol.SpawnInPaneResult,
             "spawn_in_pane",
-            .{ .pane = pane, .argv = argv, .cols = cols, .rows = rows },
+            protocol.SpawnInPaneParams{
+                .pane = pane,
+                .argv = argv,
+                .cols = opts.cols,
+                .rows = opts.rows,
+                .cwd = opts.cwd,
+                .cwd_from = opts.cwd_from,
+            },
         );
         defer parsed.deinit();
         return parsed.value.result.pid;

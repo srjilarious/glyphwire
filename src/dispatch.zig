@@ -497,10 +497,22 @@ pub const HandleResult = struct {
 /// `src/` never grows fork/exec policy: what env a pane's child gets, how
 /// its PTY output reaches the grid, and how it is reaped are all host
 /// concerns. See `host/pane_proc.zig`.
+/// Where a `spawn_in_pane` child starts: `spawn_in_pane`'s `cwd` and
+/// `cwd_from`, borrowed from the request for the length of the call.
+pub const SpawnCwd = struct {
+    /// An explicit directory, or null for the host's own.
+    path: ?[]const u8 = null,
+    /// A pane whose shell's directory wins over `path` when it can be
+    /// read. Resolving it is the spawner's job: only the host knows which
+    /// process in a pane is the shell.
+    from: ?core.PaneHandle = null,
+};
+
 pub const PaneSpawner = struct {
     ctx: ?*anyopaque,
     /// Starts `argv` seated in `pane`, whose base context is `context`,
-    /// with a PTY sized `cols` x `rows`. Returns the child pid.
+    /// with a PTY sized `cols` x `rows`, in the directory `cwd` describes.
+    /// Returns the child pid.
     spawn_fn: *const fn (
         ctx: ?*anyopaque,
         pane: core.PaneHandle,
@@ -508,6 +520,7 @@ pub const PaneSpawner = struct {
         argv: []const []const u8,
         cols: usize,
         rows: usize,
+        cwd: SpawnCwd,
     ) anyerror!i32,
     /// Stops whatever is running in `pane` and reaps it. A no-op for a
     /// pane with nothing spawned in it.
@@ -520,8 +533,9 @@ pub const PaneSpawner = struct {
         argv: []const []const u8,
         cols: usize,
         rows: usize,
+        cwd: SpawnCwd,
     ) anyerror!i32 {
-        return self.spawn_fn(self.ctx, pane, context, argv, cols, rows);
+        return self.spawn_fn(self.ctx, pane, context, argv, cols, rows, cwd);
     }
 
     pub fn kill(self: *const PaneSpawner, pane: core.PaneHandle) void {
@@ -2161,7 +2175,7 @@ pub const Dispatcher = struct {
         const rows = p.rows orelse @max(pane.rect.rows, 1);
         const base = pane.base;
 
-        const pid = spawner.spawn(p.pane, base, p.argv, cols, rows) catch
+        const pid = spawner.spawn(p.pane, base, p.argv, cols, rows, .{ .path = p.cwd, .from = p.cwd_from }) catch
             return DispatchError.SpawnFailed;
         return try self.respond(alloc, id, protocol.SpawnInPaneResult{ .pid = pid });
     }

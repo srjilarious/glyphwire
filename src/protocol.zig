@@ -328,7 +328,7 @@ pub const ListContextsResult = struct {
 
 /// The version of this protocol, as `docs/protocol.md`'s header gives
 /// it. Bumped with that document, not with any program.
-pub const protocol_version = "0.9.0";
+pub const protocol_version = "0.10.0";
 
 /// `get_version`'s result: the program serving the session and the
 /// protocol it speaks. `program` is its executable name
@@ -942,6 +942,13 @@ pub const SpawnInPaneParams = struct {
     /// what a program should almost always get.
     cols: ?usize = null,
     rows: ?usize = null,
+    /// The directory the child starts in. Null: the host's own.
+    cwd: ?[]const u8 = null,
+    /// A pane whose shell's working directory the child starts in
+    /// instead: the one nearest the top of that pane's stack, as the
+    /// context switcher's "new shell" picks it. Falls back to `cwd` when
+    /// there is none to read.
+    cwd_from: ?core.PaneHandle = null,
 };
 
 pub const SpawnInPaneResult = struct { pid: i64 };

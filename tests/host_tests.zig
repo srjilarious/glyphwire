@@ -412,6 +412,129 @@ pub fn fontEmojiDefaultsOnTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectFalse(hs.config_load.parseSource(arena, alloc, "config = { font_emoji = false }").font.emoji);
 }
 
+// ─── pane_focus ───────────────────────────────────────────────────────
+
+/// The highlight defaults to a 3-second pulse between the two theme
+/// roles; each key overrides its own part, and a bad value keeps the
+/// default.
+pub fn paneFocusConfigTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parse = hs.config_load.parseSource;
+
+    const none = parse(arena, alloc, "config = {}").pane_focus;
+    try testz.expectTrue(none.mode == .pulse);
+    try testz.expectEqual(none.pulse_ms, 3000);
+    try testz.expectTrue(none.color.role == .pane_focus);
+    try testz.expectTrue(none.pulse_color.role == .pane_focus_pulse);
+
+    const set = parse(arena, alloc,
+        \\config = { pane_focus_highlight = "solid", pane_focus_color = "#ff8000",
+        \\  pane_focus_pulse_color = "bright_red", pane_focus_pulse_seconds = 1.5 }
+    ).pane_focus;
+    try testz.expectTrue(set.mode == .solid);
+    try testz.expectEqual(set.color.rgb.r, 0xff);
+    try testz.expectEqual(set.color.rgb.g, 0x80);
+    try testz.expectTrue(set.pulse_color == .slot);
+    try testz.expectEqual(set.pulse_ms, 1500);
+
+    const off = parse(arena, alloc, "config = { pane_focus_highlight = \"none\", pane_focus_color = \"accent\" }").pane_focus;
+    try testz.expectTrue(off.mode == .none);
+    try testz.expectTrue(off.color.role == .accent);
+
+    const bad = parse(arena, alloc, "config = { pane_focus_highlight = \"glow\", pane_focus_color = \"nope\" }").pane_focus;
+    try testz.expectTrue(bad.mode == .pulse);
+    try testz.expectTrue(bad.color.role == .pane_focus);
+
+    // Clamped, not ignored: a too-fast pulse is slowed to the floor.
+    const fast = parse(arena, alloc, "config = { pane_focus_pulse_seconds = 0.01 }").pane_focus;
+    try testz.expectEqual(fast.pulse_ms, hs.pane_focus.pulse_ms_min);
+}
+
+/// The pulse starts on the highlight colour, reaches the pulse colour one
+/// leg later, comes back after another, and eases at both ends.
+pub fn paneFocusPulseMixTest(_: std.Io, _: std.mem.Allocator) !void {
+    const mixAt = hs.pane_focus.pulseMix;
+    try testz.expectTrue(mixAt(0, 3000) == 0);
+    try testz.expectTrue(@abs(mixAt(1500, 3000) - 0.5) < 0.001);
+    try testz.expectTrue(@abs(mixAt(3000, 3000) - 1) < 0.001);
+    try testz.expectTrue(@abs(mixAt(4500, 3000) - 0.5) < 0.001);
+    try testz.expectTrue(@abs(mixAt(6000, 3000)) < 0.001);
+    // Eased: a tenth of the way in is well under a tenth of the change.
+    try testz.expectTrue(mixAt(300, 3000) < 0.05);
+    // Symmetric about the turn.
+    try testz.expectTrue(@abs(mixAt(2000, 3000) - mixAt(4000, 3000)) < 0.001);
+}
+
+/// A focus change, or the window losing the keyboard, restarts the pulse
+/// on the highlight colour; only a focused window's pulse wakes the loop,
+/// and only while there is a pane divider to colour.
+pub fn paneFocusClockTest(_: std.Io, _: std.mem.Allocator) !void {
+    var pf: hs.pane_focus.PaneFocus = .{};
+    pf.tick(1, true, 0);
+    pf.tick(1, true, 1000);
+    try testz.expectEqual(pf.elapsed_ms, 1000);
+    // Wraps at a whole period, two legs.
+    pf.tick(1, true, 5500);
+    try testz.expectEqual(pf.elapsed_ms, 500);
+    pf.tick(2, true, 16);
+    try testz.expectEqual(pf.elapsed_ms, 0);
+
+    try testz.expectEqual(pf.idleTimeoutMs(true).?, hs.pane_focus.pulse_frame_ms);
+    try testz.expectTrue(pf.idleTimeoutMs(false) == null);
+    pf.tick(2, false, 16);
+    try testz.expectEqual(pf.elapsed_ms, 0);
+    try testz.expectTrue(pf.idleTimeoutMs(true) == null);
+
+    var solid: hs.pane_focus.PaneFocus = .{ .cfg = .{ .mode = .solid } };
+    solid.tick(1, true, 0);
+    solid.tick(1, true, 1000);
+    try testz.expectEqual(solid.elapsed_ms, 0);
+    try testz.expectTrue(solid.idleTimeoutMs(true) == null);
+
+    const th = glyphwire.theme.initDefault();
+    const off: hs.pane_focus.PaneFocus = .{ .cfg = .{ .mode = .none } };
+    try testz.expectTrue(off.color(&th) == null);
+    // Solid is the highlight colour itself; a pulse at its start too.
+    const accent = th.roleColor(.accent);
+    try testz.expectEqual(solid.color(&th).?.b, accent.b);
+    pf.tick(2, true, 0);
+    try testz.expectEqual(pf.color(&th).?.b, accent.b);
+}
+
+/// The cells that border a pane are its one-cell ring, corners included;
+/// a band is cut down to the stretch inside that ring.
+pub fn paneFocusRingTest(_: std.Io, _: std.mem.Allocator) !void {
+    const touches = hs.pane_focus.touches;
+    const clip = hs.pane_focus.clip;
+    // Left pane of a side-by-side pair, the divider at column 40.
+    const left: glyphwire.CellRect = .{ .row = 0, .col = 0, .rows = 20, .cols = 40 };
+    try testz.expectTrue(touches(0, 40, left));
+    try testz.expectTrue(touches(19, 40, left));
+    // One past the bottom: the corner where a horizontal divider below
+    // would meet it.
+    try testz.expectTrue(touches(20, 40, left));
+    try testz.expectFalse(touches(21, 40, left));
+    try testz.expectFalse(touches(5, 41, left));
+
+    // A pane in the middle: its top-left corner junction is in the ring.
+    const mid: glyphwire.CellRect = .{ .row = 10, .col = 10, .rows = 5, .cols = 5 };
+    try testz.expectTrue(touches(9, 9, mid));
+    try testz.expectFalse(touches(8, 9, mid));
+
+    // A horizontal band right across the window, under the left pane:
+    // only the part along it (and its corner) is lit.
+    const band: glyphwire.CellRect = .{ .row = 20, .col = 0, .rows = 1, .cols = 81 };
+    const part = clip(band, left).?;
+    try testz.expectEqual(part.row, 20);
+    try testz.expectEqual(part.col, 0);
+    try testz.expectEqual(part.cols, 41);
+    try testz.expectEqual(part.rows, 1);
+    // A band nowhere near.
+    try testz.expectTrue(clip(.{ .row = 0, .col = 60, .rows = 20, .cols = 1 }, left) == null);
+}
+
 // ─── emoji presentation ──────────────────────────────────────────────
 
 pub fn emojiPresentationDefaultsTest(_: std.Io, _: std.mem.Allocator) !void {

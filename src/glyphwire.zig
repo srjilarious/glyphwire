@@ -166,6 +166,7 @@ pub const PaneSplitError = core.PaneSplitError;
 pub const PaneBounds = core.PaneBounds;
 pub const PaneDividerRect = core.PaneDividerRect;
 pub const PaneSpawner = dispatch.PaneSpawner;
+pub const SpawnCwd = dispatch.SpawnCwd;
 pub const RemoteStarter = dispatch.RemoteStarter;
 pub const WindowPrefix = core.WindowPrefix;
 pub const ProfileSnapshot = core.ProfileSnapshot;

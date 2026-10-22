@@ -9,6 +9,7 @@ const app_mod = @import("app.zig");
 const config = @import("config.zig");
 const geometry = @import("geometry.zig");
 const dividers = @import("dividers.zig");
+const pane_focus = @import("pane_focus.zig");
 const shadow_mod = @import("shadow.zig");
 const scroll = @import("scroll.zig");
 const selection = @import("selection.zig");
@@ -2528,13 +2529,14 @@ pub const Renderer = struct {
     fn renderDividers(self: *Renderer, eng: *Engine) void {
         const server = self.app.server;
         // The window theme's: a band between panes belongs to no program.
-        const color, const bg = blk: {
+        const color, const bg, const focus = blk: {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
             self.app.panes.syncLocked();
             break :blk .{
                 themeColor(&server.session.theme, .pane_divider),
                 themeColor(&server.session.theme, .bg),
+                self.focusHighlight(),
             };
         };
         switch (self.pane_divider) {
@@ -2544,6 +2546,15 @@ pub const Renderer = struct {
                 eng.renderer.drawFilledRect(
                     host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
                     color,
+                );
+                // The stretch of this band along the focused pane, over
+                // the band just drawn.
+                const f = focus orelse continue;
+                const part = pane_focus.clip(d.rect, f.rect) orelse continue;
+                const pr = geometry.cellRectPx(part);
+                eng.renderer.drawFilledRect(
+                    host_eng.RectF{ .l = pr.x, .t = pr.y, .r = pr.x + pr.w, .b = pr.y + pr.h },
+                    f.color,
                 );
             },
             .glyphs => |*g| {
@@ -2559,7 +2570,10 @@ pub const Renderer = struct {
                         bg,
                     );
                 }
-                for (self.divider_cells.items) |c| _ = drawCellText(eng, c.glyph, c.col, c.row, 1, color);
+                for (self.divider_cells.items) |c| {
+                    const lit = if (focus) |f| pane_focus.touches(c.row, c.col, f.rect) else false;
+                    _ = drawCellText(eng, c.glyph, c.col, c.row, 1, if (lit) focus.?.color else color);
+                }
             },
         }
         // The drag ghost, over the top: the real dividers above are still
@@ -2586,6 +2600,22 @@ pub const Renderer = struct {
     /// as `drawPreedit` does), stopping before it would pass `max_cols`.
     /// Returns the columns used. For host-drawn chrome text; call between
     /// `begin`/`end`.
+    const FocusHighlight = struct {
+        rect: glyphwire.CellRect,
+        color: host_eng.Color,
+    };
+
+    /// The focused pane's rect and its highlight colour this frame, or
+    /// null for none: `pane_focus_highlight = "none"`, or a focused pane
+    /// that isn't on screen. Caller holds `ctx_mutex`.
+    fn focusHighlight(self: *Renderer) ?FocusHighlight {
+        const session = &self.app.server.session;
+        const c = self.app.pane_focus.color(&session.theme.theme) orelse return null;
+        const pane = session.panePtr(session.focused_pane.load(.monotonic)) orelse return null;
+        if (!pane.mapped) return null;
+        return .{ .rect = pane.rect, .color = host_eng.Color.from(c.r, c.g, c.b, c.a) };
+    }
+
     /// Rebuilds `divider_cells` when the pane bands moved since the last
     /// build. A failed build (out of memory) leaves the old cells and
     /// tries again next frame.

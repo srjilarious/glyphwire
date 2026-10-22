@@ -9,6 +9,7 @@ const config = @import("config.zig");
 const geometry = @import("geometry.zig");
 const key_repeat = @import("key_repeat.zig");
 const dividers = @import("dividers.zig");
+const pane_focus = @import("pane_focus.zig");
 
 const HostConfig = config.HostConfig;
 
@@ -116,6 +117,18 @@ const Apply = struct {
         if (conf.number(lua, f32, "drop_target_opacity", .{ .min = config.drop_target_opacity_min, .max = 1.0 })) |v|
             cfg.drop_target_opacity = v;
 
+        if (conf.string(lua, "pane_focus_highlight")) |v| {
+            if (std.meta.stringToEnum(pane_focus.Mode, v)) |mode| {
+                cfg.pane_focus.mode = mode;
+            } else {
+                conf.warn("pane_focus_highlight '{s}' unknown (none, solid, pulse); keeping '{t}'", .{ v, cfg.pane_focus.mode });
+            }
+        }
+        readRoleValue(lua, "pane_focus_color", &cfg.pane_focus.color);
+        readRoleValue(lua, "pane_focus_pulse_color", &cfg.pane_focus.pulse_color);
+        if (conf.number(lua, f64, "pane_focus_pulse_seconds", .{ .min = pane_focus.pulse_ms_min / 1000, .max = pane_focus.pulse_ms_max / 1000 })) |v|
+            cfg.pane_focus.pulse_ms = v * 1000;
+
         if (conf.string(lua, "cursor_shape")) |v| {
             if (config.cursorShapeFromStr(v)) |shape| {
                 cfg.cursor.shape = shape;
@@ -151,6 +164,18 @@ const Apply = struct {
         if (conf.uint(lua, usize, "scrollback_rows", .{ .max = config.scrollback_rows_max })) |v| cfg.grid.scrollback = v;
     }
 };
+
+/// A colour key: a palette slot (`"bright_blue"`), a theme role
+/// (`"accent"`), or `#rrggbb`, kept as written so it follows the window
+/// theme. Anything else warns and keeps `out`.
+fn readRoleValue(lua: *Lua, comptime name: [:0]const u8, out: *glyphwire.theme.RoleValue) void {
+    const v = conf.string(lua, name) orelse return;
+    if (glyphwire.theme.parseRoleValue(v)) |rv| {
+        out.* = rv;
+    } else {
+        conf.warn(name ++ " '{s}' isn't a slot, a role or #rrggbb; keeping the default", .{v});
+    }
+}
 
 /// `pane_divider_chars`: a table of glyph overrides keyed by
 /// `dividers.Glyphs`' field names (`h`, `v`, `cross`, `t_down`, ...). Any

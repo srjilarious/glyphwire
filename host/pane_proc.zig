@@ -87,6 +87,9 @@ pub const PaneProcs = struct {
     /// in them, with its exit status. Such a pane lives on until the last
     /// of those shells exits, and only then is its `pane_exit` sent.
     deferred_exits: std.AutoHashMapUnmanaged(glyphwire.PaneHandle, i64) = .empty,
+    /// The root pane's first shell, which `main` starts rather than this
+    /// module, so `shellCwd` can still read its directory. Set by `main`.
+    root_shell_pid: ?std.posix.pid_t = null,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -130,9 +133,12 @@ pub const PaneProcs = struct {
         argv: []const []const u8,
         cols: usize,
         rows: usize,
+        cwd: glyphwire.SpawnCwd,
     ) anyerror!i32 {
         const self: *PaneProcs = @ptrCast(@alignCast(ctx.?));
-        return self.spawn(pane, context, argv, cols, rows);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const from = if (cwd.from) |p| self.shellCwd(p, &buf) else null;
+        return self.spawn(pane, context, argv, cols, rows, from orelse cwd.path);
     }
 
     fn killThunk(ctx: ?*anyopaque, pane: glyphwire.PaneHandle) void {
@@ -140,9 +146,10 @@ pub const PaneProcs = struct {
         self.kill(pane);
     }
 
-    /// Starts `argv` in `pane`. One program per pane: an existing one is
-    /// stopped first, so a manager respawning into a pane can't leak the
-    /// child that was there. Shells spawned into the pane are left alone.
+    /// Starts `argv` in `pane`, in `cwd` (null: the host's own directory).
+    /// One program per pane: an existing one is stopped first, so a
+    /// manager respawning into a pane can't leak the child that was there.
+    /// Shells spawned into the pane are left alone.
     pub fn spawn(
         self: *PaneProcs,
         pane: glyphwire.PaneHandle,
@@ -150,11 +157,12 @@ pub const PaneProcs = struct {
         argv: []const []const u8,
         cols: usize,
         rows: usize,
+        cwd: ?[]const u8,
     ) !i32 {
         if (argv.len == 0) return error.EmptyArgv;
         self.killProgram(pane);
 
-        const proc = try self.start(pane, context, argv, cols, rows, null);
+        const proc = try self.start(pane, context, argv, cols, rows, cwd);
         errdefer self.stopProc(proc);
         {
             self.mutex.lockUncancelable(self.io);
@@ -379,6 +387,48 @@ pub const PaneProcs = struct {
         if (self.shells.get(context)) |p| return p.pty.pid;
         const p = self.procs.get(pane) orelse return null;
         return if (p.context == context) p.pty.pid else null;
+    }
+
+    /// How many contexts of one pane's stack `shellCwd` looks through,
+    /// from the top. A stack deeper than this is not a real session.
+    const max_stack_scan = 32;
+
+    /// The working directory of the topmost context in `pane` whose
+    /// process the host started (a spawned shell, the pane's own program,
+    /// or the root pane's first shell), read from `/proc/<pid>/cwd`. A
+    /// program's own screen is skipped: the shell under it is what a new
+    /// shell should feel like a sibling of. Null when there is none.
+    pub fn shellCwd(self: *PaneProcs, pane: glyphwire.PaneHandle, buf: []u8) ?[]const u8 {
+        // Copied out first: `pidFor` takes `self.mutex`, which is never
+        // taken while holding `ctx_mutex`.
+        var handles: [max_stack_scan]glyphwire.ContextHandle = undefined;
+        var base: glyphwire.ContextHandle = 0;
+        const n = blk: {
+            const server = self.server;
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            const p = server.session.panePtr(pane) orelse return null;
+            base = p.base;
+            const stack = p.stack.items;
+            const count = @min(stack.len, handles.len);
+            for (0..count) |i| handles[i] = stack[stack.len - 1 - i];
+            break :blk count;
+        };
+        for (handles[0..n]) |h| {
+            var pid = self.pidFor(pane, h);
+            if (pid == null and pane == glyphwire.root_pane_handle and h == base) pid = self.root_shell_pid;
+            const known = pid orelse continue;
+            if (procCwd(known, buf)) |dir| return dir;
+        }
+        return null;
+    }
+
+    fn procCwd(pid: std.posix.pid_t, buf: []u8) ?[]const u8 {
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrintSentinel(&path_buf, "/proc/{d}/cwd", .{pid}, 0) catch return null;
+        const n = std.c.readlink(path.ptr, buf.ptr, buf.len);
+        if (n <= 0) return null;
+        return buf[0..@intCast(n)];
     }
 
     /// `pane`'s own program has exited but the pane is held open: if its

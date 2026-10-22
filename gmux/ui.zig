@@ -88,6 +88,10 @@ pub const Ui = struct {
     scrollback_rows: usize,
     /// The program a fresh pane runs. Borrowed from the config's arena.
     shell_cmd: []const u8,
+    /// The directory gmux was started in: where the first pane's program
+    /// starts, and where a split's does when the host can't read the
+    /// split pane's shell's directory. Owned; null if it couldn't be read.
+    start_cwd: ?[]const u8 = null,
     /// Every prefix command: `actions.defaults` with the config's `keys`
     /// over them.
     keymap: actions.Keymap = .{},
@@ -123,7 +127,9 @@ pub const Ui = struct {
             .focused = 0,
             .scrollback_rows = cfg.scrollback_rows,
             .shell_cmd = config.shellCommand(cfg),
+            .start_cwd = currentDir(alloc, io),
         };
+        errdefer if (self.start_cwd) |d| alloc.free(d);
         errdefer self.bounds.deinit();
         self.keymap = try actions.Keymap.initDefaults(alloc, &actions.defaults);
         errdefer self.keymap.deinit(alloc);
@@ -151,7 +157,7 @@ pub const Ui = struct {
         // Placed before spawning, so the program's first `get_property
         // "size"` already reports the pane's real dimensions rather than
         // the window's.
-        try self.spawnIn(first.pane);
+        try self.spawnIn(first.pane, null);
         try client.focusPane(first.pane);
         return self;
     }
@@ -169,6 +175,7 @@ pub const Ui = struct {
         self.bounds.deinit();
         self.tree.deinit();
         self.keymap.deinit(self.alloc);
+        if (self.start_cwd) |d| self.alloc.free(d);
         self.alloc.destroy(self);
     }
 
@@ -176,8 +183,19 @@ pub const Ui = struct {
     /// and nothing else: the host knows the pane's size and what env lets
     /// the child find it, which is why spawning isn't gmux's job (see
     /// `dispatch.PaneSpawner`).
-    fn spawnIn(self: *Ui, pane: PaneId) !void {
-        _ = try self.client.spawnInPane(pane, &.{self.shell_cmd}, null, null);
+    ///
+    /// It starts in the directory of `cwd_from`'s shell, read by the host
+    /// (only it knows which process in a pane is the shell), or else where
+    /// gmux was started -- the way a terminal's new tab follows the one
+    /// you were in.
+    fn spawnIn(self: *Ui, pane: PaneId, cwd_from: ?PaneId) !void {
+        _ = try self.client.spawnInPane(pane, &.{self.shell_cmd}, .{ .cwd = self.start_cwd, .cwd_from = cwd_from });
+    }
+
+    fn currentDir(alloc: std.mem.Allocator, io: std.Io) ?[]const u8 {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = std.process.currentPath(io, &buf) catch return null;
+        return alloc.dupe(u8, buf[0..n]) catch null;
     }
 
     // ── Loop ────────────────────────────────────────────────────────────
@@ -353,6 +371,7 @@ pub const Ui = struct {
     }
 
     fn splitFocused(self: *Ui, axis: layout.Axis) !void {
+        const from = self.focused;
         const made = try self.client.createPane(self.scrollback_rows);
         errdefer self.client.destroyPane(made.pane) catch {};
         try self.bounds.put(made.pane, .{});
@@ -376,7 +395,7 @@ pub const Ui = struct {
 
         // After the tree edit, so the pane is already placed and sized when
         // the program starts and reads its own dimensions.
-        try self.spawnIn(made.pane);
+        try self.spawnIn(made.pane, from);
         self.setFocus(made.pane);
     }
 

@@ -284,6 +284,11 @@ pub const Role = enum(u8) {
     /// `drop_target_opacity`, and a tab-slot insertion bar drawn in it
     /// solid. Opaque, like every role; the host supplies the wash.
     drop_target,
+    /// The focused pane's highlight on the pane dividers around it
+    /// (`host.conf.lua`'s `pane_focus_highlight`): `pane_focus` held
+    /// steady, or eased to `pane_focus_pulse` and back.
+    pane_focus,
+    pane_focus_pulse,
 };
 
 pub const role_count = std.enums.values(Role).len;
@@ -384,6 +389,16 @@ pub const Theme = struct {
             }
         }
         return self.slots[slot(.normal, .white)];
+    }
+
+    /// The concrete colour of a role value as a config spells one (a
+    /// slot, another role, or an RGB literal).
+    pub fn valueColor(self: *const Theme, v: RoleValue) Color {
+        return switch (v) {
+            .slot => |s| self.slots[s],
+            .rgb => |c| c,
+            .role => |r| self.roleColor(r),
+        };
     }
 
     /// `c` with any reference followed: its RGB from the slot or role,
@@ -750,6 +765,11 @@ pub fn derive(p: Palette, dark: bool) Theme {
     // The accent: a drop target is the one thing on screen asking for
     // attention, and a translucent wash of it reads on any background.
     set(&t, .drop_target, R.r(.accent));
+    // The accent too, for the same reason; the pulse breathes down to a
+    // dim accent rather than all the way back to `pane_divider`, so the
+    // focused pane never stops reading as the focused one.
+    set(&t, .pane_focus, R.r(.accent));
+    set(&t, .pane_focus_pulse, R.c(mix(blue, bg, 0.6)));
     set(&t, .cursor_bg, R.h(p.cursor));
     set(&t, .cursor_fg, R.r(.bg));
 

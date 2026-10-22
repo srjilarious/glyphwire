@@ -8,6 +8,7 @@ const key_repeat = @import("key_repeat.zig");
 const host_eng = @import("host_eng");
 const keybind = @import("keybind");
 const dividers = @import("dividers.zig");
+const pane_focus = @import("pane_focus.zig");
 
 // Font defaults. `host.conf.lua` (a global `config` table with
 // `font_face` / `font_face_name` / `font_fallback` / `font_size` -- any
@@ -263,6 +264,10 @@ pub const HostConfig = struct {
     /// pane or cell block in the theme's `drop_target` colour, already
     /// clamped to `[drop_target_opacity_min, 1]`.
     drop_target_opacity: f32 = drop_target_opacity_default,
+    /// The focused pane's highlight on the dividers around it:
+    /// `pane_focus_highlight`, `pane_focus_color`,
+    /// `pane_focus_pulse_color` and `pane_focus_pulse_seconds`.
+    pane_focus: pane_focus.Config = .{},
 };
 
 pub const drop_target_opacity_default: f32 = 0.25;

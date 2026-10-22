@@ -18,6 +18,7 @@ const window_sizing_mod = @import("window_sizing.zig");
 const preedit_mod = @import("preedit.zig");
 const render_mod = @import("render.zig");
 const panes_mod = @import("panes.zig");
+const pane_focus_mod = @import("pane_focus.zig");
 const pane_proc_mod = @import("pane_proc.zig");
 const redraw_mod = @import("redraw.zig");
 const profiler_mod = @import("profiler.zig");
@@ -77,6 +78,11 @@ const RedrawSig = struct {
     /// The theme switcher's, the same way. Its previews change the
     /// window theme too, which this also covers.
     theme_switcher_gen: u64,
+    /// The focused pane and its highlight's colour this frame: a focus
+    /// move recolours dividers no cell knows about, and a pulse moves
+    /// the colour on its own clock. Packed RGB; 0 with no highlight.
+    pane_focus: glyphwire.PaneHandle,
+    pane_focus_rgb: u32,
 };
 
 pub const EngOptions: host_eng.EngineOptions = .{
@@ -184,6 +190,9 @@ pub const App = struct {
     profiler: profiler_mod.HostProfiler,
 
     caret: caret_mod.Caret,
+    /// The focused pane's highlight on the dividers around it. Config
+    /// set by `main` after `init`.
+    pane_focus: pane_focus_mod.PaneFocus = .{},
     keys: input_mod.KeyInput,
     preedit: preedit_mod.Preedit,
     selection: selection_mod.Selection,
@@ -203,9 +212,6 @@ pub const App = struct {
     /// The programs `spawn_in_pane` started, one per pane, and the shells
     /// the context switcher spawned. Set by `main` before the first frame.
     pane_procs: ?*pane_proc_mod.PaneProcs = null,
-    /// The root pane's first shell (`main` starts it, not `pane_procs`),
-    /// for a new shell to start in its directory. Null under `--ssh`.
-    root_shell_pid: ?std.posix.pid_t = null,
     /// Whether the root pane has been brought off its first shell's dead
     /// screen yet, once that shell exited with the pane still held open.
     root_exit_handled: bool = false,
@@ -408,6 +414,7 @@ pub const App = struct {
         self.caret.reconcilePin();
 
         self.caret.tickBlink(deltaTimeMs);
+        self.pane_focus.tick(self.server.session.focused_pane.load(.monotonic), self.caret.window_focused, deltaTimeMs);
         // Last, so the OS text-input area follows wherever every path
         // above left the caret. Drives the IME candidate window's
         // placement.
@@ -560,6 +567,7 @@ pub const App = struct {
         var caret_row: usize = 0;
         var caret_col: usize = 0;
         var caret_shape: CursorShape = self.caret.shapeFor(null);
+        var focus_rgb: u32 = 0;
         {
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
@@ -569,6 +577,8 @@ pub const App = struct {
             if (self.profiler.active()) server.session.profile = self.profiler.snapshot();
             ctx_sig = redraw_mod.contextSig(server.ctx);
             panes_sig = redraw_mod.panesSig(&server.session);
+            if (self.pane_focus.color(&server.session.theme.theme)) |c|
+                focus_rgb = (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
             // The shape actually drawn, not the configured one: a client
             // `set_caret_shape`, or the window losing focus, changes the
             // caret without touching a cell.
@@ -603,6 +613,8 @@ pub const App = struct {
             .divider_preview_on = self.panes.preview != null,
             .switcher_gen = self.switcher.gen,
             .theme_switcher_gen = self.theme_switcher.gen,
+            .pane_focus = server.session.focused_pane.load(.monotonic),
+            .pane_focus_rgb = focus_rgb,
         };
     }
 
@@ -637,6 +649,7 @@ pub const App = struct {
         // the backlog in one frame instead of an even cadence.
         wait = softMin(wait, input_mod.repeatTimeoutMs(eng));
         wait = softMin(wait, self.drag_out.idleTimeoutMs());
+        wait = softMin(wait, self.pane_focus.idleTimeoutMs(self.panes.hasPaneBands()));
         return wait;
     }
 
@@ -665,54 +678,15 @@ pub const App = struct {
 
     /// The context switcher's "new shell": a `gw-shell` on a context of
     /// its own in `pane`, put on top, starting in the directory of the
-    /// shell nearest the top of that pane (`shellCwd`).
+    /// shell nearest the top of that pane (`PaneProcs.shellCwd`), or the
+    /// host's own when there is none.
     pub fn spawnShell(self: *App, pane: glyphwire.PaneHandle) void {
         const pp = self.pane_procs orelse return;
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = self.shellCwd(pane, &buf);
+        const cwd = pp.shellCwd(pane, &buf);
         _ = pp.spawnShell(pane, cwd) catch |err| {
             std.log.err("glyphwire-host: spawning a shell in pane {d} failed: {t}", .{ pane, err });
         };
-    }
-
-    /// The working directory of the topmost context in `pane` whose
-    /// process the host started (a spawned shell, the pane's own program,
-    /// or the root pane's first shell), read from `/proc/<pid>/cwd`. A
-    /// program's own screen is skipped: the shell under it is what a new
-    /// shell should feel like a sibling of. Null when there is none (the
-    /// new shell then starts in the host's own directory).
-    fn shellCwd(self: *App, pane: glyphwire.PaneHandle, buf: []u8) ?[]const u8 {
-        const pp = self.pane_procs orelse return null;
-        // Copied out first: `pidFor` takes the process table's lock, which
-        // is never taken while holding `ctx_mutex`.
-        var handles: [switcher_mod.Switcher.max_entries]glyphwire.ContextHandle = undefined;
-        var base: glyphwire.ContextHandle = 0;
-        const n = blk: {
-            const server = self.server;
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
-            const p = server.session.panePtr(pane) orelse return null;
-            base = p.base;
-            const stack = p.stack.items;
-            const count = @min(stack.len, handles.len);
-            for (0..count) |i| handles[i] = stack[stack.len - 1 - i];
-            break :blk count;
-        };
-        for (handles[0..n]) |h| {
-            var pid = pp.pidFor(pane, h);
-            if (pid == null and pane == glyphwire.root_pane_handle and h == base) pid = self.root_shell_pid;
-            const known = pid orelse continue;
-            if (procCwd(known, buf)) |dir| return dir;
-        }
-        return null;
-    }
-
-    fn procCwd(pid: std.posix.pid_t, buf: []u8) ?[]const u8 {
-        var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrintSentinel(&path_buf, "/proc/{d}/cwd", .{pid}, 0) catch return null;
-        const n = std.c.readlink(path.ptr, buf.ptr, buf.len);
-        if (n <= 0) return null;
-        return buf[0..@intCast(n)];
     }
 
     fn softMin(a: ?f64, b: ?f64) ?f64 {

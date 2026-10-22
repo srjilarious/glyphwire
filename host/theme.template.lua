@@ -104,6 +104,7 @@
 --     --              list_cursor_inactive_fg keybar_bg keybar_key
 --     --              keybar_label_bg keybar_label suggestion
 --     --              divider pane_divider (the host's split / pane bands)
+--     --              drop_target pane_focus pane_focus_pulse
 --     --   popups     popup_bg popup_fg popup_code_bg popup_rule popup_border
 --     --              popup_selected_bg popup_label popup_kind popup_detail
 --     --              finder_header_bg finder_header_fg finder_selected_bg
