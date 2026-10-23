@@ -137,7 +137,9 @@ pub const PaneProcs = struct {
     ) anyerror!i32 {
         const self: *PaneProcs = @ptrCast(@alignCast(ctx.?));
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const from = if (cwd.from) |p| self.shellCwd(p, &buf) else null;
+        // The dispatcher calls this holding `ctx_mutex`, so the locked
+        // variant: `shellCwd` would take it again and hang the host.
+        const from = if (cwd.from) |p| self.shellCwdLocked(p, &buf) else null;
         return self.spawn(pane, context, argv, cols, rows, from orelse cwd.path);
     }
 
@@ -274,7 +276,12 @@ pub const PaneProcs = struct {
             try std.process.executableDirPathAlloc(self.io, self.alloc);
         defer self.alloc.free(dir);
 
-        const candidate = try std.fs.path.join(self.alloc, &.{ dir, name });
+        // Absolute, because the child `chdir`s before it execs: a dev
+        // run's relative `GLYPHWIRE_BIN_DIR=zig-out/bin` would otherwise
+        // be looked up from the pane's start directory and fail.
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_len = try std.process.currentPath(self.io, &cwd_buf);
+        const candidate = try std.fs.path.resolve(self.alloc, &.{ cwd_buf[0..cwd_len], dir, name });
         errdefer self.alloc.free(candidate);
         std.Io.Dir.cwd().access(self.io, candidate, .{}) catch {
             self.alloc.free(candidate);
@@ -399,24 +406,51 @@ pub const PaneProcs = struct {
     /// program's own screen is skipped: the shell under it is what a new
     /// shell should feel like a sibling of. Null when there is none.
     pub fn shellCwd(self: *PaneProcs, pane: glyphwire.PaneHandle, buf: []u8) ?[]const u8 {
-        // Copied out first: `pidFor` takes `self.mutex`, which is never
-        // taken while holding `ctx_mutex`.
-        var handles: [max_stack_scan]glyphwire.ContextHandle = undefined;
-        var base: glyphwire.ContextHandle = 0;
-        const n = blk: {
+        // Copied out first, and searched after the lock is dropped: the
+        // `/proc` reads needn't hold up every connection.
+        var top: StackTop = undefined;
+        {
             const server = self.server;
             server.ctx_mutex.lockUncancelable(server.io);
             defer server.ctx_mutex.unlock(server.io);
-            const p = server.session.panePtr(pane) orelse return null;
-            base = p.base;
-            const stack = p.stack.items;
-            const count = @min(stack.len, handles.len);
-            for (0..count) |i| handles[i] = stack[stack.len - 1 - i];
-            break :blk count;
-        };
-        for (handles[0..n]) |h| {
+            top = self.stackTop(pane) orelse return null;
+        }
+        return self.cwdIn(pane, &top, buf);
+    }
+
+    /// `shellCwd` for a caller already holding `ctx_mutex`: the
+    /// `spawn_in_pane` hook, which the dispatcher runs under it.
+    pub fn shellCwdLocked(self: *PaneProcs, pane: glyphwire.PaneHandle, buf: []u8) ?[]const u8 {
+        var top = self.stackTop(pane) orelse return null;
+        return self.cwdIn(pane, &top, buf);
+    }
+
+    /// The top of one pane's context stack, topmost first.
+    const StackTop = struct {
+        handles: [max_stack_scan]glyphwire.ContextHandle,
+        len: usize,
+        base: glyphwire.ContextHandle,
+    };
+
+    /// `pane`'s `StackTop`, or null for a pane that's gone. Caller holds
+    /// `ctx_mutex`.
+    fn stackTop(self: *PaneProcs, pane: glyphwire.PaneHandle) ?StackTop {
+        const p = self.server.session.panePtr(pane) orelse return null;
+        var top: StackTop = .{ .handles = undefined, .len = 0, .base = p.base };
+        const stack = p.stack.items;
+        top.len = @min(stack.len, top.handles.len);
+        for (0..top.len) |i| top.handles[i] = stack[stack.len - 1 - i];
+        return top;
+    }
+
+    /// The directory of the first context in `top` the host started a
+    /// process for. Takes `self.mutex` (`pidFor`). Under `ctx_mutex` that
+    /// is the same nesting `spawn`'s `killProgram` already does on the
+    /// dispatcher's thread, the reverse of `pump`'s.
+    fn cwdIn(self: *PaneProcs, pane: glyphwire.PaneHandle, top: *const StackTop, buf: []u8) ?[]const u8 {
+        for (top.handles[0..top.len]) |h| {
             var pid = self.pidFor(pane, h);
-            if (pid == null and pane == glyphwire.root_pane_handle and h == base) pid = self.root_shell_pid;
+            if (pid == null and pane == glyphwire.root_pane_handle and h == top.base) pid = self.root_shell_pid;
             const known = pid orelse continue;
             if (procCwd(known, buf)) |dir| return dir;
         }

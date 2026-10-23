@@ -766,10 +766,12 @@ pub fn derive(p: Palette, dark: bool) Theme {
     // attention, and a translucent wash of it reads on any background.
     set(&t, .drop_target, R.r(.accent));
     // The accent too, for the same reason; the pulse breathes down to a
-    // dim accent rather than all the way back to `pane_divider`, so the
-    // focused pane never stops reading as the focused one.
+    // softer accent rather than back toward `pane_divider`, so the
+    // focused pane never stops reading as the focused one. Only a third
+    // of the way to `bg`: a muted accent (gruvbox's, say) mixed further
+    // lands on the divider's own grey and the highlight disappears.
     set(&t, .pane_focus, R.r(.accent));
-    set(&t, .pane_focus_pulse, R.c(mix(blue, bg, 0.6)));
+    set(&t, .pane_focus_pulse, R.c(mix(blue, bg, 0.3)));
     set(&t, .cursor_bg, R.h(p.cursor));
     set(&t, .cursor_fg, R.r(.bg));
 

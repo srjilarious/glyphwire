@@ -512,7 +512,8 @@ pub const PaneSpawner = struct {
     ctx: ?*anyopaque,
     /// Starts `argv` seated in `pane`, whose base context is `context`,
     /// with a PTY sized `cols` x `rows`, in the directory `cwd` describes.
-    /// Returns the child pid.
+    /// Returns the child pid. Called with the server's `ctx_mutex` held,
+    /// like every handler: it must not take that lock itself.
     spawn_fn: *const fn (
         ctx: ?*anyopaque,
         pane: core.PaneHandle,
