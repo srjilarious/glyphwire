@@ -142,8 +142,8 @@ fn encodeFrame(arena: std.mem.Allocator, format: Format, rows: usize) ![]const u
 // ─── Codec scenarios ─────────────────────────────────────────────────────
 
 fn benchKeyEvent(io: std.Io, alloc: std.mem.Allocator, out: *std.Io.Writer) !void {
-    // Server side: every pushed event is built once as JSON; a MessagePack
-    // subscriber's copy is a transcode of it (`Connection.send`).
+    // Server side: every pushed event is built once as MessagePack; a JSON
+    // subscriber's copy is a conversion of it (`Connection.send`).
     const mods: glyphwire.Mods = .{ .ctrl = true };
     var sizes: [2]usize = undefined;
     var enc_ns: [2]u64 = undefined;
@@ -154,19 +154,19 @@ fn benchKeyEvent(io: std.Io, alloc: std.mem.Allocator, out: *std.Io.Writer) !voi
             format: Format,
             mods: glyphwire.Mods,
             fn run(s: @This()) !void {
-                const json = try glyphwire.rpc.keyNotification(s.alloc, "Right", true, s.mods);
-                defer s.alloc.free(json);
-                if (s.format == .msgpack) {
-                    const m = try codec.jsonToMsgpack(s.alloc, json);
-                    s.alloc.free(m);
+                const pushed = try glyphwire.rpc.keyNotification(s.alloc, "Right", true, s.mods);
+                defer s.alloc.free(pushed);
+                if (s.format == .json) {
+                    const j = try codec.msgpackToJson(s.alloc, pushed);
+                    s.alloc.free(j);
                 }
             }
         };
         enc_ns[i] = try timeIt(io, 50_000, Enc{ .alloc = alloc, .format = format, .mods = mods }, Enc.run);
 
-        const json = try glyphwire.rpc.keyNotification(alloc, "Right", true, mods);
-        defer alloc.free(json);
-        const body = if (format == .json) try alloc.dupe(u8, json) else try codec.jsonToMsgpack(alloc, json);
+        const pushed = try glyphwire.rpc.keyNotification(alloc, "Right", true, mods);
+        defer alloc.free(pushed);
+        const body = if (format == .msgpack) try alloc.dupe(u8, pushed) else try codec.msgpackToJson(alloc, pushed);
         defer alloc.free(body);
         sizes[i] = body.len;
 

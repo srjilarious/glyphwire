@@ -276,20 +276,6 @@ pub fn msgpackEnvelopeHasNoJsonrpcMemberTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(v.value.object.count(), 2);
 }
 
-pub fn jsonToMsgpackDropsJsonrpcTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    _ = io;
-    const body = try codec.jsonToMsgpack(alloc,
-        \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"a","mods":{"ctrl":true}}}
-    );
-    defer alloc.free(body);
-    const env = try codec.parseEnvelope(.msgpack, alloc, body);
-    defer env.deinit();
-    try testz.expectEqualStr(env.value.method, "key_down");
-    const p = try codec.parseParams(struct { key: []const u8 }, alloc, env.value.params);
-    defer p.deinit();
-    try testz.expectEqualStr(p.value.key, "a");
-}
-
 pub fn jsonBatchResponseSplicesSubResponsesTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     const subs = [_][]const u8{

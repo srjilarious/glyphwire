@@ -66,12 +66,12 @@ pub const Connection = struct {
     /// frame.
     format: wire.Format = .json,
 
-    /// Sends a server-pushed message. `json_body` is always JSON -- the
-    /// `rpc.zig` builders make one body for every subscriber -- and is
-    /// re-encoded here for a MessagePack connection.
-    fn send(self: *Connection, io: std.Io, json_body: []const u8) !void {
-        if (self.format == .json) return self.sendNative(io, json_body);
-        const body = try codec.jsonToMsgpack(self.alloc, json_body);
+    /// Sends a server-pushed message. `msgpack_body` is always
+    /// MessagePack -- the `rpc.zig` builders make one body for every
+    /// subscriber -- and is converted here for a JSON connection.
+    fn send(self: *Connection, io: std.Io, msgpack_body: []const u8) !void {
+        if (self.format == .msgpack) return self.sendNative(io, msgpack_body);
+        const body = try codec.msgpackToJson(self.alloc, msgpack_body);
         defer self.alloc.free(body);
         try self.sendNative(io, body);
     }

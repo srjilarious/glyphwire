@@ -23,8 +23,9 @@ client — see protocol.md §2.2 and §3.1 for the normative rules.
 | Host detects it by | any first byte but `0xc1` | first byte `0xc1` |
 
 - The host answers each connection in its own encoding, including every
-  notification pushed to it. Pushed events are built once as JSON and
-  transcoded for a MessagePack subscriber (`codec.jsonToMsgpack`).
+  notification pushed to it. Pushed events are built once as MessagePack
+  and converted for a JSON subscriber (`codec.msgpackToJson`), since JSON
+  connections are the scripting and debugging case.
 - The reference `Client` / `InputListener` default to **MessagePack**;
   `GLYPHWIRE_WIRE=json` switches a process back, and
   `Client.connectAs(.., format)` / `connectFromEnvAs` pick per

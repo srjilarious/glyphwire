@@ -23,6 +23,14 @@ fn roundTripThroughWire(alloc: std.mem.Allocator, body: []const u8) ![]u8 {
     return (try decoder.next(alloc)).?;
 }
 
+/// Whether a broadcast's MessagePack body, in the JSON form a JSON
+/// subscriber is sent, contains `needle`.
+fn expectPushHas(alloc: std.mem.Allocator, body: []const u8, needle: []const u8) !void {
+    const json = try glyphwire.codec.msgpackToJson(alloc, body);
+    defer alloc.free(json);
+    try testz.expectTrue(std.mem.indexOf(u8, json, needle) != null);
+}
+
 pub fn writeTextNotificationUpdatesCoreStateTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
@@ -409,7 +417,7 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
     const broadcast = press_result.broadcast.?;
     defer alloc.free(broadcast.body);
     try testz.expectEqualStr("key", broadcast.event);
-    try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "key_down") != null);
+    try expectPushHas(alloc, broadcast.body, "key_down");
 
     // A redundant press-while-down report changes nothing, so it queues
     // no broadcast -- avoids spamming subscribers with no-op events.
@@ -423,7 +431,7 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
     try testz.expectTrue(!session.input.isKeyDown("a"));
     const release_broadcast = release_result.broadcast.?;
     defer alloc.free(release_broadcast.body);
-    try testz.expectTrue(std.mem.indexOf(u8, release_broadcast.body, "key_up") != null);
+    try expectPushHas(alloc, release_broadcast.body, "key_up");
 }
 
 pub fn reportKeyStampsModifiersHeldAtRoutingTimeTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -439,20 +447,19 @@ pub fn reportKeyStampsModifiersHeldAtRoutingTimeTest(io: std.Io, alloc: std.mem.
     );
     defer alloc.free(ctrl_down.broadcast.?.body);
     // A modifier's own press already counts itself.
-    try testz.expectTrue(std.mem.indexOf(u8, ctrl_down.broadcast.?.body, "\"ctrl\":true") != null);
+    try expectPushHas(alloc, ctrl_down.broadcast.?.body, "\"ctrl\":true");
 
     const w_down = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"w","pressed":true}}
     );
-    const body = w_down.broadcast.?.body;
-    defer alloc.free(body);
-    try testz.expectTrue(std.mem.indexOf(u8, body, "\"key\":\"w\",\"mods\":{\"ctrl\":true,\"alt\":false,\"shift\":false,\"super\":false}") != null);
+    defer alloc.free(w_down.broadcast.?.body);
+    try expectPushHas(alloc, w_down.broadcast.?.body, "\"key\":\"w\",\"mods\":{\"ctrl\":true,\"alt\":false,\"shift\":false,\"super\":false}");
 
     const ctrl_up = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"left_control","pressed":false}}
     );
     defer alloc.free(ctrl_up.broadcast.?.body);
-    try testz.expectTrue(std.mem.indexOf(u8, ctrl_up.broadcast.?.body, "\"ctrl\":false") != null);
+    try expectPushHas(alloc, ctrl_up.broadcast.?.body, "\"ctrl\":false");
 }
 
 pub fn writeTextRowColPlacesTheRunInOneMessageTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -683,7 +690,7 @@ pub fn reportMouseMoveBroadcastsOnlyOnCellChangeTest(io: std.Io, alloc: std.mem.
     const b = first.broadcast.?;
     defer alloc.free(b.body);
     try testz.expectEqualStr("mouse_move", b.event);
-    try testz.expectTrue(std.mem.indexOf(u8, b.body, "\"method\":\"mouse_move\"") != null);
+    try expectPushHas(alloc, b.body, "\"method\":\"mouse_move\"");
 
     // Same cell, different pixel -> cursor_px updates but no broadcast.
     const same_cell =
@@ -717,9 +724,9 @@ pub fn writeTextWithTerminalQueryBroadcastsReplyTest(io: std.Io, alloc: std.mem.
     const b = result.broadcast.?;
     defer alloc.free(b.body);
     try testz.expectEqualStr("terminal_reply", b.event);
-    try testz.expectTrue(std.mem.indexOf(u8, b.body, "\"method\":\"terminal_reply\"") != null);
+    try expectPushHas(alloc, b.body, "\"method\":\"terminal_reply\"");
     // Cursor was at 1;1 -> reply "\x1b[1;1R", JSON-escaped in the body.
-    try testz.expectTrue(std.mem.indexOf(u8, b.body, "1;1R") != null);
+    try expectPushHas(alloc, b.body, "1;1R");
 
     // Plain text with no query -> no broadcast.
     const plain =
@@ -794,8 +801,8 @@ pub fn reportTextQueuesTextBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !
     const broadcast = result.broadcast.?;
     defer alloc.free(broadcast.body);
     try testz.expectEqualStr("text", broadcast.event);
-    try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "\"method\":\"text\"") != null);
-    try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "e\u{00e9}") != null);
+    try expectPushHas(alloc, broadcast.body, "\"method\":\"text\"");
+    try expectPushHas(alloc, broadcast.body, "e\u{00e9}");
 
     // report_text touches no input down-set -- text is transient.
     try testz.expectEqual(session.input.keys_down.count(), 0);
@@ -822,7 +829,7 @@ pub fn reportMouseButtonCarriesClicksTest(io: std.Io, alloc: std.mem.Allocator) 
         \\{"jsonrpc":"2.0","method":"report_mouse_button","params":{"button":"left","pressed":true,"px":{"x":1,"y":1},"cell":{"row":0,"col":0},"clicks":2}}
     );
     defer alloc.free(dbl.broadcast.?.body);
-    const a = try std.json.parseFromSlice(Notif, alloc, dbl.broadcast.?.body, .{ .ignore_unknown_fields = true });
+    const a = try glyphwire.msgpack.decode(Notif, alloc, dbl.broadcast.?.body, .{});
     defer a.deinit();
     try testz.expectEqual(a.value.params.clicks, 2);
 
@@ -831,7 +838,7 @@ pub fn reportMouseButtonCarriesClicksTest(io: std.Io, alloc: std.mem.Allocator) 
         \\{"jsonrpc":"2.0","method":"report_mouse_button","params":{"button":"left","pressed":false,"px":{"x":1,"y":1},"cell":{"row":0,"col":0}}}
     );
     defer alloc.free(plain.broadcast.?.body);
-    const b = try std.json.parseFromSlice(Notif, alloc, plain.broadcast.?.body, .{ .ignore_unknown_fields = true });
+    const b = try glyphwire.msgpack.decode(Notif, alloc, plain.broadcast.?.body, .{});
     defer b.deinit();
     try testz.expectEqual(b.value.params.clicks, 1);
 }
@@ -1444,7 +1451,7 @@ pub fn scrollViewMovesOffsetClampsAndBroadcastsTest(io: std.Io, alloc: std.mem.A
 
     try testz.expectTrue(result.broadcast != null);
     try testz.expectEqualStr("scroll", result.broadcast.?.event);
-    try testz.expectTrue(std.mem.indexOf(u8, result.broadcast.?.body, "\"offset\":1") != null);
+    try expectPushHas(alloc, result.broadcast.?.body, "\"offset\":1");
 }
 
 /// `scroll_view` on a non-root layer carries that layer's handle in the
@@ -1468,7 +1475,7 @@ pub fn scrollViewOnANonRootLayerCarriesItsHandleTest(io: std.Io, alloc: std.mem.
 
     try testz.expectTrue(result.broadcast != null);
     try testz.expectEqualStr("scroll", result.broadcast.?.event);
-    try testz.expectTrue(std.mem.indexOf(u8, result.broadcast.?.body, "\"layer\":1") != null);
+    try expectPushHas(alloc, result.broadcast.?.body, "\"layer\":1");
 }
 
 /// `get_property("scroll")` reports the same `{offset, max}` a preceding
@@ -2177,7 +2184,7 @@ pub fn setSelectionAppliesAndGetSelectionTextReturnsItTest(io: std.Io, alloc: st
     const broadcast = set_result.broadcast.?;
     defer alloc.free(broadcast.body);
     try testz.expectEqualStr("selection", broadcast.event);
-    try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "\"active\":true") != null);
+    try expectPushHas(alloc, broadcast.body, "\"active\":true");
 
     const Response = struct { jsonrpc: []const u8, id: u32, result: struct { text: []const u8 } };
     const text_body = (try d.handle(alloc,
@@ -2206,7 +2213,7 @@ pub fn clearSelectionBroadcastsInactiveTest(io: std.Io, alloc: std.mem.Allocator
     );
     const broadcast = clear_result.broadcast.?;
     defer alloc.free(broadcast.body);
-    try testz.expectTrue(std.mem.indexOf(u8, broadcast.body, "\"active\":false") != null);
+    try expectPushHas(alloc, broadcast.body, "\"active\":false");
 
     const Response = struct { jsonrpc: []const u8, id: u32, result: struct { active: bool } };
     const body = (try d.handle(alloc,
@@ -3278,9 +3285,7 @@ pub fn splitChildrenLayOutAndBroadcastTest(io: std.Io, alloc: std.mem.Allocator)
             layers: []const struct { layer: u32, row: usize, col: usize, cols: usize, rows: usize },
         },
     };
-    const parsed = try std.json.parseFromSlice(Notif, alloc, broadcast.body, .{
-        .ignore_unknown_fields = true,
-    });
+    const parsed = try glyphwire.msgpack.decode(Notif, alloc, broadcast.body, .{});
     defer parsed.deinit();
     try testz.expectEqualStr(parsed.value.method, "layout");
     try testz.expectEqual(parsed.value.params.layers.len, 2);
@@ -3660,7 +3665,7 @@ pub fn createContextRetargetsTheConnectionAndBroadcastsTest(io: std.Io, alloc: s
     try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"context\":1") != null);
     try testz.expectTrue(result.broadcast != null);
     try testz.expectTrue(std.mem.eql(u8, result.broadcast.?.event, "context"));
-    try testz.expectTrue(std.mem.indexOf(u8, result.broadcast.?.body, "\"context\":1") != null);
+    try expectPushHas(alloc, result.broadcast.?.body, "\"context\":1");
 
     // The dispatcher now points at the new context, and it's visible.
     try testz.expectEqual(d.active_ctx, @as(glyphwire.ContextHandle, 1));
@@ -3712,7 +3717,7 @@ pub fn keyReleasedAfterAContextSwitchDoesNotSwallowTheNextPressTest(io: std.Io, 
     const second_press = try d.handle(alloc, press);
     try testz.expectTrue(second_press.broadcast != null);
     defer alloc.free(second_press.broadcast.?.body);
-    try testz.expectTrue(std.mem.indexOf(u8, second_press.broadcast.?.body, "key_down") != null);
+    try expectPushHas(alloc, second_press.broadcast.?.body, "key_down");
 }
 
 pub fn createContextAndSetWindowScrollbarToggleTheFlagTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -4356,14 +4361,13 @@ pub fn sendWindowPrefixDeliversTheChordAsAKeystrokeTest(io: std.Io, alloc: std.m
     try testz.expectEqualStr(down.event, "key");
     try testz.expectEqualStr(up.event, "key");
 
-    const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
-    const pd = try std.json.parseFromSlice(KeyNotif, alloc, down.body, opts);
+    const pd = try glyphwire.msgpack.decode(KeyNotif, alloc, down.body, .{});
     defer pd.deinit();
     try testz.expectEqualStr(pd.value.method, "key_down");
     try testz.expectEqualStr(pd.value.params.key, "b");
     try testz.expectTrue(pd.value.params.mods.ctrl);
     try testz.expectFalse(pd.value.params.mods.alt);
-    const pu = try std.json.parseFromSlice(KeyNotif, alloc, up.body, opts);
+    const pu = try glyphwire.msgpack.decode(KeyNotif, alloc, up.body, .{});
     defer pu.deinit();
     try testz.expectEqualStr(pu.value.method, "key_up");
     try testz.expectEqualStr(pu.value.params.key, "b");
@@ -5099,13 +5103,9 @@ pub fn activateAtTogglesOutlineNodesTest(io: std.Io, alloc: std.mem.Allocator) !
 
 // ─── MessagePack connections ─────────────────────────────────────────────
 //
-// The same messages as the JSON tests above, re-encoded with
-// `codec.jsonToMsgpack`, through a `Dispatcher` whose connection speaks
-// MessagePack.
-
-fn msgpackBody(alloc: std.mem.Allocator, json: []const u8) ![]u8 {
-    return glyphwire.codec.jsonToMsgpack(alloc, json);
-}
+// The same messages as the JSON tests above, encoded as a MessagePack
+// client encodes them (`codec.request` / `codec.notification` from typed
+// params), through a `Dispatcher` whose connection speaks MessagePack.
 
 pub fn msgpackWriteTextUpdatesCoreStateTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
@@ -5114,9 +5114,10 @@ pub fn msgpackWriteTextUpdatesCoreStateTest(io: std.Io, alloc: std.mem.Allocator
     var d = dispatch.Dispatcher.init(&ctx);
     d.format = .msgpack;
 
-    const body = try msgpackBody(alloc,
-        \\{"method":"write_text","params":{"text":"hello","fg":{"r":255,"g":0,"b":0}}}
-    );
+    const body = try glyphwire.codec.notification(.msgpack, alloc, "write_text", glyphwire.protocol.WriteTextParams{
+        .text = "hello",
+        .fg = .{ .r = 255, .g = 0, .b = 0 },
+    }, .{ .omit_nulls = true });
     defer alloc.free(body);
     const result = try d.handle(alloc, body);
     try testz.expectTrue(result.response == null);
@@ -5134,9 +5135,9 @@ pub fn msgpackRequestIsAnsweredInMsgpackTest(io: std.Io, alloc: std.mem.Allocato
     var d = dispatch.Dispatcher.init(&ctx);
     d.format = .msgpack;
 
-    const body = try msgpackBody(alloc,
-        \\{"method":"get_property","id":11,"params":{"property":"cursor"}}
-    );
+    const body = try glyphwire.codec.request(.msgpack, alloc, 11, "get_property", .{
+        .property = @as([]const u8, "cursor"),
+    }, .{});
     defer alloc.free(body);
     const result = try d.handle(alloc, body);
     const resp = result.response.?;
@@ -5155,14 +5156,18 @@ pub fn msgpackBatchRequestFormCorrelatesResponsesTest(io: std.Io, alloc: std.mem
     var d = dispatch.Dispatcher.init(&ctx);
     d.format = .msgpack;
 
-    const body = try msgpackBody(alloc,
-        \\{"id":7,"method":"batch","params":{"messages":[
-        \\  {"method":"create_metadata","params":{"json":"{\"a\":1}"},"id":1},
-        \\  {"method":"write_text","params":{"text":"hi"}},
-        \\  {"method":"bogus_method","params":{}},
-        \\  {"method":"get_property","params":{"property":"cursor"},"id":2}
-        \\]}}
-    );
+    // Each sub-message is its own encoded envelope, spliced in whole.
+    const codec = glyphwire.codec;
+    const subs = [_][]u8{
+        try codec.request(.msgpack, alloc, 1, "create_metadata", .{ .json = @as([]const u8, "{\"a\":1}") }, .{}),
+        try codec.notification(.msgpack, alloc, "write_text", .{ .text = @as([]const u8, "hi") }, .{}),
+        try codec.notification(.msgpack, alloc, "bogus_method", struct {}{}, .{}),
+        try codec.request(.msgpack, alloc, 2, "get_property", .{ .property = @as([]const u8, "cursor") }, .{}),
+    };
+    defer for (subs) |sub| alloc.free(sub);
+    var raws: [subs.len]glyphwire.msgpack.Raw = undefined;
+    for (subs, &raws) |sub, *r| r.* = .{ .bytes = sub };
+    const body = try codec.request(.msgpack, alloc, 7, "batch", .{ .messages = @as([]const glyphwire.msgpack.Raw, &raws) }, .{});
     defer alloc.free(body);
     const result = try d.handle(alloc, body);
     const resp = result.response.?;

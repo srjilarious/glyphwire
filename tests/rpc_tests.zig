@@ -5,12 +5,21 @@ const std = @import("std");
 const testz = @import("testz");
 const glyphwire = @import("glyphwire");
 const rpc = glyphwire.rpc;
+const codec = glyphwire.codec;
 
 // The bytes these builders emit are the wire contract shared by
 // dispatch.zig (socket) and server.zig (in-process), and parsed back by
 // client.zig's InputListener -- pin them exactly so a std.json change or
 // an accidental field reorder shows up here rather than as a silent
-// cross-end mismatch.
+// cross-end mismatch. A notification is built as MessagePack; it is pinned
+// through its JSON form (`codec.msgpackToJson`, what a JSON subscriber is
+// sent), which shows field order and every value.
+
+fn expectJson(alloc: std.mem.Allocator, expected: []const u8, msgpack_body: []const u8) !void {
+    const json = try codec.msgpackToJson(alloc, msgpack_body);
+    defer alloc.free(json);
+    try testz.expectEqualStr(expected, json);
+}
 
 pub fn responseWrapsResultInEnvelopeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
@@ -25,22 +34,43 @@ pub fn notificationWrapsParamsInEnvelopeTest(io: std.Io, alloc: std.mem.Allocato
     _ = io;
     const body = try rpc.notification(alloc, "scroll", .{ .offset = 3, .max = 40 });
     defer alloc.free(body);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"scroll","params":{"offset":3,"max":40}}
     , body);
+}
+
+/// The MessagePack body is the envelope without `jsonrpc`, and reads
+/// back as the params it was built from.
+pub fn notificationIsMsgpackWithoutJsonrpcTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const body = try rpc.keyNotification(alloc, "a", true, .{ .ctrl = true });
+    defer alloc.free(body);
+
+    const env = try codec.parseEnvelope(.msgpack, alloc, body);
+    defer env.deinit();
+    try testz.expectEqualStr(env.value.method, "key_down");
+    try testz.expectTrue(env.value.id == null);
+    const p = try codec.parseParams(glyphwire.protocol.KeyParams, alloc, env.value.params);
+    defer p.deinit();
+    try testz.expectEqualStr(p.value.key, "a");
+    try testz.expectTrue(p.value.mods.ctrl);
+
+    const v = try glyphwire.msgpack.decode(std.json.Value, alloc, body, .{});
+    defer v.deinit();
+    try testz.expectTrue(v.value.object.get("jsonrpc") == null);
 }
 
 pub fn keyNotificationPicksMethodFromPressedTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     const down = try rpc.keyNotification(alloc, "space", true, .{});
     defer alloc.free(down);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"space","mods":{"ctrl":false,"alt":false,"shift":false,"super":false}}}
     , down);
 
     const up = try rpc.keyNotification(alloc, "space", false, .{});
     defer alloc.free(up);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"key_up","params":{"key":"space","mods":{"ctrl":false,"alt":false,"shift":false,"super":false}}}
     , up);
 }
@@ -51,7 +81,7 @@ pub fn keyNotificationCarriesModsTest(io: std.Io, alloc: std.mem.Allocator) !voi
     _ = io;
     const body = try rpc.keyNotification(alloc, "w", true, .{ .ctrl = true });
     defer alloc.free(body);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"w","mods":{"ctrl":true,"alt":false,"shift":false,"super":false}}}
     , body);
 }
@@ -60,7 +90,7 @@ pub fn keyRepeatNotificationIsAlwaysKeyDownTest(io: std.Io, alloc: std.mem.Alloc
     _ = io;
     const body = try rpc.keyRepeatNotification(alloc, "left", .{});
     defer alloc.free(body);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"left","mods":{"ctrl":false,"alt":false,"shift":false,"super":false}}}
     , body);
 }
@@ -78,7 +108,7 @@ pub fn mouseButtonNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !v
         2,
     );
     defer alloc.free(body);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"mouse_button","params":{"button":"left","pressed":true,"px":{"x":12.5,"y":30},"cell":{"row":2,"col":1},"view_offset":4,"mods":{"ctrl":false,"alt":false,"shift":true,"super":false},"clicks":2}}
     , body);
 }
@@ -87,7 +117,7 @@ pub fn resizeNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     const body = try rpc.resizeNotification(alloc, 80, 24);
     defer alloc.free(body);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"resize","params":{"cols":80,"rows":24}}
     , body);
 }
@@ -96,7 +126,7 @@ pub fn layerResizeNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !v
     _ = io;
     const body = try rpc.layerResizeNotification(alloc, 2, 5, 40, 14);
     defer alloc.free(body);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"layer_resize","params":{"context":2,"layer":5,"rows":14,"cols":40}}
     , body);
 }
@@ -108,13 +138,13 @@ pub fn selectionNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !voi
         .active = .{ .above = -1, .col = 7 },
     });
     defer alloc.free(active);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"selection","params":{"active":true,"anchor":{"above":2,"col":0},"active_end":{"above":-1,"col":7}}}
     , active);
 
     const cleared = try rpc.selectionNotification(alloc, null);
     defer alloc.free(cleared);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"selection","params":{"active":false,"anchor":null,"active_end":null}}
     , cleared);
 }
@@ -123,13 +153,13 @@ pub fn copyRequestAndPasteNotificationShapeTest(io: std.Io, alloc: std.mem.Alloc
     _ = io;
     const copy = try rpc.copyRequestNotification(alloc);
     defer alloc.free(copy);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"copy_request","params":{}}
     , copy);
 
     const paste = try rpc.pasteNotification(alloc, "pasted text");
     defer alloc.free(paste);
-    try testz.expectEqualStr(
+    try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"paste","params":{"text":"pasted text"}}
     , paste);
 }

@@ -461,11 +461,11 @@ pub const Subscriptions = struct {
     }
 };
 
-/// An owned notification body (caller frees with the same allocator
-/// passed to `handle`) to fan out to every *other* connection subscribed
-/// to `event`. `handle`'s caller (server.zig) owns actually doing that
-/// fan-out; `Dispatcher` itself has no knowledge of other connections, to
-/// keep it headless-testable -- see decisions.md's headless-first
+/// An owned MessagePack notification body (caller frees with the same
+/// allocator passed to `handle`) to fan out to every *other* connection
+/// subscribed to `event`. `handle`'s caller (server.zig) owns actually
+/// doing that fan-out; `Dispatcher` itself has no knowledge of other
+/// connections, to keep it headless-testable -- see decisions.md's headless-first
 /// architecture note.
 pub const Broadcast = struct {
     event: []const u8,

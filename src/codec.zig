@@ -278,17 +278,27 @@ pub fn Result(comptime T: type) type {
     };
 }
 
-/// Re-encodes a JSON body as MessagePack, dropping the envelope's
-/// `jsonrpc` member. For server-pushed notifications: those are built once
-/// as JSON (`rpc.zig`) and fanned out to every subscriber, and only a
-/// MessagePack subscriber pays for the conversion.
-pub fn jsonToMsgpack(alloc: std.mem.Allocator, json_body: []const u8) ![]u8 {
-    var arena: std.heap.ArenaAllocator = .init(alloc);
-    defer arena.deinit();
-    var v = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), json_body, .{});
-    if (v == .object) _ = v.object.orderedRemove("jsonrpc");
-    var enc: msgpack.Encoder = .init(alloc, .{});
-    errdefer enc.deinit();
-    try enc.writeJsonValue(v);
-    return enc.toOwnedSlice();
+/// A MessagePack body re-encoded as JSON, with the envelope's `jsonrpc`
+/// member put back first. For server-pushed notifications: those are built
+/// once as MessagePack (`rpc.zig`), the reference client's encoding, and
+/// only a JSON subscriber (a script, `glyphwire-probe`) pays for the
+/// conversion.
+pub fn msgpackToJson(alloc: std.mem.Allocator, msgpack_body: []const u8) ![]u8 {
+    const v = try msgpack.decode(std.json.Value, alloc, msgpack_body, .{});
+    defer v.deinit();
+    if (v.value != .object) return error.UnexpectedType;
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    const w = &out.writer;
+    try w.writeAll("{\"jsonrpc\":\"2.0\"");
+    var it = v.value.object.iterator();
+    while (it.next()) |kv| {
+        try w.writeAll(",");
+        try std.json.Stringify.value(kv.key_ptr.*, .{}, w);
+        try w.writeAll(":");
+        try std.json.Stringify.value(kv.value_ptr.*, .{}, w);
+    }
+    try w.writeAll("}");
+    return out.toOwnedSlice();
 }

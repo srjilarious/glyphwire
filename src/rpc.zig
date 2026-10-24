@@ -4,6 +4,7 @@
 const std = @import("std");
 const core = @import("core.zig");
 const protocol = @import("protocol.zig");
+const codec = @import("codec.zig");
 
 /// Tiny JSON-RPC envelope builders shared by the socket path
 /// (`dispatch.zig`) and the in-process path (`server.zig`). Not a
@@ -13,9 +14,10 @@ const protocol = @import("protocol.zig");
 /// / params value); this only removes the `const Response = struct { ... }`
 /// / `Stringify.valueAlloc` boilerplate that was repeated per handler.
 ///
-/// Everything here is JSON. A pushed notification is built once, as JSON,
-/// for every subscriber, and `server.Connection.send` re-encodes it for a
-/// MessagePack connection. A request's reply is encoded in the asking
+/// A pushed notification is built once, as MessagePack (the reference
+/// client's encoding), for every subscriber, and
+/// `server.Connection.send` converts it for a JSON connection (a script,
+/// `glyphwire-probe`). A request's reply is encoded in the asking
 /// connection's format to begin with (`codec.response`, via
 /// `Dispatcher.respond`); `response` below is the JSON form of that.
 
@@ -29,15 +31,11 @@ pub fn response(alloc: std.mem.Allocator, id: std.json.Value, result: anytype) !
     return std.json.Stringify.valueAlloc(alloc, Envelope{ .id = id, .result = result }, .{});
 }
 
-/// `{"jsonrpc":"2.0","method":<method>,"params":<params>}` for a
-/// notification (no `id`, no response expected).
+/// `{method, params}` as MessagePack, for a notification (no `id`, no
+/// response expected). `codec.msgpackToJson` gives its JSON form,
+/// `{"jsonrpc":"2.0","method":<method>,"params":<params>}`.
 pub fn notification(alloc: std.mem.Allocator, method: []const u8, params: anytype) ![]u8 {
-    const Envelope = struct {
-        jsonrpc: []const u8 = "2.0",
-        method: []const u8,
-        params: @TypeOf(params),
-    };
-    return std.json.Stringify.valueAlloc(alloc, Envelope{ .method = method, .params = params }, .{});
+    return codec.notification(.msgpack, alloc, method, params, .{});
 }
 
 // ─── Input event notification builders ───────────────────────────────────
