@@ -78,7 +78,7 @@ pub const PaneProcs = struct {
     socket_path: []const u8,
     environ: *const std.process.Environ.Map,
 
-    /// Guards `procs`, `shells` and `deferred_exits`.
+    /// Guards `procs`, `shells`, `deferred_exits` and `root_shell_pid`.
     ///
     /// **Lock order: the server's `ctx_mutex` before this one**, never
     /// the reverse. The dispatcher runs `spawn` and `kill` (through
@@ -96,7 +96,9 @@ pub const PaneProcs = struct {
     /// of those shells exits, and only then is its `pane_exit` sent.
     deferred_exits: std.AutoHashMapUnmanaged(glyphwire.PaneHandle, i64) = .empty,
     /// The root pane's first shell, which `main` starts rather than this
-    /// module, so `shellCwd` can still read its directory. Set by `main`.
+    /// module, so `shellCwd` can still read its directory. Set by `main`
+    /// through `setRootShellPid`, after the spawner is already registered,
+    /// so it is read and written under `mutex`. Null under `--ssh`.
     root_shell_pid: ?std.posix.pid_t = null,
 
     pub fn init(
@@ -414,6 +416,18 @@ pub const PaneProcs = struct {
     /// or of `pane`'s own program if `context` is the base it was started
     /// on. Null for anything else (a program's own context, or the root
     /// pane's first shell, which `main` started).
+    pub fn setRootShellPid(self: *PaneProcs, pid: ?std.posix.pid_t) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.root_shell_pid = pid;
+    }
+
+    fn rootShellPid(self: *PaneProcs) ?std.posix.pid_t {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.root_shell_pid;
+    }
+
     pub fn pidFor(self: *PaneProcs, pane: glyphwire.PaneHandle, context: glyphwire.ContextHandle) ?std.posix.pid_t {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -475,7 +489,7 @@ pub const PaneProcs = struct {
     fn cwdIn(self: *PaneProcs, pane: glyphwire.PaneHandle, top: *const StackTop, buf: []u8) ?[]const u8 {
         for (top.handles[0..top.len]) |h| {
             var pid = self.pidFor(pane, h);
-            if (pid == null and pane == glyphwire.root_pane_handle and h == top.base) pid = self.root_shell_pid;
+            if (pid == null and pane == glyphwire.root_pane_handle and h == top.base) pid = self.rootShellPid();
             const known = pid orelse continue;
             if (procCwd(known, buf)) |dir| return dir;
         }

@@ -434,9 +434,16 @@ pub fn main(init: std.process.Init) !void {
     // remote to end the session either -- an edge case not worth a
     // fallback keybinding for.
     var shell_exited: std.atomic.Value(bool) = .init(false);
-    // The root pane's first shell, for the context switcher to start a new
-    // shell in its directory. Null under `--ssh`.
-    var root_shell_pid: ?std.posix.pid_t = null;
+
+    // `spawn_in_pane`: a window manager asks the *host* to start programs,
+    // because only the host knows what env a child needs in order to find
+    // the pane it has been seated in. See `host/pane_proc.zig`. Registered
+    // before the first shell starts: a `default_program` of `gmux` asks
+    // for its first pane the moment it connects, long before the window
+    // below is up, and an unregistered spawner answers `SpawnUnsupported`.
+    var pane_procs = pane_proc_mod.PaneProcs.init(alloc, io, &srv, socket_path, init.environ_map);
+    defer pane_procs.deinit();
+    srv.setPaneSpawner(pane_procs.spawner());
 
     // `start_remote`: a shell in any pane asks the *host* to drop that pane
     // into a remote session, for the same reason `spawn_in_pane` is the
@@ -479,7 +486,9 @@ pub fn main(init: std.process.Init) !void {
         const shell_argv = try std.mem.concat(arena, []const u8, &.{ &.{shell_path}, shell_child_argv });
 
         if (std.process.spawn(io, .{ .argv = shell_argv, .environ_map = &shell_env })) |shell_child| {
-            root_shell_pid = shell_child.id;
+            // The root pane's first shell, for the context switcher to
+            // start a new shell in its directory. Never set under `--ssh`.
+            pane_procs.setRootShellPid(shell_child.id);
             _ = try std.Thread.spawn(.{}, reapChild, .{ io, shell_child, &shell_exited, &srv });
         } else |err| {
             std.log.err("failed to spawn gw-shell: {t}", .{err});
@@ -550,15 +559,7 @@ pub fn main(init: std.process.Init) !void {
     app.pane_focus.cfg = host_cfg.pane_focus;
     try app.theme_switcher.setThemes(arena, shared_themes.customs);
 
-    // `spawn_in_pane`: a window manager asks the *host* to start programs,
-    // because only the host knows what env a child needs in order to find
-    // the pane it has been seated in. See `host/pane_proc.zig`.
-    var pane_procs = pane_proc_mod.PaneProcs.init(alloc, io, &srv, socket_path, init.environ_map);
-    defer pane_procs.deinit();
     app.pane_procs = &pane_procs;
-    // Null under `--ssh`: there is no local first shell to read.
-    pane_procs.root_shell_pid = root_shell_pid;
-    srv.setPaneSpawner(pane_procs.spawner());
 
     // The render loop only repaints on demand (`EngOptions.redrawOnDemand`)
     // and parks in `SDL_WaitEvent` when idle; this lets the server's
