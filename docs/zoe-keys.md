@@ -464,7 +464,7 @@ from either grows the selection a word or line at a time; wheel and scrollbar th
 (plain or Shift) over a tab strip scrolls it sideways, and a strip too wide for its group shows a `‹` / `›` at
 each end that scrolls it one tab per click; click a tab to switch, its `×` (or a middle click anywhere on it) to close, a right click to copy its file's absolute path (a click on the statusline's filename copies the shown one's); drag a tab
 onto another group's strip (dropped in front of the tab under the pointer)
-or pane (added at the end) to move it there, or along its own strip to
+or pane (added at the end) to move it there (with Ctrl held at the drop, a second view of the file goes there and the tab stays), or along its own strip to
 reorder it, with a bar marking the gap it would land in on a strip and a
 tint over a pane it would move to; hover a tab for its full path; drag a divider to resize
 groups or the shell panel.

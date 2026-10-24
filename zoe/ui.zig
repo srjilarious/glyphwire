@@ -3551,7 +3551,9 @@ pub const Ui = struct {
         if (self.tab_drag) |td| {
             self.tab_drag = null;
             self.showDropTarget(null);
-            if (td.moved) try self.dropTab(td.slot, ev.cell);
+            // Ctrl held at the drop copies: a new view of the file
+            // there, the dragged tab staying where it was.
+            if (td.moved) try self.dropTab(td.slot, ev.cell, ev.mods.ctrl);
             return;
         }
         if (self.drag) |d| {
@@ -3625,17 +3627,44 @@ pub const Ui = struct {
     /// a tab strip, in front of the tab whose left half is under the
     /// pointer (`tabs.dropIndex`); on a group's pane, at the end of its
     /// tabs. Anywhere else -- the tree, the statusline, its own pane --
-    /// it stays put.
-    pub fn dropTab(self: *Ui, slot: *Slot, cell: glyphwire.CellPos) !void {
+    /// it stays put. With `copy` (Ctrl held), another group gets a new
+    /// view of the file instead (`copyTab`); on its own strip a copy is
+    /// just the reorder, since a group shows a file once.
+    pub fn dropTab(self: *Ui, slot: *Slot, cell: glyphwire.CellPos, copy: bool) !void {
         self.buf.ed.status.clearRetainingCapacity();
         self.status_dirty = true;
         const to = self.groupAt(cell) orelse return;
+        const from = (self.findSlot(slot) orelse return).group;
+        if (copy and to != from) {
+            const index: ?usize = if (dropStripCol(to, cell)) |col| tabs.dropIndex(to.tab_spans.items, col) else null;
+            return self.copyTab(slot, to, index);
+        }
         if (dropStripCol(to, cell)) |col| {
             const index = tabs.dropIndex(to.tab_spans.items, col);
             try self.moveTab(slot, to, index);
         } else if (to != self.grp) {
             try self.moveTab(slot, to, null);
         }
+    }
+
+    /// A new view of `slot`'s file in group `to` at `index` (the end when
+    /// null), which gets the keyboard; `slot` stays where it is. A group
+    /// already showing the file just brings that tab forward.
+    pub fn copyTab(self: *Ui, slot: *Slot, to: *Group, index: ?usize) !void {
+        try self.unzoom();
+        if (to.viewOf(slot.doc)) |i| {
+            self.focusGroup(to);
+            self.setActive(i);
+            return;
+        }
+        const view = try self.newView(slot);
+        errdefer view.deinit(self.alloc);
+        const dest = @min(index orelse to.buffers.items.len, to.buffers.items.len);
+        try to.buffers.insert(self.alloc, dest, view);
+        to.active = dest;
+        to.markRedraw();
+        self.focusGroup(to);
+        self.setActive(dest);
     }
 
     /// What a dragged tab released over `cell` would do, as the highlight

@@ -50,7 +50,8 @@ A modal text editor: vim's grammar with VS Code's keys alongside it.
   divider between them. A file can be open in several groups at once, each
   view with its own cursor and scroll over the one text: a split starts as
   a second view of the current file, and opening a file another group has
-  open gives this group a view of it. Edits, undo and saves are shared.
+  open gives this group a view of it, as does Ctrl+dragging its tab onto
+  another group. Edits, undo and saves are shared.
 - Resting the pointer on a tab shows the file's full path. A strip with
   more tabs than fit scrolls sideways with the wheel or the `‹` / `›`
   arrows at its ends, and Ctrl+Shift+E finds the current file in the tree.
