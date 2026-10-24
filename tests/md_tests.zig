@@ -462,3 +462,63 @@ pub fn mdKeymapDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(km.lookup("g", .{ .shift = true }).?, md.actions.Action.bottom);
     try testz.expectEqual(km.lookup("tab", .{ .shift = true }).?, md.actions.Action.prevLink);
 }
+
+// ─── Copying ────────────────────────────────────────────────────────────
+
+fn textOps(alloc: std.mem.Allocator, lay: *const layout.Layout) ![]layout.TextOp {
+    var out: std.ArrayList(layout.TextOp) = .empty;
+    errdefer out.deinit(alloc);
+    for (lay.ops) |op| switch (op) {
+        .text => |t| try out.append(alloc, t),
+        else => {},
+    };
+    return out.toOwnedSlice(alloc);
+}
+
+/// A line word wrap broke joins the next with a space, a split word
+/// joins directly, and a paragraph's last line ends with a newline -- so
+/// a selection copies a paragraph back as one line.
+pub fn wrappedLinesSayHowTheyJoinTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var doc = try parse(alloc, "one two three four five six\n\naaaaaaaaaaaaaaa\n");
+    defer doc.deinit();
+    var lay = try layout.layout(alloc, &doc, .{ .width = 22 });
+    defer lay.deinit();
+    const ops = try textOps(alloc, &lay);
+    defer alloc.free(ops);
+    try testz.expectEqual(ops.len, 3);
+    try testz.expectEqual(ops[0].join, .space);
+    try testz.expectEqual(ops[1].join, .newline);
+    try testz.expectEqual(ops[2].join, .newline);
+    // 10 columns can't hold the 15-letter word, so it splits.
+    var narrow = try layout.layout(alloc, &doc, .{ .width = 12 });
+    defer narrow.deinit();
+    const nops = try textOps(alloc, &narrow);
+    defer alloc.free(nops);
+    try testz.expectEqual(nops[nops.len - 2].join, .direct);
+    try testz.expectEqual(nops[nops.len - 1].join, .newline);
+}
+
+/// A code line too long for the block is split with a `.direct` join,
+/// and the furniture -- the language tag, rules, a quote's bar -- is
+/// written unselectable so a copy skips it.
+pub fn codeSplitsJoinAndChromeIsUnselectableTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var doc = try parse(alloc, "```zig\nabcdefghijklmnopqrstuvwxyz\n```\n\n---\n\n> quoted\n");
+    defer doc.deinit();
+    var lay = try layout.layout(alloc, &doc, .{ .width = 22 });
+    defer lay.deinit();
+    const ops = try textOps(alloc, &lay);
+    defer alloc.free(ops);
+    var code_direct: usize = 0;
+    var chrome: usize = 0;
+    for (ops) |t| {
+        if (t.spans[0].tone == .code and t.join == .direct) code_direct += 1;
+        if (!t.selectable) {
+            chrome += 1;
+            const tone = t.spans[0].tone;
+            try testz.expectTrue(tone == .muted or tone == .rule or tone == .quote);
+        }
+    }
+    try testz.expectEqual(code_direct, 1);
+    // The tag, the rule, the quote's one bar.
+    try testz.expectEqual(chrome, 3);
+}

@@ -6109,3 +6109,36 @@ pub fn unitSpanLineCoversTheRowTest(io: std.Io, alloc: std.mem.Allocator) !void 
     defer alloc.free(text);
     try testz.expectEqualStr("second line", text);
 }
+
+/// Rows a writer marked soft-wrapped (`line_join`) copy joined to the
+/// next -- with a space or directly -- and the next row's indent is
+/// dropped; an unmarked row still ends with a newline (the row after it
+/// keeps its indent), and overwriting
+/// the marked glyph takes the mark off.
+pub fn selectionJoinsSoftWrappedRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 12, 4, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+    const bg = glyphwire.default_style.bg;
+
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 2 } });
+    try layer.writeTextOpts("one two", fg, bg, .{ .line_join = .space });
+    layer.setProperty(.{ .cursor = .{ .row = 1, .col = 2 } });
+    try layer.writeTextOpts("three", fg, bg, .{});
+    layer.setProperty(.{ .cursor = .{ .row = 2, .col = 2 } });
+    try layer.writeTextOpts("four", fg, bg, .{ .line_join = .direct });
+    layer.setProperty(.{ .cursor = .{ .row = 3, .col = 2 } });
+    try layer.writeTextOpts("teen", fg, bg, .{});
+
+    layer.sel.set(.{ .above = 0, .col = 2 }, .{ .above = -3, .col = 11 });
+    const joined = (try layer.sel.text(alloc)).?;
+    defer alloc.free(joined);
+    try testz.expectEqualStr("one two three\n  fourteen", joined);
+
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 8 } });
+    try layer.writeTextOpts("o", fg, bg, .{});
+    const plain = (try layer.sel.text(alloc)).?;
+    defer alloc.free(plain);
+    try testz.expectEqualStr("one two\n  three\n  fourteen", plain);
+}

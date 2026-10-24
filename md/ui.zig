@@ -19,6 +19,17 @@
 //! call: a `#section` scrolls, a local Markdown file replaces the page
 //! (with Backspace/Alt+Left and Alt+Right as back and forward), and
 //! everything else goes to `xdg-open`.
+//!
+//! Text selects the way it does in the shell: the page layer is opted in
+//! to the host's own drag, double- and triple-click selection
+//! (`mouse_select`), so a plain click still reaches gwmd as a link click
+//! and the host's Ctrl+Shift+C copies what was dragged over. What makes
+//! the copy read as prose is in the writes: each word-wrapped line says
+//! how it joins the next (`line_join`), so a paragraph copies as one
+//! line, and the margin left of every line, rules, a quote's bar and a
+//! code block's language tag are written unselectable, so none of the
+//! layout's furniture comes along. Double-clicking the filename in the
+//! statusline copies the page's absolute path.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -195,6 +206,7 @@ pub const Ui = struct {
         try client.setLayerBackground(glyphwire.root_layer_handle, bg_page);
         try client.setLayerBackground(page_layer, bg_page);
         try client.setLayerBackground(status_layer, bg_status);
+        try client.setLayerMouseSelect(page_layer, true);
 
         var keymap = try actions.Keymap.initDefaults(alloc, &actions.defaults);
         errdefer keymap.deinit(alloc);
@@ -446,6 +458,9 @@ pub const Ui = struct {
         }
         self.focus = null;
         self.hover = null;
+        // A selection's ends are cells; once the text reflows or the page
+        // changes, they point at something else.
+        self.client.clearSelection(self.page_layer) catch {};
     }
 
     fn render(self: *Ui) !void {
@@ -486,6 +501,7 @@ pub const Ui = struct {
         var b = c.batch();
         defer b.deinit();
         try b.clearOn(self.page_layer, 0, 0, null, null);
+        try self.padMargins(&b, l);
         var spans: std.ArrayList(glyphwire.Client.Span) = .empty;
         defer spans.deinit(self.alloc);
         for (l.ops) |op| switch (op) {
@@ -503,7 +519,14 @@ pub const Ui = struct {
                         .scale = s.scale,
                     });
                 }
-                try b.writeSpans(spans.items, .{ .layer = self.page_layer, .row = t.row, .col = t.col, .transparent_bg = true });
+                try b.writeSpans(spans.items, .{
+                    .layer = self.page_layer,
+                    .row = t.row,
+                    .col = t.col,
+                    .transparent_bg = true,
+                    .selectable = t.selectable,
+                    .line_join = t.join,
+                });
             },
             .image => |im| {
                 const img = p.images.get(im.src) orelse continue;
@@ -537,6 +560,40 @@ pub const Ui = struct {
             .table => |t| try self.drawTable(t),
             else => {},
         };
+    }
+
+    /// Writes the blank margin left of each row's text unselectable, so a
+    /// selection's tint and copied text start where the text does rather
+    /// than at the window's edge. Only rows with text or a table on them:
+    /// a blank row (between paragraphs, inside a code block) must stay
+    /// selectable to copy as the empty line it is.
+    fn padMargins(self: *Ui, b: *glyphwire.Client.Batch, l: *const Layout) !void {
+        const left = try self.alloc.alloc(usize, l.rows);
+        defer self.alloc.free(left);
+        @memset(left, std.math.maxInt(usize));
+        for (l.ops) |op| switch (op) {
+            .text => |t| if (t.selectable and t.row < l.rows) {
+                left[t.row] = @min(left[t.row], t.col);
+            },
+            .table => |t| {
+                var rows: usize = 4; // top border, header, separator, bottom border
+                for (t.rows) |r| rows += layout_mod.tableRowHeight(t.columns, r);
+                for (t.row..@min(t.row + rows, l.rows)) |r| left[r] = @min(left[r], t.col);
+            },
+            else => {},
+        };
+        var most: usize = 0;
+        for (left) |c| {
+            if (c != std.math.maxInt(usize)) most = @max(most, c);
+        }
+        if (most == 0) return;
+        const blank = try self.alloc.alloc(u8, most);
+        defer self.alloc.free(blank);
+        @memset(blank, ' ');
+        for (left, 0..) |c, row| {
+            if (c == 0 or c == std.math.maxInt(usize)) continue;
+            try b.writeText(blank[0..c], .{ .layer = self.page_layer, .row = row, .col = 0, .transparent_bg = true, .selectable = false });
+        }
     }
 
     fn drawTable(self: *Ui, t: layout_mod.TableOp) !void {
@@ -743,8 +800,29 @@ pub const Ui = struct {
 
     fn handleMouseButton(self: *Ui, ev: glyphwire.MouseButtonEvent) !void {
         if (!ev.pressed or !std.mem.eql(u8, ev.button, "left")) return;
+        if (ev.cell.row >= self.viewRows()) {
+            if (ev.clicks == 2 and self.onStatusName(ev.cell.col)) try self.copyPath();
+            return;
+        }
         const li = self.linkAt(ev.cell) orelse return;
         try self.follow(li);
+    }
+
+    /// Whether statusline column `col` is on the page's filename: it sits
+    /// one column in (see `renderStatus`), and isn't shown at all while a
+    /// message has the line.
+    fn onStatusName(self: *const Ui, col: usize) bool {
+        if (self.message != null) return false;
+        const p = &(self.page orelse return false);
+        const w = glyphwire.stringWidth(p.displayName());
+        return col >= 1 and col < 1 + w;
+    }
+
+    /// Puts the page's absolute path on the clipboard.
+    fn copyPath(self: *Ui) !void {
+        const p = &(self.page orelse return);
+        try self.client.setClipboard(p.path);
+        try self.setMessage("copied {s}", .{p.path});
     }
 
     // ── Following links ─────────────────────────────────────────────────

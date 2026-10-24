@@ -371,7 +371,10 @@ pub const LayerSelection = struct {
 
     /// The selected text, or null when nothing is selected (a zero-width
     /// selection returns `""`). Each row is its `selectedSpan` -- the
-    /// same cells the tint covers -- and rows join with `\n`. A blank cell
+    /// same cells the tint covers -- and rows join with `\n`, or with a
+    /// space or nothing after a row its writer marked soft-wrapped
+    /// (`core.LineJoin`, read by `rowJoin`), whose next row then loses
+    /// its leading blanks. A blank cell
     /// inside the span becomes a space; a wide or scaled glyph's spacer
     /// and fill are skipped, as is any unselectable cell. The rows a
     /// scaled glyph draws down into, and rows with no selectable cell at
@@ -392,7 +395,9 @@ pub const LayerSelection = struct {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(alloc);
 
-        var first_line = true;
+        // What goes between the last line written and the next: null
+        // before the first, then the last row's `rowJoin`.
+        var join: ?core.LineJoin = null;
         var above = b.start.above;
         while (above >= b.end.above) : (above -= 1) {
             const row_cells = l.rowForAbove(above);
@@ -400,12 +405,22 @@ pub const LayerSelection = struct {
                 if (underScaledRows(cells, null) != 0) continue;
                 if (!anySelectable(cells)) continue;
             }
-            if (!first_line) try out.append(alloc, '\n');
-            first_line = false;
+            const joined = join != null and join.? != .newline;
+            if (join) |j| switch (j) {
+                .newline => try out.append(alloc, '\n'),
+                .space => try out.append(alloc, ' '),
+                .direct => {},
+            };
+            join = .newline;
 
             const cells = row_cells orelse continue;
+            join = rowJoin(cells);
             const span = self.selectedSpan(above, b.start, b.end) orelse continue;
             var col = span.lo;
+            // A soft-wrapped row's indent is layout, not text.
+            if (joined) {
+                while (col < span.hi and isBlankCell(cells[col])) col += 1;
+            }
             while (col < span.hi) {
                 const c = cells[col];
                 if (!c.selectable or c.wide == .wide_spacer) {
@@ -521,6 +536,21 @@ fn underScaledRows(cells: []const Cell, col: ?usize) i64 {
 /// A narrow, unscaled cell showing nothing -- what trailing-blank
 /// trimming drops. A wide character's spacer isn't blank: it's half
 /// of the character to its left.
+/// How `text` joins row `cells` to the row below: the `line_join` of its
+/// last selectable glyph (`core.LineJoin`), `.newline` when it has none.
+/// Trailing blanks -- a scaled glyph's fill, the rest of the row -- are
+/// skipped, so the mark is found wherever the write that set it ended.
+fn rowJoin(cells: []const Cell) core.LineJoin {
+    var i = cells.len;
+    while (i > 0) {
+        i -= 1;
+        const c = cells[i];
+        if (!c.selectable or c.wide == .wide_spacer or isBlankCell(c)) continue;
+        return c.line_join;
+    }
+    return .newline;
+}
+
 fn isBlankCell(c: Cell) bool {
     if (c.wide != .narrow or c.text_scale != .x1) return false;
     const g = c.grapheme();

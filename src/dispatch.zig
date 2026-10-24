@@ -61,6 +61,8 @@ pub const DispatchError = error{
     InvalidTextScale,
     /// `write_text`'s `underline` wasn't one of `core.Underline`'s names.
     InvalidUnderline,
+    /// `write_text`'s `line_join` wasn't one of `core.LineJoin`'s names.
+    InvalidLineJoin,
     /// A colour's `slot` was outside 0-23.
     InvalidColor,
     /// A colour's `role` isn't a `core.theme.Role` name.
@@ -1496,6 +1498,10 @@ pub const Dispatcher = struct {
             .selectable = p.selectable orelse true,
             .masked = p.masked orelse false,
             .copy_text = p.copy_text,
+            .line_join = if (p.line_join) |name|
+                std.meta.stringToEnum(core.LineJoin, name) orelse return DispatchError.InvalidLineJoin
+            else
+                .newline,
         });
 
         // A terminal query the text carried (`CSI 6n` / DA / DECRQM):

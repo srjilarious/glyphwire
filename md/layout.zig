@@ -38,7 +38,19 @@ pub const Span = struct {
     scale: glyphwire.TextScale = .x1,
 };
 
-pub const TextOp = struct { row: usize, col: usize, spans: []Span };
+pub const TextOp = struct {
+    row: usize,
+    col: usize,
+    spans: []Span,
+    /// How a copy joins this line to the next (`glyphwire.LineJoin`):
+    /// `.space` where word wrap broke a paragraph, `.direct` where a word
+    /// or a code line too long for the column was split, so selecting a
+    /// paragraph copies it as one line rather than as the window's lines.
+    join: glyphwire.LineJoin = .newline,
+    /// False for decoration -- rules, a quote's bar, a code block's
+    /// language tag -- which a selection skips rather than copying.
+    selectable: bool = true,
+};
 
 /// A solid background band -- a code block's panel.
 pub const FillOp = struct { row: usize, col: usize, rows: usize, cols: usize, tone: Tone };
@@ -462,7 +474,7 @@ const Builder = struct {
             .code => |c| try self.codeBlock(c, col, width),
             .quote => |inner| try self.quote(inner, col, width, ctx),
             .list => |l| try self.list(l, col, width, ctx),
-            .rule => try self.text(self.row, col, &.{.{ .text = try repeat(self.a, "─", width), .tone = .rule }}),
+            .rule => try self.chrome(self.row, col, &.{.{ .text = try repeat(self.a, "─", width), .tone = .rule }}),
             .table => |t| try self.table(t, col, width),
         }
         switch (blk) {
@@ -491,37 +503,44 @@ const Builder = struct {
         try self.anchors.put(self.a, h.slug, self.row);
         try self.flow(h.text.runs, col, width, tone, scale);
         if (h.level <= 2) {
-            try self.text(self.row, col, &.{.{ .text = try repeat(self.a, "─", width), .tone = .rule }});
+            try self.chrome(self.row, col, &.{.{ .text = try repeat(self.a, "─", width), .tone = .rule }});
             self.row += 1;
         }
     }
 
     fn codeBlock(self: *Builder, c: Doc.Code, col: usize, width: usize) !void {
         const inner = width -| 2;
-        var lines: std.ArrayList([]const u8) = .empty;
+        const Line = struct { text: []const u8, join: glyphwire.LineJoin = .newline };
+        var lines: std.ArrayList(Line) = .empty;
         var it = std.mem.splitScalar(u8, c.text, '\n');
         while (it.next()) |l| {
             var rest = l;
             // Hard-wrap: code is never reflowed, but nothing may be lost
-            // off the right edge either.
+            // off the right edge either -- and a copy puts it back
+            // together.
             while (glyphwire.stringWidth(rest) > inner) {
                 const head = clipToWidth(rest, inner);
                 if (head.len == 0) break;
-                try lines.append(self.a, head);
+                try lines.append(self.a, .{ .text = head, .join = .direct });
                 rest = rest[head.len..];
             }
-            try lines.append(self.a, rest);
+            try lines.append(self.a, .{ .text = rest });
         }
         // A padding row above and below; the language sits in the top one.
         const rows = lines.items.len + 2;
         try self.ops.append(self.a, .{ .fill = .{ .row = self.row, .col = col, .rows = rows, .cols = width, .tone = .code } });
         if (c.lang.len > 0 and glyphwire.stringWidth(c.lang) + 2 <= width) {
             const lc = col + width - glyphwire.stringWidth(c.lang) - 1;
-            try self.text(self.row, lc, &.{.{ .text = c.lang, .tone = .muted }});
+            try self.chrome(self.row, lc, &.{.{ .text = c.lang, .tone = .muted }});
         }
         for (lines.items, 0..) |l, i| {
-            if (l.len == 0) continue;
-            try self.text(self.row + 1 + i, col + 1, &.{.{ .text = l, .tone = .code }});
+            if (l.text.len == 0) continue;
+            try self.ops.append(self.a, .{ .text = .{
+                .row = self.row + 1 + i,
+                .col = col + 1,
+                .spans = try self.a.dupe(Span, &.{.{ .text = l.text, .tone = .code }}),
+                .join = l.join,
+            } });
         }
         self.row += rows;
     }
@@ -533,7 +552,7 @@ const Builder = struct {
         try self.blocks(inner, col + 2, width -| 2, inner_ctx, false);
         var r = top;
         while (r < self.row) : (r += 1) {
-            try self.text(r, col, &.{.{ .text = "▎", .tone = .quote }});
+            try self.chrome(r, col, &.{.{ .text = "▎", .tone = .quote }});
         }
     }
 
@@ -679,12 +698,12 @@ const Builder = struct {
             switch (r.kind) {
                 .line_break => {
                     try self.placeWord(&line, &line_w, &word, &word_w, col, width, tone, scale);
-                    try self.emitLine(&line, &line_w, col, tone, scale);
+                    try self.emitLine(&line, &line_w, col, tone, scale, false);
                     continue;
                 },
                 .image => {
                     try self.placeWord(&line, &line_w, &word, &word_w, col, width, tone, scale);
-                    if (line.items.len > 0) try self.emitLine(&line, &line_w, col, tone, scale);
+                    if (line.items.len > 0) try self.emitLine(&line, &line_w, col, tone, scale, false);
                     try self.image(r, col, width);
                     continue;
                 },
@@ -712,7 +731,7 @@ const Builder = struct {
             }
         }
         try self.placeWord(&line, &line_w, &word, &word_w, col, width, tone, scale);
-        if (line.items.len > 0) try self.emitLine(&line, &line_w, col, tone, scale);
+        if (line.items.len > 0) try self.emitLine(&line, &line_w, col, tone, scale, false);
     }
 
     /// Moves the pending word onto the line, wrapping first if it doesn't
@@ -735,7 +754,7 @@ const Builder = struct {
         }
         const pitch = glyphwire.scaledPitch(scale);
         if (line_w.* + word_w.* > width and line.items.len > 0) {
-            try self.emitLine(line, line_w, col, tone, scale);
+            try self.emitLine(line, line_w, col, tone, scale, true);
         }
         if (word_w.* <= width) {
             try line.appendSlice(self.a, word.items);
@@ -751,7 +770,7 @@ const Builder = struct {
                 var head = clipToWidth(rest, room);
                 if (head.len == 0) {
                     if (line.items.len > 0) {
-                        try self.emitLine(line, line_w, col, tone, scale);
+                        try self.emitLine(line, line_w, col, tone, scale, true);
                         continue;
                     }
                     // Not even one character fits: take one anyway.
@@ -765,13 +784,22 @@ const Builder = struct {
         }
     }
 
-    fn emitLine(self: *Builder, line: *std.ArrayList(Piece), line_w: *usize, col: usize, tone: Tone, scale: glyphwire.TextScale) !void {
+    /// Ends the current line. `wrapped` is a soft break -- the text
+    /// goes on below -- rather than the end of the paragraph or a hard
+    /// break, and the line's `join` says so: `.space` when the break fell
+    /// on a space, `.direct` when it split a word.
+    fn emitLine(self: *Builder, line: *std.ArrayList(Piece), line_w: *usize, col: usize, tone: Tone, scale: glyphwire.TextScale, wrapped: bool) !void {
         defer {
             line.clearRetainingCapacity();
             line_w.* = 0;
         }
         // Trailing spaces would only paint a link's colour past its end.
-        while (line.items.len > 0 and line.items[line.items.len - 1].space) _ = line.pop();
+        var at_space = false;
+        while (line.items.len > 0 and line.items[line.items.len - 1].space) {
+            _ = line.pop();
+            at_space = true;
+        }
+        const join: glyphwire.LineJoin = if (!wrapped) .newline else if (at_space) .space else .direct;
 
         var spans: std.ArrayList(Span) = .empty;
         var c = col;
@@ -789,7 +817,7 @@ const Builder = struct {
             try spans.append(self.a, .{ .text = p.text, .style = p.style, .tone = tone, .link = p.link, .scale = scale });
             c += w;
         }
-        if (spans.items.len > 0) try self.ops.append(self.a, .{ .text = .{ .row = self.row, .col = col, .spans = spans.items } });
+        if (spans.items.len > 0) try self.ops.append(self.a, .{ .text = .{ .row = self.row, .col = col, .spans = spans.items, .join = join } });
         self.row += glyphwire.scaledPitch(scale);
     }
 
@@ -836,6 +864,11 @@ const Builder = struct {
 
     fn text(self: *Builder, row: usize, col: usize, spans: []const Span) !void {
         try self.ops.append(self.a, .{ .text = .{ .row = row, .col = col, .spans = try self.a.dupe(Span, spans) } });
+    }
+
+    /// `text` for decoration a selection should skip (`TextOp.selectable`).
+    fn chrome(self: *Builder, row: usize, col: usize, spans: []const Span) !void {
+        try self.ops.append(self.a, .{ .text = .{ .row = row, .col = col, .spans = try self.a.dupe(Span, spans), .selectable = false } });
     }
 
     fn notePos(self: *Builder, link: usize, row: usize, col: usize) void {

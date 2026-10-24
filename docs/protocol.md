@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.11.1 — pre-1.0 draft.**
+**Version 0.12.0 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -324,6 +324,7 @@ response's `message` and as the `code` string in a `get_errors` entry.
 | `InvalidScrollMode` | `scroll_mode`'s `mode` is not `"host"` or `"client"` |
 | `InvalidSpans` | `write_text` has both `text` and `spans`, or neither |
 | `InvalidTextScale` | `write_text`'s `scale` is not one of the enumerated values |
+| `InvalidLineJoin` | `write_text`'s `line_join` is not `"newline"`, `"space"` or `"direct"` |
 | `InvalidColor`, `UnknownColorRole` | a colour's `slot` is outside 0–23, or its `role` is not a role name; `set_theme` slot given as a reference |
 | `UnknownTheme` | `set_theme`'s `name` is not a built-in theme |
 | `UnknownDividerStyle`, `InvalidDividerChar` | `set_divider_style`'s `style` is not a preset, or a `chars` glyph is not exactly one cell wide |
@@ -926,7 +927,7 @@ default style); any explicit colour, black included, is opaque.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `write_text` | notification | `layer?`, `row?`, `col?`, `text` \| `spans`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false, `selectable?` = true, `masked?` = false | — |
+| `write_text` | notification | `layer?`, `row?`, `col?`, `text` \| `spans`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false, `selectable?` = true, `masked?` = false, `line_join?` = `"newline"` | — |
 | `insert_cells` | notification | `layer?`, `count` | — |
 | `delete_cells` | notification | `layer?`, `count` | — |
 | `move_content` | notification | `layer?`, `top?`, `bot?`, `count?` = 1, `direction?` | — |
@@ -947,7 +948,12 @@ a secret's stand-in (a password field's mask glyphs): they draw normally
 but are never selected or copied, and `get_cells` reports each one exactly
 as it reports a never-written cell. The client draws the mask, never the
 secret; the flag keeps even the mask's position and length from reading
-back out.
+back out. `line_join` (`"newline"`, `"space"` or `"direct"`) marks the row
+the write ends on as soft-wrapped: a selection copies it joined to the
+next row with a space, or with nothing, instead of a line break, and drops
+the next row's leading blanks. It is for a client that word-wraps prose
+itself, so a copied paragraph comes back as one line; any later write over
+the row's last glyph clears it. An unknown name reports `InvalidLineJoin`.
 
 `spans` replaces `text` with an array of `{text, fg?, bg?, metadata_id?,
 transparent_bg?, scale?}` written back to back; each omitted field takes
@@ -1412,7 +1418,8 @@ the rows a scaled glyph draws down into belongs to the glyph's own row,
 and the tint covers every row the selected glyphs draw into. Each row's
 tint and text stop at its last non-blank cell, and cells written with
 `write_text`'s `selectable: false` or `masked: true` are never tinted or
-copied.
+copied. Rows join with a newline, except after a row written with a
+`line_join`, which joins as that says.
 
 **Selection state** is `{active, anchor?, active_end?}`; `anchor` and
 `active_end` are absent when `active` is false.

@@ -686,6 +686,16 @@ pub const CellWidth = enum(u2) { narrow, wide_lead, wide_spacer };
 /// decisions.md's Text scale section.
 pub const TextScale = enum { x1, x1_5, x2, x3 };
 
+/// How a selection's copied text joins a row to the one below it --
+/// `write_text`'s `line_join`, carried by the last glyph the write drew
+/// (`Cell.line_join`). `newline` is a hard line end, every row's default.
+/// A client that word-wraps prose itself marks each row it broke with
+/// `space` (the space the wrap swallowed comes back) or, for a word it
+/// had to split mid-way, `direct`, so a copied paragraph comes out as one
+/// line again rather than as the window's line breaks. The row below's
+/// leading blanks are then indentation, not text, and are dropped.
+pub const LineJoin = enum(u2) { newline, space, direct };
+
 /// Cells a `scale` glyph advances per display column: its size rounded up
 /// to whole cells, so 1.5x and 2x both step two and 3x steps three.
 pub fn scaledPitch(scale: TextScale) usize {
@@ -731,6 +741,11 @@ pub const Cell = struct {
     /// should still copy 。. An index rather than the bytes so every cell
     /// doesn't pay for a second grapheme buffer.
     copy_alt: u16 = 0,
+    /// How a selection joins this cell's row to the next one when this
+    /// is the row's last glyph -- see `LineJoin`. Set only by a write
+    /// that asks for it, on the last glyph it draws; any other write over
+    /// the cell resets it to `.newline`.
+    line_join: LineJoin = .newline,
     style: Style = default_style,
     /// Sibling of `style.bg`, not part of it -- a cell can be tagged
     /// regardless of whether its background is a color/image/icon. Set (or
@@ -2405,6 +2420,9 @@ pub const Layer = struct {
         /// one-glyph write drawing a stand-in for some other text; a
         /// longer write repeats it for every glyph.
         copy_text: ?[]const u8 = null,
+        /// How a selection joins the row this write ends on to the next
+        /// (`LineJoin`), set on the last glyph it draws.
+        line_join: LineJoin = .newline,
         /// The underline every cell the *text* touches carries (see
         /// `Underline`). Deliberately not applied to `pad`'s blanks: a
         /// padded status bar or list row would otherwise draw its
@@ -2416,7 +2434,7 @@ pub const Layer = struct {
     /// `writeTextTaggedScaled` with `WriteOpts` -- a single styled run.
     pub fn writeTextOpts(self: *Layer, text: []const u8, fg: Color, bg: ?Background, opts: WriteOpts) !void {
         const runs = [_]TextRun{.{ .text = text, .fg = fg, .bg = bg, .metadata_id = opts.metadata_id, .scale = opts.scale, .underline = opts.underline }};
-        return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id, .selectable = opts.selectable, .masked = opts.masked, .copy_text = opts.copy_text });
+        return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id, .selectable = opts.selectable, .masked = opts.masked, .copy_text = opts.copy_text, .line_join = opts.line_join });
     }
 
     /// One styled piece of a `write_text`: its text and everything that
@@ -2452,6 +2470,9 @@ pub const Layer = struct {
         masked: bool = false,
         /// See `WriteOpts.copy_text` -- every glyph of every run.
         copy_text: ?[]const u8 = null,
+        /// See `WriteOpts.line_join` -- the last glyph of the last run
+        /// that drew one.
+        line_join: LineJoin = .newline,
     };
 
     /// Writes `runs` back to back as one `write_text` -- `write_text`'s
@@ -2470,6 +2491,8 @@ pub const Layer = struct {
         defer self.write_masked = false;
         // The clip limit is an absolute column on the starting row.
         const clip_end: ?usize = if (opts.max_cols) |n| @min(self.cursor.col + n, self.width) else null;
+        // Where the last glyph landed, for `line_join`.
+        var last_glyph: ?GlyphPos = null;
 
         // The SGR pen is call-local: an `ESC [ ... m` colour is honoured
         // only for the rest of *this* `write_text`, never carried into
@@ -2496,7 +2519,7 @@ pub const Layer = struct {
                     var buf: [4]u8 = undefined;
                     const n = std.unicode.utf8Encode(vt.acsGraphic(cp_bytes[0]), &buf) catch unreachable;
                     if (self.vt.insert_mode) self.insertCellsFill(1, .{});
-                    if (!self.putRunGlyph(buf[0..n], 1, eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end)) break :runs;
+                    last_glyph = self.putRunGlyph(buf[0..n], 1, eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end) orelse break :runs;
                     vt.noteLastGlyph(self, buf[0..n], 1, eff.fg, eff.bg, eff.underline);
                     continue;
                 }
@@ -2513,8 +2536,13 @@ pub const Layer = struct {
                 }
                 const w = codepointWidth(cp);
                 if (self.vt.insert_mode) self.insertCellsFill(w, .{});
-                if (!self.putRunGlyph(cp_bytes, w, eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end)) break :runs;
+                last_glyph = self.putRunGlyph(cp_bytes, w, eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end) orelse break :runs;
                 vt.noteLastGlyph(self, cp_bytes, w, eff.fg, eff.bg, eff.underline);
+            }
+        }
+        if (opts.line_join != .newline) {
+            if (last_glyph) |g| {
+                if (g.row < self.height and g.col < self.width) self.cell(g.row, g.col).line_join = opts.line_join;
             }
         }
         if (clip_end) |end| {
@@ -2686,9 +2714,9 @@ pub const Layer = struct {
     /// -- is filled with blanks in the run's style so they carry its
     /// background and `metadata_id` (see `TextScale`). The rows below are
     /// clipped at the layer's bottom edge rather than scrolling it, and
-    /// the cursor stays on the glyph's own row. Returns false when
-    /// `clip_end` stops the write: the cells of the footprint that do fit
-    /// are blanked instead, never half a glyph.
+    /// the cursor stays on the glyph's own row. Returns where the glyph
+    /// landed, or null when `clip_end` stops the write: the cells of the
+    /// footprint that do fit are blanked instead, never half a glyph.
     fn putRunGlyph(
         self: *Layer,
         bytes: []const u8,
@@ -2699,7 +2727,7 @@ pub const Layer = struct {
         scale: TextScale,
         ul: UnderlineStyle,
         clip_end: ?usize,
-    ) bool {
+    ) ?GlyphPos {
         const pitch = scaledPitch(scale);
         const footprint = @as(usize, w) * pitch;
         // A scaled glyph's underline belongs at the bottom of the *block*
@@ -2710,7 +2738,7 @@ pub const Layer = struct {
         if (clip_end) |end| {
             if (self.cursor.col + footprint > end) {
                 while (self.cursor.col < end) self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1, .{});
-                return false;
+                return null;
             }
         } else if (footprint > w and self.cursor.col > 0 and self.cursor.col + footprint > self.width) {
             // A scaled glyph wraps whole, like a wide one does in
@@ -2737,8 +2765,12 @@ pub const Layer = struct {
             var col = start_col;
             while (col < end_col) : (col += 1) self.blankScaledCell(r, col, @intCast(r - row), fg, bg, metadata_id, row_ul);
         }
-        return true;
+        return .{ .row = row, .col = start_col };
     }
+
+    /// A glyph's own cell, in live-screen coordinates: `putRunGlyph`'s
+    /// answer.
+    const GlyphPos = struct { row: usize, col: usize };
 
     /// One cell under a scaled glyph (see `putRunGlyph`): a narrow blank
     /// in the run's style, written in place without moving the cursor,
@@ -2761,6 +2793,7 @@ pub const Layer = struct {
         c.selectable = self.write_selectable;
         c.masked = self.write_masked;
         c.copy_alt = 0;
+        c.line_join = .newline;
     }
 
     /// Places one grapheme cluster at the cursor. `w` is its East Asian
@@ -2817,6 +2850,7 @@ pub const Layer = struct {
         c.selectable = self.write_selectable;
         c.masked = self.write_masked;
         c.copy_alt = self.write_copy_alt;
+        c.line_join = .newline;
 
         if (w == 2) {
             // The spacer renders nothing of its own; give it the lead's

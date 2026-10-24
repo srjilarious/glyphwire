@@ -566,6 +566,10 @@ pub const Client = struct {
         /// for the punctuation it stands for (。). See
         /// `core.Cell.copy_alt`.
         copy_text: ?[]const u8 = null,
+        /// `.space` / `.direct` for a row the caller word-wrapped: a
+        /// selection copies it joined to the next row instead of with a
+        /// line break. See `core.LineJoin`.
+        line_join: core.LineJoin = .newline,
         /// Underline the text (`core.Underline`): `.curly` for a
         /// diagnostic squiggle, `.single` for a link. Never applied to
         /// `pad`'s blanks -- see `core.Layer.WriteOpts.underline`.

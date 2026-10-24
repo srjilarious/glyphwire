@@ -173,7 +173,10 @@ A two-pane file manager in the Norton / Midnight Commander tradition.
 A Markdown reader. Scaled headings from re-rasterized font atlases, GFM
 tables as native server-side tables, inline images, fenced code blocks, and
 links that Tab steps through and Enter follows. The document is one tall layer the host
-scrolls.
+scrolls. Drag, double- or triple-click to select and Ctrl+Shift+C to copy:
+a wrapped paragraph copies as one line, without the margin, rules or
+quote bars. Double-clicking the filename in the statusline copies the
+file's absolute path.
 
 ## gw-read
 

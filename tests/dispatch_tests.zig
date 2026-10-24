@@ -5681,3 +5681,38 @@ pub fn failedRequestsMapToJsonRpcCodesTest(io: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqual(dispatch.errorCode(error.UnknownLayer), -32000);
     try testz.expectEqual(dispatch.errorCode(error.MissingField), -32602);
 }
+
+/// `write_text`'s `line_join` reaches the cells: the selection copies the
+/// two rows as one line.
+pub fn writeTextLineJoinJoinsCopiedRowsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+    const panel = try ctx.createLayer(20, 4, 0);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"layer":1,"row":0,"col":0,"spans":[{"text":"soft"},{"text":" wrap"}],"line_join":"space"}}
+    );
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"layer":1,"row":1,"col":0,"text":"here"}}
+    );
+    const layer = ctx.layerPtr(panel).?;
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = -1, .col = 19 });
+    const text = (try layer.sel.text(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr("soft wrap here", text);
+}
+
+/// An unknown `line_join` name is a parse error, like `underline`'s.
+pub fn writeTextRejectsUnknownLineJoinTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 12, 2, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const msg =
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"hi","line_join":"tab"}}
+    ;
+    try testz.expectError(d.handle(alloc, msg), dispatch.DispatchError.InvalidLineJoin);
+}

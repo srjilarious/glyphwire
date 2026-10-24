@@ -108,6 +108,7 @@ pub const grapheme_inline_len = core.grapheme_inline_len;
 pub const Cell = core.Cell;
 pub const CellWidth = core.CellWidth;
 pub const TextScale = core.TextScale;
+pub const LineJoin = core.LineJoin;
 pub const Underline = core.Underline;
 pub const UnderlineStyle = core.UnderlineStyle;
 pub const scaledPitch = core.scaledPitch;

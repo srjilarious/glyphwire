@@ -328,7 +328,7 @@ pub const ListContextsResult = struct {
 
 /// The version of this protocol, as `docs/protocol.md`'s header gives
 /// it. Bumped with that document, not with any program.
-pub const protocol_version = "0.11.1";
+pub const protocol_version = "0.12.0";
 
 /// `get_version`'s result: the program serving the session and the
 /// protocol it speaks. `program` is its executable name
@@ -547,6 +547,11 @@ pub const WriteTextParams = struct {
     /// What a selection copies for each glyph this write draws, instead
     /// of the glyph -- see `core.Cell.copy_alt`. Whole-write, like `pad`.
     copy_text: ?[]const u8 = null,
+    /// `"space"` or `"direct"`: the row this write ends on is soft-wrapped,
+    /// and a selection's copied text joins it to the next row that way
+    /// rather than with a newline -- see `core.LineJoin`. Omitted:
+    /// `"newline"`.
+    line_join: ?[]const u8 = null,
     fg: ?Color = null,
     bg: ?Color = null,
     /// See `core.Cell.metadata_id`'s doc comment.

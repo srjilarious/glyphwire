@@ -964,6 +964,7 @@ fn textParams(text: ?[]const u8, spans: ?[]const protocol.SpanParams, opts: Text
         .selectable = if (opts.selectable) null else false,
         .masked = if (opts.masked) true else null,
         .copy_text = opts.copy_text,
+        .line_join = if (opts.line_join == .newline) null else @tagName(opts.line_join),
         // Omitted entirely for the overwhelmingly common no-underline
         // write, so nothing grows on the wire for every existing
         // caller. Same reason `spans` is null for a plain write.
