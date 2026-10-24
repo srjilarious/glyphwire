@@ -1913,9 +1913,12 @@ pub const Renderer = struct {
             // between them doesn't matter; the order *within* a pane does,
             // and is unchanged (root layer, caret, then `layer_order`).
             const focused_ctx = server.session.focused_context.load(.monotonic);
-            var it = server.session.panes.valueIterator();
-            while (it.next()) |pane| {
+            var it = server.session.panes.iterator();
+            while (it.next()) |e| {
+                const pane = e.value_ptr;
                 if (!pane.mapped) continue;
+                // The raised overlay goes last, over the chrome too.
+                if (server.session.isOverlayPane(e.key_ptr.*)) continue;
                 const ctx_handle = pane.top();
                 const ctx = server.session.contextPtr(ctx_handle) orelse continue;
                 self.drawOneContext(eng, ctx_handle, ctx, ctx_handle == focused_ctx, geometry.cellRectPx(pane.rect));
@@ -1933,6 +1936,24 @@ pub const Renderer = struct {
         self.renderDividers(eng);
         self.renderScrollbar(eng);
         eng.renderer.end();
+
+        // The manager's raised overlay (`Session.overlay_pane`): over
+        // every pane and band, under the host's own modal. Its context has
+        // no background of its own, so the panes show through everywhere
+        // but the layers it draws.
+        {
+            const server = self.app.server;
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
+            if (server.session.overlay_pane) |h| if (server.session.panePtr(h)) |pane| if (pane.mapped) {
+                const ctx_handle = pane.top();
+                if (server.session.contextPtr(ctx_handle)) |ctx| {
+                    const focused_ctx = server.session.focused_context.load(.monotonic);
+                    self.drawOneContext(eng, ctx_handle, ctx, ctx_handle == focused_ctx, geometry.cellRectPx(pane.rect));
+                    eng.viewport.unclip();
+                }
+            };
+        }
 
         // Over everything a program drew, dividers and scrollbar included:
         // it is a modal the host owns.
@@ -2675,7 +2696,11 @@ pub const Renderer = struct {
     fn focusHighlight(self: *Renderer) ?FocusHighlight {
         const session = &self.app.server.session;
         const c = self.app.pane_focus.color(&session.theme.theme) orelse return null;
-        const pane = session.panePtr(session.focused_pane.load(.monotonic)) orelse return null;
+        const focused = session.focused_pane.load(.monotonic);
+        // The raised overlay covers the window; outlining all of it would
+        // only frame the screen.
+        if (session.isOverlayPane(focused)) return null;
+        const pane = session.panePtr(focused) orelse return null;
         if (!pane.mapped) return null;
         return .{ .rect = pane.rect, .color = host_eng.Color.from(c.r, c.g, c.b, c.a) };
     }

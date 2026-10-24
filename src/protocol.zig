@@ -331,7 +331,7 @@ pub const ListContextsResult = struct {
 
 /// The version of this protocol, as `docs/protocol.md`'s header gives
 /// it. Bumped with that document, not with any program.
-pub const protocol_version = "0.13.0";
+pub const protocol_version = "0.14.0";
 
 /// `get_version`'s result: the program serving the session and the
 /// protocol it speaks. `program` is its executable name
@@ -967,6 +967,10 @@ pub const GetPaneSplitResult = struct {
 /// `set_root_pane_split`: null tears the window layout down, leaving the
 /// root pane as the whole window again.
 pub const SetRootPaneSplitParams = struct { split: ?core.PaneSplitHandle = null };
+
+/// `set_overlay_pane`: the pane raised over the whole window, or null to
+/// lower it. See `core.Session.overlay_pane`.
+pub const SetOverlayPaneParams = struct { pane: ?core.PaneHandle = null };
 
 pub const MovePaneDividerParams = struct {
     split: core.PaneSplitHandle,
@@ -1641,6 +1645,7 @@ pub const Methods = struct {
     replace_pane_split_child: ReplacePaneSplitChildParams,
     get_pane_split: PaneSplitHandleParams,
     set_root_pane_split: SetRootPaneSplitParams,
+    set_overlay_pane: SetOverlayPaneParams,
     move_pane_divider: MovePaneDividerParams,
     spawn_in_pane: SpawnInPaneParams,
     start_remote: StartRemoteParams,

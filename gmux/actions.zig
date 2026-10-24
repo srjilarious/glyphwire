@@ -41,19 +41,55 @@ pub const Action = enum {
     /// program that wants the same chord -- zoe's Ctrl+B sidebar toggle --
     /// still have it.
     sendPrefix,
+    /// Every command here, searchable by name and run from the list, with
+    /// the keys that run it (`applib/palette.zig`, zoe's and
+    /// salacommander's Ctrl+Shift+P). Drawn on gmux's overlay pane (see
+    /// `Ui.raise`); the same keys again close it.
+    commandPalette,
+    /// Rearranging panes with the mouse: drag one onto another's edge to
+    /// put it there, onto its middle to swap the two, or onto a window
+    /// edge for a full-height column or full-width row (`arrange.zig`).
+    /// Stays on for more moves until Escape, Enter or these keys again.
+    layoutMode,
 
     /// Whether the command leaves a zoom in place: `zoom` toggles it
     /// itself, `quit` is about to tear everything down, `sendPrefix` is a
-    /// keystroke for the pane on screen, and a rotate only changes which
-    /// pane the zoom shows. Everything else acts on the real layout, so a
-    /// zoom is undone first.
+    /// keystroke for the pane on screen, a rotate only changes which pane
+    /// the zoom shows, and the palette only lists commands (the one it
+    /// runs decides for itself). Everything else acts on the real layout,
+    /// so a zoom is undone first.
     pub fn keepsZoom(self: Action) bool {
         return switch (self) {
-            .zoom, .quit, .sendPrefix, .rotateForward, .rotateBackward => true,
+            .zoom, .quit, .sendPrefix, .rotateForward, .rotateBackward, .commandPalette => true,
             else => false,
         };
     }
 };
+
+/// Whether the palette lists `action`: everything but the palette itself.
+pub fn inPalette(action: Action) bool {
+    return action != .commandPalette;
+}
+
+/// The palette's name for `action`, where its tag made into words
+/// (`palette.labelFromName`) reads badly. Null for the rest.
+pub fn paletteLabel(action: Action) ?[]const u8 {
+    return switch (action) {
+        .splitBelow => "Split Pane Below",
+        .splitRight => "Split Pane Right",
+        .zoom => "Toggle Zoom",
+        .resizeLeft => "Resize Pane Left",
+        .resizeRight => "Resize Pane Right",
+        .resizeUp => "Resize Pane Up",
+        .resizeDown => "Resize Pane Down",
+        .rotateForward => "Rotate Panes Forward",
+        .rotateBackward => "Rotate Panes Backward",
+        .quit => "Quit gmux",
+        .sendPrefix => "Send Prefix to Pane",
+        .layoutMode => "Arrange Panes (Layout Mode)",
+        else => null,
+    };
+}
 
 /// `sendPrefix`'s default chord: the prefix chord itself (Ctrl plus
 /// `prefix_key`), so it follows a configured prefix rather than being a
@@ -84,4 +120,6 @@ pub const defaults = [_]keybind.Default(Action){
     .{ .chord = "}", .action = .rotateForward },
     .{ .chord = "{", .action = .rotateBackward },
     .{ .chord = "q", .action = .quit },
+    .{ .chord = "P", .action = .commandPalette },
+    .{ .chord = "m", .action = .layoutMode },
 };

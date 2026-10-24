@@ -692,7 +692,11 @@ pub const Server = struct {
     pub fn mouseSelectAllowed(self: *Server, layer: ?core.LayerHandle) bool {
         self.ctx_mutex.lockUncancelable(self.io);
         defer self.ctx_mutex.unlock(self.io);
-        if (!self.ctx.connection_owned) return true;
+        // The manager's raised overlay is a pane's base context, but what
+        // is on it is the manager's own drawing, and a drag across it is
+        // the manager's (gmux's layout mode), so it is treated as drawn by
+        // a client.
+        if (!self.ctx.connection_owned and !self.session.isOverlayPane(self.ctx.pane)) return true;
         const handle = layer orelse return false;
         const l = self.ctx.layers.getPtr(handle) orelse return false;
         return l.mouse_select;

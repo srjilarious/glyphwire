@@ -4186,6 +4186,59 @@ pub fn paneTreeOpsRequireTheWindowManagerRoleTest(io: std.Io, alloc: std.mem.All
     try testz.expectTrue(made.panes_changed);
 }
 
+/// `set_overlay_pane` puts a pane over the whole window at once -- so a
+/// `focus_pane` right behind it lands -- wins every hit test while raised,
+/// keeps the window's size through a relayout, and moves focus off itself
+/// when lowered. The root pane can't be raised, and destroying the raised
+/// pane lowers it.
+pub fn setOverlayPaneRaisesAPaneOverTheWindowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+    var d = try helpers.attachedConnection(&session, 7);
+
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_overlay_pane","params":{"pane":1}}
+    ), error.NotWindowManager);
+    try testz.expectTrue(session.claimManager(7, 0) != null);
+
+    const made = try session.createPane(7, 0);
+    try testz.expectFalse(session.panePtr(made.pane).?.mapped);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_overlay_pane","params":{"pane":0}}
+    ), error.RootPaneImmutable);
+    try testz.expectError(d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_overlay_pane","params":{"pane":9}}
+    ), error.UnknownPane);
+
+    const raised = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_overlay_pane","params":{"pane":1}}
+    );
+    try testz.expectTrue(raised.panes_changed);
+    try testz.expectTrue(session.panePtr(made.pane).?.mapped);
+    try session.focusPane(made.pane);
+    try testz.expectEqual(session.paneAt(3, 3).?, made.pane);
+
+    try session.layoutPanes(null, null);
+    const r = session.panePtr(made.pane).?.rect;
+    try testz.expectEqual(r.cols, 40);
+    try testz.expectEqual(r.rows, 10);
+    try testz.expectEqual(session.paneAt(3, 3).?, made.pane);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_overlay_pane","params":{"pane":null}}
+    );
+    try testz.expectFalse(session.panePtr(made.pane).?.mapped);
+    try testz.expectEqual(session.focusedPaneHandle(), glyphwire.root_pane_handle);
+    try testz.expectEqual(session.paneAt(3, 3).?, glyphwire.root_pane_handle);
+
+    try session.setOverlayPane(made.pane);
+    try session.destroyPane(made.pane);
+    try testz.expectTrue(session.overlay_pane == null);
+}
+
 /// A pane-tree edit inside a `batch` still tells the caller to re-lay-out
 /// (gmux's rotate sends all its slot swaps as one); without it, the
 /// programs in the moved panes never got their `resize`.

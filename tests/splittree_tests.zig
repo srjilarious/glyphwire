@@ -128,6 +128,41 @@ pub fn removeKeepsTheGrandparentLinkTest(_: std.Io, alloc: std.mem.Allocator) !v
 /// The slot an edit reports is the host child index a caller passes to
 /// `replace_*split_child`: a split in place sits where its leaf did, and
 /// a removal's replacement where the removed split did.
+/// A window-edge drop: the old tree becomes one child of a new root.
+pub fn wrapRootPutsTheTreeBesideTheNewLeafTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var tree = try Tree.init(alloc, 1);
+    defer tree.deinit();
+    const old = try tree.split(1, 2, .column, 100, .after);
+
+    const root = try tree.wrapRoot(3, .row, 200, .before);
+    try testz.expectTrue(tree.root == root);
+    try testz.expectTrue(root.parent == null);
+    try testz.expectEqual(root.kind.split.axis, .row);
+    try testz.expectEqual(root.kind.split.first.kind.leaf, 3);
+    try testz.expectTrue(root.kind.split.second == old);
+    try testz.expectTrue(old.parent == root);
+    try testz.expectTrue(old.slot().? == .second);
+
+    const ids = try order(alloc, &tree);
+    defer alloc.free(ids);
+    try testz.expectTrue(std.mem.eql(u32, ids, &.{ 3, 1, 2 }));
+}
+
+pub fn swapLeavesTradesIdsInPlaceTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var tree = try Tree.init(alloc, 1);
+    defer tree.deinit();
+    _ = try tree.split(1, 2, .row, 100, .after);
+    _ = try tree.split(2, 3, .column, 101, .after);
+
+    const nodes = try tree.swapLeaves(1, 3);
+    try testz.expectEqual(nodes[0].kind.leaf, 3);
+    try testz.expectEqual(nodes[1].kind.leaf, 1);
+    const ids = try order(alloc, &tree);
+    defer alloc.free(ids);
+    try testz.expectTrue(std.mem.eql(u32, ids, &.{ 3, 2, 1 }));
+    try testz.expectError(tree.swapLeaves(1, 9), error.UnknownLeaf);
+}
+
 pub fn slotIndexNamesTheHostChildTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(splittree.Slot.first.index(), 0);
     try testz.expectEqual(splittree.Slot.second.index(), 1);

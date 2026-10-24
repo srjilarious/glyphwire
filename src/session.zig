@@ -337,6 +337,15 @@ pub const Session = struct {
     /// pane simply *is* the window, which is the single-program case and
     /// the default.
     root_pane_split: ?PaneSplitHandle = null,
+    /// The pane the manager has raised over the whole window, if any
+    /// (`set_overlay_pane`): laid out at the full window rect whatever the
+    /// tree says, composited after every other pane, and hit first by the
+    /// pointer. Its context is drawn without a background, so only the
+    /// layers its program creates cover anything -- a multiplexer's
+    /// palette, or the drop highlight of a pane being dragged. Focusing it
+    /// is how the manager takes the keyboard for a mode of its own while
+    /// still never seeing a keystroke meant for a program.
+    overlay_pane: ?PaneHandle = null,
     /// Cells of gap between two children of a pane split.
     pane_divider_cells: usize = 1,
 
@@ -916,11 +925,41 @@ pub const Session = struct {
             }
         }
 
+        if (self.overlay_pane == handle) self.overlay_pane = null;
         if (self.focused_pane.load(.monotonic) == handle) {
             self.focused_pane.store(root_pane_handle, .monotonic);
         }
         _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
         self.republish();
+    }
+
+    /// `set_overlay_pane`: raises `handle` over the whole window, or with
+    /// null lowers whichever pane is raised (see `overlay_pane`). Mapped at
+    /// once rather than at the next `layoutPanes`, so a `focus_pane` right
+    /// behind it -- the manager taking the keyboard -- finds it on screen
+    /// even inside one `batch`. Lowering it unmaps it and moves focus off
+    /// it, the same rescue an unmapped tree pane gets.
+    pub fn setOverlayPane(self: *Session, handle: ?PaneHandle) PaneError!void {
+        if (handle) |h| {
+            if (h == root_pane_handle) return PaneError.RootPaneImmutable;
+            const pane = self.panes.getPtr(h) orelse return PaneError.UnknownPane;
+            if (self.overlay_pane) |old| if (old != h) {
+                if (self.panes.getPtr(old)) |p| p.mapped = false;
+            };
+            pane.rect = .{ .cols = self.window_cols, .rows = self.window_rows };
+            pane.mapped = true;
+        } else if (self.overlay_pane) |old| {
+            if (self.panes.getPtr(old)) |p| p.mapped = false;
+        }
+        self.overlay_pane = handle;
+        self.rescueFocus();
+        _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
+        self.republish();
+    }
+
+    /// Whether `handle` is the raised overlay pane.
+    pub fn isOverlayPane(self: *const Session, handle: PaneHandle) bool {
+        return self.overlay_pane == handle;
     }
 
     /// `focus_pane`: which pane raw input goes to. Errors on an unknown
@@ -936,7 +975,12 @@ pub const Session = struct {
     /// The pane whose rect contains `(row, col)` in window cells, or null
     /// for a gap between panes (a divider band) or outside every pane.
     /// What a mouse click resolves through.
+    /// The raised overlay pane covers the whole window, so it is the
+    /// answer everywhere while it is up.
     pub fn paneAt(self: *Session, row: usize, col: usize) ?PaneHandle {
+        if (self.overlay_pane) |h| {
+            if (self.panes.getPtr(h)) |p| if (p.mapped and p.rect.contains(row, col)) return h;
+        }
         var it = self.panes.iterator();
         while (it.next()) |e| {
             if (!e.value_ptr.mapped) continue;
@@ -1042,6 +1086,7 @@ pub const Session = struct {
         } else {
             try self.applyPaneRect(root_pane_handle, full, changed);
         }
+        if (self.overlay_pane) |h| try self.applyPaneRect(h, full, changed);
 
         // Every context follows its pane. A context whose pane went
         // unmapped keeps its last size: it is still live, just not shown,

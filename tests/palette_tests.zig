@@ -88,6 +88,19 @@ pub fn listAddLabelsAndFormatsTheChordTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqualStr(l.commands.items[2].chord, "");
 }
 
+/// gmux's rows: the keys as pressed, prefix first; an unbound action
+/// shows none, not the prefix alone.
+pub fn addAfterPrefixShowsThePrefixThenTheKeyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var l = palette.List.init(alloc);
+    defer l.deinit();
+    const prefix = try Chord.parse("ctrl+b");
+    try l.addAfterPrefix(0, "commandPalette", null, prefix, try Chord.parse("P"));
+    try l.addAfterPrefix(1, "layoutMode", null, prefix, null);
+    try testz.expectEqualStr(l.commands.items[0].label, "Command Palette");
+    try testz.expectEqualStr(l.commands.items[0].chord, "Ctrl+B P");
+    try testz.expectEqualStr(l.commands.items[1].chord, "");
+}
+
 pub fn emptyQueryListsInTheCallersOrderTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var l = try sampleList(alloc);
     defer l.deinit();

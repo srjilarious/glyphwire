@@ -18,8 +18,8 @@
 -- wrong type is logged and the default stands. Any parse error is logged
 -- and whatever parsed before it is kept.
 --
--- Keybindings, scrollback style, and the pane layout itself are not
--- configurable yet -- gmux's first version. How the lines between panes
+-- Scrollback style and the starting pane layout are not configurable
+-- yet. How the lines between panes
 -- look is the host's to draw: see `pane_divider_style` in host.conf.lua.
 
 -- config = {
@@ -34,8 +34,13 @@
 --     -- the slot, and a zoom stays on, showing the pane that rotated
 --     -- in), H/L shrink/grow the focused pane along a row-axis
 --     -- split, J/K along a column-axis one, q quits
---     -- gmux, and the prefix again (Ctrl-B Ctrl-B) sends one Ctrl-B on
---     -- to the focused program -- zoe's sidebar toggle, say.
+--     -- gmux, P opens the command palette (every command, searchable,
+--     -- with its keys), m starts layout mode (drag a pane onto
+--     -- another's edge to move it there, onto its middle to swap the
+--     -- two, or onto a window edge for a full-height column or
+--     -- full-width row; Esc or Enter finishes), and the prefix again
+--     -- (Ctrl-B Ctrl-B) sends one Ctrl-B on to the focused program --
+--     -- zoe's sidebar toggle, say.
 --     prefix_key = "b",
 --
 --     -- The command run in a fresh pane, overriding the default
@@ -63,6 +68,7 @@
 --     --   splitBelow ", splitRight %, killPane x, zoom z,
 --     --   resizeLeft H, resizeRight L, resizeUp K, resizeDown J,
 --     --   rotateForward }, rotateBackward {, quit q,
+--     --   commandPalette P, layoutMode m,
 --     --   sendPrefix ctrl+<prefix_key>
 --     keys = {
 --         -- ["-"] = "splitBelow", ["|"] = "splitRight",

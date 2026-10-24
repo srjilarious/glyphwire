@@ -490,6 +490,14 @@ pub fn Ops(comptime Self: type) type {
             try self.notify("set_root_pane_split", .{ .split = split });
         }
 
+        /// `set_overlay_pane`: raises `pane` over the whole window, drawn
+        /// on top of every other pane and hit first by the pointer; null
+        /// lowers it. Follow it with `focusPane(pane)` to take the keyboard
+        /// for a mode of the manager's own.
+        pub fn setOverlayPane(self: *Self, pane: ?core.PaneHandle) !void {
+            try self.notify("set_overlay_pane", .{ .pane = pane });
+        }
+
         /// `move_pane_divider`: drags the band after child `index` by `delta`
         /// cells. Positive grows the child at `index` and shrinks its
         /// neighbour.

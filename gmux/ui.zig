@@ -24,6 +24,15 @@
 //! ratio alone; closing one hands its whole slot to its sibling -- see
 //! `splittree`'s module doc comment. Zoom is cheaper still: it never
 //! touches the real tree at all, just swaps which split is the wire root.
+//!
+//! **The overlay is the one exception to drawing nothing.** The palette
+//! and layout mode need a surface over every pane and the keyboard and
+//! mouse while they are up, so gmux keeps one pane of its own outside the
+//! tree and raises it over the window for as long as a mode lasts
+//! (`set_overlay_pane`, see `raise`). Both connections are bound to it:
+//! this one draws there, the listener hears its input. It is still the
+//! session that routes that input, by focus, so gmux sees keystrokes only
+//! while its own pane has them.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -32,7 +41,9 @@ const splittree = @import("applib").splittree;
 const layout = @import("layout.zig");
 const actions = @import("actions.zig");
 const keybind = @import("applib").keybind;
+const palette = @import("applib").palette;
 const config = @import("config.zig");
+const arrange = @import("arrange.zig");
 
 const Client = glyphwire.Client;
 const InputListener = glyphwire.InputListener;
@@ -43,6 +54,12 @@ const resize_step: i64 = 2;
 
 const Bounds = splittree.Rect;
 const Direction = splittree.Direction;
+
+/// What the raised overlay is for, if anything.
+const Mode = enum { none, palette, layout };
+
+/// Layout mode's note across the top of the window.
+const layout_hint = " Layout: drag a pane onto another's edge to move it there, onto its middle to swap  \u{00b7}  Esc to finish ";
 
 pub const Error = error{
     /// Another connection already holds the window-manager role -- there is
@@ -95,6 +112,23 @@ pub const Ui = struct {
     /// Every prefix command: `actions.defaults` with the config's `keys`
     /// over them.
     keymap: actions.Keymap = .{},
+    /// The prefix chord itself (Ctrl plus `prefix_key`), which the
+    /// palette shows in front of every command's key.
+    prefix_chord: keybind.Chord,
+
+    /// gmux's own pane, never in the tree: raised over the window while a
+    /// mode is up, lowered otherwise (see the module doc comment).
+    overlay: PaneId = 0,
+    mode: Mode = .none,
+    /// The overlay's size in cells, i.e. the window's, as of the last
+    /// raise or `resize`.
+    win: struct { cols: usize = 0, rows: usize = 0 } = .{},
+    /// Ctrl+B P. Its layers are on the overlay.
+    palette: palette.Popup = undefined,
+    /// Layout mode's one-line note (`layout_hint`), on the overlay.
+    hint_layer: glyphwire.LayerHandle = 0,
+    /// The pane being dragged in layout mode, and where it would land.
+    drag: ?struct { pane: PaneId, drop: ?arrange.Drop = null } = null,
 
     quit: bool = false,
 
@@ -128,14 +162,32 @@ pub const Ui = struct {
             .scrollback_rows = cfg.scrollback_rows,
             .shell_cmd = config.shellCommand(cfg),
             .start_cwd = currentDir(alloc, io),
+            .prefix_chord = actions.sendPrefixChord(cfg.prefix_key),
         };
         errdefer if (self.start_cwd) |d| alloc.free(d);
         errdefer self.bounds.deinit();
         self.keymap = try actions.Keymap.initDefaults(alloc, &actions.defaults);
         errdefer self.keymap.deinit(alloc);
         // Before `apply`, so `keys` can still move or drop it.
-        try self.keymap.bind(alloc, actions.sendPrefixChord(cfg.prefix_key), .sendPrefix);
+        try self.keymap.bind(alloc, self.prefix_chord, .sendPrefix);
         try self.keymap.apply(alloc, cfg.keys);
+
+        // The overlay, before anything is drawn on it: binding both
+        // connections first is what puts the layers below on its context,
+        // and what keeps the listener's raw input streams (subscribed in
+        // `main.zig`) gated on its focus rather than the shell gmux was
+        // started from.
+        const overlay = try client.createPane(0);
+        self.overlay = overlay.pane;
+        try client.attachPane(overlay.pane);
+        try listener.attachPane(overlay.pane);
+        try client.setCaretVisible(false);
+        self.hint_layer = try client.createLayer(1, 1, 0);
+        try client.setLayerVisible(self.hint_layer, false);
+        try client.setLayerBackground(self.hint_layer, glyphwire.Color.role(.popup_bg));
+        // Last, so it composites over the hint.
+        self.palette = try palette.Popup.init(alloc, client, try self.paletteStyle());
+        errdefer self.palette.deinit();
 
         // The prefix chord the session will enforce for us. From here on
         // every `window_key` / `window_text` we receive is a command, and
@@ -169,9 +221,11 @@ pub const Ui = struct {
         // teardown order obvious.
         var it = self.bounds.keyIterator();
         while (it.next()) |id| self.client.destroyPane(id.*) catch {};
+        self.client.destroyPane(self.overlay) catch {};
         self.client.setRootPaneSplit(null) catch {};
         self.client.setWindowPrefix(null, true, false, false) catch {};
 
+        self.palette.deinit();
         self.bounds.deinit();
         self.tree.deinit();
         self.keymap.deinit(self.alloc);
@@ -223,6 +277,18 @@ pub const Ui = struct {
                 .pane_focus => |f| if (self.bounds.contains(f.pane)) {
                     self.focused = f.pane;
                 },
+                // The overlay's own input: only ever while it is raised and
+                // focused, since the session gates it on focus.
+                .key => |k| self.modeKey(k),
+                .text, .paste => |t| self.modeText(t.text),
+                .mouse_button => |m| self.modeMouseButton(m),
+                .mouse_move => |m| self.modeMouseMove(m.cell),
+                .scroll_offset => |so| if (self.mode == .palette and self.palette.scrolled(so)) self.redraw(),
+                .resize => |r| {
+                    self.win = .{ .cols = r.cols, .rows = r.rows };
+                    self.redraw();
+                },
+                .theme => self.restyle(),
                 else => if (ev.asInput()) |input| try self.handleInput(input),
             }
         }
@@ -240,9 +306,7 @@ pub const Ui = struct {
             .window_key => |k| if (k.pressed) self.command(self.keyAction(k)),
             .window_text => |t| self.command(self.textAction(t.text)),
             .shutdown => self.quit = true,
-            // gmux is never in the focused pane, so raw input never arrives.
-            // Ignored rather than asserted: a future host that does deliver
-            // something here shouldn't crash the multiplexer.
+            // Raw input is the overlay's, taken in `run` before this.
             .key, .text, .paste, .copy_request => {},
         }
     }
@@ -278,6 +342,13 @@ pub const Ui = struct {
     /// swallowed, same as tmux.
     fn command(self: *Ui, action: ?actions.Action) void {
         const a = action orelse return;
+        // A mode's own keys close it again. Any other command ends the mode
+        // first: it acts on the panes, which the overlay is covering.
+        if (self.mode != .none) {
+            const own = (a == .commandPalette and self.mode == .palette) or (a == .layoutMode and self.mode == .layout);
+            self.endMode();
+            if (own) return;
+        }
         // Everything but zoom itself and quit acts on the real layout, so
         // a zoom is undone first -- tmux's rule. Silently ignoring a split
         // while zoomed looked like gmux had stopped listening.
@@ -300,6 +371,14 @@ pub const Ui = struct {
             .rotateBackward => self.rotate(.before) catch |err| self.logError("rotate", err),
             .quit => self.quit = true,
             .sendPrefix => self.client.sendWindowPrefix() catch |err| self.logError("send prefix", err),
+            .commandPalette => self.openPalette() catch |err| {
+                self.logError("command palette", err);
+                self.endMode();
+            },
+            .layoutMode => self.openLayout() catch |err| {
+                self.logError("layout mode", err);
+                self.endMode();
+            },
         }
     }
 
@@ -308,8 +387,11 @@ pub const Ui = struct {
         std.log.err("gmux: {s} failed: {t}", .{ what, err });
     }
 
+    /// While a mode is up the overlay keeps the keyboard: the pane is only
+    /// recorded, and `endMode` focuses it.
     fn setFocus(self: *Ui, id: PaneId) void {
         self.focused = id;
+        if (self.mode != .none) return;
         self.client.focusPane(id) catch {};
     }
 
@@ -345,9 +427,13 @@ pub const Ui = struct {
     }
 
     fn childInput(ref: layout.ChildRef) glyphwire.PaneSplitChildInput {
+        return weightedInput(ref, 1);
+    }
+
+    fn weightedInput(ref: layout.ChildRef, weight: f32) glyphwire.PaneSplitChildInput {
         return switch (ref) {
-            .pane => |id| glyphwire.PaneSplitChildInput.paneWeighted(id, 1),
-            .split => |wire| glyphwire.PaneSplitChildInput.splitWeighted(wire, 1),
+            .pane => |id| glyphwire.PaneSplitChildInput.paneWeighted(id, weight),
+            .split => |wire| glyphwire.PaneSplitChildInput.splitWeighted(wire, weight),
         };
     }
 
@@ -563,5 +649,283 @@ pub const Ui = struct {
         const grows_first = grow == (leaf.slot() == .first);
         const delta: i64 = if (grows_first) resize_step else -resize_step;
         try self.client.movePaneDivider(parent.handle, 0, delta);
+    }
+
+    // ── Modes: the palette and layout mode ──────────────────────────────
+
+    /// Raises the overlay over the window and gives it the keyboard. The
+    /// size is asked for after the raise, since only a raised overlay is
+    /// laid out at the window's size.
+    fn raise(self: *Ui, mode: Mode) !void {
+        try self.client.setOverlayPane(self.overlay);
+        try self.client.focusPane(self.overlay);
+        self.mode = mode;
+        const size = try self.client.getSize();
+        self.win = .{ .cols = size.cols, .rows = size.rows };
+    }
+
+    /// Ends whatever mode is up: everything on the overlay hidden, focus
+    /// handed back to the pane that had it (or took it meanwhile, see
+    /// `setFocus`), then the overlay lowered -- in that order, so focus is
+    /// never on a pane that has left the screen. A no-op with no mode up.
+    fn endMode(self: *Ui) void {
+        if (self.mode == .none) return;
+        self.mode = .none;
+        self.drag = null;
+        if (self.palette.isOpen()) self.palette.close();
+        self.client.setLayerVisible(self.hint_layer, false) catch {};
+        self.client.setDropTarget(null, null) catch {};
+        self.client.focusPane(self.focused) catch {};
+        self.client.setOverlayPane(null) catch {};
+    }
+
+    /// Redraws what the mode up shows, after anything changed it.
+    fn redraw(self: *Ui) void {
+        switch (self.mode) {
+            .none => {},
+            .palette => self.renderPalette() catch |err| self.logError("draw palette", err),
+            .layout => {
+                self.renderHint() catch |err| self.logError("draw layout hint", err);
+                if (self.drag) |d| self.showDrop(d.drop, d.pane);
+            },
+        }
+    }
+
+    /// Re-reads the theme for the palette's frame, which is a nine-patch
+    /// picked by name and so doesn't recolour on its own.
+    fn restyle(self: *Ui) void {
+        const style = self.paletteStyle() catch return;
+        self.palette.setStyle(style) catch |err| self.logError("restyle palette", err);
+        self.redraw();
+    }
+
+    fn paletteStyle(self: *Ui) !palette.Style {
+        const th = try self.client.getTheme();
+        var style = palette.default_style;
+        style.frame_style = th.panelStyle();
+        return style;
+    }
+
+    /// A keystroke while the overlay has the keyboard.
+    fn modeKey(self: *Ui, k: glyphwire.KeyEvent) void {
+        if (!k.pressed) return;
+        switch (self.mode) {
+            .none => {},
+            .palette => switch (self.palette.key(k) catch .handled) {
+                .accept => self.acceptPalette(),
+                .closed => self.endMode(),
+                .handled => if (self.palette.dirty) self.redraw(),
+            },
+            .layout => if (std.mem.eql(u8, k.key, "escape") or std.mem.eql(u8, k.key, "enter")) self.endMode(),
+        }
+    }
+
+    fn modeText(self: *Ui, text: []const u8) void {
+        if (self.mode != .palette) return;
+        self.palette.text(text) catch |err| self.logError("palette", err);
+        if (self.palette.dirty) self.redraw();
+    }
+
+    fn modeMouseButton(self: *Ui, m: glyphwire.MouseButtonEvent) void {
+        if (!std.mem.eql(u8, m.button, "left")) return;
+        switch (self.mode) {
+            .none => {},
+            .palette => if (m.pressed) switch (self.palette.click(m.cell)) {
+                .accept => self.acceptPalette(),
+                .closed => self.endMode(),
+                .handled => {},
+            },
+            .layout => if (m.pressed) self.startDrag(m.cell) else self.endDrag(),
+        }
+    }
+
+    fn modeMouseMove(self: *Ui, cell: glyphwire.CellPos) void {
+        if (self.mode != .layout) return;
+        const d = if (self.drag) |*held| held else return;
+        const rects = self.paneRects() catch return;
+        defer self.alloc.free(rects);
+        const drop = arrange.dropAt(rects, self.window(), d.pane, cell.row, cell.col);
+        const same = if (drop) |a| (if (d.drop) |b| a.eql(b) else false) else d.drop == null;
+        if (same) return;
+        d.drop = drop;
+        self.showDrop(drop, d.pane);
+    }
+
+    fn window(self: *const Ui) arrange.Rect {
+        return .{ .cols = self.win.cols, .rows = self.win.rows };
+    }
+
+    /// Every pane in the tree with its rect. Caller frees.
+    fn paneRects(self: *Ui) ![]arrange.PaneRect {
+        const out = try self.alloc.alloc(arrange.PaneRect, self.bounds.count());
+        var it = self.bounds.iterator();
+        var i: usize = 0;
+        while (it.next()) |e| : (i += 1) out[i] = .{ .pane = e.key_ptr.*, .rect = e.value_ptr.* };
+        return out;
+    }
+
+    // ── The palette ─────────────────────────────────────────────────────
+
+    /// Ctrl+B P: every command `inPalette` admits, with the keys that run
+    /// it after the prefix.
+    fn openPalette(self: *Ui) !void {
+        try self.raise(.palette);
+        var list = palette.List.init(self.alloc);
+        {
+            errdefer list.deinit();
+            for (std.enums.values(actions.Action)) |a| {
+                if (!actions.inPalette(a)) continue;
+                try list.addAfterPrefix(@intFromEnum(a), @tagName(a), actions.paletteLabel(a), self.prefix_chord, self.keymap.chordFor(a));
+            }
+        }
+        try self.palette.open(list);
+        self.redraw();
+    }
+
+    /// Runs the pick as if its keys had been pressed, the overlay lowered
+    /// first so the command acts on the panes with focus back where it was.
+    fn acceptPalette(self: *Ui) void {
+        const a = self.palette.selectedAs(actions.Action);
+        self.endMode();
+        self.command(a);
+    }
+
+    /// Across the top of the window, as wide and tall as the palette's
+    /// style allows.
+    fn renderPalette(self: *Ui) !void {
+        var b = self.client.batch();
+        defer b.deinit();
+        try self.palette.render(&b, .{ .row = 0, .col = 0, .cols = self.win.cols, .rows = self.win.rows });
+        var sent = try b.send();
+        sent.deinit();
+    }
+
+    // ── Layout mode ─────────────────────────────────────────────────────
+
+    /// Ctrl+B m. Nothing to arrange with one pane, so it doesn't start.
+    fn openLayout(self: *Ui) !void {
+        if (self.tree.count() < 2) return;
+        try self.raise(.layout);
+        self.redraw();
+    }
+
+    fn renderHint(self: *Ui) !void {
+        const cols = @min(glyphwire.stringWidth(layout_hint), self.win.cols);
+        if (cols == 0) return;
+        var b = self.client.batch();
+        defer b.deinit();
+        try b.setLayerSize(self.hint_layer, cols, 1);
+        try b.setLayerCellPosition(self.hint_layer, 0, (self.win.cols - cols) / 2);
+        try b.writeSpans(&.{.{ .text = layout_hint }}, .{
+            .layer = self.hint_layer,
+            .row = 0,
+            .col = 0,
+            .fg = glyphwire.Color.role(.popup_fg),
+            .max_cols = cols,
+            .pad = true,
+        });
+        try b.setLayerVisible(self.hint_layer, true);
+        var sent = try b.send();
+        sent.deinit();
+    }
+
+    /// A press picks up the pane under the pointer; a press on a divider
+    /// band picks up nothing.
+    fn startDrag(self: *Ui, cell: glyphwire.CellPos) void {
+        var it = self.bounds.iterator();
+        while (it.next()) |e| {
+            const r = e.value_ptr.*;
+            if (cell.row >= r.row and cell.row < r.row + r.rows and cell.col >= r.col and cell.col < r.col + r.cols) {
+                self.drag = .{ .pane = e.key_ptr.* };
+                return;
+            }
+        }
+    }
+
+    /// The release drops the pane wherever the highlight says. Layout mode
+    /// stays on for the next move.
+    fn endDrag(self: *Ui) void {
+        const d = self.drag orelse return;
+        self.drag = null;
+        self.client.setDropTarget(null, null) catch {};
+        const drop = d.drop orelse return;
+        self.applyDrop(d.pane, drop) catch |err| self.logError("move pane", err);
+    }
+
+    /// Washes the cells `drop` would give the dragged pane, on the
+    /// overlay's root layer, under the hint; null clears it.
+    fn showDrop(self: *Ui, drop: ?arrange.Drop, dragged: PaneId) void {
+        const d = drop orelse {
+            self.client.setDropTarget(null, null) catch {};
+            return;
+        };
+        const rects = self.paneRects() catch return;
+        defer self.alloc.free(rects);
+        const root_run = switch (d) {
+            .window => |e| arrange.windowRun(&self.tree, dragged, e.axis()),
+            .pane => 0,
+        };
+        const r = arrange.highlight(d, rects, self.window(), root_run);
+        self.client.setDropTarget(null, .{ .cells = .{ .row = r.row, .col = r.col, .rows = r.rows, .cols = r.cols } }) catch {};
+    }
+
+    /// Moves `dragged` to `drop`. The tree is edited first, then every
+    /// split's children are re-sent in one batch with the weights
+    /// `arrange.childWeights` gives them -- a move can reshape several
+    /// splits at once, which the one-slot edits splitting and closing use
+    /// can't express.
+    fn applyDrop(self: *Ui, dragged: PaneId, drop: arrange.Drop) !void {
+        const axis = switch (drop) {
+            .pane => |p| switch (p.zone) {
+                .center => return self.swapPanes(dragged, p.pane),
+                .edge => |e| e.axis(),
+            },
+            .window => |e| e.axis(),
+        };
+        const handle = try self.client.createPaneSplit(toWireAxis(axis), true);
+        const moved = arrange.move(&self.tree, dragged, drop, handle) catch |err| {
+            self.client.destroyPaneSplit(handle) catch {};
+            return err;
+        };
+
+        var splits: std.ArrayList(*layout.Node) = .empty;
+        defer splits.deinit(self.alloc);
+        try arrange.splitNodes(self.alloc, self.tree.root, &splits);
+
+        var batch = self.client.batch();
+        defer batch.deinit();
+        for (splits.items) |n| {
+            const w = arrange.childWeights(n, &moved.runs, &self.bounds, dragged);
+            const refs = layout.childRefs(n);
+            try batch.setPaneSplitChildren(n.kind.split.handle, &.{ weightedInput(refs[0], w[0]), weightedInput(refs[1], w[1]) });
+        }
+        // Layout mode unzoomed on the way in, so the wire root is the
+        // tree's. Two or more panes, so the root is a split.
+        const root = self.tree.root.kind.split.handle;
+        if (root != self.current_root_wire) try batch.setRootPaneSplit(root);
+        try batch.destroyPaneSplit(moved.removed_handle);
+        var res = try batch.send();
+        res.deinit();
+        self.current_root_wire = root;
+        self.setFocus(dragged);
+    }
+
+    /// A drop on another pane's middle: the two trade slots, every size
+    /// kept, the way `rotate` moves panes.
+    fn swapPanes(self: *Ui, a: PaneId, b: PaneId) !void {
+        const nodes = try self.tree.swapLeaves(a, b);
+        var batch = self.client.batch();
+        defer batch.deinit();
+        for (nodes) |node| {
+            const parent = node.parent.?; // two or more leaves: none is the root
+            try batch.replacePaneSplitChild(parent.kind.split.handle, node.slot().?.index(), .{ .pane = node.kind.leaf });
+        }
+        var res = try batch.send();
+        res.deinit();
+        const ra = self.bounds.get(a) orelse Bounds{};
+        const rb = self.bounds.get(b) orelse Bounds{};
+        try self.bounds.put(a, rb);
+        try self.bounds.put(b, ra);
+        self.setFocus(a);
     }
 };

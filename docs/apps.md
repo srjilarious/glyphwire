@@ -134,13 +134,22 @@ A modal text editor: vim's grammar with VS Code's keys alongside it.
 
 ## gmux
 
-A terminal multiplexer that is a pure window manager: it draws nothing and
-never touches a program's I/O. It claims the window-manager role, asks the
-server for panes and places them.
+A terminal multiplexer that is a window manager: it never touches a
+program's I/O. It claims the window-manager role, asks the server for
+panes and places them. The one thing it draws is on a pane of its own,
+raised over the window only while the palette or layout mode is open.
 
 - Keys follow `Ctrl-B`: `"` / `%` split, arrows move focus, `x` closes,
-  `z` zooms, `H` / `J` / `K` / `L` resize, `q` quits, and `Ctrl-B` again
-  sends one `Ctrl-B` through.
+  `z` zooms, `H` / `J` / `K` / `L` resize, `{` / `}` rotate, `q` quits,
+  and `Ctrl-B` again sends one `Ctrl-B` through.
+- `Ctrl-B P` opens the command palette: every gmux command, searchable,
+  with the keys that run it.
+- `Ctrl-B m` is layout mode: drag a pane onto another pane's edge to
+  move it there, onto its middle to swap the two, or onto a window edge
+  for a full-height column or full-width row. The drop target is
+  highlighted as you drag. Panes in the row or column a pane lands in (or
+  leaves) are evened out; every other ratio is kept. `Esc` or `Enter`
+  finishes.
 - Dividers are host-drawn and draggable, and keep their ratios when panes
   split or close. The host highlights the dividers around the focused
   pane, solid or slowly pulsing (`pane_focus_highlight` in

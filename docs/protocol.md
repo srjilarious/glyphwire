@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.13.0 — pre-1.0 draft.**
+**Version 0.14.0 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -1529,6 +1529,7 @@ gets `NotWindowManager`.
 | `replace_pane_split_child` | notification | `split`, `index`, `child` | — |
 | `get_pane_split` | request | `split` | `{axis, resizable, children}` |
 | `set_root_pane_split` | notification | `split?` | — |
+| `set_overlay_pane` | notification | `pane?` | — |
 | `move_pane_divider` | notification | `split`, `index`, `delta` | — |
 | `spawn_in_pane` | request | `pane`, `argv`, `cols?`, `rows?`, `cwd?`, `cwd_from?` | `{pid}` |
 | `set_window_prefix` | notification | `key?`, `ctrl?` = true, `alt?` = false, `shift?` = false | — |
@@ -1553,6 +1554,17 @@ on screen there. A pane handle is a small counter and naming one is no
 proof of having been started in it, so it is the window manager's; a
 program is bound to its pane by attaching to its context
 (`GLYPHWIRE_CTX`), which lives in exactly one.
+
+`set_overlay_pane` raises a pane over the whole window, outside the tree,
+or with `pane: null` lowers it. The raised pane **MUST** be mapped at the
+full window rect as soon as the message is processed, so a `focus_pane`
+behind it succeeds. While raised it is composited above every other pane
+and every divider, every pointer event resolves to it, and its context
+draws no background of its own. Lowering it unmaps it and moves focus off
+it as for any unmapped pane; destroying it lowers it. The root pane reports
+`RootPaneImmutable`. A manager raises one and focuses it to take the
+keyboard and mouse for a mode of its own while input is still routed by
+the session.
 
 `spawn_in_pane` forks a program with the discovery variables set for that
 pane, `GLYPHWIRE_TOKEN` among them (section 2.1). `argv` **MUST** be non-empty; the first element is resolved through

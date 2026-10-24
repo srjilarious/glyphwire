@@ -277,9 +277,18 @@ pub const Panes = struct {
     /// they can mean to drag. zoe's tree divider runs the full height of
     /// its split, so without this a click into the column of the panel it
     /// crosses resized the sidebar instead of reaching the shell.
+    ///
+    /// While the manager has an overlay raised (`Session.overlay_pane`)
+    /// every band but the overlay's own is under it, so none of them is a
+    /// hit: a drag in gmux's layout mode is the overlay's, not a resize.
     pub fn dividerAt(self: *const Panes, px: f32, py: f32) ?Band {
+        const overlay = self.overlayContext();
         for (self.bands.items) |d| {
             if (!geometry.cellRectPx(d.rect).contains(px, py)) continue;
+            if (overlay) |o| switch (d.level) {
+                .layer => |h| if (h != o) continue,
+                else => continue,
+            };
             switch (d.level) {
                 // Pane bands separate whole programs and sit outside every
                 // context's own area, so nothing can be over them.
@@ -289,6 +298,18 @@ pub const Panes = struct {
             }
         }
         return null;
+    }
+
+    /// The context on screen in the raised overlay pane, if one is up.
+    /// Takes `ctx_mutex` itself.
+    fn overlayContext(self: *const Panes) ?glyphwire.ContextHandle {
+        const server = self.app.server;
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
+        const h = server.session.overlay_pane orelse return null;
+        const pane = server.session.panePtr(h) orelse return null;
+        if (!pane.mapped) return null;
+        return pane.top();
     }
 
     /// A floating layer's `resize_edge` under `(px, py)`, with the

@@ -465,6 +465,7 @@ pub const Client = struct {
     // -- Panes --
     pub const setWindowPrefix = ops.setWindowPrefix;
     pub const sendWindowPrefix = ops.sendWindowPrefix;
+    pub const setOverlayPane = ops.setOverlayPane;
     pub const destroyPane = ops.destroyPane;
     pub const focusPane = ops.focusPane;
     pub const destroyPaneSplit = ops.destroyPaneSplit;
@@ -2025,6 +2026,7 @@ pub const Client = struct {
         // -- Panes --
         pub const setWindowPrefix = batch_ops.setWindowPrefix;
         pub const sendWindowPrefix = batch_ops.sendWindowPrefix;
+        pub const setOverlayPane = batch_ops.setOverlayPane;
         pub const destroyPane = batch_ops.destroyPane;
         pub const focusPane = batch_ops.focusPane;
         pub const destroyPaneSplit = batch_ops.destroyPaneSplit;
@@ -3403,6 +3405,18 @@ pub const InputListener = struct {
     /// reader thread is running (nothing else writes this connection).
     pub fn attachContext(self: *InputListener, context: core.ContextHandle, token: *const core.AccessToken) !void {
         const body = try codec.notification(self.format, self.alloc, "attach_context", protocol.AttachContextParams{ .context = context, .token = token }, .{});
+        defer self.alloc.free(body);
+        try self.writeBody(body);
+    }
+
+    /// Sends `attach_pane(pane)` on this listener's own connection: the
+    /// window-manager counterpart of `attachContext`, for a manager that
+    /// draws on a pane of its own (`Client.setOverlayPane`) and wants the
+    /// raw input streams it subscribed to while that pane has focus. A
+    /// notification for the reason `joinWindowManager` is; send that first,
+    /// since binding a pane needs the role.
+    pub fn attachPane(self: *InputListener, pane: core.PaneHandle) !void {
+        const body = try codec.notification(self.format, self.alloc, "attach_pane", protocol.AttachPaneParams{ .pane = pane }, .{});
         defer self.alloc.free(body);
         try self.writeBody(body);
     }

@@ -192,6 +192,37 @@ pub fn SplitTree(comptime Id: type, comptime Axis: type, comptime Handle: type) 
             return leaf;
         }
 
+        /// Puts the whole tree on one side of a new root split along
+        /// `axis`, leaf `new_id` on `side` of it, under the host split
+        /// `handle` the caller has already created: a full-height column or
+        /// full-width row at a window edge. Returns the new root, whose
+        /// children the caller sends before installing it. Unlike `split`
+        /// this one does move a node -- the old root becomes a child -- but
+        /// only the root, which no parent points at.
+        pub fn wrapRoot(self: *Self, new_id: Id, axis: Axis, handle: Handle, side: Side) Error!*Node {
+            const leaf = try self.alloc.create(Node);
+            errdefer self.alloc.destroy(leaf);
+            const root = try self.alloc.create(Node);
+            const old = self.root;
+            const kids: [2]*Node = if (side == .after) .{ old, leaf } else .{ leaf, old };
+            leaf.* = .{ .parent = root, .kind = .{ .leaf = new_id } };
+            old.parent = root;
+            root.* = .{ .kind = .{ .split = .{ .axis = axis, .handle = handle, .first = kids[0], .second = kids[1] } } };
+            self.root = root;
+            return root;
+        }
+
+        /// Trades two leaves' ids, the shape untouched: each pane moves
+        /// into the other's slot. Returns both leaf nodes, now holding
+        /// their new ids, for the caller to re-send.
+        pub fn swapLeaves(self: *Self, a: Id, b: Id) Error![2]*Node {
+            const na = self.find(a) orelse return error.UnknownLeaf;
+            const nb = self.find(b) orelse return error.UnknownLeaf;
+            na.kind = .{ .leaf = b };
+            nb.kind = .{ .leaf = a };
+            return .{ na, nb };
+        }
+
         /// Takes leaf `id` out of the tree, its sibling growing into the
         /// space. The tree is untouched on an error.
         pub fn remove(self: *Self, id: Id) Error!Removed {

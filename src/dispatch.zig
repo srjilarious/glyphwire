@@ -1157,6 +1157,7 @@ pub const Dispatcher = struct {
         .{ "replace_pane_split_child", needsManager(catResult(handleReplacePaneSplitChild)) },
         .{ "get_pane_split", needsManager(catBytesId(handleGetPaneSplit)) },
         .{ "set_root_pane_split", needsManager(catResult(handleSetRootPaneSplit)) },
+        .{ "set_overlay_pane", needsManager(catResult(handleSetOverlayPane)) },
         .{ "move_pane_divider", needsManager(catResult(handleMovePaneDivider)) },
         .{ "spawn_in_pane", needsManager(catBytesId(handleSpawnInPane)) },
         .{ "start_remote", needsContext(catBytesId(handleStartRemote)) },
@@ -2357,6 +2358,20 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.SetRootPaneSplitParams, alloc, params_value);
         defer parsed.deinit();
         session.setRootPaneSplit(parsed.value.split) catch return DispatchError.UnknownPaneSplit;
+        return .{ .panes_changed = true };
+    }
+
+    /// `set_overlay_pane`: raises a pane over the whole window, or lowers
+    /// it. A pane-layout change like any other, so the manager hears the
+    /// overlay's rect in `pane_layout` and its program a `resize`.
+    fn handleSetOverlayPane(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
+        const session = try self.requireManager();
+        const parsed = try codec.parseParams(protocol.SetOverlayPaneParams, alloc, params_value);
+        defer parsed.deinit();
+        session.setOverlayPane(parsed.value.pane) catch |err| return switch (err) {
+            error.RootPaneImmutable => DispatchError.RootPaneImmutable,
+            else => DispatchError.UnknownPane,
+        };
         return .{ .panes_changed = true };
     }
 

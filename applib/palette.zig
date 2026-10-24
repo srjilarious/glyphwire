@@ -179,10 +179,29 @@ pub const List = struct {
     /// matched alongside the label. A command-line-only entry passes
     /// null for `chord`.
     pub fn addWithCommand(self: *List, id: u32, name: []const u8, label: ?[]const u8, chord: ?keybind.Chord, command: []const u8) !void {
-        var label_buf: [max_label_len]u8 = undefined;
         var chord_buf: [64]u8 = undefined;
-        const shown = label orelse labelFromName(&label_buf, name);
         const chord_text = if (chord) |c| c.format(&chord_buf) else "";
+        return self.addShown(id, name, label, chord_text, command);
+    }
+
+    /// `add`, for a program whose chords only mean something after a
+    /// prefix chord (gmux's Ctrl+B): `chord` is shown behind `prefix`
+    /// the way the keys are pressed, `Ctrl+B P`. An unbound action shows
+    /// no keys at all rather than the bare prefix.
+    pub fn addAfterPrefix(self: *List, id: u32, name: []const u8, label: ?[]const u8, prefix: keybind.Chord, chord: ?keybind.Chord) !void {
+        var prefix_buf: [64]u8 = undefined;
+        var chord_buf: [64]u8 = undefined;
+        var both_buf: [130]u8 = undefined;
+        const chord_text = if (chord) |c|
+            std.fmt.bufPrint(&both_buf, "{s} {s}", .{ prefix.format(&prefix_buf), c.format(&chord_buf) }) catch ""
+        else
+            "";
+        return self.addShown(id, name, label, chord_text, "");
+    }
+
+    fn addShown(self: *List, id: u32, name: []const u8, label: ?[]const u8, chord_text: []const u8, command: []const u8) !void {
+        var label_buf: [max_label_len]u8 = undefined;
+        const shown = label orelse labelFromName(&label_buf, name);
 
         const owned_name = try self.alloc.dupe(u8, name);
         errdefer self.alloc.free(owned_name);

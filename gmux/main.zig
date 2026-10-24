@@ -32,14 +32,24 @@ pub fn main(init: std.process.Init) !void {
     // See `applib.interrupt`.
     interrupt.keep();
 
-    // Deliberately *not* subscribed to `key` / `text`: gmux never wants a
-    // program's keystrokes, and could not receive them anyway (it is never
-    // in the focused pane). `window_keys` is the prefix-command stream the
-    // session addresses to us; `panes` carries pane rects and exits.
+    // `window_keys` is the prefix-command stream the session addresses to
+    // us; `panes` carries pane rects and exits. The raw input streams are
+    // gmux's own overlay's (the palette, layout mode): the listener binds
+    // to that pane before anything can focus it (`Ui.init`), and the
+    // session gates raw input on focus, so a program's keystrokes still
+    // never arrive here. `resize` and `theme` follow the overlay too.
     var conn = cli.connectOrFail(io, alloc, init.environ_map, "gmux", &.{
         "window_keys",
         "panes",
         "shutdown",
+        "key",
+        "text",
+        "paste",
+        "mouse_button",
+        "mouse_move",
+        "scroll",
+        "resize",
+        "theme",
     });
     defer conn.deinit();
 
