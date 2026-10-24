@@ -104,6 +104,7 @@ const buffer_mod = @import("buffer.zig");
 const shellpanel = @import("applib").shellpanel;
 
 const Editor = editor.Editor;
+const Document = @import("document.zig").Document;
 pub const Tree = tree_mod.Tree;
 const Finder = finder_mod.Finder;
 const lineedit = @import("applib").lineedit;
@@ -682,17 +683,21 @@ const EdSnapshot = struct {
     }
 };
 
-/// One open buffer: its editor, plus everything about *how it is being
-/// looked at* -- the scroll position, the between-frame bookkeeping the
-/// buffer pane's incremental redraw keeps, and its own syntax tree.
+/// One tab: a view of a `Document` (`zoe/document.zig`) -- its own
+/// editor over the document's buffer, plus everything about *how it is
+/// being looked at*: the scroll position, the between-frame bookkeeping
+/// the buffer pane's incremental redraw keeps, the wrapped row counts.
 ///
-/// All of it is per buffer, deliberately: switching tabs is then a
+/// All of it is kept per tab, deliberately: switching tabs is then a
 /// pointer swap and a repaint, never a re-read or a reparse, which is
 /// what makes it feel instant on a big file. The cost is that every open
-/// buffer holds its text and its tree-sitter tree for as long as it is
-/// open -- see decisions.md's "zoe multiple buffers".
+/// document holds its text and its tree-sitter tree for as long as a tab
+/// shows it.
 pub const Slot = struct {
     ed: Editor,
+    /// What this tab shows. Shared with every other tab on the same file;
+    /// `deinit` lets go of it, and the last one frees it.
+    doc: *Document,
 
     /// First buffer line and display column shown in the buffer pane --
     /// zoe's own scroll position, since that pane isn't host-scrolled.
@@ -735,18 +740,8 @@ pub const Slot = struct {
     /// only when one of them changes -- see `syncBufferScrollbar`.
     pushed_bar: [4]usize = .{ std.math.maxInt(usize), 0, 0, 0 },
 
-    /// This buffer's own tree-sitter state -- null when highlighting is
-    /// off entirely, or when no grammar matched its extension. Per slot
-    /// so a tab switch doesn't throw a parse tree away.
-    hl: ?syntax.Highlighter = null,
-    /// The `Buffer.edits` value `hl`'s tree reflects; a mismatch in
-    /// `renderBuffer` triggers a reparse.
-    hl_edits: u64 = 0,
-    /// `hl`'s spans for the lines painted so far, kept in step with the
-    /// buffer by `syncHighlight` and filled per frame by `fillSpanCache`.
-    spans: SpanCache = .{},
     /// Screen rows per line while `ed.wrap` is on, for the scrollbar
-    /// (`syncRowCounts`). Follows the edit journal alongside `spans`.
+    /// (`syncRowCounts`). Per view: it depends on this pane's width.
     rows: RowCounts = .{},
     /// How many of `Buffer.pending_edits` `rows` has already followed:
     /// the journal is only cleared once per frame, after the
@@ -754,71 +749,14 @@ pub const Slot = struct {
     /// before then (a wheel event between frames).
     rows_applied: usize = 0,
 
-    /// The `Buffer.edits` value the language servers have been told about.
-    /// A mismatch arms the `didChange` debounce -- deliberately a separate
-    /// watermark from `hl_edits` rather than a second consumer of
-    /// `Buffer.pending_edits`, which the highlighter drains alone.
-    lsp_sent_edits: u64 = 0,
-    /// The LSP document version to send next. Monotonic per buffer, as the
-    /// protocol requires; a server uses it to discard a stale reply.
-    lsp_version: i64 = 1,
-    /// Whether `didOpen` has been sent for this buffer. A scratch buffer
-    /// with no path never is, and neither is one whose extension no
-    /// configured server claims.
-    lsp_opened: bool = false,
-    /// `ed.path` resolved to an absolute path, owned, filled on first use
-    /// (`Ui.slotAbs`). The diagnostic store is keyed by absolute path, and
-    /// the sign column asks it a question per visible row per frame --
-    /// resolving the cwd that many times a frame is the kind of cost that
-    /// only shows up as the editor feeling slightly heavy. Invalidated by
-    /// whatever changes `ed.path`.
-    abs_path: ?[]u8 = null,
-
-    /// The file's size and mtime as of zoe's last read or write of it --
-    /// what `Ui.checkDisk` compares against to notice a change made
-    /// outside zoe. Null for a scratch buffer, or a `[New]` one until its
-    /// first `:w`. `disk_warned` is the changed stamp already reported
-    /// for a modified buffer, so it is reported once, not every poll.
-    disk: ?diskwatch.Stamp = null,
-    disk_warned: ?diskwatch.Stamp = null,
-    /// The file was on disk and the last check found it gone
-    /// (`diskwatch.gone`): its tab carries `tabs.gone_mark`. Cleared when
-    /// it comes back or a `:w` writes it again.
-    gone: bool = false,
-
-    /// The name, in the backup directory, of this buffer's backup
-    /// (`zoe/backup.zig`), owned. Null when it has none on disk. A slot
-    /// freed with one keeps the file: that is what brings unsaved edits
-    /// back after `:q`.
-    backup_name: ?[]u8 = null,
-    /// `ed.buf.edits` when the backup was last written. A mismatch on a
-    /// modified buffer is a backup that has fallen behind.
-    backup_edits: u64 = 0,
-    /// An untitled buffer's id in its backup's name, random, so the
-    /// backup keeps one name across writes and sessions.
-    backup_id: ?u64 = null,
-    /// A backup that doesn't match the file on disk any more, waiting on
-    /// recover / discard / split (`Ui.recoverKey`), owned. While set the
-    /// slot's backup is left untouched.
-    pending_backup: ?[]u8 = null,
-    /// Another running zoe has this file open with unsaved edits: its
-    /// backup is that zoe's, and this one never writes or deletes it.
-    backup_foreign: bool = false,
-    /// `zoe --wait` clients that opened this buffer from the shell panel
-    /// (`zoe/remote.zig`): each connection is closed when the tab is,
-    /// which is what lets them exit. Owned.
-    waiters: std.ArrayList(i32) = .empty,
-
+    /// Lets go of the document, freeing it with its last tab. The caller
+    /// has already done what a document's last close needs
+    /// (`Ui.closeBuffer`: `didClose`, the backup).
     pub fn deinit(self: *Slot, alloc: std.mem.Allocator) void {
-        for (self.waiters.items) |fd| remote.close(fd);
-        self.waiters.deinit(alloc);
-        if (self.hl) |*h| h.deinit();
-        self.spans.deinit(alloc);
         self.rows.deinit(alloc);
-        if (self.abs_path) |p| alloc.free(p);
-        if (self.backup_name) |n| alloc.free(n);
-        if (self.pending_backup) |t| alloc.free(t);
         self.ed.deinit();
+        self.doc.refs -= 1;
+        if (self.doc.refs == 0) self.doc.destroy(alloc);
         alloc.destroy(self);
     }
 };
@@ -1828,9 +1766,11 @@ pub const Ui = struct {
             if (filetype.looksBinary(t)) return error.NotTextFile;
         }
 
-        slot.* = .{ .ed = try Editor.initFromText(self.alloc, text orelse "", path) };
+        const doc = try Document.create(self.alloc, text orelse "");
+        errdefer doc.destroy(self.alloc);
+        slot.* = .{ .ed = try Editor.initView(self.alloc, &doc.buf, path), .doc = doc };
         errdefer slot.ed.deinit();
-        if (text != null) slot.disk = self.diskStamp(path.?);
+        if (text != null) doc.disk = self.diskStamp(path.?);
         slot.ed.keymaps = &self.keymaps;
         slot.ed.cmd_history = &self.cmd_history;
         slot.ed.search_history = &self.search_history;
@@ -1867,11 +1807,11 @@ pub const Ui = struct {
             slot.ed.fold_column = cfg.fold_column;
 
             if (syntax.Highlighter.init(self.alloc, syntax.Theme.fromTheme(&self.th.theme))) |h| {
-                slot.hl = h;
+                slot.doc.hl = h;
                 // The highlighter resolves injected grammars through the
                 // shared registry; `injections` is the `zoe.conf.lua` switch.
                 const reg: ?*syntax.Registry = if (self.grammars) |*g| g else null;
-                slot.hl.?.configureInjections(reg, cfg.injections);
+                slot.doc.hl.?.configureInjections(reg, cfg.injections);
                 self.selectHighlightLanguage(slot, path);
             } else |_| {}
         }
@@ -1905,7 +1845,7 @@ pub const Ui = struct {
     /// Points a slot's highlighter at the grammar for `path` (by
     /// extension), or clears it. Cheap and idempotent.
     pub fn selectHighlightLanguage(self: *Ui, slot: *Slot, path: ?[]const u8) void {
-        const h = if (slot.hl) |*x| x else return;
+        const h = if (slot.doc.hl) |*x| x else return;
         const reg = if (self.grammars) |*x| x else return;
 
         h.clearLanguage();
@@ -1916,7 +1856,7 @@ pub const Ui = struct {
 
         // Nudge `hl_edits` off the buffer's value so the next
         // `renderBuffer` parses.
-        slot.hl_edits = slot.ed.buf.edits -% 1;
+        slot.doc.hl_edits = slot.ed.buf.edits -% 1;
     }
 
     /// Tears down what `init` built on the server, not just this
@@ -3492,7 +3432,7 @@ pub const Ui = struct {
                 // under the pointer, a triple its line, both on the press.
                 switch (ev.clicks) {
                     2 => {
-                        const w = motion.wordAt(&self.buf.ed.buf, byte);
+                        const w = motion.wordAt(self.buf.ed.buf, byte);
                         self.drag = .{ .anchor = byte, .moved = true, .unit = .word, .word = .{ .start = w.start, .end = w.end } };
                         self.buf.ed.setVisualSelection(w.start, self.lastByteOf(w.start, w.end));
                     },
@@ -3558,7 +3498,7 @@ pub const Ui = struct {
             if (!d.moved) {
                 if (byte == d.anchor) return;
                 d.moved = true;
-            } else if (motion.clampNormal(&self.buf.ed.buf, byte) == self.buf.ed.cursor) {
+            } else if (motion.clampNormal(self.buf.ed.buf, byte) == self.buf.ed.cursor) {
                 // A new cell, but the same selection end -- past the end
                 // of a line, or across the columns of one tab. Nothing to
                 // redraw.
@@ -3571,7 +3511,7 @@ pub const Ui = struct {
                 // double-click landed on stays the anchor, and the moving
                 // end snaps to the edge of the word under the pointer.
                 .word => {
-                    const w = motion.wordAt(&self.buf.ed.buf, byte);
+                    const w = motion.wordAt(self.buf.ed.buf, byte);
                     if (byte < d.word.start) {
                         self.buf.ed.setVisualSelection(self.lastByteOf(d.word.start, d.word.end), w.start);
                     } else {
@@ -3648,7 +3588,7 @@ pub const Ui = struct {
     /// empty one.
     pub fn lastByteOf(self: *const Ui, start: usize, end: usize) usize {
         if (end <= start) return start;
-        return motion.prevCodepoint(&self.buf.ed.buf, end);
+        return motion.prevCodepoint(self.buf.ed.buf, end);
     }
 
     /// What is under a root-grid cell of `g`'s strip, or null when the
@@ -4932,7 +4872,7 @@ pub const Ui = struct {
                 self.setFocus(.buffer);
                 remote.send(p.fd, "ok\n");
                 if (req.wait) {
-                    self.buf.waiters.append(self.alloc, p.fd) catch remote.close(p.fd);
+                    self.buf.doc.waiters.append(self.alloc, p.fd) catch remote.close(p.fd);
                 } else {
                     remote.close(p.fd);
                 }
@@ -4976,13 +4916,13 @@ pub const Ui = struct {
         // `loadText` re-owns the path, freeing the string `path` points
         // at, so everything below reads it back off the editor.
         try self.buf.ed.loadText(bytes, path);
-        self.buf.disk = self.diskStamp(self.buf.ed.path.?);
-        self.buf.disk_warned = null;
-        self.buf.gone = false;
+        self.buf.doc.disk = self.diskStamp(self.buf.ed.path.?);
+        self.buf.doc.disk_warned = null;
+        self.buf.doc.gone = false;
         self.selectHighlightLanguage(self.buf, self.buf.ed.path);
         // Wholly different contents: the servers' copy is stale in a way the
         // edit watermark can't express, so force the next flush to send.
-        self.buf.lsp_sent_edits = self.buf.ed.buf.edits -% 1;
+        self.buf.doc.lsp_sent_edits = self.buf.ed.buf.edits -% 1;
         self.buf.top_line = 0;
         self.buf.top_sub = 0;
         self.buf.left_col = 0;
@@ -5069,16 +5009,16 @@ pub const Ui = struct {
             for (g.buffers.items) |slot| {
                 const path = slot.ed.path orelse continue;
                 const current = self.diskStamp(path);
-                const gone = diskwatch.gone(slot.disk, current);
-                if (gone != slot.gone) {
-                    slot.gone = gone;
+                const gone = diskwatch.gone(slot.doc.disk, current);
+                if (gone != slot.doc.gone) {
+                    slot.doc.gone = gone;
                     g.tabs_dirty = true;
                 }
-                switch (diskwatch.decide(slot.disk, slot.disk_warned, current, slot.ed.buf.dirty)) {
+                switch (diskwatch.decide(slot.doc.disk, slot.doc.disk_warned, current, slot.ed.buf.dirty)) {
                     .none => {},
                     .reload => self.reloadFromDisk(g, slot, current.?),
                     .warn => {
-                        slot.disk_warned = current;
+                        slot.doc.disk_warned = current;
                         // On whichever buffer is showing: the status
                         // line is the active buffer's, and this is news
                         // the user needs before their next `:w`
@@ -5121,8 +5061,8 @@ pub const Ui = struct {
     /// skipped; `stamp` is recorded either way so it isn't retried every
     /// second.
     pub fn reloadFromDisk(self: *Ui, g: *Group, slot: *Slot, stamp: diskwatch.Stamp) void {
-        slot.disk = stamp;
-        slot.disk_warned = null;
+        slot.doc.disk = stamp;
+        slot.doc.disk_warned = null;
         const path = slot.ed.path orelse return;
         const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, path, self.alloc, .limited(max_file_bytes)) catch return;
         defer self.alloc.free(bytes);
@@ -5144,11 +5084,11 @@ pub const Ui = struct {
         // Same as `reloadCurrent`: the servers' copy is stale in a way the
         // edit watermark can't express. A background buffer's goes out
         // when it is next made active, like any of its edits would.
-        slot.lsp_sent_edits = slot.ed.buf.edits -% 1;
+        slot.doc.lsp_sent_edits = slot.ed.buf.edits -% 1;
 
         const last_line = slot.ed.buf.lineCount() - 1;
         const line = @min(pos.line, last_line);
-        slot.ed.moveCursorTo(motion.atColumn(&slot.ed.buf, line, pos.col, false));
+        slot.ed.moveCursorTo(motion.atColumn(slot.ed.buf, line, pos.col, false));
         if (was_insert) slot.ed.mode = .insert;
         slot.top_line = @min(slot.top_line, last_line);
         slot.full_redraw = true;
@@ -5209,7 +5149,7 @@ pub const Ui = struct {
         self.buf.full_redraw = true;
         self.buf.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
         // A tab still waiting on its backup asks again when shown.
-        if (self.buf.pending_backup != null) askRecover(self.buf);
+        if (self.buf.doc.pending_backup != null) askRecover(self.buf);
         self.grp.buffer_dirty = true;
         self.grp.tabs_dirty = true;
         self.status_dirty = true;
@@ -5369,17 +5309,17 @@ pub const Ui = struct {
             // path and whatever the servers were told about the old name
             // both stop being true.
             self.invalidateAbs(self.buf);
-            self.buf.lsp_opened = false;
+            self.buf.doc.lsp_opened = false;
         }
         self.buf.ed.markSaved();
         // On disk for real now: the backup has nothing left to keep.
         self.dropBackup(self.buf);
         // Our own write moves the mtime too; this is the version on disk
         // now, not an outside change to react to.
-        self.buf.disk = self.diskStamp(self.buf.ed.path orelse dest);
-        self.buf.disk_warned = null;
+        self.buf.doc.disk = self.diskStamp(self.buf.ed.path orelse dest);
+        self.buf.doc.disk_warned = null;
         // A deleted file just came back.
-        self.buf.gone = false;
+        self.buf.doc.gone = false;
         self.lspDidSave();
         // The tab loses its `+` (and any deleted mark), and a `:w <name>`
         // also renamed it.
@@ -5667,7 +5607,7 @@ pub const Ui = struct {
             g.buffer_dirty = true;
             g.tabs_dirty = true;
             for (g.buffers.items) |slot| {
-                if (slot.hl) |*h| h.setTheme(syn);
+                if (slot.doc.hl) |*h| h.setTheme(syn);
                 slot.full_redraw = true;
             }
         }

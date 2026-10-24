@@ -240,15 +240,15 @@ pub fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     // when it can, whole-buffer otherwise -- and reports whether the
     // repaint can be confined to `hl_dirty_lines`.
     var localized = false;
-    if (self.buf.hl) |*h| {
-        if (h.languageSet() and self.buf.ed.buf.edits != self.buf.hl_edits) {
+    if (self.buf.doc.hl) |*h| {
+        if (h.languageSet() and self.buf.ed.buf.edits != self.buf.doc.hl_edits) {
             const t_parse = self.prof.now();
             defer self.prof.add(.parse, t_parse);
             localized = self.syncHighlight(h) catch blk: {
                 self.buf.full_redraw = true;
                 break :blk false;
             };
-            self.buf.hl_edits = self.buf.ed.buf.edits;
+            self.buf.doc.hl_edits = self.buf.ed.buf.edits;
         }
     }
     // The journal's last reader this frame, highlighter or not:
@@ -426,7 +426,7 @@ pub fn repaintSelectionChange(
 ) !void {
     var ranges: [2]selection_diff.ByteRange = undefined;
     const n = selection_diff.changedRanges(old, new, &ranges);
-    const buf = &self.buf.ed.buf;
+    const buf = self.buf.ed.buf;
     for (ranges[0..n]) |range| {
         // A byte either side: whether a line's highlight runs to the
         // pane edge depends on the span reaching its newline, which
@@ -462,7 +462,7 @@ pub fn repaintCaretRows(self: *Ui, batch: *glyphwire.client.Client.Batch, cursor
 /// line count changed, the injection layout shifted, or the change
 /// is simply too broad to localise.
 pub fn syncHighlight(self: *Ui, h: *syntax.Highlighter) !bool {
-    const buf = &self.buf.ed.buf;
+    const buf = self.buf.ed.buf;
     self.hl_dirty_lines.clearRetainingCapacity();
 
     // A whole-buffer parse: the first one, or one an edit journal can't
@@ -486,8 +486,8 @@ pub fn syncHighlight(self: *Ui, h: *syntax.Highlighter) !bool {
     for (buf.pending_edits.items) |e| {
         h.applyEdit(e.toSyntax());
         // The cached lines follow the edit the same way the tree does.
-        self.buf.spans.applyEdit(self.alloc, e.start_point.line, e.old_end_point.line, e.new_end_point.line) catch
-            self.buf.spans.reset(self.alloc);
+        self.buf.doc.spans.applyEdit(self.alloc, e.start_point.line, e.old_end_point.line, e.new_end_point.line) catch
+            self.buf.doc.spans.reset(self.alloc);
         if (e.start_point.line != e.old_end_point.line or
             e.start_point.line != e.new_end_point.line) line_count_stable = false;
     }
@@ -506,7 +506,7 @@ pub fn syncHighlight(self: *Ui, h: *syntax.Highlighter) !bool {
     for (self.hl_changed.items) |cr| {
         const lo = buf.lineAt(cr.start);
         const hi = buf.lineAt(if (cr.end > cr.start) cr.end - 1 else cr.start);
-        self.buf.spans.invalidate(self.alloc, lo, hi);
+        self.buf.doc.spans.invalidate(self.alloc, lo, hi);
     }
     if (!localized or !line_count_stable) {
         self.buf.full_redraw = true;
@@ -540,7 +540,7 @@ pub fn syncHighlight(self: *Ui, h: *syntax.Highlighter) !bool {
 /// stays coloured and a construct the cut splits (an unterminated
 /// block comment) mis-colours rows nobody is looking at.
 pub fn parsePrefixEnd(self: *const Ui) usize {
-    const buf = &self.buf.ed.buf;
+    const buf = self.buf.ed.buf;
     const last = self.buf.top_line + 2 * @as(usize, self.grp.buffer_bounds.rows);
     return buf.lineEnd(@min(last, buf.lineCount() -| 1));
 }
@@ -553,7 +553,7 @@ pub fn parseBudget(self: *const Ui, ms: i64) syntax.ParseBudget {
 pub fn highlightPending(self: *const Ui) bool {
     for (self.group_list.items) |g| {
         for (g.buffers.items) |slot| {
-            if (slot.hl) |*h| if (h.parsing()) return true;
+            if (slot.doc.hl) |*h| if (h.parsing()) return true;
         }
     }
     return false;
@@ -567,7 +567,7 @@ pub fn highlightPending(self: *const Ui) bool {
 pub fn stepHighlight(self: *Ui) void {
     for (self.group_list.items) |g| {
         for (g.buffers.items) |slot| {
-            const h = if (slot.hl) |*x| x else continue;
+            const h = if (slot.doc.hl) |*x| x else continue;
             if (!h.parsing()) continue;
             const progress = h.continueParse(self.parseBudget(parse_slice_ms)) catch .done;
             if (progress == .done and slot == g.slot()) {
@@ -688,7 +688,7 @@ pub fn renderGutterCell(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usi
         if (fold.isClosed(self.buf.ed.buf.closed_folds.items, line)) {
             marker = fold_closed_marker;
             marker_fg = role(.fg);
-        } else if (fold.isFoldStart(&self.buf.ed.buf, line, self.buf.ed.tab_width)) {
+        } else if (fold.isFoldStart(self.buf.ed.buf, line, self.buf.ed.tab_width)) {
             marker = fold_open_marker;
         }
     }
@@ -777,7 +777,7 @@ pub fn renderBufferRow(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usiz
     // failure (or with no grammar) the same painter runs with no
     // spans at all, which is exactly a plain row in `fg_text`.
     var painted = false;
-    if (self.buf.hl) |*h| {
+    if (self.buf.doc.hl) |*h| {
         if (h.ready() and self.renderRowSpans(batch, r, rv, text)) painted = true;
     }
     if (!painted) try self.rowSpansImpl(batch, r, rv, text, &.{});
@@ -1118,7 +1118,7 @@ pub fn paintMatchRow(
     const line_end = self.buf.ed.buf.lineEnd(line);
 
     var at = ls;
-    while (search.firstIn(&self.buf.ed.buf, pat, opts, at, line_end)) |hit| {
+    while (search.firstIn(self.buf.ed.buf, pat, opts, at, line_end)) |hit| {
         at = hit + 1;
         if (scope) |s| {
             if (hit < s.lo or hit + pat.len > s.hi) continue;
@@ -1250,11 +1250,11 @@ pub fn renderRowSpans(
     text: []const u8,
 ) bool {
     const line = rv.line;
-    const spans = self.buf.spans.get(line) orelse blk: {
+    const spans = self.buf.doc.spans.get(line) orelse blk: {
         // `fillSpanCache` covers every visible line, so this is only
         // a row it couldn't fill (an allocation failure): query it on
         // its own rather than paint it plain.
-        const h = &self.buf.hl.?;
+        const h = &self.buf.doc.hl.?;
         const t_spans = self.prof.now();
         h.lineSpans(self.buf.ed.buf.lineStart(line), self.buf.ed.buf.lineEnd(line), &self.hl_scratch) catch return false;
         self.prof.add(.spans, t_spans);
@@ -1276,10 +1276,10 @@ pub const span_run_gap: usize = 8;
 /// misses one line; a scroll back over rows seen before, a caret move
 /// or a selection repaint misses none.
 pub fn fillSpanCache(self: *Ui) void {
-    const h = if (self.buf.hl) |*x| x else return;
+    const h = if (self.buf.doc.hl) |*x| x else return;
     if (!h.ready()) return;
-    const buf = &self.buf.ed.buf;
-    self.buf.spans.sync(self.alloc, h.generation, buf.lineCount()) catch return;
+    const buf = self.buf.ed.buf;
+    self.buf.doc.spans.sync(self.alloc, h.generation, buf.lineCount()) catch return;
 
     // One past the last line on screen -- fewer than the pane's rows
     // when lines wrap.
@@ -1288,14 +1288,14 @@ pub fn fillSpanCache(self: *Ui) void {
     const end = @min(last_shown + 1, buf.lineCount());
     var line = self.buf.top_line;
     while (line < end) {
-        if (self.buf.spans.get(line) != null) {
+        if (self.buf.doc.spans.get(line) != null) {
             line += 1;
             continue;
         }
         var last_missing = line;
         var next = line + 1;
         while (next < end and next - last_missing <= span_run_gap) : (next += 1) {
-            if (self.buf.spans.get(next) == null) last_missing = next;
+            if (self.buf.doc.spans.get(next) == null) last_missing = next;
         }
         self.fillSpanRun(h, line, last_missing + 1) catch return;
         line = last_missing + 1;
@@ -1307,12 +1307,12 @@ pub fn fillSpanCache(self: *Ui) void {
 pub fn fillSpanRun(self: *Ui, h: *syntax.Highlighter, lo: usize, hi: usize) !void {
     const t_spans = self.prof.now();
     defer self.prof.add(.spans, t_spans);
-    const buf = &self.buf.ed.buf;
+    const buf = self.buf.ed.buf;
     self.hl_lines.clearRetainingCapacity();
     for (lo..hi) |l| try self.hl_lines.append(self.alloc, .{ .start = buf.lineStart(l), .end = buf.lineEnd(l) });
     try h.linesSpans(self.hl_lines.items, &self.hl_scratch, &self.hl_bounds);
     const bounds = self.hl_bounds.items;
-    for (lo..hi, 0..) |l, i| try self.buf.spans.put(self.alloc, l, self.hl_scratch.items[bounds[i]..bounds[i + 1]]);
+    for (lo..hi, 0..) |l, i| try self.buf.doc.spans.put(self.alloc, l, self.hl_scratch.items[bounds[i]..bounds[i + 1]]);
     self.prof.span_lines += @intCast(hi - lo);
 }
 
@@ -1474,7 +1474,7 @@ pub fn layoutRows(self: *Ui) !void {
     try layoutRowMap(
         self.alloc,
         &self.row_map,
-        BufLines{ .buf = &self.buf.ed.buf },
+        BufLines{ .buf = self.buf.ed.buf },
         self.buf.top_line,
         self.buf.top_sub,
         self.buf.left_col,
@@ -1786,7 +1786,7 @@ pub fn placeOfRow(self: *Ui, row: usize) RowPos {
 /// lines. Only meaningful with `wrap` on.
 pub fn syncRowCounts(self: *Ui) bool {
     const slot = self.buf;
-    const buf = &slot.ed.buf;
+    const buf = slot.ed.buf;
     if (buf.edits_overflowed) {
         slot.rows.reset();
     } else {
@@ -2060,7 +2060,7 @@ pub fn renderTabs(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         try labels.append(self.alloc, .{
             .label = tabs.labelFor(slot.ed.path),
             .dirty = slot.ed.buf.dirty,
-            .gone = slot.gone,
+            .gone = slot.doc.gone,
         });
     }
 

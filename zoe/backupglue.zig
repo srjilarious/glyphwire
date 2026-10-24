@@ -79,13 +79,13 @@ fn nameFor(self: *Ui, slot: *Slot, buf: *[backup.name_len]u8) ?[]const u8 {
         const abs = self.slotAbs(slot) orelse return null;
         return backup.fileName(buf, abs);
     }
-    if (slot.backup_id == null) slot.backup_id = newId(self, slot);
+    if (slot.doc.backup_id == null) slot.doc.backup_id = newId(self, slot);
     var scope_buf: [scope_max]u8 = undefined;
-    return backup.untitledName(buf, scopeOf(self, &scope_buf), slot.backup_id.?);
+    return backup.untitledName(buf, scopeOf(self, &scope_buf), slot.doc.backup_id.?);
 }
 
 fn skipped(slot: *const Slot) bool {
-    return slot.pending_backup != null or slot.backup_foreign;
+    return slot.doc.pending_backup != null or slot.doc.backup_foreign;
 }
 
 /// Writes `slot`'s backup now. A buffer whose name moved since the last
@@ -103,31 +103,31 @@ pub fn writeBackup(self: *Ui, slot: *Slot) bool {
     const untitled = slot.ed.path == null;
     const bytes = backup.serialize(self.alloc, .{
         .pid = selfPid(),
-        .disk = slot.disk,
+        .disk = slot.doc.disk,
         .path = if (untitled) null else self.slotAbs(slot),
         .scope = if (untitled) scopeOf(self, &scope_buf) else null,
     }, text) catch return false;
     defer self.alloc.free(bytes);
     backup.writeFile(self.io, dir, name, bytes) catch return false;
 
-    if (slot.backup_name) |old| {
+    if (slot.doc.backup_name) |old| {
         if (!std.mem.eql(u8, old, name)) backup.deleteFile(self.alloc, self.io, dir, old);
         self.alloc.free(old);
-        slot.backup_name = null;
+        slot.doc.backup_name = null;
     }
-    slot.backup_name = self.alloc.dupe(u8, name) catch null;
-    slot.backup_edits = slot.ed.buf.edits;
+    slot.doc.backup_name = self.alloc.dupe(u8, name) catch null;
+    slot.doc.backup_edits = slot.ed.buf.edits;
     return true;
 }
 
 /// Deletes `slot`'s backup: its edits were written (`:w`) or thrown
 /// away (`:q!`, a forced close). One still waiting on the user stays.
 pub fn dropBackup(self: *Ui, slot: *Slot) void {
-    if (slot.pending_backup != null) return;
-    const name = slot.backup_name orelse return;
+    if (slot.doc.pending_backup != null) return;
+    const name = slot.doc.backup_name orelse return;
     if (self.backup_dir) |dir| backup.deleteFile(self.alloc, self.io, dir, name);
     self.alloc.free(name);
-    slot.backup_name = null;
+    slot.doc.backup_name = null;
 }
 
 /// Whether `slot`'s backup is out of step with it: a modified buffer
@@ -135,8 +135,8 @@ pub fn dropBackup(self: *Ui, slot: *Slot) void {
 /// buffer with a backup still on disk.
 fn behind(slot: *const Slot) bool {
     if (skipped(slot)) return false;
-    if (slot.ed.buf.dirty) return slot.backup_name == null or slot.backup_edits != slot.ed.buf.edits;
-    return slot.backup_name != null;
+    if (slot.ed.buf.dirty) return slot.doc.backup_name == null or slot.doc.backup_edits != slot.ed.buf.edits;
+    return slot.doc.backup_name != null;
 }
 
 /// Brings every slot's backup in line with its buffer. False when a
@@ -156,7 +156,7 @@ pub fn syncBackups(self: *Ui) bool {
             if (!behind(slot)) {
                 var name_buf: [backup.name_len]u8 = undefined;
                 const name = nameFor(self, slot, &name_buf) orelse continue;
-                if (std.mem.eql(u8, name, slot.backup_name.?)) continue;
+                if (std.mem.eql(u8, name, slot.doc.backup_name.?)) continue;
             }
             if (!writeBackup(self, slot)) ok = false;
         }
@@ -191,7 +191,7 @@ pub fn hotExitReady(self: *Ui) bool {
     if (self.backup_dir == null) return !self.refuseQuitForDirtyBuffer();
     for (self.group_list.items) |g| {
         for (g.buffers.items) |slot| {
-            if (!slot.backup_foreign or !slot.ed.buf.dirty) continue;
+            if (!slot.doc.backup_foreign or !slot.ed.buf.dirty) continue;
             self.buf.ed.setStatus(
                 "E162: No write since last change for buffer \"{s}\" (another zoe has its backup)",
                 .{slot.ed.path orelse "[No Name]"},
@@ -234,23 +234,23 @@ pub fn restoreBackup(self: *Ui, slot: *Slot) void {
 
     const shown = slot.ed.path.?;
     if (backup.ownerAlive(self.io, parsed.header.pid, selfPid())) {
-        slot.backup_foreign = true;
+        slot.doc.backup_foreign = true;
         slot.ed.setStatus("\"{s}\": another zoe (pid {d}) has unsaved changes to it", .{ shown, parsed.header.pid });
         return;
     }
-    slot.backup_name = self.alloc.dupe(u8, name) catch return;
-    switch (backup.decide(parsed.header.disk, slot.disk)) {
+    slot.doc.backup_name = self.alloc.dupe(u8, name) catch return;
+    switch (backup.decide(parsed.header.disk, slot.doc.disk)) {
         .restore => {
             slot.ed.replaceAllText(parsed.text) catch return;
             // Rewritten at the next sync, so the file names this zoe as
             // its owner rather than the one that wrote it.
-            slot.backup_edits = slot.ed.buf.edits -% 1;
+            slot.doc.backup_edits = slot.ed.buf.edits -% 1;
             if (slot.ed.buf.dirty) {
                 slot.ed.setStatus("\"{s}\" {d}L, unsaved changes restored (u undoes)", .{ shown, slot.ed.buf.lineCount() });
             }
         },
         .ask => {
-            slot.pending_backup = self.alloc.dupe(u8, parsed.text) catch return;
+            slot.doc.pending_backup = self.alloc.dupe(u8, parsed.text) catch return;
             askRecover(slot);
         },
     }
@@ -267,7 +267,7 @@ pub fn askRecover(slot: *Slot) void {
 /// Whether keys go to `recoverKey`: the focused buffer is waiting on
 /// what to do with its backup.
 pub fn recoverPending(self: *const Ui) bool {
-    return self.focus == .buffer and self.buf.pending_backup != null;
+    return self.focus == .buffer and self.buf.doc.pending_backup != null;
 }
 
 /// The answer to `askRecover`. `r` puts the backup's text in the buffer
@@ -284,31 +284,31 @@ pub fn recoverKey(self: *Ui, k: glyphwire.KeyEvent) !void {
     const answer: u8 = if (k.ctrl() or k.alt() or k.key.len != 1) 0 else k.key[0];
     switch (answer) {
         'r' => {
-            const text = slot.pending_backup.?;
+            const text = slot.doc.pending_backup.?;
             defer self.alloc.free(text);
-            slot.pending_backup = null;
+            slot.doc.pending_backup = null;
             slot.ed.replaceAllText(text) catch {};
-            slot.backup_edits = slot.ed.buf.edits -% 1;
+            slot.doc.backup_edits = slot.ed.buf.edits -% 1;
             slot.ed.setStatus("\"{s}\" unsaved changes recovered (u undoes)", .{slot.ed.path orelse "[No Name]"});
         },
         'd' => {
-            self.alloc.free(slot.pending_backup.?);
-            slot.pending_backup = null;
+            self.alloc.free(slot.doc.pending_backup.?);
+            slot.doc.pending_backup = null;
             dropBackup(self, slot);
             slot.ed.setStatus("backup discarded", .{});
         },
         's' => {
             const fresh = try self.newSlot(null);
             errdefer fresh.deinit(self.alloc);
-            try fresh.ed.replaceAllText(slot.pending_backup.?);
+            try fresh.ed.replaceAllText(slot.doc.pending_backup.?);
             // Down on disk under its own name before the file's goes.
             if (!writeBackup(self, fresh)) {
                 fresh.deinit(self.alloc);
                 slot.ed.setStatus("E: can't write unsaved-change backups to {s}", .{self.backup_dir orelse ""});
                 return;
             }
-            self.alloc.free(slot.pending_backup.?);
-            slot.pending_backup = null;
+            self.alloc.free(slot.doc.pending_backup.?);
+            slot.doc.pending_backup = null;
             dropBackup(self, slot);
 
             const g = try self.insertGroup(self.grp, .vertical, .after);
@@ -328,7 +328,7 @@ pub fn recoverKey(self: *Ui, k: glyphwire.KeyEvent) !void {
 fn slotWithBackup(self: *const Ui, name: []const u8) ?*Slot {
     for (self.group_list.items) |g| {
         for (g.buffers.items) |slot| {
-            const n = slot.backup_name orelse continue;
+            const n = slot.doc.backup_name orelse continue;
             if (std.mem.eql(u8, n, name)) return slot;
         }
     }
@@ -349,11 +349,11 @@ fn openUntitled(self: *Ui, name: []const u8) !bool {
     const slot = try self.newSlot(null);
     errdefer slot.deinit(self.alloc);
     try slot.ed.replaceAllText(parsed.text);
-    slot.backup_id = id;
-    slot.backup_name = try self.alloc.dupe(u8, name);
+    slot.doc.backup_id = id;
+    slot.doc.backup_name = try self.alloc.dupe(u8, name);
     // Rewritten at the next sync: under this zoe's pid, and under this
     // session's scope when `:recover` brought it in from another.
-    slot.backup_edits = slot.ed.buf.edits -% 1;
+    slot.doc.backup_edits = slot.ed.buf.edits -% 1;
 
     const g = self.grp;
     if (g.buffers.items.len == 1 and Ui.isPristineScratch(g.buffers.items[0])) {

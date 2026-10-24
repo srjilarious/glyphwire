@@ -65,7 +65,7 @@ pub fn lspGrammarFor(self: *Ui, path: ?[]const u8) ?[]const u8 {
 /// both simply not announced.
 pub fn lspDidOpen(self: *Ui, slot: *Slot) void {
     const pool = if (self.lsp_pool) |*p| p else return;
-    if (slot.lsp_opened) return;
+    if (slot.doc.lsp_opened) return;
     const path = slot.ed.path orelse return;
     const grammar = self.lspGrammarFor(path) orelse return;
 
@@ -82,8 +82,8 @@ pub fn lspDidOpen(self: *Ui, slot: *Slot) void {
         any = true;
     }
     if (!any) return;
-    slot.lsp_opened = true;
-    slot.lsp_sent_edits = slot.ed.buf.edits;
+    slot.doc.lsp_opened = true;
+    slot.doc.lsp_sent_edits = slot.ed.buf.edits;
 }
 
 /// The counterpart, on `:bd`. The stored diagnostics go too: a closed
@@ -91,7 +91,7 @@ pub fn lspDidOpen(self: *Ui, slot: *Slot) void {
 /// the slot.
 pub fn lspDidClose(self: *Ui, slot: *Slot) void {
     const pool = if (self.lsp_pool) |*p| p else return;
-    if (!slot.lsp_opened) return;
+    if (!slot.doc.lsp_opened) return;
     const path = slot.ed.path orelse return;
     const grammar = self.lspGrammarFor(path) orelse return;
 
@@ -102,7 +102,7 @@ pub fn lspDidClose(self: *Ui, slot: *Slot) void {
     var it = pool.forLanguage(grammar);
     while (it.next()) |s| s.didClose(uri) catch {};
     self.diags.clearPath(abs);
-    slot.lsp_opened = false;
+    slot.doc.lsp_opened = false;
 }
 
 /// `:w` -- some servers only report on save (and `ruff`'s formatting
@@ -111,7 +111,7 @@ pub fn lspDidSave(self: *Ui) void {
     const pool = if (self.lsp_pool) |*p| p else return;
     // A `:w <newname>` makes this a file the servers have never seen;
     // announce it rather than saving under a name they don't know.
-    if (!self.buf.lsp_opened) {
+    if (!self.buf.doc.lsp_opened) {
         self.lspDidOpen(self.buf);
         return;
     }
@@ -133,8 +133,8 @@ pub fn lspDidSave(self: *Ui) void {
 /// often this is called.
 pub fn armLspChange(self: *Ui) void {
     if (self.lsp_pool == null) return;
-    if (!self.buf.lsp_opened) return;
-    if (self.buf.ed.buf.edits == self.buf.lsp_sent_edits) return;
+    if (!self.buf.doc.lsp_opened) return;
+    if (self.buf.ed.buf.edits == self.buf.doc.lsp_sent_edits) return;
     if (self.timers.armed(.lsp_change)) return;
     self.timers.armIn(self.io, .lsp_change, lsp_change_debounce_ms);
 }
@@ -146,8 +146,8 @@ pub fn armLspChange(self: *Ui) void {
 pub fn lspFlushChange(self: *Ui) void {
     self.timers.disarm(.lsp_change);
     const pool = if (self.lsp_pool) |*p| p else return;
-    if (!self.buf.lsp_opened) return;
-    if (self.buf.ed.buf.edits == self.buf.lsp_sent_edits) return;
+    if (!self.buf.doc.lsp_opened) return;
+    if (self.buf.ed.buf.edits == self.buf.doc.lsp_sent_edits) return;
 
     const path = self.buf.ed.path orelse return;
     const grammar = self.lspGrammarFor(path) orelse return;
@@ -157,10 +157,10 @@ pub fn lspFlushChange(self: *Ui) void {
     const text = self.buf.ed.buf.text(self.alloc) catch return;
     defer self.alloc.free(text);
 
-    self.buf.lsp_version += 1;
+    self.buf.doc.lsp_version += 1;
     var it = pool.forLanguage(grammar);
-    while (it.next()) |s| s.didChange(uri, self.buf.lsp_version, text) catch {};
-    self.buf.lsp_sent_edits = self.buf.ed.buf.edits;
+    while (it.next()) |s| s.didChange(uri, self.buf.doc.lsp_version, text) catch {};
+    self.buf.doc.lsp_sent_edits = self.buf.ed.buf.edits;
 }
 
 /// The earliest of the `didChange` debounce, the completion and tab
@@ -179,25 +179,25 @@ pub fn lspRequestDeadline(self: *Ui) ?std.Io.Clock.Timestamp {
 }
 
 /// `slot`'s absolute path, resolved once and cached on the slot (see
-/// `Slot.abs_path`). Borrowed -- the slot owns it. Null for a buffer with
+/// `Document.abs_path`). Borrowed -- the slot owns it. Null for a buffer with
 /// no file behind it, which is also "nothing a language server can say
 /// anything about".
 pub fn slotAbs(self: *Ui, slot: *Slot) ?[]const u8 {
-    if (slot.abs_path) |p| return p;
+    if (slot.doc.abs_path) |p| return p;
     const path = slot.ed.path orelse return null;
     // Every LSP URI is absolute, and a buffer path is whatever was typed,
     // so this is also what makes `./src/main.zig` and its absolute
     // spelling the same file.
     const abs = homepath.absolute(self.io, self.alloc, path) catch return null;
-    slot.abs_path = abs;
+    slot.doc.abs_path = abs;
     return abs;
 }
 
 /// Drops the cached absolute path, for whatever just changed `ed.path`
 /// (`:w <newname>`, `:e`).
 pub fn invalidateAbs(self: *Ui, slot: *Slot) void {
-    if (slot.abs_path) |p| self.alloc.free(p);
-    slot.abs_path = null;
+    if (slot.doc.abs_path) |p| self.alloc.free(p);
+    slot.doc.abs_path = null;
 }
 
 /// Drains everything the servers have said since the last turn round the
@@ -422,7 +422,7 @@ pub fn highlightHoverBlocks(self: *Ui, doc: *hover_mod.Doc) ![]const []const syn
     if (doc.blocks.len == 0) return out;
 
     const reg = if (self.grammars) |*g| g else return out;
-    const fallback: ?[]const u8 = if (self.buf.hl) |*bh| bh.lang_name else null;
+    const fallback: ?[]const u8 = if (self.buf.doc.hl) |*bh| bh.lang_name else null;
     if (self.hover_hl == null) {
         self.hover_hl = syntax.Highlighter.init(self.alloc, syntax.Theme.fromTheme(&self.th.theme)) catch return out;
         // No injections: a hover's code block is a signature, and a
@@ -554,7 +554,7 @@ pub fn restartLsp(self: *Ui) void {
     self.diags.deinit();
     self.diags = diag.Store.init(self.alloc);
     for (self.group_list.items) |g| {
-        for (g.buffers.items) |slot| slot.lsp_opened = false;
+        for (g.buffers.items) |slot| slot.doc.lsp_opened = false;
     }
 
     // The sidebar's folders as they stand now -- `:addfolder` and a

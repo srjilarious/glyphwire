@@ -363,12 +363,12 @@ pub fn ctrlBackspaceDeletesAWordPartTest(_: std.Io, alloc: std.mem.Allocator) !v
     defer ed.deinit();
     _ = try keys.feed(&ed, "A");
     _ = try ed.feedKey("backspace", .{ .ctrl = true });
-    try expectText(alloc, &ed.buf, "let fooBar");
+    try expectText(alloc, ed.buf, "let fooBar");
     _ = try ed.feedKey("backspace", .{ .ctrl = true });
-    try expectText(alloc, &ed.buf, "let foo");
+    try expectText(alloc, ed.buf, "let foo");
     // The whole-word action is still there for `keys` to bind.
     _ = try ed.runAction(.deleteWordBack);
-    try expectText(alloc, &ed.buf, "let ");
+    try expectText(alloc, ed.buf, "let ");
 }
 
 pub fn ctrlDeleteDeletesAWordPartTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -376,7 +376,7 @@ pub fn ctrlDeleteDeletesAWordPartTest(_: std.Io, alloc: std.mem.Allocator) !void
     defer ed.deinit();
     _ = try keys.feed(&ed, "i");
     _ = try ed.feedKey("delete", .{ .ctrl = true });
-    try expectText(alloc, &ed.buf, "bar");
+    try expectText(alloc, ed.buf, "bar");
 }
 
 pub fn ctrlArrowsMoveByWordPartAltByWordTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -559,7 +559,7 @@ pub fn editorInsertModeAcceptsMultibyteTextTest(_: std.Io, alloc: std.mem.Alloca
     _ = try keys.feed(&ed, "i");
     _ = try ed.feedText("\u{65e5}\u{672c}"); // committed IME text
     _ = try keys.feed(&ed, "<esc>");
-    try expectText(alloc, &ed.buf, "\u{65e5}\u{672c}");
+    try expectText(alloc, ed.buf, "\u{65e5}\u{672c}");
 }
 
 // ─── Editor: motions and counts ─────────────────────────────────────────
@@ -761,7 +761,7 @@ pub fn editorEscapeCancelsAPendingOperatorTest(_: std.Io, alloc: std.mem.Allocat
     var ed = try Editor.initFromText(alloc, "foo bar", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "d<esc>w");
-    try expectText(alloc, &ed.buf, "foo bar");
+    try expectText(alloc, ed.buf, "foo bar");
     try testz.expectEqual(ed.cursor, 4);
 }
 
@@ -803,7 +803,7 @@ pub fn visualDeleteRemovesSelectionAndYanksTest(_: std.Io, alloc: std.mem.Alloca
         .set_clipboard => |got| try testz.expectEqualStr(got, "hel"),
         else => try testz.fail(),
     }
-    try expectText(alloc, &ed.buf, "lo world");
+    try expectText(alloc, ed.buf, "lo world");
     try testz.expectEqual(ed.mode, .normal);
 }
 
@@ -812,7 +812,7 @@ pub fn visualChangeEntersInsertModeTest(_: std.Io, alloc: std.mem.Allocator) !vo
     defer ed.deinit();
     _ = try keys.feed(&ed, "vlc");
     try testz.expectEqual(ed.mode, .insert);
-    try expectText(alloc, &ed.buf, "llo");
+    try expectText(alloc, ed.buf, "llo");
 }
 
 pub fn visualModeSwitchesCharwiseToLinewiseTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -853,7 +853,7 @@ pub fn visualPasteReturnsAPasteOutcomeTest(_: std.Io, alloc: std.mem.Allocator) 
         .paste => |p| try testz.expectTrue(!p.after),
         else => try testz.fail(),
     }
-    try expectText(alloc, &ed.buf, "lo");
+    try expectText(alloc, ed.buf, "lo");
     try testz.expectEqual(ed.mode, .normal);
 }
 
@@ -874,7 +874,7 @@ pub fn normalYankLeavesBufferUnchangedTest(_: std.Io, alloc: std.mem.Allocator) 
     var ed = try Editor.initFromText(alloc, "one\ntwo", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "jyy");
-    try expectText(alloc, &ed.buf, "one\ntwo");
+    try expectText(alloc, ed.buf, "one\ntwo");
 }
 
 pub fn normalPasteAndPutTextCharwiseTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -886,7 +886,7 @@ pub fn normalPasteAndPutTextCharwiseTest(_: std.Io, alloc: std.mem.Allocator) !v
     }
     // The host would call `putText` with whatever the clipboard held.
     try ed.putText("XY", true);
-    try expectText(alloc, &ed.buf, "aXYbc");
+    try expectText(alloc, ed.buf, "aXYbc");
     try testz.expectEqual(ed.cursor, 2);
 }
 
@@ -894,14 +894,14 @@ pub fn putTextLinewisePastesWholeLinesBelowTest(_: std.Io, alloc: std.mem.Alloca
     var ed = try Editor.initFromText(alloc, "one\ntwo", null);
     defer ed.deinit();
     try ed.putText("new\n", true); // `p` on line 1
-    try expectText(alloc, &ed.buf, "one\nnew\ntwo");
+    try expectText(alloc, ed.buf, "one\nnew\ntwo");
 }
 
 pub fn putTextLinewiseAboveTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "one\ntwo", null);
     defer ed.deinit();
     try ed.putText("new\n", false); // `P` on line 1
-    try expectText(alloc, &ed.buf, "new\none\ntwo");
+    try expectText(alloc, ed.buf, "new\none\ntwo");
 }
 
 pub fn putTextLinewiseOnLastLineAddsTheSeparatorTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -909,7 +909,7 @@ pub fn putTextLinewiseOnLastLineAddsTheSeparatorTest(_: std.Io, alloc: std.mem.A
     defer ed.deinit();
     _ = try keys.feed(&ed, "j"); // on "two", the last line, no trailing \n
     try ed.putText("new\n", true);
-    try expectText(alloc, &ed.buf, "one\ntwo\nnew\n");
+    try expectText(alloc, ed.buf, "one\ntwo\nnew\n");
 }
 
 pub fn selectionSpanCharwiseIsInclusiveTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -940,7 +940,7 @@ pub fn clipboardCopyWithNoSelectionTakesTheLineTest(_: std.Io, alloc: std.mem.Al
         .set_clipboard => |got| try testz.expectEqualStr(got, "two\n"),
         else => try testz.fail(),
     }
-    try expectText(alloc, &ed.buf, "one\ntwo"); // copy never mutates
+    try expectText(alloc, ed.buf, "one\ntwo"); // copy never mutates
 }
 
 pub fn clipboardCutWithNoSelectionRemovesTheLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -951,7 +951,7 @@ pub fn clipboardCutWithNoSelectionRemovesTheLineTest(_: std.Io, alloc: std.mem.A
         .set_clipboard => |got| try testz.expectEqualStr(got, "two\n"),
         else => try testz.fail(),
     }
-    try expectText(alloc, &ed.buf, "one\nthree");
+    try expectText(alloc, ed.buf, "one\nthree");
 }
 
 pub fn clipboardCopyUsesTheVisualSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -980,7 +980,7 @@ pub fn dropSelectionRemovesSelectedTextWithoutClipboardTest(_: std.Io, alloc: st
     defer ed.deinit();
     _ = try keys.feed(&ed, "vll");
     try ed.dropSelection();
-    try expectText(alloc, &ed.buf, "lo");
+    try expectText(alloc, ed.buf, "lo");
     try testz.expectEqual(ed.mode, .normal);
 }
 
@@ -1454,11 +1454,11 @@ pub fn insertTabExpandsToTheNextStopTest(_: std.Io, alloc: std.mem.Allocator) !v
 
     // Column 0: the full width.
     _ = try keys.feed(&ed, "i<tab>x");
-    try expectText(alloc, &ed.buf, "    x");
+    try expectText(alloc, ed.buf, "    x");
 
     // Column 5 now, so the next stop is 3 cells away, not 4.
     _ = try keys.feed(&ed, "<tab>y");
-    try expectText(alloc, &ed.buf, "    x   y");
+    try expectText(alloc, ed.buf, "    x   y");
 }
 
 pub fn insertTabHonoursTabWidthAndExpandTabTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -1466,11 +1466,11 @@ pub fn insertTabHonoursTabWidthAndExpandTabTest(_: std.Io, alloc: std.mem.Alloca
     defer ed.deinit();
 
     _ = try keys.feed(&ed, ":set tabwidth=2<cr>i<tab>x");
-    try expectText(alloc, &ed.buf, "  x");
+    try expectText(alloc, ed.buf, "  x");
 
     // `expandtab=off` puts the byte itself in, whatever the width is.
     _ = try keys.feed(&ed, "<esc>:set expandtab=off<cr>A<tab>z");
-    try expectText(alloc, &ed.buf, "  x\tz");
+    try expectText(alloc, ed.buf, "  x\tz");
 }
 
 pub fn insertTabStepsOverAnExistingTabTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -1483,7 +1483,7 @@ pub fn insertTabStepsOverAnExistingTabTest(_: std.Io, alloc: std.mem.Allocator) 
     // 4 and 5, so the Tab is typed at column 6 and inserts the two
     // spaces that reach the stop at 8 -- not four.
     _ = try keys.feed(&ed, "A<tab>z");
-    try expectText(alloc, &ed.buf, "\tab  z");
+    try expectText(alloc, ed.buf, "\tab  z");
 }
 
 pub fn commandLineEscapeAbandonsTheLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -1556,7 +1556,7 @@ pub fn editorLoadTextReplacesTheBufferTest(_: std.Io, alloc: std.mem.Allocator) 
     _ = try keys.feed(&ed, "jll");
 
     try ed.loadText("brand new", "b.txt");
-    try expectText(alloc, &ed.buf, "brand new");
+    try expectText(alloc, ed.buf, "brand new");
     try testz.expectEqualStr(ed.path.?, "b.txt");
     // A fresh file starts at the top, unmodified, in normal mode.
     try testz.expectEqual(ed.cursor, 0);
@@ -3690,14 +3690,14 @@ pub fn replaceAllTextIsOneUndoBackToCleanTest(_: std.Io, alloc: std.mem.Allocato
     var ed = try Editor.initFromText(alloc, "alpha\nbeta\ngamma\n", null);
     defer ed.deinit();
     try ed.replaceAllText("alpha\nBETA two\ngamma\n");
-    try expectText(alloc, &ed.buf, "alpha\nBETA two\ngamma\n");
+    try expectText(alloc, ed.buf, "alpha\nBETA two\ngamma\n");
     try testz.expectTrue(ed.buf.dirty);
     // The cursor goes to where the text first differs.
     try testz.expectEqual(ed.pos().line, 1);
 
     // One `u` is the file as it was, and clean again.
     _ = try keys.feed(&ed, "u");
-    try expectText(alloc, &ed.buf, "alpha\nbeta\ngamma\n");
+    try expectText(alloc, ed.buf, "alpha\nbeta\ngamma\n");
     try testz.expectFalse(ed.buf.dirty);
 
     // The same text is no change at all.
@@ -4158,16 +4158,16 @@ pub fn undoTreatsAChangeAndItsTypingAsOneStepTest(_: std.Io, alloc: std.mem.Allo
     // ends the first script -- see `keys.feed`.
     _ = try keys.feed(&ed, "sX");
     _ = try keys.feed(&ed, "<esc>u");
-    try expectText(alloc, &ed.buf, "abc");
+    try expectText(alloc, ed.buf, "abc");
 }
 
 pub fn redoReappliesAnUndoneChangeTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "abc", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "xu");
-    try expectText(alloc, &ed.buf, "abc");
+    try expectText(alloc, ed.buf, "abc");
     _ = try keys.feed(&ed, "<c-r>");
-    try expectText(alloc, &ed.buf, "bc");
+    try expectText(alloc, ed.buf, "bc");
 }
 
 pub fn anEditAfterUndoDiscardsTheRedoStackTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -4178,7 +4178,7 @@ pub fn anEditAfterUndoDiscardsTheRedoStackTest(_: std.Io, alloc: std.mem.Allocat
     // to re-apply, so the `dd` stands.
     _ = try keys.feed(&ed, "dd");
     _ = try keys.feed(&ed, "<c-r>");
-    try expectText(alloc, &ed.buf, "");
+    try expectText(alloc, ed.buf, "");
     try testz.expectFalse(ed.buf.canRedo());
 }
 
@@ -4204,7 +4204,7 @@ pub fn undoBackToAnEmptyUnsavedBufferIsCleanTest(_: std.Io, alloc: std.mem.Alloc
     _ = try keys.feed(&ed, "ihello<esc>");
     try testz.expectTrue(ed.buf.dirty);
     _ = try keys.feed(&ed, "u");
-    try expectText(alloc, &ed.buf, "");
+    try expectText(alloc, ed.buf, "");
     try testz.expectFalse(ed.buf.dirty);
 }
 
@@ -4216,7 +4216,7 @@ pub fn undoAndRedoBackToTheSavePointIsCleanTest(_: std.Io, alloc: std.mem.Alloca
     _ = try keys.feed(&ed, "x");
     try testz.expectTrue(ed.buf.dirty);
     _ = try keys.feed(&ed, "u");
-    try expectText(alloc, &ed.buf, "bcd");
+    try expectText(alloc, ed.buf, "bcd");
     try testz.expectFalse(ed.buf.dirty);
     // Past the save point the text differs from the file again.
     _ = try keys.feed(&ed, "u");
@@ -4236,7 +4236,7 @@ pub fn anEditAfterUndoingPastTheSavePointLosesItTest(_: std.Io, alloc: std.mem.A
     _ = try keys.feed(&ed, "$x");
     try testz.expectTrue(ed.buf.dirty);
     _ = try keys.feed(&ed, "u");
-    try expectText(alloc, &ed.buf, "abcd");
+    try expectText(alloc, ed.buf, "abcd");
     try testz.expectTrue(ed.buf.dirty);
     _ = try keys.feed(&ed, "<c-r>");
     try testz.expectTrue(ed.buf.dirty);
@@ -4250,10 +4250,10 @@ pub fn aSaveMidInsertSplitsTheUndoStepTest(_: std.Io, alloc: std.mem.Allocator) 
     _ = try keys.feed(&ed, "XY<esc>");
     try testz.expectTrue(ed.buf.dirty);
     _ = try keys.feed(&ed, "u");
-    try expectText(alloc, &ed.buf, "helloabc");
+    try expectText(alloc, ed.buf, "helloabc");
     try testz.expectFalse(ed.buf.dirty);
     _ = try keys.feed(&ed, "u");
-    try expectText(alloc, &ed.buf, "abc");
+    try expectText(alloc, ed.buf, "abc");
     try testz.expectTrue(ed.buf.dirty);
 }
 
@@ -4318,9 +4318,9 @@ pub fn undoOfAPasteIsOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
     // The host's half of `p`: the editor asked for the clipboard and the
     // text came back.
     try ed.putText("XY", true);
-    try expectText(alloc, &ed.buf, "aXYbc");
+    try expectText(alloc, ed.buf, "aXYbc");
     _ = try keys.feed(&ed, "u");
-    try expectText(alloc, &ed.buf, "abc");
+    try expectText(alloc, ed.buf, "abc");
 }
 
 pub fn undoOfAVisualReplaceIsOneStepTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -4330,9 +4330,9 @@ pub fn undoOfAVisualReplaceIsOneStepTest(_: std.Io, alloc: std.mem.Allocator) !v
     // clipboard into the gap. One `u` has to put "abc" back.
     _ = try keys.feed(&ed, "vllp");
     try ed.putText("Z", false);
-    try expectText(alloc, &ed.buf, "Zdef");
+    try expectText(alloc, ed.buf, "Zdef");
     _ = try keys.feed(&ed, "u");
-    try expectText(alloc, &ed.buf, "abcdef");
+    try expectText(alloc, ed.buf, "abcdef");
 }
 
 // ─── r / J / ~ / >> ─────────────────────────────────────────────────────
@@ -4379,7 +4379,7 @@ pub fn toggleCaseFlipsAndStepsRightTest(_: std.Io, alloc: std.mem.Allocator) !vo
     var ed = try Editor.initFromText(alloc, "abc", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "~");
-    try expectText(alloc, &ed.buf, "Abc");
+    try expectText(alloc, ed.buf, "Abc");
     try testz.expectEqual(ed.cursor, 1);
 
     try expectEdit(alloc, "aBc", "3~", "AbC");
@@ -4475,7 +4475,7 @@ pub fn gvReselectsTheLastVisualRangeTest(_: std.Io, alloc: std.mem.Allocator) !v
 
     // And it is a real selection, so an operator acts on it.
     _ = try keys.feed(&ed, "d");
-    try expectText(alloc, &ed.buf, "def");
+    try expectText(alloc, ed.buf, "def");
 }
 
 pub fn gvRemembersLinewiseSelectionsTooTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -4532,7 +4532,7 @@ pub fn altMoveKeepsTheCursorOnItsCharacterTest(_: std.Io, alloc: std.mem.Allocat
     var ed = try Editor.initFromText(alloc, "abc\nxy", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "ll<a-down>");
-    try expectText(alloc, &ed.buf, "xy\nabc");
+    try expectText(alloc, ed.buf, "xy\nabc");
     try testz.expectEqual(ed.cursor, 5);
     try testz.expectEqual(ed.buf.byteAt(ed.cursor), 'c');
 }
@@ -4557,7 +4557,7 @@ pub fn altMoveCarriesTheSelectedBlockTest(_: std.Io, alloc: std.mem.Allocator) !
     var ed = try Editor.initFromText(alloc, "a\nb\nc\nd", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "Vj<a-down><a-down>");
-    try expectText(alloc, &ed.buf, "c\nd\na\nb");
+    try expectText(alloc, ed.buf, "c\nd\na\nb");
     try testz.expectEqual(ed.mode, .visual_line);
     const span = ed.selectionSpan().?;
     try testz.expectEqual(ed.buf.lineAt(span.lo), 2);
@@ -4592,13 +4592,13 @@ pub fn shiftAltCopyLeavesTheCursorOnTheCopyTest(_: std.Io, alloc: std.mem.Alloca
     var ed = try Editor.initFromText(alloc, "abc\nxy", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "l<s-a-down>");
-    try expectText(alloc, &ed.buf, "abc\nabc\nxy");
+    try expectText(alloc, ed.buf, "abc\nabc\nxy");
     try testz.expectEqual(ed.buf.lineAt(ed.cursor), 1);
     try testz.expectEqual(ed.cursor - ed.buf.lineStart(1), 1);
     // Up: the copy takes the original's place, so the cursor stays put
     // and a second press copies again above it.
     _ = try keys.feed(&ed, "<s-a-up><s-a-up>");
-    try expectText(alloc, &ed.buf, "abc\nabc\nabc\nabc\nxy");
+    try expectText(alloc, ed.buf, "abc\nabc\nabc\nabc\nxy");
     try testz.expectEqual(ed.buf.lineAt(ed.cursor), 1);
 }
 
@@ -4695,7 +4695,7 @@ pub fn selectModePasteReplacesTheSelectionTest(_: std.Io, alloc: std.mem.Allocat
     defer ed.deinit();
     _ = try keys.feed(&ed, "i<s-c-right>");
     try ed.putText("bye ", true);
-    try expectText(alloc, &ed.buf, "bye world");
+    try expectText(alloc, ed.buf, "bye world");
     try testz.expectEqual(ed.mode, .insert);
     try testz.expectEqual(ed.cursor, 4);
 }
@@ -4729,16 +4729,16 @@ pub fn ctrlZInInsertModeStaysInInsertTest(_: std.Io, alloc: std.mem.Allocator) !
     var ed = try Editor.initFromText(alloc, "ab", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "Axyz<c-z>");
-    try expectText(alloc, &ed.buf, "ab");
+    try expectText(alloc, ed.buf, "ab");
     try testz.expectEqual(ed.mode, .insert);
     // The caret goes where the undone step started, the same as `u`.
     try testz.expectEqual(ed.cursor, 0);
     _ = try keys.feed(&ed, "Q<esc>");
-    try expectText(alloc, &ed.buf, "Qab");
+    try expectText(alloc, ed.buf, "Qab");
 
     // Redo puts it back, still in insert mode.
     _ = try keys.feed(&ed, "A<c-z><c-y>");
-    try expectText(alloc, &ed.buf, "Qab");
+    try expectText(alloc, ed.buf, "Qab");
     try testz.expectEqual(ed.mode, .insert);
 }
 
@@ -4746,7 +4746,7 @@ pub fn ctrlZDropsASelectionFirstTest(_: std.Io, alloc: std.mem.Allocator) !void 
     var ed = try Editor.initFromText(alloc, "a\nb", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "Ax<esc>V<c-z>");
-    try expectText(alloc, &ed.buf, "a\nb");
+    try expectText(alloc, ed.buf, "a\nb");
     try testz.expectEqual(ed.mode, .normal);
 }
 
@@ -4758,7 +4758,7 @@ fn expectCommentEdit(alloc: std.mem.Allocator, marker: ?[]const u8, text: []cons
     defer ed.deinit();
     ed.line_comment = marker;
     _ = try keys.feed(&ed, script);
-    try expectText(alloc, &ed.buf, expected);
+    try expectText(alloc, ed.buf, expected);
 }
 
 pub fn ctrlSlashCommentsTheCursorLineTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -4798,7 +4798,7 @@ pub fn ctrlSlashWithoutAMarkerSaysSoTest(_: std.Io, alloc: std.mem.Allocator) !v
     var ed = try Editor.initFromText(alloc, "a", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "<c-slash>");
-    try expectText(alloc, &ed.buf, "a");
+    try expectText(alloc, ed.buf, "a");
     try testz.expectTrue(std.mem.indexOf(u8, ed.status.items, "No line comment") != null);
 }
 
@@ -5005,7 +5005,7 @@ pub fn keysConfigRebindsAndUnbindsTest(_: std.Io, alloc: std.mem.Allocator) !voi
     defer ed.deinit();
     ed.keymaps = &km;
     _ = try keys.feed(&ed, "i<c-d><esc>");
-    try expectText(alloc, &ed.buf, "bar");
+    try expectText(alloc, ed.buf, "bar");
 }
 
 pub fn languagesConfigTakesACommentMarkerTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -5609,14 +5609,14 @@ pub fn completeAcceptIsOneUndoWithTheTypingTest(_: std.Io, alloc: std.mem.Alloca
     _ = try ed.feedText("ap");
     // Accepting replaces the word typed so far.
     try ed.replaceBeforeCursor(4, "append(item)");
-    try expectText(alloc, &ed.buf, "x = append(item)\n");
+    try expectText(alloc, ed.buf, "x = append(item)\n");
     try testz.expectEqual(ed.cursor, 16);
     // Typing continues after it.
     _ = try ed.feedText(";");
-    try expectText(alloc, &ed.buf, "x = append(item);\n");
+    try expectText(alloc, ed.buf, "x = append(item);\n");
     // And one `u` takes back the whole insert session, completion included.
     _ = try keys.feed(&ed, "<Esc>u");
-    try expectText(alloc, &ed.buf, "x = \n");
+    try expectText(alloc, ed.buf, "x = \n");
 }
 
 // ─── Double-click words ──────────────────────────────────────────────────
@@ -6532,16 +6532,16 @@ pub fn autoIndentColonOpensABlockOnlyWhereTheLanguageSaysTest(_: std.Io, alloc: 
     defer ed.deinit();
     ed.colon_block = true;
     _ = try keys.feed(&ed, "A<cr>y<esc>");
-    try expectText(alloc, &ed.buf, "if x:\n    y");
+    try expectText(alloc, ed.buf, "if x:\n    y");
 }
 
 pub fn autoIndentCloserLinesUpWithItsOpenerTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "fn {\n    a", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "GA<cr>");
-    try expectText(alloc, &ed.buf, "fn {\n    a\n    ");
+    try expectText(alloc, ed.buf, "fn {\n    a\n    ");
     try typeKeys(&ed, "}");
-    try expectText(alloc, &ed.buf, "fn {\n    a\n}");
+    try expectText(alloc, ed.buf, "fn {\n    a\n}");
 }
 
 pub fn autoIndentOffIsABareNewlineTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -6562,16 +6562,16 @@ pub fn autoCloseTypesThePartnerAndStepsOverItTest(_: std.Io, alloc: std.mem.Allo
     defer ed.deinit();
     _ = try keys.feed(&ed, "i");
     try typeKeys(&ed, "(");
-    try expectText(alloc, &ed.buf, "()");
+    try expectText(alloc, ed.buf, "()");
     try testz.expectEqual(ed.cursor, 1);
     // The typed closer steps over the one auto-close put there.
     try typeKeys(&ed, "x)");
-    try expectText(alloc, &ed.buf, "(x)");
+    try expectText(alloc, ed.buf, "(x)");
     try testz.expectEqual(ed.cursor, 3);
     // Nested pairs each step over their own closer.
     try typeKeys(&ed, " {[");
     try typeKeys(&ed, "]}");
-    try expectText(alloc, &ed.buf, "(x) {[]}");
+    try expectText(alloc, ed.buf, "(x) {[]}");
     try testz.expectEqual(ed.cursor, 8);
 }
 
@@ -6580,7 +6580,7 @@ pub fn autoCloseLeavesAnOpenerBeforeAWordAloneTest(_: std.Io, alloc: std.mem.All
     defer ed.deinit();
     _ = try keys.feed(&ed, "i");
     try typeKeys(&ed, "(");
-    try expectText(alloc, &ed.buf, "(foo");
+    try expectText(alloc, ed.buf, "(foo");
 }
 
 pub fn autoCloseNeverStepsOverAClosingBracketItDidNotTypeTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -6588,7 +6588,7 @@ pub fn autoCloseNeverStepsOverAClosingBracketItDidNotTypeTest(_: std.Io, alloc: 
     defer ed.deinit();
     _ = try keys.feed(&ed, "i");
     try typeKeys(&ed, ")");
-    try expectText(alloc, &ed.buf, "))");
+    try expectText(alloc, ed.buf, "))");
 }
 
 pub fn autoCloseBackspaceTakesBothHalvesTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -6597,7 +6597,7 @@ pub fn autoCloseBackspaceTakesBothHalvesTest(_: std.Io, alloc: std.mem.Allocator
     _ = try keys.feed(&ed, "i");
     try typeKeys(&ed, "[");
     _ = try keys.feed(&ed, "<bs>");
-    try expectText(alloc, &ed.buf, "");
+    try expectText(alloc, ed.buf, "");
 }
 
 pub fn autoCloseQuotesTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -6605,7 +6605,7 @@ pub fn autoCloseQuotesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     defer ed.deinit();
     _ = try keys.feed(&ed, "i");
     try typeKeys(&ed, "\"ab\"");
-    try expectText(alloc, &ed.buf, "\"ab\"");
+    try expectText(alloc, ed.buf, "\"ab\"");
     try testz.expectEqual(ed.cursor, 4);
 
     // Not straight after a word character: an apostrophe.
@@ -6613,14 +6613,14 @@ pub fn autoCloseQuotesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     defer word.deinit();
     _ = try keys.feed(&word, "A");
     try typeKeys(&word, "'");
-    try expectText(alloc, &word.buf, "don'");
+    try expectText(alloc, word.buf, "don'");
 
     // An odd number of them before the caret: this one closes a string.
     var open = try Editor.initFromText(alloc, "x = \"ab", null);
     defer open.deinit();
     _ = try keys.feed(&open, "A");
     try typeKeys(&open, "\"");
-    try expectText(alloc, &open.buf, "x = \"ab\"");
+    try expectText(alloc, open.buf, "x = \"ab\"");
 }
 
 pub fn autoCloseWrapsASelectModeSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -6628,7 +6628,7 @@ pub fn autoCloseWrapsASelectModeSelectionTest(_: std.Io, alloc: std.mem.Allocato
     defer ed.deinit();
     _ = try keys.feed(&ed, "A<s-left><s-left><s-left>");
     try typeKeys(&ed, "(");
-    try expectText(alloc, &ed.buf, "(foo)");
+    try expectText(alloc, ed.buf, "(foo)");
     // Still selected, on the text inside.
     try testz.expectEqual(ed.mode, .select);
     const span = ed.selectionSpan().?;
@@ -6641,7 +6641,7 @@ pub fn autoCloseOffTypesOneCharacterTest(_: std.Io, alloc: std.mem.Allocator) !v
     defer ed.deinit();
     _ = try keys.feed(&ed, ":set autoclose=off<cr>i");
     try typeKeys(&ed, "(\"");
-    try expectText(alloc, &ed.buf, "(\"");
+    try expectText(alloc, ed.buf, "(\"");
 }
 
 pub fn autoCloseAndIndentTogetherTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -6651,7 +6651,7 @@ pub fn autoCloseAndIndentTogetherTest(_: std.Io, alloc: std.mem.Allocator) !void
     _ = try keys.feed(&ed, "A");
     try typeKeys(&ed, "{");
     _ = try keys.feed(&ed, "<cr>body<esc>");
-    try expectText(alloc, &ed.buf, "fn f() {\n    body\n}");
+    try expectText(alloc, ed.buf, "fn f() {\n    body\n}");
 }
 
 // ─── Folding ─────────────────────────────────────────────────────────────
@@ -6948,9 +6948,9 @@ pub fn editorSubstituteReportsAndRepeatsTest(_: std.Io, alloc: std.mem.Allocator
     _ = try keys.feed(&ed, ":%s/one/1/<cr>");
     try ed.loadText("one\none", null);
     _ = try keys.feed(&ed, "j:s<cr>");
-    try expectText(alloc, &ed.buf, "one\n1");
+    try expectText(alloc, ed.buf, "one\n1");
     _ = try keys.feed(&ed, "/one<cr>:%s//2/<cr>");
-    try expectText(alloc, &ed.buf, "2\n1");
+    try expectText(alloc, ed.buf, "2\n1");
 }
 
 pub fn editorSubstituteRangeErrorsTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -6963,7 +6963,7 @@ pub fn editorSubstituteRangeErrorsTest(_: std.Io, alloc: std.mem.Allocator) !voi
     // A plain out-of-range line jump still clamps, as before.
     _ = try keys.feed(&ed, ":99<cr>");
     try testz.expectEqual(ed.buf.lineAt(ed.cursor), 1);
-    try expectText(alloc, &ed.buf, "a\nb");
+    try expectText(alloc, ed.buf, "a\nb");
 }
 
 // ─── Find widget ────────────────────────────────────────────────────────
@@ -7044,15 +7044,15 @@ pub fn findWidgetReplaceOneAndAllTest(_: std.Io, alloc: std.mem.Allocator) !void
 
     // On a match, Enter replaces it and moves past the replacement.
     _ = try keys.feed(&ed, "<cr>");
-    try expectText(alloc, &ed.buf, "aa b a b a");
+    try expectText(alloc, ed.buf, "aa b a b a");
     try testz.expectEqual(ed.cursor, 5);
     // Replace all takes the first replacement's two `a`s as well.
     _ = try keys.feed(&ed, "<c-a-cr>");
-    try expectText(alloc, &ed.buf, "aaaa b aa b aa");
+    try expectText(alloc, ed.buf, "aaaa b aa b aa");
     try testz.expectEqualStr(ed.status.items, "Replaced 4 occurrences");
     // Replace all is one undo step.
     _ = try keys.feed(&ed, "<esc>u");
-    try expectText(alloc, &ed.buf, "aa b a b a");
+    try expectText(alloc, ed.buf, "aa b a b a");
 }
 
 pub fn findWidgetInSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -7062,10 +7062,10 @@ pub fn findWidgetInSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
     _ = try keys.feed(&ed, "jVj<c-h>");
     try testz.expectTrue(ed.find_in_selection);
     _ = try keys.feed(&ed, "<tab>x<tab>y<c-a-cr>");
-    try expectText(alloc, &ed.buf, "x\ny\ny\nx");
+    try expectText(alloc, ed.buf, "x\ny\ny\nx");
     // Alt+L widens it back to the buffer.
     _ = try keys.feed(&ed, "<a-l><c-a-cr>");
-    try expectText(alloc, &ed.buf, "y\ny\ny\ny");
+    try expectText(alloc, ed.buf, "y\ny\ny\ny");
 }
 
 pub fn findWidgetFromInsertModeReturnsThereTest(_: std.Io, alloc: std.mem.Allocator) !void {

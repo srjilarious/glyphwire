@@ -19,7 +19,7 @@
 //!     <file|dir> NUL <line, or empty> NUL <0|1 wait> NUL <absolute path>
 //!
 //! The answer is one line, `ok` or `error: <why>`. With `--wait` the
-//! connection then stays open until the file's tab closes (`Slot.waiters`)
+//! connection then stays open until the file's tab closes (`Document.waiters`)
 //! -- the server just closes it, so the client's read hits EOF -- which
 //! is what makes `EDITOR='zoe --wait' git commit` work in the panel.
 //!

@@ -38,7 +38,7 @@ pub fn startJump(self: *Ui) !bool {
     // The rows as they are on screen: the frame that drew them may have
     // been another group's, and `row_map` is shared.
     try self.layoutRows();
-    const buf = &self.buf.ed.buf;
+    const buf = self.buf.ed.buf;
     const opts = self.displayOpts();
     var found: std.ArrayList(jump_mod.Target) = .empty;
     defer found.deinit(self.alloc);

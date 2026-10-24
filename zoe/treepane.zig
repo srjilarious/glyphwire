@@ -555,7 +555,7 @@ pub fn retargetBuffers(self: *Ui, old_abs: []const u8, new_abs: []const u8) void
             self.lspDidClose(slot);
             slot.ed.setPath(moved) catch continue;
             self.invalidateAbs(slot);
-            slot.lsp_opened = false;
+            slot.doc.lsp_opened = false;
             slot.ed.line_comment = self.lineCommentFor(slot.ed.path);
             slot.ed.colon_block = self.colonBlockFor(slot.ed.path);
             self.selectHighlightLanguage(slot, slot.ed.path);

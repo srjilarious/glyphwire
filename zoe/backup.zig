@@ -34,7 +34,7 @@
 //!     <text>
 //!
 //! `disk` is the file's size and mtime as of zoe's last read or write of
-//! it (`Slot.disk`), or `-` for a file not on disk then. Reopening the
+//! it (`Document.disk`), or `-` for a file not on disk then. Reopening the
 //! file compares it against the file now: unchanged means the backup is
 //! edits on top of exactly what is on disk, and is restored without
 //! asking; changed means someone else wrote the file since, and the user
