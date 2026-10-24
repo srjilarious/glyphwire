@@ -29,6 +29,9 @@ pub const Document = struct {
     buf: Buffer,
     /// How many tabs show this document. The last one to close frees it.
     refs: usize = 1,
+    /// Scratch for `Ui.trimJournals`: the oldest journal entry some
+    /// reader of this document still needs. Meaningless between calls.
+    journal_floor: u64 = 0,
 
     /// This document's own tree-sitter state -- null when highlighting is
     /// off entirely, or when no grammar matched its extension. Kept for

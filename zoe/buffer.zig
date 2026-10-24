@@ -207,6 +207,29 @@ pub const Edit = struct {
     start_point: Pos,
     old_end_point: Pos,
     new_end_point: Pos,
+    /// Who made it: `Buffer.author` when it was recorded. A view of a
+    /// shared buffer skips its own edits when it catches up with the
+    /// others' (`Editor.followEdit`).
+    author: u64 = 0,
+
+    /// Where `at` ends up after this edit: unchanged before it, shifted
+    /// after it, and inside the replaced span kept as far in as the new
+    /// text reaches. An insertion exactly at `at` leaves it in front.
+    /// Works on any one coordinate the edit has a start and two ends in
+    /// -- bytes, or lines through `mapLine`.
+    pub fn mapIn(at: usize, start: usize, old_end: usize, new_end: usize) usize {
+        if (at <= start) return at;
+        if (at >= old_end) return at - old_end + new_end;
+        return start + @min(at - start, new_end - start);
+    }
+
+    pub fn mapByte(e: Edit, at: usize) usize {
+        return mapIn(at, e.start_byte, e.old_end_byte, e.new_end_byte);
+    }
+
+    pub fn mapLine(e: Edit, line: usize) usize {
+        return mapIn(line, e.start_point.line, e.old_end_point.line, e.new_end_point.line);
+    }
 
     /// The same edit in the highlighter's own types, which don't know
     /// about `Buffer`.
@@ -222,11 +245,12 @@ pub const Edit = struct {
     }
 };
 
-/// Cap on `pending_edits`. Past this the log is cleared and
-/// `edits_overflowed` is set: a consumer that sees the flag must do a
-/// full reparse rather than trust a partial replay. Sized so a normal
-/// burst of typing between frames never trips it.
-const max_pending_edits: usize = 512;
+/// Cap on `pending_edits`. Past this the older entries are dropped, and
+/// a reader whose mark they were behind finds `editsSince` null: it has
+/// to start over (a full reparse, a recount) rather than trust a partial
+/// replay. Sized so a normal burst of typing between frames never trips
+/// it.
+pub const max_pending_edits: usize = 512;
 
 /// One primitive mutation, stored as what it takes to put the text back:
 /// at `at`, drop `inserted` bytes and re-insert `removed`. A pure insert
@@ -280,15 +304,22 @@ pub const Buffer = struct {
     edits: u64 = 0,
 
     /// When false, `pending_edits` is not maintained -- there is no
-    /// consumer. `ui.zig` sets it once it has a live highlighter.
+    /// reader. `ui.zig` turns it on for every buffer it opens.
     track_edits: bool = false,
-    /// Mutations applied since the last `clearEdits`, oldest first. Only
-    /// populated while `track_edits`. Never allocates otherwise.
+    /// The edit journal: the newest mutations, oldest first, numbered by
+    /// how many came before them. Several readers follow it at their own
+    /// pace -- the highlighter, each view's row counts and cursor -- each
+    /// keeping the number it has read up to (a mark) and asking
+    /// `editsSince` for the rest; `trimEdits` drops what every reader has
+    /// seen. Only populated while `track_edits`.
     pending_edits: std.ArrayList(Edit) = .empty,
-    /// `pending_edits` filled past `max_pending_edits` (or an append
-    /// failed) and was dropped; the log no longer accounts for every
-    /// change since the last drain.
-    edits_overflowed: bool = false,
+    /// How many edits have ever been recorded: the next one's number, and
+    /// the mark of a reader that is up to date. `pending_edits[0]` is
+    /// number `edit_seq - pending_edits.items.len`.
+    edit_seq: u64 = 0,
+    /// Stamped on each recorded edit (`Edit.author`). An `Editor` sets it
+    /// to its own `Editor.author` before every mutation it makes.
+    author: u64 = 0,
 
     /// Closed undo groups, oldest first; `u` pops from the end.
     undo_stack: std.ArrayList(UndoGroup) = .empty,
@@ -586,29 +617,44 @@ pub const Buffer = struct {
         self.folds_gen += 1;
     }
 
-    /// Append one edit to the pending log, or trip `edits_overflowed` and
-    /// drop the log if it is full (or the append fails). Never returns an
-    /// error: a lost edit degrades the highlighter to a full reparse, it
-    /// does not fail the mutation.
-    fn recordEdit(self: *Buffer, e: Edit) void {
-        if (self.edits_overflowed) return;
-        if (self.pending_edits.items.len >= max_pending_edits) {
-            self.pending_edits.clearRetainingCapacity();
-            self.edits_overflowed = true;
-            return;
-        }
-        self.pending_edits.append(self.alloc, e) catch {
-            self.pending_edits.clearRetainingCapacity();
-            self.edits_overflowed = true;
-        };
+    /// Appends one edit to the journal, dropping the older entries first
+    /// when it is full. Never returns an error: an edit the journal loses
+    /// costs its readers a fresh start (`editsSince` goes null for them),
+    /// it does not fail the mutation.
+    fn recordEdit(self: *Buffer, edit: Edit) void {
+        var e = edit;
+        e.author = self.author;
+        self.edit_seq += 1;
+        if (self.pending_edits.items.len >= max_pending_edits) self.pending_edits.clearRetainingCapacity();
+        self.pending_edits.append(self.alloc, e) catch self.pending_edits.clearRetainingCapacity();
     }
 
-    /// Drop the pending edit log and clear the overflow flag. The
-    /// consumer calls this once it has replayed (or given up on) the
-    /// edits for a frame.
+    /// The journal number of the oldest edit still held.
+    pub fn journalStart(self: *const Buffer) u64 {
+        return self.edit_seq - self.pending_edits.items.len;
+    }
+
+    /// The edits after `mark` (a number `edit_seq` once was), oldest
+    /// first, or null when some of them were dropped: the reader has to
+    /// start over from the text as it is.
+    pub fn editsSince(self: *const Buffer, mark: u64) ?[]const Edit {
+        if (mark < self.journalStart() or mark > self.edit_seq) return null;
+        return self.pending_edits.items[@intCast(mark - self.journalStart())..];
+    }
+
+    /// Drops the edits before number `upto`: every reader has read them.
+    pub fn trimEdits(self: *Buffer, upto: u64) void {
+        const start = self.journalStart();
+        if (upto <= start) return;
+        const n: usize = @intCast(@min(upto - start, self.pending_edits.items.len));
+        const items = self.pending_edits.items;
+        std.mem.copyForwards(Edit, items[0 .. items.len - n], items[n..]);
+        self.pending_edits.shrinkRetainingCapacity(items.len - n);
+    }
+
+    /// Drops the whole journal: whoever reads it next starts over.
     pub fn clearEdits(self: *Buffer) void {
         self.pending_edits.clearRetainingCapacity();
-        self.edits_overflowed = false;
     }
 
     // ── Undo ────────────────────────────────────────────────────────────

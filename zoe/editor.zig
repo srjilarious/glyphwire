@@ -272,6 +272,10 @@ pub const Editor = struct {
     buf: *Buffer,
     /// Whether `deinit` frees `buf`. False for a borrowed one.
     owns_buf: bool = true,
+    /// Stamped on every edit this editor makes (`Buffer.author`), so the
+    /// other views of a shared buffer can tell them from their own. Each
+    /// tab's is distinct (`Ui.newView`); 0 for an editor nothing shares.
+    author: u64 = 0,
     /// Byte offset into the buffer. Normal mode keeps this on a
     /// character; insert mode may sit one past the line's last one.
     cursor: usize = 0,
@@ -555,6 +559,43 @@ pub const Editor = struct {
         self.* = undefined;
     }
 
+    /// `buf`, signed as this editor's for the edit about to be made. Every
+    /// mutation here goes through it.
+    fn mutBuf(self: *Editor) *Buffer {
+        self.buf.author = self.author;
+        return self.buf;
+    }
+
+    /// Follows an edit another view of the buffer made: the cursor and
+    /// the selection's anchor move with the text around them, and the
+    /// state that only means something where it was set (a pending
+    /// count, a vertical-motion column cache, the tracked auto-close
+    /// pairs, an auto-indent waiting to be undone) is dropped. The search
+    /// highlight is kept, its match moved along.
+    pub fn followEdit(self: *Editor, e: buffer.Edit) void {
+        self.cursor = e.mapByte(self.cursor);
+        if (self.select_anchor) |a| self.select_anchor = e.mapByte(a);
+        if (self.search_match) |m| self.search_match = e.mapByte(m);
+        self.search_origin = e.mapByte(self.search_origin);
+        self.wrap_want_at = null;
+        self.autoindent_at = null;
+        self.pending_replace = null;
+        self.find_scope = null;
+        self.pair_closers.clearRetainingCapacity();
+    }
+
+    /// Puts the cursor (and the anchor) back inside the text after edits
+    /// a view couldn't follow one by one (`Buffer.editsSince` came back
+    /// null), on a character in normal mode.
+    pub fn clampToText(self: *Editor) void {
+        const n = self.buf.len();
+        if (self.select_anchor) |a| self.select_anchor = @min(a, n);
+        self.search_match = null;
+        self.find_scope = null;
+        self.pair_closers.clearRetainingCapacity();
+        self.moveCursorTo(@min(self.cursor, n));
+    }
+
     /// The cursor as a line/column pair -- what a status line shows and
     /// what the renderer will place the caret from.
     pub fn pos(self: *const Editor) Pos {
@@ -586,7 +627,12 @@ pub const Editor = struct {
         if (path) |p| try self.setPath(p);
 
         // In place: a borrowed buffer is shared, and the other editors
-        // over it keep pointing here.
+        // over it keep pointing here. The journal numbering and the edit
+        // count carry on past the old text's, so everything following
+        // either sees a change it can't replay and starts over.
+        fresh.track_edits = self.buf.track_edits;
+        fresh.edit_seq = self.buf.edit_seq + 1;
+        fresh.edits = self.buf.edits +% 1;
         self.buf.deinit();
         self.buf.* = fresh;
         self.cursor = 0;
@@ -625,8 +671,8 @@ pub const Editor = struct {
         self.mode = .normal;
         self.resetPending();
         self.buf.undoCheckpoint(self.cursor);
-        try self.buf.delete(pre, old.len - pre - suf);
-        try self.buf.insert(pre, text[pre .. text.len - suf]);
+        try self.mutBuf().delete(pre, old.len - pre - suf);
+        try self.mutBuf().insert(pre, text[pre .. text.len - suf]);
         self.buf.closeUndoGroup();
         self.moveCursorTo(pre);
     }
@@ -1114,7 +1160,7 @@ pub const Editor = struct {
         if (self.hasSelection()) self.exitVisual();
         if (!typing) return if (redo_it) self.redo() else self.undo(self.takeCount());
 
-        const at = (if (redo_it) try self.buf.redo() else try self.buf.undo()) orelse {
+        const at = (if (redo_it) try self.mutBuf().redo() else try self.mutBuf().undo()) orelse {
             self.setStatus("Already at {s} change", .{if (redo_it) "newest" else "oldest"});
             return .none;
         };
@@ -1141,7 +1187,7 @@ pub const Editor = struct {
         else
             motion.wordBackward(self.buf, self.cursor, 1, false);
         const target = @max(back, start);
-        try self.buf.delete(target, self.cursor - target);
+        try self.mutBuf().delete(target, self.cursor - target);
         self.cursor = target;
         self.syncSticky();
     }
@@ -1157,7 +1203,7 @@ pub const Editor = struct {
         else
             wordTargetForDelete(self.buf, self.cursor, 1);
         const target = @min(ahead, end);
-        try self.buf.delete(self.cursor, target - self.cursor);
+        try self.mutBuf().delete(self.cursor, target - self.cursor);
         self.syncSticky();
     }
 
@@ -1245,7 +1291,7 @@ pub const Editor = struct {
     pub fn replaceBeforeCursor(self: *Editor, start: usize, text: []const u8) !void {
         if (self.mode != .insert) return;
         const lo = @min(start, self.cursor);
-        if (self.cursor > lo) try self.buf.delete(lo, self.cursor - lo);
+        if (self.cursor > lo) try self.mutBuf().delete(lo, self.cursor - lo);
         self.cursor = lo;
         try self.insertText(text);
     }
@@ -1288,8 +1334,8 @@ pub const Editor = struct {
         const removed = old.len - pre - suf;
         const added = text[pre .. text.len - suf];
         if (removed == 0 and added.len == 0) return;
-        if (removed > 0) try self.buf.delete(at, removed);
-        if (added.len > 0) try self.buf.insert(at, added);
+        if (removed > 0) try self.mutBuf().delete(at, removed);
+        if (added.len > 0) try self.mutBuf().insert(at, added);
 
         const shift = struct {
             fn f(off: usize, span_at: usize, gone: usize, new_len: usize) usize {
@@ -1735,7 +1781,7 @@ pub const Editor = struct {
 
     fn insertText(self: *Editor, text: []const u8) !void {
         const tracked = self.pairsCurrent();
-        try self.buf.insert(self.cursor, text);
+        try self.mutBuf().insert(self.cursor, text);
         if (tracked) {
             for (self.pair_closers.items) |*off| {
                 if (off.* >= self.cursor) off.* += text.len;
@@ -1805,7 +1851,7 @@ pub const Editor = struct {
     fn deleteRange(self: *Editor, lo: usize, hi: usize) !void {
         if (hi <= lo) return;
         try self.stashYankRange(lo, hi, false);
-        try self.buf.delete(lo, hi - lo);
+        try self.mutBuf().delete(lo, hi - lo);
         self.cursor = motion.clampNormal(self.buf, lo);
         self.syncSticky();
     }
@@ -1818,7 +1864,7 @@ pub const Editor = struct {
     fn changeRange(self: *Editor, lo: usize, hi: usize) !void {
         if (hi > lo) {
             try self.stashYankRange(lo, hi, false);
-            try self.buf.delete(lo, hi - lo);
+            try self.mutBuf().delete(lo, hi - lo);
         }
         self.cursor = @min(lo, self.buf.len());
         self.syncSticky();
@@ -1883,12 +1929,12 @@ pub const Editor = struct {
         try self.stashYankRange(start, end, true);
 
         if (end < self.buf.len()) {
-            try self.buf.delete(start, end + 1 - start);
+            try self.mutBuf().delete(start, end + 1 - start);
         } else if (f > 0) {
             const prev_end = self.buf.lineEnd(f - 1);
-            try self.buf.delete(prev_end, end - prev_end);
+            try self.mutBuf().delete(prev_end, end - prev_end);
         } else {
-            try self.buf.delete(start, end - start);
+            try self.mutBuf().delete(start, end - start);
         }
 
         // vim lands on the first non-blank of whatever line took their
@@ -1919,8 +1965,8 @@ pub const Editor = struct {
         var k: usize = 0;
         while (k < count) : (k += 1) try rep.appendSlice(self.alloc, s);
 
-        try self.buf.delete(self.cursor, end - self.cursor);
-        try self.buf.insert(self.cursor, rep.items);
+        try self.mutBuf().delete(self.cursor, end - self.cursor);
+        try self.mutBuf().insert(self.cursor, rep.items);
         // On the last replaced character, which is where vim leaves it.
         self.moveTo(motion.clampNormal(self.buf, self.cursor + rep.items.len - s.len), true);
     }
@@ -1949,9 +1995,9 @@ pub const Editor = struct {
             const next_empty = cut >= next_end;
             const next_closes = !next_empty and self.buf.byteAt(cut) == ')';
 
-            try self.buf.delete(end, cut - end);
+            try self.mutBuf().delete(end, cut - end);
             if (!(here_empty or ends_blank or next_empty or next_closes)) {
-                try self.buf.insert(end, " ");
+                try self.mutBuf().insert(end, " ");
             }
             self.moveTo(motion.clampNormal(self.buf, end), true);
         }
@@ -1975,8 +2021,8 @@ pub const Editor = struct {
                     std.ascii.toUpper(b)
                 else
                     std.ascii.toLower(b);
-                try self.buf.delete(at, 1);
-                try self.buf.insert(at, &[_]u8{flipped});
+                try self.mutBuf().delete(at, 1);
+                try self.mutBuf().insert(at, &[_]u8{flipped});
             }
             at = next;
         }
@@ -2083,11 +2129,11 @@ pub const Editor = struct {
             @memcpy(paste[1..], text);
         }
 
-        try self.buf.delete(cut_lo, moved.len);
+        try self.mutBuf().delete(cut_lo, moved.len);
         // After the cut, the block has (going up) moved up by `steps`
         // lines, so its end is `lineEnd(last - steps)`.
         const at = if (down) self.buf.lineStart(first) else self.buf.lineEnd(last - steps);
-        try self.buf.insert(at, paste);
+        try self.mutBuf().insert(at, paste);
 
         const shift = moved.len;
         if (self.select_anchor) |a| {
@@ -2134,11 +2180,11 @@ pub const Editor = struct {
 
         self.buf.undoCheckpoint(self.cursor);
         if (down) {
-            try self.buf.insert(self.buf.lineEnd(last), paste);
+            try self.mutBuf().insert(self.buf.lineEnd(last), paste);
             if (self.select_anchor) |a| self.select_anchor = a + paste.len;
             self.moveTo(self.cursor + paste.len, false);
         } else {
-            try self.buf.insert(self.buf.lineStart(first), paste);
+            try self.mutBuf().insert(self.buf.lineStart(first), paste);
         }
     }
 
@@ -2192,7 +2238,7 @@ pub const Editor = struct {
                 const at = start + indent;
                 var n = marker.len;
                 if (at + n < self.buf.len() and self.buf.byteAt(at + n) == ' ') n += 1;
-                try self.buf.delete(at, n);
+                try self.mutBuf().delete(at, n);
             } else {
                 try self.insertMarker(start + min_indent, marker);
             }
@@ -2205,8 +2251,8 @@ pub const Editor = struct {
 
     /// `marker` plus one space, at `at`.
     fn insertMarker(self: *Editor, at: usize, marker: []const u8) !void {
-        try self.buf.insert(at, " ");
-        try self.buf.insert(at, marker);
+        try self.mutBuf().insert(at, " ");
+        try self.mutBuf().insert(at, marker);
     }
 
     /// Bytes of leading spaces and tabs on `line`.
@@ -2259,9 +2305,9 @@ pub const Editor = struct {
         // whitespace behind on one.
         if (self.buf.lineLen(line) == 0) return;
         const start = self.buf.lineStart(line);
-        if (!self.expand_tab) return self.buf.insert(start, "\t");
+        if (!self.expand_tab) return self.mutBuf().insert(start, "\t");
         const spaces: [max_tab_width]u8 = @splat(' ');
-        try self.buf.insert(start, spaces[0..self.tab_width]);
+        try self.mutBuf().insert(start, spaces[0..self.tab_width]);
     }
 
     fn dedentLine(self: *Editor, line: usize) !void {
@@ -2280,7 +2326,7 @@ pub const Editor = struct {
                 cols += display.tabStop(cols, self.tab_width);
             } else break;
         }
-        if (at > start) try self.buf.delete(start, at - start);
+        if (at > start) try self.mutBuf().delete(start, at - start);
     }
 
     // ── Undo ────────────────────────────────────────────────────────────
@@ -2291,7 +2337,7 @@ pub const Editor = struct {
         var did = false;
         var i: usize = 0;
         while (i < count) : (i += 1) {
-            const at = (try self.buf.undo()) orelse break;
+            const at = (try self.mutBuf().undo()) orelse break;
             self.moveTo(motion.clampNormal(self.buf, at), true);
             did = true;
         }
@@ -2306,7 +2352,7 @@ pub const Editor = struct {
         var did = false;
         var i: usize = 0;
         while (i < count) : (i += 1) {
-            const at = (try self.buf.redo()) orelse break;
+            const at = (try self.mutBuf().redo()) orelse break;
             self.moveTo(motion.clampNormal(self.buf, at), true);
             did = true;
         }
@@ -2335,14 +2381,14 @@ pub const Editor = struct {
             .below => {
                 // Below a closed fold, not inside it.
                 const at = self.buf.lineEnd(self.rowLast(line));
-                try self.buf.insert(at, "\n");
-                try self.buf.insert(at + 1, indent.items);
+                try self.mutBuf().insert(at, "\n");
+                try self.mutBuf().insert(at + 1, indent.items);
                 self.cursor = at + 1 + indent.items.len;
             },
             .above => {
                 const at = self.buf.lineStart(line);
-                try self.buf.insert(at, "\n");
-                try self.buf.insert(at, indent.items);
+                try self.mutBuf().insert(at, "\n");
+                try self.mutBuf().insert(at, indent.items);
                 self.cursor = at + indent.items.len;
             },
         }
@@ -2440,7 +2486,7 @@ pub const Editor = struct {
         const le = self.buf.lineEnd(line);
         var i = at;
         while (i < le) : (i += 1) if (!isBlank(self.buf.byteAt(i))) return;
-        self.buf.delete(at, le - at) catch return;
+        self.mutBuf().delete(at, le - at) catch return;
         self.cursor = at;
     }
 
@@ -2578,8 +2624,8 @@ pub const Editor = struct {
             return self.typeChar(c);
         };
         const anchor_low = self.select_anchor.? <= self.cursor;
-        try self.buf.insert(span.hi, &.{pairCloser(c).?});
-        try self.buf.insert(span.lo, &.{c});
+        try self.mutBuf().insert(span.hi, &.{pairCloser(c).?});
+        try self.mutBuf().insert(span.lo, &.{c});
         self.select_anchor = if (anchor_low) span.lo + 1 else span.hi + 1;
         self.moveTo(if (anchor_low) span.hi + 1 else span.lo + 1, true);
     }
@@ -2588,7 +2634,7 @@ pub const Editor = struct {
     fn deleteTracked(self: *Editor, at: usize, n: usize) !void {
         if (n == 0) return;
         const tracked = self.pairsCurrent();
-        try self.buf.delete(at, n);
+        try self.mutBuf().delete(at, n);
         if (!tracked) return;
         var i: usize = 0;
         while (i < self.pair_closers.items.len) {
@@ -3002,7 +3048,7 @@ pub const Editor = struct {
     /// whether the removed text should reach the clipboard.
     fn removeSpan(self: *Editor, span: SelSpan) !void {
         if (span.hi <= span.lo) return;
-        try self.buf.delete(span.lo, span.hi - span.lo);
+        try self.mutBuf().delete(span.lo, span.hi - span.lo);
         // Select mode returns to insert, where the caret may sit past the
         // line's last character.
         self.cursor = if (self.mode == .select) span.lo else motion.clampNormal(self.buf, span.lo);
@@ -3059,14 +3105,14 @@ pub const Editor = struct {
                 if (line + 1 < self.buf.lineCount()) break :blk self.buf.lineStart(line + 1);
                 // Pasting below the last line: it has no trailing newline
                 // to insert after, so add one first.
-                try self.buf.insert(self.buf.len(), "\n");
+                try self.mutBuf().insert(self.buf.len(), "\n");
                 break :blk self.buf.len();
             } else self.buf.lineStart(line);
-            try self.buf.insert(at, text);
+            try self.mutBuf().insert(at, text);
             self.moveTo(motion.firstNonBlank(self.buf, at), true);
         } else {
             const at = if (after) motion.right(self.buf, self.cursor, 1, true) else self.cursor;
-            try self.buf.insert(at, text);
+            try self.mutBuf().insert(at, text);
             // vim leaves the cursor on the last pasted character.
             self.moveTo(motion.clampNormal(self.buf, at + text.len - 1), true);
         }
@@ -3828,8 +3874,8 @@ pub const Editor = struct {
                     break :blk piece.items;
                 },
             };
-            try self.buf.delete(m.at, m.len);
-            try self.buf.insert(m.at, text);
+            try self.mutBuf().delete(m.at, m.len);
+            try self.mutBuf().insert(m.at, text);
 
             if (i + 1 < matches.len) growth_before_last += @as(i64, @intCast(text.len)) - @as(i64, @intCast(m.len));
             self.cursor = shiftPast(self.cursor, m.at, m.len, text.len);

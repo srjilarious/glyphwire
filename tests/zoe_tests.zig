@@ -2376,22 +2376,63 @@ pub fn bufferJournalsEditsOnlyWhileTrackingTest(_: std.Io, alloc: std.mem.Alloca
 
     buf.clearEdits();
     try testz.expectEqual(buf.pending_edits.items.len, 0);
-    try testz.expectFalse(buf.edits_overflowed);
+    // A reader that was up to date stays so; one that wasn't lost them.
+    try testz.expectEqual(buf.editsSince(2).?.len, 0);
+    try testz.expectTrue(buf.editsSince(0) == null);
 }
 
-pub fn bufferJournalOverflowSetsFlagTest(_: std.Io, alloc: std.mem.Allocator) !void {
+pub fn bufferJournalOverflowDropsOlderEditsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var buf = try Buffer.initFromText(alloc, "");
     defer buf.deinit();
     buf.track_edits = true;
 
-    // Way past the 512 cap: the log is dropped and the flag latches.
+    // Way past the 512 cap: the older entries are dropped, so a reader
+    // from the start has to start over, while a recent mark still reads.
     var i: usize = 0;
     while (i < 600) : (i += 1) try buf.insert(buf.len(), "x");
-    try testz.expectTrue(buf.edits_overflowed);
-    try testz.expectEqual(buf.pending_edits.items.len, 0);
+    try testz.expectEqual(buf.edit_seq, 600);
+    try testz.expectTrue(buf.editsSince(0) == null);
+    try testz.expectEqual(buf.editsSince(590).?.len, 10);
+    try testz.expectTrue(buf.editsSince(601) == null);
+}
 
-    buf.clearEdits();
-    try testz.expectFalse(buf.edits_overflowed);
+/// Each reader reads from its own mark; trimming drops only what all of
+/// them have read.
+pub fn bufferJournalReadersKeepTheirOwnMarksTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try Buffer.initFromText(alloc, "abc");
+    defer buf.deinit();
+    buf.track_edits = true;
+    buf.author = 7;
+    try buf.insert(0, "x");
+    buf.author = 9;
+    try buf.insert(0, "y");
+    try buf.insert(0, "z");
+    try testz.expectEqual(buf.editsSince(0).?.len, 3);
+    try testz.expectEqual(buf.editsSince(0).?[0].author, 7);
+    try testz.expectEqual(buf.editsSince(1).?[0].author, 9);
+    buf.trimEdits(1);
+    try testz.expectTrue(buf.editsSince(0) == null);
+    try testz.expectEqual(buf.editsSince(1).?.len, 2);
+    try testz.expectEqual(buf.editsSince(3).?.len, 0);
+    buf.trimEdits(3);
+    try testz.expectEqual(buf.pending_edits.items.len, 0);
+}
+
+/// A position before an edit stays, one after it shifts, one inside the
+/// replaced span keeps as far in as the new text reaches.
+pub fn editMapsPositionsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const map = zoe.buffer.Edit.mapIn;
+    // Insert 3 at 5.
+    try testz.expectEqual(map(4, 5, 5, 8), 4);
+    try testz.expectEqual(map(5, 5, 5, 8), 5);
+    try testz.expectEqual(map(9, 5, 5, 8), 12);
+    // Delete [5, 9).
+    try testz.expectEqual(map(7, 5, 9, 5), 5);
+    try testz.expectEqual(map(9, 5, 9, 5), 5);
+    try testz.expectEqual(map(12, 5, 9, 5), 8);
+    // Replace [5, 9) with 2 bytes.
+    try testz.expectEqual(map(6, 5, 9, 7), 6);
+    try testz.expectEqual(map(8, 5, 9, 7), 7);
 }
 
 // ─── Incremental reparse equivalence ───────────────────────────────────

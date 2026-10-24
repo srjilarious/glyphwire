@@ -743,11 +743,14 @@ pub const Slot = struct {
     /// Screen rows per line while `ed.wrap` is on, for the scrollbar
     /// (`syncRowCounts`). Per view: it depends on this pane's width.
     rows: RowCounts = .{},
-    /// How many of `Buffer.pending_edits` `rows` has already followed:
-    /// the journal is only cleared once per frame, after the
-    /// highlighter, and `rows` may be brought up to date more than once
-    /// before then (a wheel event between frames).
-    rows_applied: usize = 0,
+    /// How far into the edit journal `rows` has followed it
+    /// (`Buffer.editsSince`). It may be brought up to date more than
+    /// once a frame (a wheel event between frames); a view not on screen
+    /// can fall behind what the journal keeps, and recounts when shown.
+    rows_mark: u64 = 0,
+    /// How far into the journal this view's editor has followed the
+    /// other views' edits (`Ui.syncViews`).
+    view_mark: u64 = 0,
 
     /// Lets go of the document, freeing it with its last tab. The caller
     /// has already done what a document's last close needs
@@ -863,6 +866,9 @@ pub const Ui = struct {
     /// `zoe/groups.zig`.
     layout: groups.Layout,
     next_group_id: groups.GroupId = 1,
+    /// The next tab's `Editor.author`: distinct per tab, never 0, so a
+    /// tab can tell its own edits in a shared document's journal.
+    next_author: u64 = 1,
     /// The group filling the editor area while zoomed (`zoomToggle`):
     /// its `col_split` sits in the editors' slot of `pane_split` in place
     /// of the layout's root, and every other group's layers are hidden.
@@ -1771,6 +1777,8 @@ pub const Ui = struct {
         slot.* = .{ .ed = try Editor.initView(self.alloc, &doc.buf, path), .doc = doc };
         errdefer slot.ed.deinit();
         if (text != null) doc.disk = self.diskStamp(path.?);
+        slot.ed.author = self.next_author;
+        self.next_author += 1;
         slot.ed.keymaps = &self.keymaps;
         slot.ed.cmd_history = &self.cmd_history;
         slot.ed.search_history = &self.search_history;
@@ -2076,6 +2084,7 @@ pub const Ui = struct {
             self.grp.markRedraw();
             self.grp = g;
             self.buf = g.slot();
+            _ = self.syncView(self.buf);
             g.markRedraw();
             // The host's caret, when it is drawing one, sits on a group's
             // buffer layer: point it at the new one.
@@ -2687,6 +2696,7 @@ pub const Ui = struct {
             // And whatever `zoe <file>` in the shell panel asked for, which
             // wakes this the same way.
             self.drainRemote();
+            self.syncViews();
             if (self.anyDirty()) try self.render();
             if (self.quit) break;
             // After the frame, not before: entering insert mode's frame
@@ -2778,6 +2788,9 @@ pub const Ui = struct {
 
     pub fn handleEvent(self: *Ui, ev: glyphwire.Event) !void {
         defer ev.deinit(self.alloc);
+        // Another view of this document may have edited it since this one
+        // last looked (a reload, the previous event in this batch).
+        _ = self.syncView(self.buf);
         // `exit` typed into the shell panel (or a shell that died): the
         // panel closes itself and the keyboard is the editor's again.
         if (self.shell.reapIfExited()) self.shellClosed();
@@ -5100,6 +5113,74 @@ pub const Ui = struct {
         }
     }
 
+    // ── Views of one document ─────────────────────────────────────────────
+
+    /// Every tab catches up with the edits the other tabs on its document
+    /// made since it last looked, and a group showing one that moved is
+    /// repainted. Run once a turn, before the frame.
+    pub fn syncViews(self: *Ui) void {
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                if (!self.syncView(slot)) continue;
+                g.tabs_dirty = true;
+                if (slot == g.slot()) g.buffer_dirty = true;
+            }
+        }
+    }
+
+    /// Brings `slot` up to date with its document's journal: each edit
+    /// another tab made moves this one's cursor, selection and top line
+    /// along with the text (`Editor.followEdit`); its own are already
+    /// accounted for. Edits the journal no longer holds are caught up
+    /// with by clamping instead. Returns whether anything foreign was
+    /// followed, which means its cells are stale too.
+    pub fn syncView(_: *Ui, slot: *Slot) bool {
+        const buf = slot.ed.buf;
+        if (slot.view_mark == buf.edit_seq) return false;
+        defer slot.view_mark = buf.edit_seq;
+        const edits = buf.editsSince(slot.view_mark) orelse {
+            slot.ed.clampToText();
+            slot.top_line = @min(slot.top_line, buf.lineCount() -| 1);
+            slot.top_sub = 0;
+            slot.full_redraw = true;
+            return true;
+        };
+        var followed = false;
+        for (edits) |e| {
+            if (e.author == slot.ed.author) continue;
+            slot.ed.followEdit(e);
+            const top = e.mapLine(slot.top_line);
+            if (top != slot.top_line) slot.top_sub = 0;
+            slot.top_line = top;
+            followed = true;
+        }
+        if (followed) slot.full_redraw = true;
+        return followed;
+    }
+
+    /// Drops the journal entries every reader of each document has read:
+    /// each tab's editor, the row counts of a shown tab wrapping its
+    /// lines, and the highlighter. A tab not on screen is not waited for
+    /// by its row counts; it recounts when shown. Run after the frame.
+    pub fn trimJournals(self: *Ui) void {
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| slot.doc.journal_floor = slot.doc.buf.edit_seq;
+        }
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| {
+                const doc = slot.doc;
+                doc.journal_floor = @min(doc.journal_floor, slot.view_mark);
+                if (slot == g.slot() and slot.ed.wrap) doc.journal_floor = @min(doc.journal_floor, slot.rows_mark);
+                if (doc.hl) |*h| {
+                    if (h.languageSet()) doc.journal_floor = @min(doc.journal_floor, doc.hl_mark);
+                }
+            }
+        }
+        for (self.group_list.items) |g| {
+            for (g.buffers.items) |slot| slot.doc.buf.trimEdits(slot.doc.journal_floor);
+        }
+    }
+
     // ── Buffers and tabs ────────────────────────────────────────────────
 
     /// Whether `:q` / `:wq` has to be refused because some *other* tab
@@ -5143,6 +5224,7 @@ pub const Ui = struct {
     pub fn setActive(self: *Ui, index: usize) void {
         self.grp.active = @min(index, self.grp.buffers.items.len - 1);
         self.buf = self.grp.buffers.items[self.grp.active];
+        _ = self.syncView(self.buf);
         // The buffer layer's cells belong to whichever buffer drew last,
         // and its scrollbar to that buffer's line count. Neither carries
         // over, so the incoming buffer repaints and re-pushes its extent.

@@ -134,6 +134,8 @@ pub fn render(self: *Ui) !void {
     self.tree_edit_dirty = false;
     self.status_dirty = false;
     self.popups.clearDirty();
+    // Every shown view has read the journal for this frame.
+    self.trimJournals();
 }
 
 /// Whether `render` has anything to draw: a group, the fixed panes
@@ -249,12 +251,9 @@ pub fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
                 break :blk false;
             };
             self.buf.doc.hl_edits = self.buf.ed.buf.edits;
+            self.buf.doc.hl_mark = self.buf.ed.buf.edit_seq;
         }
     }
-    // The journal's last reader this frame, highlighter or not:
-    // `syncBufferScrollbar` above has followed it into `rows` already.
-    self.buf.ed.buf.clearEdits();
-    self.buf.rows_applied = 0;
     // Every row this frame paints reads its colours from the cache;
     // fill in the visible lines it is missing first, a run at a time.
     self.fillSpanCache();
@@ -464,13 +463,14 @@ pub fn repaintCaretRows(self: *Ui, batch: *glyphwire.client.Client.Batch, cursor
 pub fn syncHighlight(self: *Ui, h: *syntax.Highlighter) !bool {
     const buf = self.buf.ed.buf;
     self.hl_dirty_lines.clearRetainingCapacity();
+    const journal = buf.editsSince(self.buf.doc.hl_mark);
 
     // A whole-buffer parse: the first one, or one an edit journal can't
     // be replayed onto -- including a prefix tree from a staged parse
     // still running, which an edit restarts. Staged, so a big file
     // draws its first screen highlighted without waiting for the rest
     // (see `beginParse`); `run` finishes it between events.
-    if (!h.ready() or h.parsing() or buf.edits_overflowed or buf.pending_edits.items.len == 0) {
+    if (!h.ready() or h.parsing() or journal == null or journal.?.len == 0) {
         const text = try buf.text(self.alloc);
         defer self.alloc.free(text);
         _ = try h.beginParse(text, self.parsePrefixEnd(), self.parseBudget(first_parse_budget_ms));
@@ -483,7 +483,8 @@ pub fn syncHighlight(self: *Ui, h: *syntax.Highlighter) !bool {
     // row below it -- the partial-repaint path can't express that, so
     // reparse incrementally (still the win) but repaint in full.
     var line_count_stable = true;
-    for (buf.pending_edits.items) |e| {
+    const edits = journal.?;
+    for (edits) |e| {
         h.applyEdit(e.toSyntax());
         // The cached lines follow the edit the same way the tree does.
         self.buf.doc.spans.applyEdit(self.alloc, e.start_point.line, e.old_end_point.line, e.new_end_point.line) catch
@@ -515,7 +516,7 @@ pub fn syncHighlight(self: *Ui, h: *syntax.Highlighter) !bool {
 
     // Union: every directly-edited line, plus every line overlapping
     // a range tree-sitter flagged as structurally changed.
-    for (buf.pending_edits.items) |e| {
+    for (edits) |e| {
         try self.addDirtyLine(e.start_point.line);
     }
     for (self.hl_changed.items) |cr| {
@@ -1787,15 +1788,15 @@ pub fn placeOfRow(self: *Ui, row: usize) RowPos {
 pub fn syncRowCounts(self: *Ui) bool {
     const slot = self.buf;
     const buf = slot.ed.buf;
-    if (buf.edits_overflowed) {
-        slot.rows.reset();
-    } else {
-        for (buf.pending_edits.items[@min(slot.rows_applied, buf.pending_edits.items.len)..]) |e| {
+    if (buf.editsSince(slot.rows_mark)) |edits| {
+        for (edits) |e| {
             slot.rows.applyEdit(self.alloc, e.start_point.line, e.old_end_point.line, e.new_end_point.line) catch
                 slot.rows.reset();
         }
+    } else {
+        slot.rows.reset();
     }
-    slot.rows_applied = buf.pending_edits.items.len;
+    slot.rows_mark = buf.edit_seq;
     const opts = self.displayOpts();
     slot.rows.sync(self.alloc, .{
         .cols = self.textCols(),
