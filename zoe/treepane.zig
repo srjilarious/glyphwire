@@ -3,18 +3,23 @@
 
 //! zoe's file tree pane: its keys, scrolling, the tree search (`/` in
 //! the tree, and the finder's scopes), and creating or renaming entries
-//! in place. `Ui` methods moved out of ui.zig and aliased back.
+//! in place, deleting them, and the sidebar's own cut/copy/paste of
+//! files. `Ui` methods moved out of ui.zig and aliased back.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const tree_mod = @import("tree.zig");
 const fsops = @import("applib").fsops;
+const fileops = @import("applib").fileops;
+const trash_mod = @import("applib").trash;
+const homepath = @import("applib").homepath;
 const lineedit = @import("applib").lineedit;
 
 const ui = @import("ui.zig");
 const Ui = ui.Ui;
 const FindScope = ui.FindScope;
 const TreeEdit = ui.TreeEdit;
+const TreeAsk = ui.TreeAsk;
 const TreeFind = ui.TreeFind;
 const tree_scroll_margin = ui.tree_scroll_margin;
 const tree_trailing_rows = ui.tree_trailing_rows;
@@ -99,6 +104,8 @@ pub fn endsTreeSearch(key: []const u8) bool {
 pub fn treeKey(self: *Ui, ev: glyphwire.KeyEvent) !void {
     // So does the name field, and it never lets a key through.
     if (self.tree_edit != null) return self.treeEditKey(ev);
+    // As does a delete question.
+    if (self.tree_ask != null) return self.treeAskKey(ev);
 
     // A search owns the keyboard while it is up, the way the Ctrl+P
     // popup does: Tab steps the candidates, Backspace shortens the
@@ -126,6 +133,9 @@ pub fn treeKey(self: *Ui, ev: glyphwire.KeyEvent) !void {
     if (eq(u8, key, "F2")) try self.startTreeRename();
     if (eq(u8, key, "F7")) try self.startTreeCreate(.create_dir);
     if (eq(u8, key, "F4") and ev.mods.shift) try self.startTreeCreate(.create);
+    // And its delete pair, alongside `d` and `D`: F8 to the trash,
+    // Shift+F8 for good.
+    if (eq(u8, key, "F8")) try self.startTreeAsk(if (ev.mods.shift) .delete else .trash);
 }
 
 /// How far Page Up / Page Down move in the tree: `tree_page_lines`
@@ -155,6 +165,7 @@ pub fn treePageRows(self: *const Ui) usize {
 /// screen, `/` searches the whole tree. See `TreeFind`.
 pub fn treeText(self: *Ui, text: []const u8) !void {
     if (self.tree_edit != null) return self.treeEditText(text);
+    if (self.tree_ask != null) return self.treeAskText(text);
     if (self.find != null) return self.findText(text);
 
     var it = (std.unicode.Utf8View.init(text) catch return).iterator();
@@ -175,6 +186,15 @@ pub fn treeText(self: *Ui, text: []const u8) !void {
             // dropped -- it arrived before the field was there.
             'a' => return self.startTreeCreate(.create),
             'r' => return self.startTreeRename(),
+            // Also nvim-tree's: `d` deletes (to the trash here, after a
+            // y/n; `D` for good), `x` cuts, `c` copies, `p` pastes into
+            // the folder under the cursor. The question owns the
+            // keyboard from here, like the field.
+            'd' => return self.startTreeAsk(.trash),
+            'D' => return self.startTreeAsk(.delete),
+            'x' => try self.treeClipTake(true),
+            'c' => try self.treeClipTake(false),
+            'p' => return self.treePaste(),
             else => {},
         }
     }
@@ -482,6 +502,22 @@ pub fn commitTreeEdit(self: *Ui) !void {
                 self.setFocus(.buffer);
             }
         },
+        .paste => {
+            fsops.checkNewName(name) catch |err| {
+                te.err = treeEditError(err);
+                self.status_dirty = true;
+                return;
+            };
+            const dest = try std.fs.path.join(self.alloc, &.{ te.dir, name });
+            defer self.alloc.free(dest);
+            if (fsops.exists(self.io, dest)) {
+                te.err = treeEditError(error.PathAlreadyExists);
+                self.status_dirty = true;
+                return;
+            }
+            self.cancelTreeEdit();
+            try pasteTo(self, dest);
+        },
     }
 }
 
@@ -526,6 +562,244 @@ pub fn retargetBuffers(self: *Ui, old_abs: []const u8, new_abs: []const u8) void
             g.tabs_dirty = true;
         }
     }
+    self.status_dirty = true;
+}
+
+/// `c` (`cut` false) / `x` / Ctrl+Shift+X: puts the entry under the
+/// cursor on the sidebar's clipboard (`TreeClip`), replacing whatever
+/// was there. Nothing moves until `p`.
+pub fn treeClipTake(self: *Ui, cut: bool) !void {
+    self.cancelFind();
+    const e = self.tree.at(self.tree.cursor) orelse return;
+    // Copying a workspace folder somewhere is fine; moving it out from
+    // under its own header is `:rmfolder`'s business, as for `r`.
+    if (cut and e.is_root) {
+        self.buf.ed.setStatus("E: \"{s}\" is a workspace folder; move it outside zoe", .{e.name});
+        self.status_dirty = true;
+        return;
+    }
+    const path = try self.alloc.dupe(u8, e.path);
+    self.dropTreeClip();
+    self.tree_clip = .{ .path = path, .cut = cut, .is_dir = e.is_dir };
+    if (cut) {
+        self.buf.ed.setStatus(" Cut {s}  (p in another folder moves it there)", .{e.name});
+    } else {
+        self.buf.ed.setStatus(" Copied {s}  (p pastes a copy into the folder under the cursor)", .{e.name});
+    }
+    self.status_dirty = true;
+    // A cut row is drawn dim, and an earlier one isn't any more.
+    self.markTreeDirty(.full);
+}
+
+/// Empties the sidebar's clipboard. Safe to call when it is empty.
+pub fn dropTreeClip(self: *Ui) void {
+    const c = self.tree_clip orelse return;
+    self.alloc.free(c.path);
+    self.tree_clip = null;
+    if (c.cut) self.markTreeDirty(.full);
+}
+
+/// `p` / Ctrl+Shift+V: the clipboard entry into the folder under the
+/// cursor -- the row itself when it is a folder, else the one it is in,
+/// the same folder `a` creates in. A name that is taken there (always,
+/// for a copy into the folder it came from) opens the name field with a
+/// free `name (1).ext` in it rather than replacing anything.
+pub fn treePaste(self: *Ui) !void {
+    self.cancelFind();
+    const clip = self.tree_clip orelse {
+        self.buf.ed.setStatus("E: nothing to paste (c copies, x cuts)", .{});
+        self.status_dirty = true;
+        return;
+    };
+    if (!fsops.exists(self.io, clip.path)) {
+        self.buf.ed.setStatus("E: {s} is no longer there", .{std.fs.path.basename(clip.path)});
+        self.dropTreeClip();
+        self.status_dirty = true;
+        return;
+    }
+    const dir = self.tree.dirFor(self.tree.cursor);
+    if (clip.is_dir and fileops.isWithin(dir, clip.path)) {
+        self.buf.ed.setStatus("E: a folder can't go inside itself", .{});
+        self.status_dirty = true;
+        return;
+    }
+    const name = std.fs.path.basename(clip.path);
+    const dest = try std.fs.path.join(self.alloc, &.{ dir, name });
+    defer self.alloc.free(dest);
+
+    // Moving something to where it already is: done already.
+    if (clip.cut and std.mem.eql(u8, dest, clip.path)) {
+        self.buf.ed.setStatus(" {s} is already here", .{name});
+        self.dropTreeClip();
+        self.status_dirty = true;
+        return;
+    }
+    if (!fsops.exists(self.io, dest)) return pasteTo(self, dest);
+
+    // Taken: the name field, as for `a`, prefilled.
+    self.cancelTreeEdit();
+    const dir_owned = try self.alloc.dupe(u8, dir);
+    errdefer self.alloc.free(dir_owned);
+    const old_name = try self.alloc.dupe(u8, name);
+    errdefer self.alloc.free(old_name);
+    const free = try fsops.freeName(self.io, self.alloc, dir, name, clip.is_dir);
+    defer self.alloc.free(free);
+    var field = try lineedit.LineEdit.init(self.alloc, free);
+    errdefer field.deinit(self.alloc);
+    _ = field.moveTo(fsops.renameCaret(free, clip.is_dir));
+
+    var row: usize = 0;
+    var depth: usize = 0;
+    if (try self.tree.openDirRow(self.io, dir_owned)) |index| {
+        row = index + 1;
+        depth = self.tree.entries.items[index].depth + 1;
+        self.tree.cursor = index;
+    }
+    self.tree_edit = .{ .kind = .paste, .field = field, .dir = dir_owned, .old_name = old_name, .row = row, .depth = depth };
+    self.showTreeEdit();
+}
+
+/// Copies or moves the clipboard entry to `dest`, which is free. A move
+/// takes any open tab inside it along (as a rename does) and empties the
+/// clipboard; a copy leaves it for another paste.
+fn pasteTo(self: *Ui, dest: []const u8) !void {
+    const clip = self.tree_clip.?;
+    const op: fileops.Operation = .{
+        .kind = if (clip.cut) .move else .copy,
+        .sources = &.{clip.path},
+        .dest = dest,
+    };
+    // `dest` is free, so the one question the run could ask -- replace
+    // what's there? -- can't come up; quiet hooks skip and count the
+    // rest.
+    const result = op.run(self.io, self.alloc, fileops.quiet_hooks);
+    const name = std.fs.path.basename(dest);
+    if (result.failed > 0 or result.skipped > 0 or result.cancelled) {
+        // A copy can stop partway; whatever did land is shown.
+        const why = if (result.first_error) |err| treeEditError(err) else "E: not all of it could be copied";
+        self.buf.ed.setStatus("{s} ({s})", .{ why, name });
+        try self.refreshTree(dest);
+        self.status_dirty = true;
+        return;
+    }
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const where = homepath.collapseHome(std.fs.path.dirname(dest) orelse dest, self.environ.get("HOME"), &home_buf);
+    if (clip.cut) {
+        self.buf.ed.setStatus(" Moved {s} to {s}", .{ name, where });
+        self.retargetBuffers(clip.path, dest);
+        self.dropTreeClip();
+    } else {
+        self.buf.ed.setStatus(" Copied {s} to {s}", .{ name, where });
+    }
+    try self.refreshTree(dest);
+    self.status_dirty = true;
+}
+
+/// Ctrl+Shift+C in the sidebar: the entry's absolute path to the system
+/// clipboard, the way a selection is copied in the buffer.
+pub fn copyTreePath(self: *Ui) !void {
+    const e = self.tree.at(self.tree.cursor) orelse return;
+    self.client.setClipboard(e.path) catch {};
+    self.buf.ed.setStatus(" Copied path {s}", .{e.path});
+    self.status_dirty = true;
+}
+
+/// `d` / F8 (`.trash`) and `D` / Shift+F8 (`.delete`): puts the
+/// question for the entry under the cursor on the statusline. Nothing
+/// happens until it is answered `y`.
+pub fn startTreeAsk(self: *Ui, kind: TreeAsk.Kind) !void {
+    self.cancelFind();
+    self.cancelTreeAsk();
+    const e = self.tree.at(self.tree.cursor) orelse return;
+    if (e.is_root) {
+        self.buf.ed.setStatus("E: \"{s}\" is a workspace folder; :rmfolder takes it out of the sidebar", .{e.name});
+        self.status_dirty = true;
+        return;
+    }
+    self.tree_ask = .{ .path = try self.alloc.dupe(u8, e.path), .kind = kind };
+    self.status_dirty = true;
+}
+
+/// Drops the question, which is answering no. Safe to call when there
+/// is none.
+pub fn cancelTreeAsk(self: *Ui) void {
+    const a = self.tree_ask orelse return;
+    self.alloc.free(a.path);
+    self.tree_ask = null;
+    self.status_dirty = true;
+}
+
+/// A named key while the question is up. The answer comes as text
+/// (`treeAskText`), and every printable key arrives as both -- so, as
+/// with `endsTreeSearch`, only a closed list of keys that type nothing
+/// answers no here. Cancelling on any other key would let its text half
+/// through to the tree as a command (`space` opening the entry).
+pub fn treeAskKey(self: *Ui, ev: glyphwire.KeyEvent) !void {
+    const no = [_][]const u8{ "escape", "tab", "backspace", "delete" };
+    for (no) |k| {
+        if (std.mem.eql(u8, ev.key, k)) return self.cancelTreeAsk();
+    }
+    if (endsTreeSearch(ev.key)) self.cancelTreeAsk();
+}
+
+/// The answer: `y` goes ahead, any other character is no.
+pub fn treeAskText(self: *Ui, text: []const u8) !void {
+    if (text.len == 0) return;
+    if (text[0] != 'y' and text[0] != 'Y') return self.cancelTreeAsk();
+    const a = self.tree_ask.?;
+    self.tree_ask = null;
+    defer self.alloc.free(a.path);
+    try removeTreeEntry(self, a);
+}
+
+/// Carries out a `TreeAsk` answered yes. An entry the trash can't take
+/// (no trash on its filesystem, or it is in one) is asked about again,
+/// as a delete for good -- salacommander's F8 does the same.
+fn removeTreeEntry(self: *Ui, a: TreeAsk) !void {
+    const name = std.fs.path.basename(a.path);
+    switch (a.kind) {
+        .trash => {
+            const home_trash = try trash_mod.homeTrashPath(self.alloc, self.environ.get("XDG_DATA_HOME"), self.environ.get("HOME"));
+            defer if (home_trash) |h| self.alloc.free(h);
+            const now = std.Io.Clock.real.now(self.io).toSeconds();
+            var date_buf: [32]u8 = undefined;
+            const opts: trash_mod.Options = .{
+                .home_trash = home_trash,
+                .deletion_date = trash_mod.formatDeletionDate(&date_buf, now, trash_mod.localUtcOffset(now)),
+                .uid = trash_mod.currentUid(),
+            };
+            trash_mod.moveToTrash(self.io, self.alloc, a.path, opts) catch |err| switch (err) {
+                error.NoTrash, error.InTrash => {
+                    self.tree_ask = .{ .path = try self.alloc.dupe(u8, a.path), .kind = .delete, .no_trash = true };
+                    self.status_dirty = true;
+                    return;
+                },
+                else => {
+                    self.buf.ed.setStatus("{s} ({s})", .{ treeEditError(err), name });
+                    self.status_dirty = true;
+                    return;
+                },
+            };
+            self.buf.ed.setStatus(" Moved {s} to the trash", .{name});
+        },
+        .delete => {
+            std.Io.Dir.cwd().deleteTree(self.io, a.path) catch |err| {
+                self.buf.ed.setStatus("{s} ({s})", .{ treeEditError(err), name });
+                self.status_dirty = true;
+                return;
+            };
+            self.buf.ed.setStatus(" Deleted {s}", .{name});
+        },
+    }
+    if (self.tree_clip) |c| {
+        if (fileops.isWithin(c.path, a.path)) self.dropTreeClip();
+    }
+    // The row below slides up into the gone one's place, and the
+    // cursor stays on that place rather than jumping to the top.
+    const row = self.tree.cursor;
+    try self.tree.reload(self.io);
+    self.tree.cursor = @min(row, self.tree.len() -| 1);
+    try self.treeChanged();
     self.status_dirty = true;
 }
 

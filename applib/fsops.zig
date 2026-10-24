@@ -8,8 +8,7 @@
 //! replaces something that already exists -- a create or rename that
 //! would collide is an error the caller shows, and nothing is touched.
 //!
-//! The multi-source copy/move/delete machinery stays in
-//! `salacommander/fileops.zig`; nothing else needs it.
+//! The multi-source copy/move/delete machinery is `fileops.zig`.
 
 const std = @import("std");
 
@@ -85,6 +84,30 @@ pub fn renameCaret(name: []const u8, is_dir: bool) usize {
     const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return name.len;
     if (dot == 0) return name.len;
     return dot;
+}
+
+/// `name` with ` (n)` put in where `renameCaret` would put the caret:
+/// `notes (2).txt`, `src (2)`, `.bashrc (2)`. What a paste that collides
+/// offers instead (zoe's sidebar `p`). Caller owns the result.
+pub fn numberedName(alloc: std.mem.Allocator, name: []const u8, is_dir: bool, n: usize) ![]u8 {
+    const at = renameCaret(name, is_dir);
+    return std.fmt.allocPrint(alloc, "{s} ({d}){s}", .{ name[0..at], n, name[at..] });
+}
+
+/// The first `numberedName` from ` (1)` up that nothing in `dir` is
+/// called. Caller owns the result.
+pub fn freeName(io: std.Io, alloc: std.mem.Allocator, dir: []const u8, name: []const u8, is_dir: bool) ![]u8 {
+    var n: usize = 1;
+    while (true) : (n += 1) {
+        const candidate = try numberedName(alloc, name, is_dir, n);
+        const path = std.fs.path.join(alloc, &.{ dir, candidate }) catch |err| {
+            alloc.free(candidate);
+            return err;
+        };
+        defer alloc.free(path);
+        if (!exists(io, path)) return candidate;
+        alloc.free(candidate);
+    }
 }
 
 /// Whether anything -- file, directory, dangling symlink -- is at `path`.

@@ -910,6 +910,57 @@ pub fn makeFileCreatesParentsAndNeverTruncatesTest(io: std.Io, alloc: std.mem.Al
     try testz.expectEqualStr(after, "body");
 }
 
+pub fn numberedNameGoesBeforeTheExtensionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const fsops = @import("applib").fsops;
+    const cases = [_]struct { name: []const u8, is_dir: bool, want: []const u8 }{
+        .{ .name = "notes.txt", .is_dir = false, .want = "notes (2).txt" },
+        .{ .name = "a.tar.gz", .is_dir = false, .want = "a.tar (2).gz" },
+        .{ .name = "src.old", .is_dir = true, .want = "src.old (2)" },
+        .{ .name = ".bashrc", .is_dir = false, .want = ".bashrc (2)" },
+        .{ .name = "Makefile", .is_dir = false, .want = "Makefile (2)" },
+    };
+    for (cases) |c| {
+        const got = try fsops.numberedName(alloc, c.name, c.is_dir, 2);
+        defer alloc.free(got);
+        try testz.expectEqualStr(got, c.want);
+    }
+}
+
+pub fn freeNameSkipsTakenNumbersTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const fsops = @import("applib").fsops;
+    var s = try Scratch.init(io, alloc, "freename");
+    defer s.deinit();
+    try s.file("a.txt", "a");
+    try s.file("a (1).txt", "a");
+    const got = try fsops.freeName(io, alloc, s.path, "a.txt", false);
+    defer alloc.free(got);
+    try testz.expectEqualStr(got, "a (2).txt");
+}
+
+/// zoe's sidebar `p` runs a single-source copy or move *to* a free
+/// name in the same folder: the copy is a sibling, the move a rename.
+pub fn copyAndMoveToAFreeSiblingNameTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "sibling");
+    defer s.deinit();
+    try s.mkdir("d");
+    try s.file("d/x.txt", "x");
+    const src = try s.abs("d");
+    defer alloc.free(src);
+    const copy = try s.abs("d (1)");
+    defer alloc.free(copy);
+    const r = (fileops.Operation{ .kind = .copy, .sources = &.{src}, .dest = copy }).run(io, alloc, fileops.quiet_hooks);
+    try testz.expectEqual(r.failed, 0);
+    try testz.expectTrue(s.exists("d/x.txt"));
+    try testz.expectTrue(s.exists("d (1)/x.txt"));
+
+    const moved = try s.abs("e");
+    defer alloc.free(moved);
+    const m = (fileops.Operation{ .kind = .move, .sources = &.{copy}, .dest = moved }).run(io, alloc, fileops.quiet_hooks);
+    try testz.expectEqual(m.failed, 0);
+    try testz.expectFalse(s.exists("d (1)"));
+    try testz.expectTrue(s.exists("e/x.txt"));
+}
+
 pub fn checkNewPathStaysUnderTheDirectoryTest(_: std.Io, _: std.mem.Allocator) !void {
     const fsops = @import("applib").fsops;
     try fsops.checkNewPath("new.zig");

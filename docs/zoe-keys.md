@@ -391,11 +391,22 @@ Escape back to the buffer.
 | `a` / Shift+F4 | New file in the folder under the cursor (or the cursor file's folder). End the name with `/` for a folder; `sub/new.zig` makes `sub` too. A new file opens in a tab. |
 | F7 | New folder there |
 | `r` / F2 | Rename in place, caret before the extension |
+| `d` / F8 | Move to the desktop trash, after a `y`/`n` on the status line. If the filesystem has no trash, it asks again to delete for good. |
+| `D` / Shift+F8 | Delete for good (folders and all), after a `y`/`n` |
+| `c` | Copy the entry to the sidebar's clipboard |
+| `x` / Ctrl+Shift+X | Cut it (drawn dim until it is pasted) |
+| `p` / Ctrl+Shift+V | Paste into the folder under the cursor (or the cursor file's folder). A copy stays on the clipboard for more pastes; a cut is used up. |
+| Ctrl+Shift+C | Copy the entry's absolute path to the system clipboard |
 
 The name is typed into the row itself; Enter commits, Escape (or leaving
 the tree) abandons it. A name that already exists keeps the field open
 with the reason on the status line. Renaming a file or folder retargets
-any open tab inside it.
+any open tab inside it, and so does moving one with `x` and `p`.
+
+A paste never replaces anything. When the name is taken (always, for a
+copy into the folder it came from) the name field opens in a new row with
+a free `name (1).ext` in it: Enter takes it, or type another. Only `y`
+answers yes to a delete; any other key, or leaving the tree, is no.
 
 The tree follows the disk: a file or folder created, deleted or renamed
 in the root or any open folder shows up within about a second, keeping

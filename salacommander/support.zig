@@ -5,7 +5,7 @@
 
 pub const pane = @import("pane.zig");
 pub const dirhistory = @import("dirhistory.zig");
-pub const fileops = @import("fileops.zig");
+pub const fileops = @import("applib").fileops;
 pub const dialog = @import("dialog.zig");
 pub const actions = @import("actions.zig");
 pub const openaction = @import("openaction.zig");

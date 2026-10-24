@@ -28,7 +28,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const fileops = @import("fileops.zig");
+const fileops = @import("applib").fileops;
 const attrs = @import("attrs.zig");
 
 /// The first argument that turns salacommander into the helper.

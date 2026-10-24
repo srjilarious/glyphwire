@@ -373,7 +373,8 @@ pub const TreeEdit = struct {
     field: lineedit.LineEdit = .{},
     /// The directory the entry is made in or renamed within. Owned.
     dir: []u8,
-    /// A rename's current name. Owned; empty for a create.
+    /// A rename's current name, or the name of the entry a paste is
+    /// copying or moving. Owned; empty for a create.
     old_name: []u8,
     /// The pane row the field is drawn on.
     row: usize,
@@ -391,6 +392,10 @@ pub const TreeEdit = struct {
         /// F7: a directory, slash or not.
         create_dir,
         rename,
+        /// `p` onto a name that is taken: the clipboard entry (`TreeClip`)
+        /// lands under the name typed here instead, prefilled with a free
+        /// `name (1).ext`.
+        paste,
     };
 
     pub fn deinit(self: *TreeEdit, alloc: std.mem.Allocator) void {
@@ -403,6 +408,35 @@ pub const TreeEdit = struct {
     pub fn inserts(self: *const TreeEdit) bool {
         return self.kind != .rename;
     }
+};
+
+/// `c` / `x` in the sidebar: the entry the next `p` copies or moves. One
+/// entry, kept in zoe rather than on the system clipboard (which only
+/// carries text). A copy stays for more pastes; a cut is used up by the
+/// first one, and until then its row is drawn dim.
+pub const TreeClip = struct {
+    /// Absolute. Owned.
+    path: []u8,
+    cut: bool,
+    is_dir: bool,
+};
+
+/// `d` / `D` in the sidebar: the yes/no on the statusline before anything
+/// is removed. `y` answers yes; any other key, or leaving the tree, no.
+pub const TreeAsk = struct {
+    /// Absolute. Owned.
+    path: []u8,
+    kind: Kind,
+    /// A `.delete` asked because the trash couldn't take the entry (no
+    /// trash on its filesystem), so the question says why.
+    no_trash: bool = false,
+
+    pub const Kind = enum {
+        /// `d`: to the freedesktop trash.
+        trash,
+        /// `D`, or a `d` whose entry the trash can't take: gone for good.
+        delete,
+    };
 };
 
 /// Which set of names a tree-pane search is walking.
@@ -922,6 +956,10 @@ pub const Ui = struct {
     tree_edit: ?TreeEdit = null,
     /// Only the field's row needs repainting (a keystroke in it).
     tree_edit_dirty: bool = false,
+    /// What the sidebar's `p` pastes. See `TreeClip`.
+    tree_clip: ?TreeClip = null,
+    /// The sidebar's delete question while it waits for `y`. See `TreeAsk`.
+    tree_ask: ?TreeAsk = null,
 
     /// An in-progress left-button drag in the buffer pane. `anchor` is
     /// the buffer byte offset the press landed on; `moved` flips true the
@@ -1947,6 +1985,8 @@ pub const Ui = struct {
         if (self.theme_choices.len > 0) self.alloc.free(self.theme_choices);
         if (self.find) |*f| f.deinit(self.alloc);
         if (self.tree_edit) |*te| te.deinit(self.alloc);
+        if (self.tree_clip) |c| self.alloc.free(c.path);
+        if (self.tree_ask) |a| self.alloc.free(a.path);
         if (self.prev_cwd) |p| self.alloc.free(p);
         if (self.ws_file) |p| self.alloc.free(p);
         if (self.backup_dir) |p| self.alloc.free(p);
@@ -2530,8 +2570,14 @@ pub const Ui = struct {
             .jump => return self.startJump(),
             // Through the system clipboard. (Ctrl+Shift+C is swallowed by
             // glyphwire-host, which broadcasts a `copy_request` instead --
-            // see the `.copy_request` arm.)
+            // see the `.copy_request` arm.) In the sidebar, the same chords
+            // cut and paste files through its own clipboard: `x` and `p`.
             .cut => {
+                if (self.focus == .tree) {
+                    if (self.tree_edit != null or self.tree_ask != null) return false;
+                    try self.treeClipTake(true);
+                    return true;
+                }
                 if (!in_buffer) return false;
                 try self.applyOutcome(try self.buf.ed.clipboardCut());
                 self.buf.full_redraw = true;
@@ -2539,6 +2585,11 @@ pub const Ui = struct {
                 self.status_dirty = true;
             },
             .paste => {
+                if (self.focus == .tree) {
+                    if (self.tree_edit != null or self.tree_ask != null) return false;
+                    try self.treePaste();
+                    return true;
+                }
                 if (!in_buffer) return false;
                 try self.pasteFromClipboard(true);
             },
@@ -2689,6 +2740,14 @@ pub const Ui = struct {
     pub const commitTreeEdit = treepane.commitTreeEdit;
     pub const treeEditError = treepane.treeEditError;
     pub const retargetBuffers = treepane.retargetBuffers;
+    pub const treeClipTake = treepane.treeClipTake;
+    pub const dropTreeClip = treepane.dropTreeClip;
+    pub const treePaste = treepane.treePaste;
+    pub const copyTreePath = treepane.copyTreePath;
+    pub const startTreeAsk = treepane.startTreeAsk;
+    pub const cancelTreeAsk = treepane.cancelTreeAsk;
+    pub const treeAskKey = treepane.treeAskKey;
+    pub const treeAskText = treepane.treeAskText;
 
     // ── Loop ────────────────────────────────────────────────────────────
 
@@ -3192,7 +3251,16 @@ pub const Ui = struct {
                         self.buf.full_redraw = true;
                         self.grp.buffer_dirty = true;
                     }
+                } else if (self.tree_edit != null) {
+                    // Into the name field, as typing.
+                    try self.treeEditText(t.text);
+                } else if (self.tree_ask == null and self.find == null) {
+                    // Ctrl+Shift+V in the sidebar pastes its own
+                    // clipboard (`p`); the system clipboard's text has
+                    // nowhere to go there.
+                    try self.treePaste();
                 }
+                self.status_dirty = true;
             },
             // Ctrl+Shift+C with no host selection: glyphwire-host asks its
             // `"clipboard"` subscribers to supply the copy. Only answer
@@ -3203,6 +3271,12 @@ pub const Ui = struct {
             // While the shell panel is up the request is its business
             // (it copies its own selection), not the buffer's.
             .copy_request => if (self.isVisible() and !self.shell.isFocused()) {
+                // In the sidebar it copies the entry's path instead.
+                if (self.focus == .tree) {
+                    try self.copyTreePath();
+                    self.status_dirty = true;
+                    return;
+                }
                 try self.applyOutcome(try self.buf.ed.clipboardCopy());
                 self.grp.buffer_dirty = true;
                 self.status_dirty = true;
@@ -3281,8 +3355,10 @@ pub const Ui = struct {
         // being what the keyboard drives.
         if (to != .tree) {
             self.cancelFind();
-            // A half-typed name is abandoned the same way.
+            // A half-typed name is abandoned the same way, and so is
+            // a delete question: no is the safe answer.
             self.cancelTreeEdit();
+            self.cancelTreeAsk();
         }
         // Only the highlight appears or disappears: the listing itself is
         // untouched by a focus change.
@@ -3299,6 +3375,7 @@ pub const Ui = struct {
         } else if (self.focus == .tree) {
             self.focus = .buffer;
             self.cancelFind();
+            self.cancelTreeAsk();
         }
         try self.setTreeVisible(!self.tree_visible);
     }
@@ -3808,8 +3885,10 @@ pub const Ui = struct {
         if (ev.cell.row < b.row or ev.cell.row >= b.row + b.rows) return;
         if (ev.cell.col < b.col or ev.cell.col >= b.col + b.cols) return;
         // A click abandons a name being typed -- and takes the virtual
-        // row with it, so the index below is the tree's own.
+        // row with it, so the index below is the tree's own. A delete
+        // question is answered no.
         self.cancelTreeEdit();
+        self.cancelTreeAsk();
 
         const index = self.tree_scroll.row + (ev.cell.row - b.row);
         if (index >= self.tree.len()) return;

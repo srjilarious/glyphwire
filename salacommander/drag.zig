@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const pane_mod = @import("pane.zig");
-const fileops = @import("fileops.zig");
+const fileops = @import("applib").fileops;
 
 const Pane = pane_mod.Pane;
 

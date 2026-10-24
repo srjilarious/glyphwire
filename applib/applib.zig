@@ -34,9 +34,11 @@
 //!                (salacommander, zoe's sidebar)
 //!   `tabstrip`   a tab strip's scroll arrows and window (zoe,
 //!                salacommander)
+//!   `fileops`    copy / move / trash / delete over absolute paths, with
+//!                the questions going out through hooks (salacommander's
+//!                F5/F6/F8, zoe's sidebar `p`)
 //!   `trash`      the freedesktop.org trash: move an entry to it
-//!                (salacommander's F8; here so zoe's sidebar can offer
-//!                the same when it grows a delete)
+//!                (`fileops`, salacommander's F8, zoe's sidebar `d`)
 //!   `homepath`   `~` <-> `$HOME` (gw-shell, zoe), and a typed path
 //!                made absolute (gw-ls, gw-grep, gw-read, gwmd,
 //!                salacommander, zoe)
@@ -106,6 +108,7 @@ pub const splittree = @import("splittree.zig");
 pub const walk = @import("walk.zig");
 pub const listcursor = @import("listcursor");
 pub const fsops = @import("fsops.zig");
+pub const fileops = @import("fileops.zig");
 pub const trash = @import("trash.zig");
 pub const pathcomplete = @import("pathcomplete.zig");
 pub const tabstrip = @import("tabstrip.zig");

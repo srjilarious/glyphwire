@@ -1,14 +1,14 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
-//! The file operations behind F2/F5/F6/F7/F8: rename, copy, move, make
-//! directory, move to the trash and delete, run synchronously over
-//! absolute paths.
+//! The file operations behind salacommander's F2/F5/F6/F7/F8 and zoe's
+//! sidebar `p`: rename, copy, move, make directory, move to
+//! the trash and delete, run synchronously over absolute paths.
 //!
 //! No UI lives here. Whatever needs a person -- "the target exists,
 //! overwrite it?", "this one failed, carry on?", "how far along are we?"
-//! -- goes out through `Hooks`, so the same `Operation` runs under the
-//! modal dialogs in `ui.zig`, under a test that answers every question
+//! -- goes out through `Hooks`, so the same `Operation` runs under
+//! salacommander's modal dialogs, under zoe's one-line prompts, under a test that answers every question
 //! from a script, or (later) on a worker thread that forwards the
 //! questions to the UI.
 //!
@@ -18,8 +18,8 @@
 //! several sources with a non-directory `dest` is an error.
 
 const std = @import("std");
-const fsops = @import("applib").fsops;
-const trash_mod = @import("applib").trash;
+const fsops = @import("fsops.zig");
+const trash_mod = @import("trash.zig");
 
 pub const Kind = enum {
     copy,

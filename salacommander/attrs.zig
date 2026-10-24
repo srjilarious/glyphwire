@@ -20,7 +20,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const fileops = @import("fileops.zig");
+const fileops = @import("applib").fileops;
 
 /// Which entries a change applies to. The tag names cross the sudo
 /// helper's pipe, so renaming one breaks a helper of another version.

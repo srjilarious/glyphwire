@@ -51,6 +51,9 @@ A modal text editor: vim's grammar with VS Code's keys alongside it.
 - Resting the pointer on a tab shows the file's full path. A strip with
   more tabs than fit scrolls sideways with the wheel or the `‹` / `›`
   arrows at its ends, and Ctrl+Shift+E finds the current file in the tree.
+- The tree manages files in place, nvim-tree style: `a` new, `r` rename,
+  `d` to the trash (`D` for good) after a `y`/`n`, `c` / `x` / `p` copy,
+  cut and paste, Ctrl+Shift+C the entry's path.
 - Ctrl+` drops a `gw-shell` into a panel over the bottom of the window for
   builds and tests. Drag its top edge to resize it; clicking the tree or a
   buffer takes the keyboard back with the panel still up.

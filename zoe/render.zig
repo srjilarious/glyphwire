@@ -1888,7 +1888,10 @@ pub fn renderTree(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
                 // mysteriously doubled in length.
                 // A workspace folder's header stands out from the
                 // directories under it, the way VS Code's does.
-                .fg = if (e.is_root)
+                // So is one cut with `x`, until the paste moves it.
+                .fg = if (isCutEntry(self, e))
+                    (if (e.is_dir) role(.hidden_dir) else role(.hidden))
+                else if (e.is_root)
                     role(.fg_strong)
                 else if (e.hidden)
                     (if (e.is_dir) role(.hidden_dir) else role(.hidden))
@@ -1922,6 +1925,12 @@ pub fn renderTree(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     }
 
     self.tree_painted = .{ .row = self.tree.cursor, .focused = self.focus == .tree, .shown = !editing };
+}
+
+/// Whether `e` is the entry the sidebar's clipboard holds as a cut.
+fn isCutEntry(self: *const Ui, e: tree_mod.Entry) bool {
+    const c = self.tree_clip orelse return false;
+    return c.cut and std.mem.eql(u8, c.path, e.path);
 }
 
 /// The tree cursor's row: the selection colour while the tree has the
@@ -1972,10 +1981,15 @@ pub fn renderTreeEditRow(self: *Ui, batch: *glyphwire.client.Client.Batch, conte
     }
 
     // A rename keeps the entry's icon; a create shows what the typed
-    // name will make, so a trailing `/` turns it into a folder.
+    // name will make, so a trailing `/` turns it into a folder. A paste
+    // shows what is being pasted.
     const icon: []const u8 = switch (te.kind) {
         .rename => if (self.tree.at(te.row)) |e| iconFor(e) else "file/folder",
         .create_dir => "file/folder",
+        .paste => if (self.tree_clip) |c|
+            (if (c.is_dir) "file/folder" else ls_icons.iconForFileName(text) orelse ls_icons.iconForExtension(text))
+        else
+            "file/folder",
         .create => if (std.mem.endsWith(u8, text, "/"))
             "file/folder"
         else
@@ -2179,7 +2193,20 @@ pub fn renderStatus(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     // readable while it runs.
     // The sidebar's name field says what Enter will do, or why the
     // last one didn't.
-    if (self.tree_edit) |te| {
+    if (self.tree_ask) |a| {
+        // The delete question, in the error colour: it is the one
+        // prompt here whose yes can't be taken back from inside zoe.
+        fg = role(.message_error);
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const what = homepath.collapseHome(a.path, self.environ.get("HOME"), &home_buf);
+        switch (a.kind) {
+            .trash => try line.print(self.alloc, " Move {s} to the trash? (y/n)", .{what}),
+            .delete => if (a.no_trash)
+                try line.print(self.alloc, " {s} can't go to the trash. Delete it for good? (y/n)", .{what})
+            else
+                try line.print(self.alloc, " Delete {s} for good? (y/n)", .{what}),
+        }
+    } else if (self.tree_edit) |te| {
         if (te.err) |msg| {
             fg = role(.message_error);
             try line.print(self.alloc, " {s}", .{msg});
@@ -2190,6 +2217,7 @@ pub fn renderStatus(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
                 .create => try line.print(self.alloc, " New file in {s}  (end with / for a folder; Enter creates, Esc cancels)", .{where}),
                 .create_dir => try line.print(self.alloc, " New folder in {s}  (Enter creates, Esc cancels)", .{where}),
                 .rename => try line.print(self.alloc, " Rename {s}  (Enter renames, Esc cancels)", .{te.old_name}),
+                .paste => try line.print(self.alloc, " {s} is taken in {s}; paste under a new name  (Enter pastes, Esc cancels)", .{ te.old_name, where }),
             }
         }
     } else if (self.find) |f| {
@@ -2251,7 +2279,8 @@ pub fn renderStatus(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     // Only the plain status form starts with the mode word; the tree's
     // search and name field take the row with text of their own.
     const show_mode = self.buf.ed.mode != .command and self.buf.ed.mode != .search and
-        self.buf.ed.status.items.len == 0 and self.find == null and self.tree_edit == null;
+        self.buf.ed.status.items.len == 0 and self.find == null and self.tree_edit == null and
+        self.tree_ask == null;
     const opts: glyphwire.client.Client.TextOpts = .{
         .layer = self.status_layer,
         .row = 0,
