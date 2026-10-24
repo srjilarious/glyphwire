@@ -515,11 +515,12 @@ pub fn gifDimensions(bytes: []const u8) ImageError!ImageInfo {
 /// five from the same run of rects, so the marginal cost of the last three
 /// is a pattern table.
 ///
-/// Note the deliberate gap: bold, italic and strikethrough stay *parsed
-/// and ignored* (see `SgrPen`). Underline earns its `Style` field because
-/// it is drawn from geometry the host already has (a rect at the cell's
-/// baseline); the others need a second and third font face in the atlas,
-/// which is a different piece of work.
+/// Note the deliberate gap: bold and italic stay *parsed and ignored* (see
+/// `SgrPen`). Underline earns its `Style` field because it is drawn from
+/// geometry the host already has (a rect at the cell's baseline), and
+/// strikethrough (`Style.strike`) for the same reason; the others need a
+/// second and third font face in the atlas, which is a different piece of
+/// work.
 pub const Underline = enum { none, single, double, curly, dotted, dashed };
 
 /// A cell's underline: which style, and in what colour. `color` null means
@@ -540,12 +541,26 @@ pub const UnderlineStyle = struct {
     }
 };
 
+/// The lines a write draws on its text: an underline, and a strikethrough.
+/// Bundled because they travel together from the SGR pen and a
+/// `write_text`'s own arguments down to each cell's `Style`.
+pub const Decoration = struct {
+    underline: UnderlineStyle = .{},
+    strike: bool = false,
+};
+
 pub const Style = struct {
     fg: Color,
     bg: Background,
     /// See `UnderlineStyle`. Defaults to no underline, so every existing
     /// `Style` initializer means what it did before this field existed.
     underline: UnderlineStyle = .{},
+    /// A line through the text, in its `fg` -- `write_text`'s
+    /// `strikethrough`, or SGR `9`. On a scaled glyph only the glyph's own
+    /// cell carries it, and the host draws it across the whole footprint
+    /// at the block's middle; the fill around the glyph never does, so the
+    /// line isn't drawn twice at the wrong height.
+    strike: bool = false,
 };
 
 /// The blank cell's style. `bg` is **fully transparent** (alpha 0), and
@@ -2429,11 +2444,14 @@ pub const Layer = struct {
         /// underline out to the full width, and a diagnostic squiggle
         /// should stop at the end of the token it marks.
         underline: UnderlineStyle = .{},
+        /// A line through every glyph the write draws (`Style.strike`).
+        /// Like `underline`, never applied to `pad`'s blanks.
+        strikethrough: bool = false,
     };
 
     /// `writeTextTaggedScaled` with `WriteOpts` -- a single styled run.
     pub fn writeTextOpts(self: *Layer, text: []const u8, fg: Color, bg: ?Background, opts: WriteOpts) !void {
-        const runs = [_]TextRun{.{ .text = text, .fg = fg, .bg = bg, .metadata_id = opts.metadata_id, .scale = opts.scale, .underline = opts.underline }};
+        const runs = [_]TextRun{.{ .text = text, .fg = fg, .bg = bg, .metadata_id = opts.metadata_id, .scale = opts.scale, .underline = opts.underline, .strikethrough = opts.strikethrough }};
         return self.writeRuns(&runs, .{ .max_cols = opts.max_cols, .pad = opts.pad, .pad_fg = fg, .pad_bg = bg, .pad_metadata_id = opts.metadata_id, .selectable = opts.selectable, .masked = opts.masked, .copy_text = opts.copy_text, .line_join = opts.line_join });
     }
 
@@ -2451,6 +2469,8 @@ pub const Layer = struct {
         /// underline part of a row -- which is the whole point for a
         /// diagnostic span inside a syntax-coloured line.
         underline: UnderlineStyle = .{},
+        /// See `WriteOpts.strikethrough`. Per run, like `underline`.
+        strikethrough: bool = false,
     };
 
     /// The whole-write options for `writeRuns`: clipping and padding apply
@@ -2510,7 +2530,7 @@ pub const Layer = struct {
             var it = (std.unicode.Utf8View.init(r.text) catch unreachable).iterator();
             while (it.nextCodepointSlice()) |cp_bytes| {
                 if (cp_bytes.len == 1 and try vt.consumeControl(self, cp_bytes[0])) continue;
-                const eff = self.vt.pen.resolve(r.fg, r.bg, r.underline);
+                const eff = self.vt.pen.resolve(r.fg, r.bg, .{ .underline = r.underline, .strike = r.strikethrough });
                 // While the shifted-in charset is line drawing, a byte in
                 // `` ` ``..`~` names a box-drawing/symbol glyph, not itself
                 // -- see `EscState`'s charset paragraph and `acsGraphic`.
@@ -2519,8 +2539,8 @@ pub const Layer = struct {
                     var buf: [4]u8 = undefined;
                     const n = std.unicode.utf8Encode(vt.acsGraphic(cp_bytes[0]), &buf) catch unreachable;
                     if (self.vt.insert_mode) self.insertCellsFill(1, .{});
-                    last_glyph = self.putRunGlyph(buf[0..n], 1, eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end) orelse break :runs;
-                    vt.noteLastGlyph(self, buf[0..n], 1, eff.fg, eff.bg, eff.underline);
+                    last_glyph = self.putRunGlyph(buf[0..n], 1, eff.fg, eff.bg, r.metadata_id, r.scale, eff.deco, clip_end) orelse break :runs;
+                    vt.noteLastGlyph(self, buf[0..n], 1, eff.fg, eff.bg, eff.deco);
                     continue;
                 }
                 const cp = std.unicode.utf8Decode(cp_bytes) catch 0xFFFD;
@@ -2536,8 +2556,8 @@ pub const Layer = struct {
                 }
                 const w = codepointWidth(cp);
                 if (self.vt.insert_mode) self.insertCellsFill(w, .{});
-                last_glyph = self.putRunGlyph(cp_bytes, w, eff.fg, eff.bg, r.metadata_id, r.scale, eff.underline, clip_end) orelse break :runs;
-                vt.noteLastGlyph(self, cp_bytes, w, eff.fg, eff.bg, eff.underline);
+                last_glyph = self.putRunGlyph(cp_bytes, w, eff.fg, eff.bg, r.metadata_id, r.scale, eff.deco, clip_end) orelse break :runs;
+                vt.noteLastGlyph(self, cp_bytes, w, eff.fg, eff.bg, eff.deco);
             }
         }
         if (opts.line_join != .newline) {
@@ -2725,9 +2745,10 @@ pub const Layer = struct {
         bg: ?Background,
         metadata_id: ?MetadataHandle,
         scale: TextScale,
-        ul: UnderlineStyle,
+        deco: Decoration,
         clip_end: ?usize,
     ) ?GlyphPos {
+        const ul = deco.underline;
         const pitch = scaledPitch(scale);
         const footprint = @as(usize, w) * pitch;
         // A scaled glyph's underline belongs at the bottom of the *block*
@@ -2746,13 +2767,15 @@ pub const Layer = struct {
             self.cursor.col = 0;
             self.cursor.row += 1;
         }
-        self.putAtCursor(bytes, w, fg, bg, metadata_id, scale, glyph_row_ul);
+        // The strikethrough goes on the glyph's own cell only: the host
+        // draws it from there across the footprint (`Style.strike`).
+        self.putAtCursor(bytes, w, fg, bg, metadata_id, scale, .{ .underline = glyph_row_ul, .strike = deco.strike });
         // Read back after the put, which may have wrapped the glyph.
         const row = self.cursor.row;
         const start_col = self.cursor.col - w;
         var extra = footprint - w;
         while (extra > 0 and self.cursor.col < self.width) : (extra -= 1) {
-            self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1, glyph_row_ul);
+            self.putAtCursor(" ", 1, fg, bg, metadata_id, .x1, .{ .underline = glyph_row_ul });
         }
         const end_col = self.cursor.col;
         var r = row + 1;
@@ -2783,6 +2806,7 @@ pub const Layer = struct {
         c.setGrapheme(" ");
         c.style.fg = fg;
         c.style.underline = ul;
+        c.style.strike = false;
         if (bg) |b| c.style.bg = b;
         c.metadata_id = metadata_id;
         c.meta_focus = false;
@@ -2811,7 +2835,7 @@ pub const Layer = struct {
     /// screen's last row overwrote that row in place. With autowrap off
     /// (DECAWM, `?7l`) there is no wrap: the glyph lands on the last
     /// column(s) and the cursor stays there.
-    pub fn putAtCursor(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale, ul: UnderlineStyle) void {
+    pub fn putAtCursor(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale, deco: Decoration) void {
         if (self.cursor.col + w > self.width) {
             if (self.vt.autowrap) {
                 self.cursor.col = 0;
@@ -2839,7 +2863,8 @@ pub const Layer = struct {
         // Set, not merged, like `fg` -- a write with no underline clears
         // whatever the cell carried before, which is what makes a repaint
         // of a row enough to take a stale squiggle off it.
-        c.style.underline = ul;
+        c.style.underline = deco.underline;
+        c.style.strike = deco.strike;
         if (bg) |b| c.style.bg = b;
         c.metadata_id = metadata_id;
         c.meta_focus = false;

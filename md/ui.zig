@@ -517,6 +517,9 @@ pub const Ui = struct {
                         .transparent_bg = !inline_code,
                         .metadata_id = if (s.link) |li| self.metas.items[li] else null,
                         .scale = s.scale,
+                        // `~~struck~~`: the line, as well as the
+                        // `strike` colour `spanColor` gives it.
+                        .strikethrough = if (s.style.strike) true else null,
                     });
                 }
                 try b.writeSpans(spans.items, .{

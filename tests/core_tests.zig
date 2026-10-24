@@ -6142,3 +6142,43 @@ pub fn selectionJoinsSoftWrappedRowsTest(io: std.Io, alloc: std.mem.Allocator) !
     defer alloc.free(plain);
     try testz.expectEqualStr("one two\n  three\n  fourteen", plain);
 }
+
+/// `strikethrough` marks every glyph the write draws, but not `pad`'s
+/// blanks; a scaled glyph carries it on its own cell only (the host draws
+/// the footprint from there); and a plain write over the cell clears it.
+pub fn strikethroughMarksGlyphsNotPaddingTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 12, 3, 0);
+    defer layer.deinit();
+    const fg = glyphwire.default_style.fg;
+    const bg = glyphwire.default_style.bg;
+
+    try layer.writeTextOpts("ab", fg, bg, .{ .strikethrough = true, .max_cols = 4, .pad = true });
+    try testz.expectTrue(layer.cell(0, 0).style.strike);
+    try testz.expectTrue(layer.cell(0, 1).style.strike);
+    try testz.expectFalse(layer.cell(0, 2).style.strike);
+
+    layer.setProperty(.{ .cursor = .{ .row = 1, .col = 0 } });
+    try layer.writeTextOpts("c", fg, bg, .{ .strikethrough = true, .scale = .x2 });
+    try testz.expectTrue(layer.cell(1, 0).style.strike);
+    try testz.expectFalse(layer.cell(1, 1).style.strike);
+    try testz.expectFalse(layer.cell(2, 0).style.strike);
+
+    layer.setProperty(.{ .cursor = .{ .row = 0, .col = 0 } });
+    try layer.writeTextOpts("x", fg, bg, .{});
+    try testz.expectFalse(layer.cell(0, 0).style.strike);
+    try testz.expectTrue(layer.cell(0, 1).style.strike);
+}
+
+/// SGR `9` turns strikethrough on and `29` off, and `0` resets it with the
+/// rest of the pen.
+pub fn sgrStrikethroughOnAndOffTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 12, 1, 0);
+    defer layer.deinit();
+    try layer.writeText("\x1b[9ma\x1b[29mb\x1b[9mc\x1b[0md", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.cell(0, 0).style.strike);
+    try testz.expectFalse(layer.cell(0, 1).style.strike);
+    try testz.expectTrue(layer.cell(0, 2).style.strike);
+    try testz.expectFalse(layer.cell(0, 3).style.strike);
+}

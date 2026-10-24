@@ -5716,3 +5716,19 @@ pub fn writeTextRejectsUnknownLineJoinTest(io: std.Io, alloc: std.mem.Allocator)
     ;
     try testz.expectError(d.handle(alloc, msg), dispatch.DispatchError.InvalidLineJoin);
 }
+
+/// `write_text`'s `strikethrough` reaches the cells, and a span inherits
+/// the message's unless it says otherwise.
+pub fn writeTextStrikethroughPerSpanTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 2, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    try notifyThrough(alloc, &d,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"row":0,"col":0,"strikethrough":true,"spans":[{"text":"a"},{"text":"b","strikethrough":false}]}}
+    );
+    const layer = ctx.layerPtr(glyphwire.root_layer_handle).?;
+    try testz.expectTrue(layer.cell(0, 0).style.strike);
+    try testz.expectFalse(layer.cell(0, 1).style.strike);
+}

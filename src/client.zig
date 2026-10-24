@@ -577,6 +577,10 @@ pub const Client = struct {
         /// The underline's colour; null follows `fg`. Set it to keep a red
         /// squiggle red under syntax-coloured text.
         underline_color: ?core.Color = null,
+        /// A line through the text, in its `fg` (`core.Style.strike`):
+        /// Markdown's `~~struck~~`. Like `underline`, never on `pad`'s
+        /// blanks.
+        strikethrough: bool = false,
     };
 
     /// One styled piece of a `writeSpans` write. Every null field inherits
@@ -592,6 +596,8 @@ pub const Client = struct {
         /// part of a syntax-coloured row.
         underline: ?core.Underline = null,
         underline_color: ?core.Color = null,
+        /// See `TextOpts.strikethrough`. Per span.
+        strikethrough: ?bool = null,
     };
 
     /// `clear`'s options: the region (defaulting to the whole layer) and

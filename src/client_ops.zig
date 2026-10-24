@@ -970,6 +970,7 @@ fn textParams(text: ?[]const u8, spans: ?[]const protocol.SpanParams, opts: Text
         // caller. Same reason `spans` is null for a plain write.
         .underline = if (opts.underline == .none) null else @tagName(opts.underline),
         .underline_color = colorToJson(opts.underline_color),
+        .strikethrough = if (opts.strikethrough) true else null,
     };
 }
 
@@ -984,6 +985,7 @@ fn spansToWire(alloc: std.mem.Allocator, spans: []const Span) ![]protocol.SpanPa
         .scale = if (s.scale) |sc| @tagName(sc) else null,
         .underline = if (s.underline) |u| @tagName(u) else null,
         .underline_color = colorToJson(s.underline_color),
+        .strikethrough = s.strikethrough,
     };
     return out;
 }

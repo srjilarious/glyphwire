@@ -1450,13 +1450,14 @@ pub const Dispatcher = struct {
         const metadata_id = try self.resolveMetadata(p.metadata_id);
         const scale = try parseTextScale(p.scale);
         const underline = try parseUnderline(p.underline, p.underline_color);
+        const strikethrough = p.strikethrough orelse false;
 
         // Everything is validated into runs before the cursor moves, so a
         // bad span can't leave the write half-applied.
         var one: [1]core.Layer.TextRun = undefined;
         const runs: []const core.Layer.TextRun = if (p.text) |text| blk: {
             if (p.spans != null) return DispatchError.InvalidSpans;
-            one[0] = .{ .text = text, .fg = fg, .bg = bg, .metadata_id = metadata_id, .scale = scale, .underline = underline };
+            one[0] = .{ .text = text, .fg = fg, .bg = bg, .metadata_id = metadata_id, .scale = scale, .underline = underline, .strikethrough = strikethrough };
             break :blk &one;
         } else if (p.spans) |spans| blk: {
             const out = try alloc.alloc(core.Layer.TextRun, spans.len);
@@ -1479,6 +1480,7 @@ pub const Dispatcher = struct {
                         try parseUnderline(s.underline orelse p.underline, s.underline_color orelse p.underline_color)
                     else
                         underline,
+                    .strikethrough = s.strikethrough orelse strikethrough,
                 };
             }
             break :blk out;
@@ -2879,6 +2881,7 @@ pub const Dispatcher = struct {
                         colorToJsonResolved(c, &self.ctx.theme)
                     else
                         null,
+                    .strikethrough = if (cell.style.strike) true else null,
                 };
             }
         }

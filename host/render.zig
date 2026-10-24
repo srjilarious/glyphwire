@@ -264,6 +264,25 @@ fn addRect(b: *ShapeBatch, dest: host_eng.RectF, c: host_eng.Color) void {
     b.addQuad(quad4(dest.l, dest.t, dest.r, dest.b), {}, colour4(c)) catch {};
 }
 
+/// Emits `Cell.style.strike`'s line for the glyph cell at `(px, py)`: a
+/// rect through the text, `cols` cells wide. For an x1 cell that is its
+/// own width (two for a wide character); for a scaled glyph it is the
+/// whole footprint, at the middle of the enlarged glyph rather than of the
+/// cell, which is why core marks only the glyph's own cell (see
+/// `core.Style.strike`). Sized from the cell like `emitUnderline`'s line,
+/// and scaled with the glyph so a 3x heading's strike isn't a hairline.
+fn emitStrike(b: *ShapeBatch, scale: f32, cols: usize, px: i32, py: i32, color: host_eng.Color) void {
+    const cw = geometry.cell_w;
+    const ch = geometry.cell_h;
+    if (cw <= 0 or ch <= 0) return;
+    const glyph_h: i32 = @intFromFloat(@as(f32, @floatFromInt(ch)) * scale);
+    const t: i32 = @max(1, @divTrunc(glyph_h, 14));
+    // A little below the middle: the strike crosses lowercase letters at
+    // half their x-height, and the baseline sits low in the cell.
+    const y = py + @divTrunc(glyph_h * 11, 20) - @divTrunc(t, 2);
+    addRect(b, host_eng.RectF.fromPosSize(px, y, cw * @as(i32, @intCast(cols)), t), color);
+}
+
 /// Emits one cell's worth of `Cell.style.underline` as filled rects into
 /// `b`, at cell origin `(px, py)` in absolute window pixels.
 ///
@@ -1169,6 +1188,20 @@ pub const Renderer = struct {
                     emitUnderline(
                         &lb.underline,
                         ul.style,
+                        px,
+                        py,
+                        fade(host_eng.Color.from(src.r, src.g, src.b, src.a), alpha),
+                    );
+                }
+                // A wide character's spacer copies its lead's style, but
+                // the lead already drew the line across both halves.
+                if (c.style.strike and c.wide != .wide_spacer) {
+                    const src = th.resolve(c.style.fg);
+                    const per_col: usize = if (c.wide == .wide_lead) 2 else 1;
+                    emitStrike(
+                        &lb.underline,
+                        textScaleFactor(c.text_scale),
+                        per_col * glyphwire.scaledPitch(c.text_scale),
                         px,
                         py,
                         fade(host_eng.Color.from(src.r, src.g, src.b, src.a), alpha),

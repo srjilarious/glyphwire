@@ -281,6 +281,9 @@ pub const WireCell = struct {
     underline: ?[]const u8 = null,
     /// The underline's colour, absent when it follows `fg`.
     underline_color: ?Color = null,
+    /// `true` for a cell with a line through it (`core.Style.strike`),
+    /// absent otherwise -- read back for the same reason as `underline`.
+    strikethrough: ?bool = null,
 };
 
 /// The `get_cells` response body: the layer's visible viewport as a
@@ -575,6 +578,9 @@ pub const WriteTextParams = struct {
     /// what an ordinary underline wants. A diagnostic squiggle sets it so
     /// the line can be red under syntax-coloured text.
     underline_color: ?Color = null,
+    /// `true` draws a line through the text, in its `fg` -- see
+    /// `core.Style.strike`. Omitted: false.
+    strikethrough: ?bool = null,
 };
 
 /// One entry of `write_text`'s `spans`. Every field but `text` is optional
@@ -588,6 +594,7 @@ pub const SpanParams = struct {
     scale: ?[]const u8 = null,
     underline: ?[]const u8 = null,
     underline_color: ?Color = null,
+    strikethrough: ?bool = null,
 };
 
 /// Params shared by `insert_cells`/`delete_cells` -- also cursor-implicit

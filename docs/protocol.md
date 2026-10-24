@@ -927,7 +927,7 @@ default style); any explicit colour, black included, is opaque.
 
 | Method | Kind | Params | Result |
 |---|---|---|---|
-| `write_text` | notification | `layer?`, `row?`, `col?`, `text` \| `spans`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false, `selectable?` = true, `masked?` = false, `line_join?` = `"newline"` | — |
+| `write_text` | notification | `layer?`, `row?`, `col?`, `text` \| `spans`, `fg?`, `bg?`, `metadata_id?`, `transparent_bg?` = false, `scale?`, `max_cols?`, `pad?` = false, `selectable?` = true, `masked?` = false, `line_join?` = `"newline"`, `strikethrough?` = false | — |
 | `insert_cells` | notification | `layer?`, `count` | — |
 | `delete_cells` | notification | `layer?`, `count` | — |
 | `move_content` | notification | `layer?`, `top?`, `bot?`, `count?` = 1, `direction?` | — |
@@ -981,12 +981,20 @@ cell's baseline, which is why it is affordable where bold and italic —
 which would need further font faces in the atlas — are not. The pad of a
 `pad`ded write is never underlined.
 
+`strikethrough: true` draws a line through the text in its foreground,
+for the same reason it is affordable: it is a rect, not a font face. It is
+per-span as well as per-message and, like `underline`, never applied to
+`pad`'s blanks. On a scaled glyph the line crosses the middle of the
+enlarged glyph across its whole footprint. `get_cells` reports it as
+`strikethrough: true`.
+
 `write_text` also mirrors a useful subset of ANSI/VT escape sequences found
 in the text, so output from a program that does not know about glyphwire
-still shows colour. This is **colour, plus underline**: SGR 30-37 / 90-97 /
+still shows colour. This is **colour, plus underline and strikethrough**: SGR 30-37 / 90-97 /
 38;2;r;g;b and their background forms, plus `bold` (maps a basic foreground
 to its bright variant), `dim`, `inverse`, and the underline set — `4`,
-`4:0`–`4:5`, `21`, `24`, with `58`/`59` for its colour. There are no other
+`4:0`–`4:5`, `21`, `24`, with `58`/`59` for its colour, and `9`/`29` for
+strikethrough. There are no other
 attribute bitflags on the wire. Note that `;` and `:` are not
 interchangeable here: `4:3` is a curly underline, `4;3` is an underline
 followed by an italic (still ignored). A sequence that is a *query*

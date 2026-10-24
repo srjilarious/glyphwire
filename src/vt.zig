@@ -29,6 +29,7 @@ const ColorRef = core.ColorRef;
 const Background = core.Background;
 const Underline = core.Underline;
 const UnderlineStyle = core.UnderlineStyle;
+const Decoration = core.Decoration;
 const default_style = core.default_style;
 const grapheme_inline_len = core.grapheme_inline_len;
 const tab_width = core.tab_width;
@@ -116,7 +117,7 @@ pub const Vt = struct {
     last_glyph_w: u2 = 1,
     last_glyph_fg: Color = default_style.fg,
     last_glyph_bg: ?Background = null,
-    last_glyph_ul: UnderlineStyle = .{},
+    last_glyph_deco: Decoration = .{},
     /// The kitty keyboard protocol flag stacks, tracked from the same
     /// stream `pty.ModeTracker` reads, only so `CSI ? u` (the protocol's
     /// "is this supported?" query) gets an answer here -- the encoding
@@ -162,8 +163,8 @@ pub const Vt = struct {
 ///
 ///  - **interprets** `ESC [ ... m` (SGR): colours + bold/dim/inverse are
 ///    folded into `Vt.pen` and thence into each printed cell's
-///    `Style` -- see `SgrPen`. Italic/underline/strikethrough are parsed
-///    and ignored (colour-only for now).
+///    `Style` -- see `SgrPen`. Underline and strikethrough are carried
+///    through to `Style`; italic is parsed and ignored.
 ///  - **interprets** a handful of `ESC [ ...` cursor/erase finals:
 ///    `A`/`B`/`C`/`D` (cursor up/down/right/left), `G` (column),
 ///    `H`/`f` (row;col), `J` (erase in display), `K` (erase in line).
@@ -341,8 +342,10 @@ const SgrColorTarget = enum { fg, bg, ul };
 /// concrete `Cell.style` at write time -- no attribute bitflags on `Style`.
 /// Underline (`4`, `4:1`..`4:5`, `21`, `24`) and its colour (`58`, `59`)
 /// are carried through to `Style.underline` and drawn -- see `Underline`.
-/// Italic / blink / strikethrough are still *parsed and ignored*: they need
-/// font faces in the atlas rather than a rect at the baseline.
+/// Strikethrough (`9`, `29`) is likewise carried through to `Style.strike`,
+/// a line the host draws through the text. Italic and blink are still
+/// *parsed and ignored*: italic needs a font face in the atlas rather than
+/// a rect over the glyph.
 ///
 /// A `null` `fg` / `bg` override means "fall back to the `write_text`
 /// call's own `fg`/`bg` argument (and then `default_style`)". `ESC [ 0 m`
@@ -364,6 +367,9 @@ pub const SgrPen = struct {
     /// `59`. Unlike `bold`/`dim`/`inverse` this is not folded into the
     /// colours -- it passes straight through to `Style.underline`.
     underline: UnderlineStyle = .{},
+    /// Strikethrough from `9` / `29`. Passed through to `Style.strike`
+    /// like `underline`.
+    strike: bool = false,
 
     /// ANSI colour `n` (0-7 normal, 8-15 bright) -- a reference to the
     /// theme's palette slot for it, not a fixed RGB, so terminal output
@@ -476,9 +482,11 @@ pub const SgrPen = struct {
                 21 => self.underline.style = .double,
                 24 => self.underline.style = .none,
                 59 => self.underline.color = null,
-                // Parsed and ignored: italic (3/23), blink (5/25),
-                // strikethrough (9/29) -- see `SgrPen`'s doc comment.
-                3, 5, 9, 23, 25, 29 => {},
+                9 => self.strike = true,
+                29 => self.strike = false,
+                // Parsed and ignored: italic (3/23), blink (5/25) -- see
+                // `SgrPen`'s doc comment.
+                3, 5, 23, 25 => {},
                 30...37 => {
                     self.fg_basic = @intCast(code - 30);
                     self.fg = ansi16(@intCast(code - 30));
@@ -549,7 +557,7 @@ pub const SgrPen = struct {
         }
     }
 
-    /// Resolves the concrete `(fg, bg, underline)` a printed cell gets,
+    /// Resolves the concrete `(fg, bg, decoration)` a printed cell gets,
     /// given the pen and the `write_text` call's own arguments (`bg` is a
     /// `?Background`: `null` = "leave the cell's existing background",
     /// per `write_text`'s `transparent_bg`). The pen overrides the
@@ -562,12 +570,14 @@ pub const SgrPen = struct {
     /// squiggle) survives output that never mentions underlines. They can
     /// only conflict inside one `write_text` whose text also carries SGR,
     /// and there the escape in the text is the more specific instruction.
+    /// Strikethrough is the same "either asked": SGR `9` or the call's own
+    /// `strikethrough`.
     pub fn resolve(
         self: SgrPen,
         arg_fg: Color,
         arg_bg: ?Background,
-        arg_ul: UnderlineStyle,
-    ) struct { fg: Color, bg: ?Background, underline: UnderlineStyle } {
+        arg_deco: Decoration,
+    ) struct { fg: Color, bg: ?Background, deco: Decoration } {
         var fg: Color = self.fg orelse arg_fg;
         if (self.bold) {
             if (self.fg_basic) |idx| fg = Color.slot(theme.ansiSlot(@as(u4, idx) + 8));
@@ -596,11 +606,11 @@ pub const SgrPen = struct {
         // the same rule, and falls back to the argument's rather than to
         // the fg, so `ESC [ 4 m` inside a run the client already gave a
         // colour keeps that colour.
-        var ul = arg_ul;
+        var ul = arg_deco.underline;
         if (self.underline.style != .none) ul.style = self.underline.style;
         if (self.underline.color) |c| ul.color = c;
 
-        return .{ .fg = fg, .bg = bg, .underline = ul };
+        return .{ .fg = fg, .bg = bg, .deco = .{ .underline = ul, .strike = arg_deco.strike or self.strike } };
     }
 
     /// SGR `2`'s faint foreground. A slot steps down to its hue's dim
@@ -968,14 +978,14 @@ pub fn resetVtModes(self: *Layer) void {
 }
 
 /// Remembers a just-printed glyph for REP (`repeatLastGlyph`).
-pub fn noteLastGlyph(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, ul: UnderlineStyle) void {
+pub fn noteLastGlyph(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, deco: Decoration) void {
     if (bytes.len > self.vt.last_glyph.len) return;
     @memcpy(self.vt.last_glyph[0..bytes.len], bytes);
     self.vt.last_glyph_len = @intCast(bytes.len);
     self.vt.last_glyph_w = w;
     self.vt.last_glyph_fg = fg;
     self.vt.last_glyph_bg = bg;
-    self.vt.last_glyph_ul = ul;
+    self.vt.last_glyph_deco = deco;
 }
 
 /// REP (`CSI n b`): prints the last graphic character `n` more times,
@@ -988,7 +998,7 @@ fn repeatLastGlyph(self: *Layer, n: usize) void {
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (self.vt.insert_mode) self.insertCellsFill(self.vt.last_glyph_w, .{});
-        self.putAtCursor(bytes, self.vt.last_glyph_w, self.vt.last_glyph_fg, self.vt.last_glyph_bg, null, .x1, self.vt.last_glyph_ul);
+        self.putAtCursor(bytes, self.vt.last_glyph_w, self.vt.last_glyph_fg, self.vt.last_glyph_bg, null, .x1, self.vt.last_glyph_deco);
     }
 }
 
