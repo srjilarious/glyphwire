@@ -29,11 +29,12 @@ fn strField(lua: *Lua, arena: std.mem.Allocator, key: [:0]const u8) ?[:0]const u
     return arena.dupeSentinel(u8, s, 0) catch null;
 }
 
-/// `font_fallback`: one font (`"Noto Sans CJK JP"`) or a list tried in
-/// order (`{ "Noto Sans CJK JP", "Adwaita Mono" }`). Null when absent,
-/// empty, or neither shape, so the default stands.
-fn readFallbacks(lua: *Lua, arena: std.mem.Allocator) ?[]const [:0]const u8 {
-    const key = "font_fallback";
+/// A key that takes one string or a list of them: `font_fallback`
+/// (`"Noto Sans CJK JP"` or `{ "Noto Sans CJK JP", "Adwaita Mono" }`),
+/// `default_program` (`"gmux"` or `{ "zoe", "notes.md" }`). A lone
+/// string is one item, never split on spaces. Null when absent, empty,
+/// or neither shape, so the default stands.
+fn readStringOrList(lua: *Lua, arena: std.mem.Allocator, key: [:0]const u8) ?[]const [:0]const u8 {
     const t = lua.getField(-1, key);
     lua.pop(1);
     if (t == .string) {
@@ -96,7 +97,7 @@ const Apply = struct {
 
         if (strField(lua, arena, "font_face")) |v| cfg.font.face = v;
         if (strField(lua, arena, "font_face_name")) |v| cfg.font.face_name = v;
-        if (readFallbacks(lua, arena)) |v| cfg.font.fallbacks = v;
+        if (readStringOrList(lua, arena, "font_fallback")) |v| cfg.font.fallbacks = v;
         if (conf.boolean(lua, "font_emoji")) |v| cfg.font.emoji = v;
         if (conf.number(lua, f32, "font_size", .{ .min = config.min_font_size, .max = config.max_font_size })) |v| cfg.font.size = v;
 
@@ -162,6 +163,8 @@ const Apply = struct {
         if (conf.uint(lua, usize, "grid_cols", .{ .min = geometry.min_grid_cols })) |v| cfg.grid.cols = v;
         if (conf.uint(lua, usize, "grid_rows", .{ .min = geometry.min_grid_rows })) |v| cfg.grid.rows = v;
         if (conf.uint(lua, usize, "scrollback_rows", .{ .max = config.scrollback_rows_max })) |v| cfg.grid.scrollback = v;
+
+        if (readStringOrList(lua, arena, "default_program")) |v| cfg.default_program = v;
     }
 };
 

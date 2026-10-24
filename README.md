@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # glyphwire
 
-![Version Badge](https://img.shields.io/badge/Version-0.30.0-brightgreen)
+![Version Badge](https://img.shields.io/badge/Version-0.31.0-brightgreen)
 ![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0-%23f7a41d?logo=zig)
 ![Protocol Badge](https://img.shields.io/badge/Protocol-0.13.0-blueviolet)
 [![License](https://img.shields.io/badge/License-MPL--2.0%20%7C%20GPL--3.0%20%7C%20CC--BY--4.0-blue)](#license)
@@ -153,7 +153,7 @@ Each program also has its own run step (`zig build zoe`, `zig build gwmd`,
 
 Every program answers `--version` (or `-V`) with its own version, the
 glyphwire release and the `git describe` it was built from, e.g. `zoe
-0.24.0 (glyphwire 0.30.0, 1b122a9)`. Each program's number is a line in
+0.24.0 (glyphwire 0.31.0, 1b122a9)`. Each program's number is a line in
 `program_versions` at the top of `build.zig`, bumped when that program
 changes in a release, and the release's own number is `build.zig.zon`'s
 `version`. The numbers quoted in this README, the website and the spec's
@@ -192,7 +192,7 @@ Every config file is Lua, named `*.conf.lua`, and read from
 
 | File | Configures | Reference |
 |---|---|---|
-| `host.conf.lua` | Font face, fallbacks and size, colour emoji, cursor, grid size, scrollback, icon theme, the context switcher (Super+F12) and theme switcher (Super+F10) chords | `host/host.conf.template.lua` |
+| `host.conf.lua` | Font face, fallbacks and size, colour emoji, cursor, grid size, scrollback, the program the window starts (`default_program`, e.g. gmux), icon theme, the context switcher (Super+F12) and theme switcher (Super+F10) chords | `host/host.conf.template.lua` |
 | `theme.lua` | The window's colour theme: a 24-slot ANSI palette and the shared roles every program paints with. Nineteen built-ins (Catppuccin, Tokyo Night, Solarized, Dracula, Nord, Gruvbox, VS Code Light and more) or your own | `host/theme.template.lua` |
 | `shell.conf.lua` | Aliases, prompt segments, `zj` directory jumping, completions, hooks | `shell/shell.conf.template.lua` |
 | `gmux.conf.lua` | Prefix key, pane shell, scrollback | `gmux/gmux.conf.template.lua` |

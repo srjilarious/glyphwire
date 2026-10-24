@@ -143,6 +143,8 @@ server for panes and places them.
   `host.conf.lua`).
 - The first pane starts where gmux was started, and a split starts in
   the directory of the shell in the pane it was split from.
+- `default_program = "gmux"` in `host.conf.lua` opens every window in
+  gmux instead of the shell.
 
 ## salacommander
 

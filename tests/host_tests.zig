@@ -432,6 +432,33 @@ pub fn fontFallbackTakesOneFontOrAListTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectEqualStr(empty.font.fallbacks[0], config.font_fallback_default);
 }
 
+/// `default_program` takes one program or an argv list; unset (or an
+/// empty list) leaves it empty, which is the shell's own prompt. A lone
+/// string is never split on spaces.
+pub fn defaultProgramTakesOneProgramOrAListTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parse = hs.config_load.parseSource;
+
+    try testz.expectEqual(parse(arena, alloc, "config = {}").default_program.len, 0);
+
+    const one = parse(arena, alloc, "config = { default_program = \"gmux\" }");
+    try testz.expectEqual(one.default_program.len, 1);
+    try testz.expectEqualStr(one.default_program[0], "gmux");
+
+    const spaced = parse(arena, alloc, "config = { default_program = \"/opt/my apps/gmux\" }");
+    try testz.expectEqual(spaced.default_program.len, 1);
+    try testz.expectEqualStr(spaced.default_program[0], "/opt/my apps/gmux");
+
+    const list = parse(arena, alloc, "config = { default_program = { \"zoe\", \"notes.md\" } }");
+    try testz.expectEqual(list.default_program.len, 2);
+    try testz.expectEqualStr(list.default_program[0], "zoe");
+    try testz.expectEqualStr(list.default_program[1], "notes.md");
+
+    try testz.expectEqual(parse(arena, alloc, "config = { default_program = {} }").default_program.len, 0);
+}
+
 pub fn fontEmojiDefaultsOnTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();

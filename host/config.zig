@@ -268,6 +268,12 @@ pub const HostConfig = struct {
     /// `pane_focus_highlight`, `pane_focus_color`,
     /// `pane_focus_pulse_color` and `pane_focus_pulse_seconds`.
     pane_focus: pane_focus.Config = .{},
+    /// `default_program`: the argv the root pane's gw-shell execs into
+    /// (`gmux`, `{ "zoe", "notes.md" }`) when the command line forwards
+    /// none. Empty -- the default -- is gw-shell's own interactive
+    /// prompt. Like a forwarded command, the window closes when it exits.
+    /// `arena`-owned when set from `host.conf.lua`.
+    default_program: []const [:0]const u8 = &.{},
 };
 
 pub const drop_target_opacity_default: f32 = 0.25;

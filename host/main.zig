@@ -328,6 +328,12 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
+    // No command on the command line: `host.conf.lua`'s `default_program`
+    // stands in for one (`gmux`, say), and is exec'd the same way. Still
+    // empty when that is unset too, which is the shell's own prompt.
+    if (forwarded.items.len == 0) {
+        for (host_cfg.default_program) |a| try forwarded.append(arena, a);
+    }
     const shell_child_argv: []const []const u8 = forwarded.items;
 
     const socket_path = try socketPath(arena, init.environ_map);

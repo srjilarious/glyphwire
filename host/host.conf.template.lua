@@ -183,6 +183,17 @@
 --     -- Clamped to 0..100000.
 --     scrollback_rows = 1000,
 --
+--     ---- Startup ----------------------------------------------------
+--
+--     -- What the window runs instead of the gw-shell prompt: a program
+--     -- name ("gmux") or an argv list ({ "zoe", "notes.md" }). A lone
+--     -- string is one program, never split on spaces, so put arguments
+--     -- in the list form. It's started the same way `glyphwire gmux`
+--     -- would be, so the window closes when it exits. A command given on
+--     -- the command line (`glyphwire zoe`) wins over this, and `--ssh`
+--     -- ignores it. Unset (the default) runs the shell's prompt.
+--     default_program = "gmux",
+--
 --     ---- Icons ------------------------------------------------------
 --
 --     -- Which bundled file-type icon set backs the canonical `file/*`
