@@ -147,9 +147,9 @@ raised over the window only while the palette or layout mode is open.
 - `Ctrl-B m` is layout mode: drag a pane onto another pane's edge to
   move it there, onto its middle to swap the two, or onto a window edge
   for a full-height column or full-width row. The drop target is
-  highlighted as you drag. Panes in the row or column a pane lands in (or
-  leaves) are evened out; every other ratio is kept. `Esc` or `Enter`
-  finishes.
+  highlighted and the pane you picked up darkened as you drag. Panes in
+  the row or column a pane lands in (or leaves) are evened out; every
+  other ratio is kept. `Esc` or `Enter` finishes.
 - Dividers are host-drawn and draggable, and keep their ratios when panes
   split or close. The host highlights the dividers around the focused
   pane, solid or slowly pulsing (`pane_focus_highlight` in

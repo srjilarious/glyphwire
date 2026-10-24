@@ -58,6 +58,11 @@ const Direction = splittree.Direction;
 /// What the raised overlay is for, if anything.
 const Mode = enum { none, palette, layout };
 
+/// What darkens the pane being dragged: translucent black rather than a
+/// theme role, since a light theme's background over a pane would lighten
+/// it instead.
+const shade_color: glyphwire.Color = .{ .r = 0, .g = 0, .b = 0, .a = 115 };
+
 /// Layout mode's note across the top of the window.
 const layout_hint = " Layout: drag a pane onto another's edge to move it there, onto its middle to swap  \u{00b7}  Esc to finish ";
 
@@ -127,6 +132,9 @@ pub const Ui = struct {
     palette: palette.Popup = undefined,
     /// Layout mode's one-line note (`layout_hint`), on the overlay.
     hint_layer: glyphwire.LayerHandle = 0,
+    /// Layout mode's darkening over the pane being dragged (`showShade`),
+    /// on the overlay.
+    shade_layer: glyphwire.LayerHandle = 0,
     /// The pane being dragged in layout mode, and where it would land.
     drag: ?struct { pane: PaneId, drop: ?arrange.Drop = null } = null,
 
@@ -182,6 +190,11 @@ pub const Ui = struct {
         try client.attachPane(overlay.pane);
         try listener.attachPane(overlay.pane);
         try client.setCaretVisible(false);
+        // Created first, so the drop highlight's root layer is under it
+        // and the hint and palette are over it.
+        self.shade_layer = try client.createLayer(1, 1, 0);
+        try client.setLayerVisible(self.shade_layer, false);
+        try client.setLayerBackground(self.shade_layer, shade_color);
         self.hint_layer = try client.createLayer(1, 1, 0);
         try client.setLayerVisible(self.hint_layer, false);
         try client.setLayerBackground(self.hint_layer, glyphwire.Color.role(.popup_bg));
@@ -674,6 +687,7 @@ pub const Ui = struct {
         self.drag = null;
         if (self.palette.isOpen()) self.palette.close();
         self.client.setLayerVisible(self.hint_layer, false) catch {};
+        self.client.setLayerVisible(self.shade_layer, false) catch {};
         self.client.setDropTarget(null, null) catch {};
         self.client.focusPane(self.focused) catch {};
         self.client.setOverlayPane(null) catch {};
@@ -686,7 +700,10 @@ pub const Ui = struct {
             .palette => self.renderPalette() catch |err| self.logError("draw palette", err),
             .layout => {
                 self.renderHint() catch |err| self.logError("draw layout hint", err);
-                if (self.drag) |d| self.showDrop(d.drop, d.pane);
+                if (self.drag) |d| {
+                    self.showShade();
+                    self.showDrop(d.drop, d.pane);
+                }
             },
         }
     }
@@ -837,9 +854,28 @@ pub const Ui = struct {
             const r = e.value_ptr.*;
             if (cell.row >= r.row and cell.row < r.row + r.rows and cell.col >= r.col and cell.col < r.col + r.cols) {
                 self.drag = .{ .pane = e.key_ptr.* };
+                self.showShade();
                 return;
             }
         }
+    }
+
+    /// Darkens the pane being dragged (`shade_layer`), so it reads as the
+    /// one picked up; hidden with no drag.
+    fn showShade(self: *Ui) void {
+        const d = self.drag orelse {
+            self.client.setLayerVisible(self.shade_layer, false) catch {};
+            return;
+        };
+        const r = self.bounds.get(d.pane) orelse return;
+        if (r.cols == 0 or r.rows == 0) return;
+        var b = self.client.batch();
+        defer b.deinit();
+        b.setLayerSize(self.shade_layer, r.cols, r.rows) catch return;
+        b.setLayerCellPosition(self.shade_layer, r.row, r.col) catch return;
+        b.setLayerVisible(self.shade_layer, true) catch return;
+        var sent = b.send() catch |err| return self.logError("shade pane", err);
+        sent.deinit();
     }
 
     /// The release drops the pane wherever the highlight says. Layout mode
@@ -847,6 +883,7 @@ pub const Ui = struct {
     fn endDrag(self: *Ui) void {
         const d = self.drag orelse return;
         self.drag = null;
+        self.showShade();
         self.client.setDropTarget(null, null) catch {};
         const drop = d.drop orelse return;
         self.applyDrop(d.pane, drop) catch |err| self.logError("move pane", err);
