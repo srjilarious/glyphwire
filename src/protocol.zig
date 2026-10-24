@@ -328,7 +328,7 @@ pub const ListContextsResult = struct {
 
 /// The version of this protocol, as `docs/protocol.md`'s header gives
 /// it. Bumped with that document, not with any program.
-pub const protocol_version = "0.11.0";
+pub const protocol_version = "0.11.1";
 
 /// `get_version`'s result: the program serving the session and the
 /// protocol it speaks. `program` is its executable name

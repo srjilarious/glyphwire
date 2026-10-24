@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.11.0 — pre-1.0 draft.**
+**Version 0.11.1 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -1720,9 +1720,12 @@ client can keep its content current.
 
 ### 7.1 Streams
 
-`subscribe`'s `events` takes these names. Several names map to one
-underlying stream, so a client can name the event it wants rather than the
-flag.
+`subscribe`'s `events` takes these names: each stream's own name, and the
+name of every notification it delivers, so a client can name the event it
+wants rather than the stream. Naming any event subscribes to its whole
+stream. A name the host doesn't know is skipped and the rest still apply.
+`window_key` is accepted for the window stream because hosts before 0.11.1
+documented it.
 
 | Stream | Delivers | Accepted names |
 |---|---|---|
@@ -1734,14 +1737,14 @@ flag.
 | shutdown | `shutdown` | `shutdown` |
 | focus | `focus` | `focus` |
 | scroll | `scroll`, `scroll_offset` | `scroll`, `scroll_offset` |
-| layout | `layout` | `layout` |
+| layout | `layout`, `layer_resize` | `layout`, `layer_resize` |
 | selection | `selection` | `selection` |
 | clipboard | `copy_request`, `paste` | `clipboard`, `copy_request`, `paste` |
-| terminal | `terminal_reply` | `terminal` |
+| terminal | `terminal_reply` | `terminal`, `terminal_reply` |
 | context | `context` | `context` |
 | theme | `theme` | `theme` |
 | panes | `pane_layout`, `pane_exit`, `pane_focus` | `panes`, `pane_layout`, `pane_exit`, `pane_focus` |
-| window_keys | `window_key_down`, `window_key_up`, `window_text` | `window_keys`, `window_key`, `window_text` |
+| window_keys | `window_key_down`, `window_key_up`, `window_text` | `window_keys`, `window_key_down`, `window_key_up`, `window_key`, `window_text` |
 | remote | `remote_exit` | `remote`, `remote_exit` |
 | error | *(nothing — see below)* | `error` |
 

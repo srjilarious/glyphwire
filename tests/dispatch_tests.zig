@@ -416,7 +416,7 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
 
     const broadcast = press_result.broadcast.?;
     defer alloc.free(broadcast.body);
-    try testz.expectEqualStr("key", broadcast.event);
+    try testz.expectEqual(broadcast.event, .key);
     try expectPushHas(alloc, broadcast.body, "key_down");
 
     // A redundant press-while-down report changes nothing, so it queues
@@ -689,7 +689,7 @@ pub fn reportMouseMoveBroadcastsOnlyOnCellChangeTest(io: std.Io, alloc: std.mem.
     try testz.expectEqual(ctx.pointer.cursor_cell.row, @as(usize, 2));
     const b = first.broadcast.?;
     defer alloc.free(b.body);
-    try testz.expectEqualStr("mouse_move", b.event);
+    try testz.expectEqual(b.event, .mouse_move);
     try expectPushHas(alloc, b.body, "\"method\":\"mouse_move\"");
 
     // Same cell, different pixel -> cursor_px updates but no broadcast.
@@ -723,7 +723,7 @@ pub fn writeTextWithTerminalQueryBroadcastsReplyTest(io: std.Io, alloc: std.mem.
     const result = try d.handle(alloc, msg);
     const b = result.broadcast.?;
     defer alloc.free(b.body);
-    try testz.expectEqualStr("terminal_reply", b.event);
+    try testz.expectEqual(b.event, .terminal_reply);
     try expectPushHas(alloc, b.body, "\"method\":\"terminal_reply\"");
     // Cursor was at 1;1 -> reply "\x1b[1;1R", JSON-escaped in the body.
     try expectPushHas(alloc, b.body, "1;1R");
@@ -747,7 +747,7 @@ pub fn subscribeTerminalEventTest(io: std.Io, alloc: std.mem.Allocator) !void {
     ;
     const result = try d.handle(alloc, sub);
     if (result.response) |r| alloc.free(r);
-    try testz.expectTrue(d.subscriptions.terminal);
+    try testz.expectTrue(d.subscriptions.hasStream(.terminal));
 }
 
 pub fn subscribeMouseMoveEventTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -761,8 +761,8 @@ pub fn subscribeMouseMoveEventTest(io: std.Io, alloc: std.mem.Allocator) !void {
     ;
     const result = try d.handle(alloc, sub);
     if (result.response) |r| alloc.free(r);
-    try testz.expectTrue(d.subscriptions.mouse_move);
-    try testz.expectFalse(d.subscriptions.mouse_button);
+    try testz.expectTrue(d.subscriptions.hasStream(.mouse_move));
+    try testz.expectFalse(d.subscriptions.hasStream(.mouse_button));
 }
 
 /// `focus` is its own stream: a client that paints its own cursor asks
@@ -778,9 +778,63 @@ pub fn subscribeFocusEventTest(io: std.Io, alloc: std.mem.Allocator) !void {
     ;
     const result = try d.handle(alloc, sub);
     if (result.response) |r| alloc.free(r);
-    try testz.expectTrue(d.subscriptions.focus);
-    try testz.expectTrue(d.subscriptions.has("focus"));
-    try testz.expectFalse(d.subscriptions.shutdown);
+    try testz.expectTrue(d.subscriptions.hasStream(.focus));
+    try testz.expectTrue(d.subscriptions.has(.focus));
+    try testz.expectFalse(d.subscriptions.hasStream(.shutdown));
+}
+
+/// Event names subscribe to their stream too. These three were once
+/// routed by name but missing from what `subscribe` accepted, so asking for
+/// them by name silently subscribed to nothing.
+pub fn subscribeByEventNameTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const sub =
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["terminal_reply","window_key_down"]}}
+    ;
+    const result = try d.handle(alloc, sub);
+    if (result.response) |r| alloc.free(r);
+    try testz.expectTrue(d.subscriptions.hasStream(.terminal));
+    try testz.expectTrue(d.subscriptions.has(.terminal_reply));
+    try testz.expectTrue(d.subscriptions.hasStream(.window_keys));
+    try testz.expectTrue(d.subscriptions.has(.window_key_up));
+    try testz.expectTrue(d.subscriptions.has(.window_text));
+    try testz.expectFalse(d.subscriptions.hasStream(.key));
+}
+
+/// Every pushed event's own name subscribes to the stream it is routed
+/// on, so no event can be routed by a name `subscribe` doesn't accept.
+pub fn everyPushEventNameSubscribesItsStreamTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    _ = alloc;
+    for (std.enums.values(dispatch.PushEvent)) |event| {
+        const stream = dispatch.Stream.fromName(@tagName(event)) orelse return error.TestUnexpectedResult;
+        try testz.expectEqual(stream, event.route().stream);
+    }
+}
+
+/// An unknown name is skipped, not an error: the known names alongside it
+/// still subscribe, so a client written for a newer host keeps working.
+/// `window_key`, the name both window-key events once went by, still works.
+pub fn subscribeSkipsUnknownNamesTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const sub =
+        \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["no_such_stream","key","window_key"]}}
+    ;
+    const result = try d.handle(alloc, sub);
+    const r = result.response orelse return error.TestUnexpectedResult;
+    defer alloc.free(r);
+    try testz.expectTrue(std.mem.indexOf(u8, r, "\"error\"") == null);
+    try testz.expectTrue(d.subscriptions.hasStream(.key));
+    try testz.expectTrue(d.subscriptions.hasStream(.window_keys));
+    try testz.expectEqual(d.subscriptions.streams.count(), 2);
 }
 
 pub fn reportTextQueuesTextBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -800,7 +854,7 @@ pub fn reportTextQueuesTextBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !
     try testz.expectTrue(result.response == null);
     const broadcast = result.broadcast.?;
     defer alloc.free(broadcast.body);
-    try testz.expectEqualStr("text", broadcast.event);
+    try testz.expectEqual(broadcast.event, .text);
     try expectPushHas(alloc, broadcast.body, "\"method\":\"text\"");
     try expectPushHas(alloc, broadcast.body, "e\u{00e9}");
 
@@ -856,8 +910,8 @@ pub fn subscribeThenGetInputStateReflectsReportedInputTest(io: std.Io, alloc: st
     ;
     const sub_result = try d.handle(alloc, sub_msg);
     defer alloc.free(sub_result.response.?);
-    try testz.expectTrue(d.subscriptions.key);
-    try testz.expectTrue(d.subscriptions.mouse_button);
+    try testz.expectTrue(d.subscriptions.hasStream(.key));
+    try testz.expectTrue(d.subscriptions.hasStream(.mouse_button));
 
     const key_msg =
         \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"space","pressed":true}}
@@ -1450,7 +1504,7 @@ pub fn scrollViewMovesOffsetClampsAndBroadcastsTest(io: std.Io, alloc: std.mem.A
     try testz.expectEqual(ctx.root.view_scroll, 1);
 
     try testz.expectTrue(result.broadcast != null);
-    try testz.expectEqualStr("scroll", result.broadcast.?.event);
+    try testz.expectEqual(result.broadcast.?.event, .scroll);
     try expectPushHas(alloc, result.broadcast.?.body, "\"offset\":1");
 }
 
@@ -1474,7 +1528,7 @@ pub fn scrollViewOnANonRootLayerCarriesItsHandleTest(io: std.Io, alloc: std.mem.
     defer if (result.broadcast) |b| alloc.free(b.body);
 
     try testz.expectTrue(result.broadcast != null);
-    try testz.expectEqualStr("scroll", result.broadcast.?.event);
+    try testz.expectEqual(result.broadcast.?.event, .scroll);
     try expectPushHas(alloc, result.broadcast.?.body, "\"layer\":1");
 }
 
@@ -2183,7 +2237,7 @@ pub fn setSelectionAppliesAndGetSelectionTextReturnsItTest(io: std.Io, alloc: st
     );
     const broadcast = set_result.broadcast.?;
     defer alloc.free(broadcast.body);
-    try testz.expectEqualStr("selection", broadcast.event);
+    try testz.expectEqual(broadcast.event, .selection);
     try expectPushHas(alloc, broadcast.body, "\"active\":true");
 
     const Response = struct { jsonrpc: []const u8, id: u32, result: struct { text: []const u8 } };
@@ -2387,8 +2441,8 @@ pub fn subscribeAcceptsSelectionAndClipboardTest(io: std.Io, alloc: std.mem.Allo
         \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["selection","clipboard"]}}
     )).response.?;
     alloc.free(ack);
-    try testz.expectTrue(d.subscriptions.selection);
-    try testz.expectTrue(d.subscriptions.clipboard);
+    try testz.expectTrue(d.subscriptions.hasStream(.selection));
+    try testz.expectTrue(d.subscriptions.hasStream(.clipboard));
 }
 
 // ─── Layer geometry, visibility and stacking over the wire ──────────────
@@ -2735,9 +2789,9 @@ pub fn layerResizeSubscribesThroughLayoutTest(io: std.Io, alloc: std.mem.Allocat
         \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["layer_resize"]}}
     );
     if (result.response) |r| alloc.free(r);
-    try testz.expectTrue(d.subscriptions.layout);
-    try testz.expectTrue(d.subscriptions.has("layer_resize"));
-    try testz.expectTrue(d.subscriptions.has("layout"));
+    try testz.expectTrue(d.subscriptions.hasStream(.layout));
+    try testz.expectTrue(d.subscriptions.has(.layer_resize));
+    try testz.expectTrue(d.subscriptions.has(.layout));
 }
 
 /// `write_text`'s `copy_text` reaches the cells: a selection over the
@@ -3277,7 +3331,7 @@ pub fn splitChildrenLayOutAndBroadcastTest(io: std.Io, alloc: std.mem.Allocator)
     const result = try d.handle(alloc, decoded);
     const broadcast = result.broadcast.?;
     defer alloc.free(broadcast.body);
-    try testz.expectEqualStr(broadcast.event, "layout");
+    try testz.expectEqual(broadcast.event, .layout);
 
     const Notif = struct {
         method: []const u8,
@@ -3368,11 +3422,11 @@ pub fn scrollAndLayoutAreSubscribableTest(io: std.Io, alloc: std.mem.Allocator) 
     const body = (try d.handle(alloc, decoded)).response.?;
     defer alloc.free(body);
 
-    try testz.expectTrue(d.subscriptions.layout);
+    try testz.expectTrue(d.subscriptions.hasStream(.layout));
     // `scroll_offset` rides the `scroll` subscription -- a client that
     // wants to know the view moved wants both kinds.
-    try testz.expectTrue(d.subscriptions.scroll);
-    try testz.expectTrue(d.subscriptions.has("scroll_offset"));
+    try testz.expectTrue(d.subscriptions.hasStream(.scroll));
+    try testz.expectTrue(d.subscriptions.has(.scroll_offset));
 }
 
 // ── Layer ownership: create records an owner, destroy enforces it, ──────
@@ -3537,7 +3591,7 @@ pub fn subscribeErrorSetsTheFlagTest(io: std.Io, alloc: std.mem.Allocator) !void
 
     const ack = (try d.handle(alloc, subscribe_error)).response.?;
     alloc.free(ack);
-    try testz.expectTrue(d.subscriptions.error_events);
+    try testz.expectTrue(d.subscriptions.hasStream(.@"error"));
 }
 
 pub fn getErrorsRecordsNothingWithoutSubscriptionTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3664,7 +3718,7 @@ pub fn createContextRetargetsTheConnectionAndBroadcastsTest(io: std.Io, alloc: s
 
     try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"context\":1") != null);
     try testz.expectTrue(result.broadcast != null);
-    try testz.expectTrue(std.mem.eql(u8, result.broadcast.?.event, "context"));
+    try testz.expectEqual(result.broadcast.?.event, .context);
     try expectPushHas(alloc, result.broadcast.?.body, "\"context\":1");
 
     // The dispatcher now points at the new context, and it's visible.
@@ -4219,7 +4273,7 @@ pub fn subscribeWithAContextBindsTheConnectionAtomicallyTest(io: std.Io, alloc: 
     try testz.expectEqual(d.active_pane, made.pane);
     try testz.expectEqual(d.active_ctx, made.context);
     try testz.expectEqual(d.ctx, session.contextPtr(made.context).?);
-    try testz.expectTrue(d.subscriptions.has("key"));
+    try testz.expectTrue(d.subscriptions.has(.key));
 }
 
 pub fn subscribeWithAnUnknownPaneStillSubscribesTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -4237,7 +4291,7 @@ pub fn subscribeWithAnUnknownPaneStillSubscribesTest(io: std.Io, alloc: std.mem.
         \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key"],"pane":99}}
     );
     defer if (resp.response) |r| alloc.free(r);
-    try testz.expectTrue(d.subscriptions.has("key"));
+    try testz.expectTrue(d.subscriptions.has(.key));
     try testz.expectEqual(d.active_pane, glyphwire.root_pane_handle);
 }
 
@@ -4358,8 +4412,8 @@ pub fn sendWindowPrefixDeliversTheChordAsAKeystrokeTest(io: std.Io, alloc: std.m
     defer alloc.free(down.body);
     const up = res.broadcast_after.?;
     defer alloc.free(up.body);
-    try testz.expectEqualStr(down.event, "key");
-    try testz.expectEqualStr(up.event, "key");
+    try testz.expectEqual(down.event, .key);
+    try testz.expectEqual(up.event, .key);
 
     const pd = try glyphwire.msgpack.decode(KeyNotif, alloc, down.body, .{});
     defer pd.deinit();
@@ -5511,7 +5565,7 @@ pub fn subscribeWithAWrongTokenIsRefusedTest(io: std.Io, alloc: std.mem.Allocato
         \\{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"events":["key"],"context":0,"token":"nope"}}
     ), dispatch.DispatchError.ContextAccessDenied);
     // Refused before it armed anything.
-    try testz.expectFalse(d.subscriptions.has("key"));
+    try testz.expectFalse(d.subscriptions.has(.key));
 }
 
 pub fn synthesizedInputNeedsTheWindowManagerRoleTest(io: std.Io, alloc: std.mem.Allocator) !void {

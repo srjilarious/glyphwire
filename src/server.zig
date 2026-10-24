@@ -443,14 +443,14 @@ pub const Server = struct {
                 }
                 if (result.broadcast) |b| {
                     defer alloc.free(b.body);
-                    const scope: ?core.ContextHandle = if (isContextScopedEvent(b.event)) d.active_ctx else null;
+                    const scope: ?core.ContextHandle = if (b.event.route().delivery == .context_scoped) d.active_ctx else null;
                     self.broadcastIn(&conn, scope, b.event, b.body);
                     // A `destroy_context` / `activate_context` put another
                     // context on screen. One backgrounded through a window
                     // resize had its tree re-laid-out silently on the way
                     // up (`Session.republish`), so it's owed a `layout` --
                     // the same follow-up the disconnect-cull path sends.
-                    if (std.mem.eql(u8, b.event, "context")) {
+                    if (b.event == .context) {
                         self.reportLayout(alloc) catch |err| {
                             std.log.err("glyphwire: layout after context switch failed: {t}", .{err});
                         };
@@ -458,7 +458,7 @@ pub const Server = struct {
                 }
                 if (result.broadcast_after) |b| {
                     defer alloc.free(b.body);
-                    const scope: ?core.ContextHandle = if (isContextScopedEvent(b.event)) d.active_ctx else null;
+                    const scope: ?core.ContextHandle = if (b.event.route().delivery == .context_scoped) d.active_ctx else null;
                     self.broadcastIn(&conn, scope, b.event, b.body);
                 }
                 // A pane-tree edit reshaped the window: re-lay-out, tell
@@ -597,7 +597,7 @@ pub const Server = struct {
     /// `reportKey`/`reportMouseButton`, called by whatever process owns
     /// this `Server` in-process and captures input directly, e.g.
     /// glyphwire-host reading its own window's keyboard).
-    fn broadcast(self: *Server, sender: ?*Connection, event: []const u8, body: []const u8) void {
+    fn broadcast(self: *Server, sender: ?*Connection, event: dispatch.PushEvent, body: []const u8) void {
         self.broadcastIn(sender, null, event, body);
     }
 
@@ -608,93 +608,63 @@ pub const Server = struct {
     /// each other pane's program (a second zoe in another pane dragging
     /// the first one's shell panel to its own rows). Null `scope` is plain
     /// `broadcast`.
-    fn broadcastIn(self: *Server, sender: ?*Connection, scope: ?core.ContextHandle, event: []const u8, body: []const u8) void {
+    fn broadcastIn(self: *Server, sender: ?*Connection, scope: ?core.ContextHandle, event: dispatch.PushEvent, body: []const u8) void {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
 
-        // Raw input streams reach only the connection whose context is on
-        // screen *in the focused pane*. Two things are being excluded at
-        // once: a backgrounded full-screen editor (its context isn't on
-        // screen in its own pane), and every program in an unfocused pane
-        // (its context is perfectly visible, but the keystrokes aren't
-        // for it).
+        // Each event's `dispatch.Delivery` (`PushEvent.route`) decides who
+        // among its stream's subscribers gets it.
         //
-        // This single test is what replaces addressing input to individual
-        // layers. A pane is a real addressable object with its own
-        // visibility, so "who gets this keystroke" is answerable here,
-        // once, from state the session already maintains -- rather than
-        // needing a multiplexer to relay every keystroke on to its panes.
+        // `focus_gated` (raw input) reaches only the connection whose
+        // context is on screen *in the focused pane*. Two things are being
+        // excluded at once: a backgrounded full-screen editor (its context
+        // isn't on screen in its own pane), and every program in an
+        // unfocused pane (its context is perfectly visible, but the
+        // keystrokes aren't for it). This single test is what replaces
+        // addressing input to individual layers. A pane is a real
+        // addressable object with its own visibility, so "who gets this
+        // keystroke" is answerable here, once, from state the session
+        // already maintains -- rather than needing a multiplexer to relay
+        // every keystroke on to its panes.
         //
-        // Every other event (`resize`, `pane_layout`, `selection`,
-        // `context`, ...) still fans out to all subscribers (`layout` /
-        // `scroll` / `scroll_offset` to all of one context's -- see
-        // `broadcastIn`):
-        // a backgrounded or unfocused client wants to know its panes moved
-        // so it can redraw before it's shown again. `focused_context` is
-        // the lock-free denormalised copy of the focused pane's stack top.
-        // A window event is addressed, not fanned out: it has exactly one
-        // recipient by definition. Re-routed here rather than only at the
-        // `report*` call sites, so a window command can never be broadcast
-        // no matter which path produced it (the in-process input loop, or a
-        // client's `report_key` / `report_text`).
-        if (isWindowEvent(event)) {
+        // `fan_out` events (`pane_layout`, `selection`, `context`, ...) go
+        // to every subscriber, `context_scoped` ones to all of one
+        // context's: a backgrounded or unfocused client wants to know its
+        // panes moved so it can redraw before it's shown again.
+        // `focused_context` is the lock-free denormalised copy of the
+        // focused pane's stack top.
+        //
+        // A `window_manager` event is addressed, not fanned out. Re-routed
+        // here rather than only at the `report*` call sites, so a window
+        // command can never be broadcast no matter which path produced it
+        // (the in-process input loop, or a client's `report_key` /
+        // `report_text`).
+        const rule = event.route().delivery;
+        if (rule == .window_manager) {
             self.deliverToManagerLocked(event, body);
             return;
         }
 
-        const gated = isFocusGatedEvent(event);
         const focused = self.session.focused_context.load(.monotonic);
 
         for (self.connections.items) |other| {
             if (sender != null and other == sender.?) continue;
             if (!other.route.attached) continue;
             if (!other.route.subscriptions.has(event)) continue;
-            if (gated and other.route.active_ctx != focused) continue;
-            if (scope) |s| if (other.route.active_ctx != s) continue;
+            switch (rule) {
+                .focus_gated => if (other.route.active_ctx != focused) continue,
+                // `scope` is the context the event came from, which only
+                // the caller knows; an unscoped call is a plain fan-out.
+                .context_scoped => if (scope) |s| if (other.route.active_ctx != s) continue,
+                // `addressed` events are sent by their own methods and
+                // never reach here; fanning one out is the harmless reading.
+                .fan_out, .addressed => {},
+                .window_manager => unreachable,
+            }
             other.send(self.io, body) catch |err| {
                 std.log.err("glyphwire broadcast to a connection failed: {t}", .{err});
             };
         }
-    }
-
-    /// Whether `event` is a raw input stream that only the focused pane's
-    /// on-screen client should receive (see `broadcast`).
-    /// Whether `event` is addressed to the window manager rather than fanned
-    /// out to subscribers.
-    fn isWindowEvent(event: []const u8) bool {
-        return std.mem.eql(u8, event, "window_key_down") or
-            std.mem.eql(u8, event, "window_key_up") or
-            std.mem.eql(u8, event, "window_text");
-    }
-
-    /// Whether `event` means something only to clients of the context it
-    /// came from (see `broadcastIn`): one naming a layer by its
-    /// per-context handle, or a terminal's answer to a query. Fanned out,
-    /// htop's `CSI 6n` in one pane would have its cursor-position reply
-    /// written into every other pane's pty child as stray input.
-    fn isContextScopedEvent(event: []const u8) bool {
-        return std.mem.eql(u8, event, "scroll") or
-            std.mem.eql(u8, event, "scroll_offset") or
-            std.mem.eql(u8, event, "layout") or
-            std.mem.eql(u8, event, "terminal_reply");
-    }
-
-    fn isFocusGatedEvent(event: []const u8) bool {
-        return std.mem.eql(u8, event, "key") or
-            std.mem.eql(u8, event, "text") or
-            std.mem.eql(u8, event, "mouse_button") or
-            std.mem.eql(u8, event, "mouse_move") or
-            // Not raw input, but the direct answer to one keystroke
-            // (Ctrl+Shift+C) and so addressed the same way: exactly one
-            // program should answer it, and it is the one on screen.
-            // Fanned out, every `"clipboard"` subscriber answers with
-            // `set_clipboard` and the last write wins at random -- a
-            // backgrounded gw-shell overwriting salacommander's file
-            // paths with its own prompt line.
-            std.mem.eql(u8, event, "copy_request") or
-            // Ctrl+Shift+V's text, which is typed input in all but name:
-            // fanned out, every pane's program inserted it.
-            std.mem.eql(u8, event, "paste");
     }
 
     /// The session's visibility change-counter (see
@@ -758,7 +728,7 @@ pub const Server = struct {
         };
         const body = try rpc.contextNotification(alloc, info.handle, info.cols, info.rows);
         defer alloc.free(body);
-        self.broadcast(null, "context", body);
+        self.broadcast(null, .context, body);
     }
 
     // ─── Panes ─────────────────────────────────────────────────────────
@@ -913,7 +883,7 @@ pub const Server = struct {
         defer self.registry_mutex.unlock(self.io);
         for (self.connections.items) |conn| {
             if (!conn.route.attached) continue;
-            if (!conn.route.subscriptions.has("focus")) continue;
+            if (!conn.route.subscriptions.has(.focus)) continue;
             const has = window and conn.route.active_ctx == focused_ctx;
             if (has == conn.focus_sent) continue;
             conn.send(self.io, if (has) on else off) catch |err| {
@@ -943,7 +913,7 @@ pub const Server = struct {
         };
         const body = try rpc.paneFocusNotification(alloc, pane);
         defer alloc.free(body);
-        self.broadcast(null, "pane_focus", body);
+        self.broadcast(null, .pane_focus, body);
     }
 
     /// Brings `context` to the top of its pane's stack (the host's own
@@ -1053,7 +1023,7 @@ pub const Server = struct {
         defer self.registry_mutex.unlock(self.io);
         for (self.connections.items) |conn| {
             if (!conn.route.attached) continue;
-            if (!conn.route.subscriptions.has("theme")) continue;
+            if (!conn.route.subscriptions.has(.theme)) continue;
             if (std.mem.indexOfScalar(core.ContextHandle, followers.items, conn.route.active_ctx) == null) continue;
             conn.send(self.io, body) catch |err| {
                 std.log.err("glyphwire theme notification to a connection failed: {t}", .{err});
@@ -1094,7 +1064,7 @@ pub const Server = struct {
             }
             const body = try rpc.paneLayoutNotification(alloc, bounds);
             defer alloc.free(body);
-            self.broadcast(null, "pane_layout", body);
+            self.broadcast(null, .pane_layout, body);
         }
         try self.reportContextSizes(alloc);
         try self.reportLayout(alloc);
@@ -1111,7 +1081,7 @@ pub const Server = struct {
 
         for (self.connections.items) |conn| {
             if (!conn.route.attached) continue;
-            if (!conn.route.subscriptions.has("resize")) continue;
+            if (!conn.route.subscriptions.has(.resize)) continue;
             const size = blk: {
                 self.ctx_mutex.lockUncancelable(self.io);
                 defer self.ctx_mutex.unlock(self.io);
@@ -1135,7 +1105,7 @@ pub const Server = struct {
     pub fn reportPaneExit(self: *Server, alloc: std.mem.Allocator, pane: core.PaneHandle, status: i64) !void {
         const body = try rpc.paneExitNotification(alloc, pane, status);
         defer alloc.free(body);
-        self.broadcast(null, "pane_exit", body);
+        self.broadcast(null, .pane_exit, body);
     }
 
     /// Tells every `remote`-subscribed connection that the remote session
@@ -1146,7 +1116,7 @@ pub const Server = struct {
     pub fn reportRemoteExit(self: *Server, alloc: std.mem.Allocator, session: u64, status: i64, started: bool) !void {
         const body = try rpc.remoteExitNotification(alloc, session, status, started);
         defer alloc.free(body);
-        self.broadcast(null, "remote_exit", body);
+        self.broadcast(null, .remote_exit, body);
     }
 
     /// In-process equivalent of a connected client's `report_key` request
@@ -1177,7 +1147,7 @@ pub const Server = struct {
             .manager => {
                 const body = try rpc.windowKeyNotification(alloc, key, pressed, decision.mods);
                 defer alloc.free(body);
-                self.deliverToManager("window_key", body);
+                self.deliverToManager(if (pressed) .window_key_down else .window_key_up, body);
                 return;
             },
             .pass => {},
@@ -1186,7 +1156,7 @@ pub const Server = struct {
 
         const body = try rpc.keyNotification(alloc, key, pressed, decision.mods);
         defer alloc.free(body);
-        self.broadcast(null, "key", body);
+        self.broadcast(null, .key, body);
     }
 
     /// A synthetic key press-and-release delivered to `context`'s clients
@@ -1201,7 +1171,7 @@ pub const Server = struct {
         defer alloc.free(down);
         const up = try rpc.keyNotification(alloc, key, false, .{});
         defer alloc.free(up);
-        self.sendTapToContext(context, "key", down, up);
+        self.sendTapToContext(context, .key, down, up);
     }
 
     /// A wheel notch (`wheel_up` / `wheel_down`) as a `mouse_button`
@@ -1228,13 +1198,13 @@ pub const Server = struct {
         defer alloc.free(down);
         const up = try rpc.mouseButtonNotification(alloc, button, false, px, cell, 0, mods, 1);
         defer alloc.free(up);
-        self.sendTapToContext(context, "mouse_button", down, up);
+        self.sendTapToContext(context, .mouse_button, down, up);
     }
 
     /// Sends a press/release pair to every `event` subscriber whose
     /// context is `context`, skipping the focus gate -- the addressed
     /// delivery behind `reportKeyTapIn` / `reportWheelTapIn`.
-    fn sendTapToContext(self: *Server, context: core.ContextHandle, event: []const u8, down: []const u8, up: []const u8) void {
+    fn sendTapToContext(self: *Server, context: core.ContextHandle, event: dispatch.PushEvent, down: []const u8, up: []const u8) void {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
         for (self.connections.items) |conn| {
@@ -1242,7 +1212,7 @@ pub const Server = struct {
             if (!conn.route.attached) continue;
             if (!conn.route.subscriptions.has(event)) continue;
             conn.send(self.io, down) catch |err| {
-                std.log.err("glyphwire: {s} tap to a connection failed: {t}", .{ event, err });
+                std.log.err("glyphwire: {t} tap to a connection failed: {t}", .{ event, err });
                 continue;
             };
             conn.send(self.io, up) catch {};
@@ -1253,7 +1223,7 @@ pub const Server = struct {
     /// counterpart of `broadcast`, for the two events that are addressed
     /// rather than fanned out (`window_key` / `window_text`): a window
     /// command has exactly one recipient by definition.
-    fn deliverToManager(self: *Server, event: []const u8, body: []const u8) void {
+    fn deliverToManager(self: *Server, event: dispatch.PushEvent, body: []const u8) void {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
         self.deliverToManagerLocked(event, body);
@@ -1261,7 +1231,7 @@ pub const Server = struct {
 
     /// `deliverToManager` with `registry_mutex` already held -- what
     /// `broadcast` uses when it re-routes a window event it was handed.
-    fn deliverToManagerLocked(self: *Server, event: []const u8, body: []const u8) void {
+    fn deliverToManagerLocked(self: *Server, event: dispatch.PushEvent, body: []const u8) void {
         // The role is held by both of a manager's connections (see
         // `core.Session.managers`); only the one that subscribed to the
         // window stream wants this, which is its `InputListener`.
@@ -1303,7 +1273,7 @@ pub const Server = struct {
         };
         const body = try rpc.keyRepeatNotification(alloc, key, mods);
         defer alloc.free(body);
-        self.broadcast(null, "key", body);
+        self.broadcast(null, .key, body);
     }
 
     /// In-process equivalent of a connected client's `report_text`
@@ -1325,13 +1295,13 @@ pub const Server = struct {
         if (route == .manager) {
             const body = try rpc.windowTextNotification(alloc, text);
             defer alloc.free(body);
-            self.deliverToManager("window_text", body);
+            self.deliverToManager(.window_text, body);
             return;
         }
 
         const body = try rpc.textNotification(alloc, text);
         defer alloc.free(body);
-        self.broadcast(null, "text", body);
+        self.broadcast(null, .text, body);
     }
 
     /// In-process equivalent of `report_mouse_button` -- see `reportKey`.
@@ -1352,7 +1322,7 @@ pub const Server = struct {
 
         const body = try rpc.mouseButtonNotification(alloc, button, pressed, px, cell, view_offset, mods, clicks);
         defer alloc.free(body);
-        self.broadcast(null, "mouse_button", body);
+        self.broadcast(null, .mouse_button, body);
     }
 
     /// In-process scroll of the root layer's scrollback view (see
@@ -1393,7 +1363,7 @@ pub const Server = struct {
 
         const body = try rpc.scrollNotification(alloc, null, result.offset, result.max);
         defer alloc.free(body);
-        self.broadcastIn(null, result.context, "scroll", body);
+        self.broadcastIn(null, result.context, .scroll, body);
     }
 
     /// In-process scroll of a **non-root** layer's scrollback ring (see
@@ -1431,7 +1401,7 @@ pub const Server = struct {
 
         const body = try rpc.scrollNotification(alloc, layer, r.offset, r.max);
         defer alloc.free(body);
-        self.broadcastIn(null, r.context, "scroll", body);
+        self.broadcastIn(null, r.context, .scroll, body);
     }
 
     /// In-process equivalent of `report_mouse_move` -- see `reportKey`.
@@ -1454,7 +1424,7 @@ pub const Server = struct {
 
         const body = try rpc.mouseMoveNotification(alloc, px, cell, mods);
         defer alloc.free(body);
-        self.broadcast(null, "mouse_move", body);
+        self.broadcast(null, .mouse_move, body);
     }
 
     /// Applies a new window size, in cells. The window is the rect the
@@ -1542,7 +1512,7 @@ pub const Server = struct {
     pub fn reportShutdown(self: *Server, alloc: std.mem.Allocator, grace_ms: u32) !void {
         const body = try rpc.shutdownNotification(alloc, grace_ms);
         defer alloc.free(body);
-        self.broadcast(null, "shutdown", body);
+        self.broadcast(null, .shutdown, body);
     }
 
     /// Re-lays-out the split tree against the current context size and
@@ -1591,7 +1561,7 @@ pub const Server = struct {
             }
             const body = try rpc.layoutNotification(alloc, bounds);
             defer alloc.free(body);
-            self.broadcastIn(null, cl.context, "layout", body);
+            self.broadcastIn(null, cl.context, .layout, body);
         }
     }
 
@@ -1608,7 +1578,7 @@ pub const Server = struct {
     pub fn reportLayerResize(self: *Server, alloc: std.mem.Allocator, context: core.ContextHandle, layer: core.LayerHandle, cols: usize, rows: usize) !void {
         const body = try rpc.layerResizeNotification(alloc, context, layer, cols, rows);
         defer alloc.free(body);
-        self.broadcast(null, "layer_resize", body);
+        self.broadcast(null, .layer_resize, body);
     }
 
     /// In-process equivalent of `set_property(layer, "scroll_offset")` --
@@ -1665,7 +1635,7 @@ pub const Server = struct {
             result.max.col,
         );
         defer alloc.free(body);
-        self.broadcastIn(null, result.context, "scroll_offset", body);
+        self.broadcastIn(null, result.context, .scroll_offset, body);
     }
 
     // ── Selection & clipboard (in-process, for glyphwire-host) ──────────
@@ -1693,7 +1663,7 @@ pub const Server = struct {
         };
         const body = try rpc.selectionNotification(alloc, snapshot);
         defer alloc.free(body);
-        self.broadcast(null, "selection", body);
+        self.broadcast(null, .selection, body);
     }
 
     /// In-process `clear_selection` on `layer_handle` (null = root).
@@ -1706,7 +1676,7 @@ pub const Server = struct {
         }
         const body = try rpc.selectionNotification(alloc, null);
         defer alloc.free(body);
-        self.broadcast(null, "selection", body);
+        self.broadcast(null, .selection, body);
     }
 
     /// Which layer of the visible context currently holds a selection --
@@ -1770,23 +1740,23 @@ pub const Server = struct {
     ///
     /// Broadcast under `"copy_request"` rather than the stream name the
     /// two clipboard events share, because only this one is focus-gated
-    /// (`isFocusGatedEvent`): the answer is a single clipboard write, so
+    /// (`dispatch.Delivery.focus_gated`): the answer is a single clipboard write, so
     /// asking every subscriber would just mean the last reply wins.
     pub fn requestCopy(self: *Server, alloc: std.mem.Allocator) !void {
         const body = try rpc.copyRequestNotification(alloc);
         defer alloc.free(body);
-        self.broadcast(null, "copy_request", body);
+        self.broadcast(null, .copy_request, body);
     }
 
     /// Sends a `paste` notification (committed clipboard text) to the
     /// focused pane's on-screen client, the same gate as typed text
-    /// (`isFocusGatedEvent`). It is the answer to one keystroke: fanned
+    /// (`dispatch.Delivery.focus_gated`). It is the answer to one keystroke: fanned
     /// out, a path pasted into a shell pane also landed in the zoe buffer
     /// next to it.
     pub fn broadcastPaste(self: *Server, alloc: std.mem.Allocator, text: []const u8) !void {
         const body = try rpc.pasteNotification(alloc, text);
         defer alloc.free(body);
-        self.broadcast(null, "paste", body);
+        self.broadcast(null, .paste, body);
     }
 
     /// The current session clipboard serial (see

@@ -3,7 +3,7 @@
 
 ![Version Badge](https://img.shields.io/badge/Version-0.29.1-brightgreen)
 ![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0-%23f7a41d?logo=zig)
-![Protocol Badge](https://img.shields.io/badge/Protocol-0.11.0-blueviolet)
+![Protocol Badge](https://img.shields.io/badge/Protocol-0.11.1-blueviolet)
 [![License](https://img.shields.io/badge/License-MPL--2.0%20%7C%20GPL--3.0%20%7C%20CC--BY--4.0-blue)](#license)
 
 A 2D-grid terminal replacement. Programs talk to the display over a local
@@ -29,7 +29,7 @@ splits and panes back.
 
 ## The protocol
 
-The wire protocol is at **version 0.11.0**, a pre-1.0 draft.
+The wire protocol is at **version 0.11.1**, a pre-1.0 draft.
 [`docs/protocol.md`](docs/protocol.md) is the normative specification
 (CC-BY-4.0), enough to write a client or a host in any language without
 reading the Zig. [`docs/api.md`](docs/api.md) is the annotated message

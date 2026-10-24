@@ -286,174 +286,231 @@ pub const LoadImageHeader = struct {
     data: ?[]const u8 = null,
 };
 
-/// Which input event categories a connection has opted into (see
-/// decisions.md's Input model: subscription is opt-in per event type,
-/// X11 event-mask precedent). Set via the `subscribe` request; consulted
-/// by server.zig when fanning out a `Broadcast` from `HandleResult` to
-/// other connections.
-pub const Subscriptions = struct {
-    key: bool = false,
-    /// `text` server->client notifications (`{text}`), committed text
-    /// input -- see `Server.reportText` / `handleReportText`. A separate
-    /// stream from `key`: a client wanting to edit a line subscribes to
-    /// both (`key` for navigation/chords, `text` for the characters).
-    text: bool = false,
-    mouse_button: bool = false,
-    /// `mouse_move` server->client notifications (`{px, cell}`), sent on a
-    /// pointer cell change -- see `Server.reportMouseMove` /
-    /// `handleReportMouseMove`. Opt-in on its own because a client that
-    /// only cares about clicks doesn't want the motion firehose;
-    /// glyphwire-shell subscribes while a pty child has motion reporting
-    /// on.
-    mouse_move: bool = false,
-    /// `resize` server->client notifications (`{cols, rows}`), sent when
-    /// the host window is resized -- see `Server.reportResize`.
-    resize: bool = false,
-    /// `shutdown` server->client notification (`{grace_ms}`), sent once
-    /// when the host window is closing so a client can flush persistent
-    /// state and exit cleanly -- see `Server.reportShutdown`.
-    /// glyphwire-shell subscribes and treats it like a typed `exit`.
-    shutdown: bool = false,
-    /// `focus` server->client notification (`{focused}`), sent when the
-    /// host's window gains or loses the keyboard -- see
-    /// `Server.reportFocus`. Only a client that paints its own cursor has
-    /// a reason to subscribe; zoe does, to hollow its block out.
-    focus: bool = false,
-    /// `scroll` server->client notifications (`{offset, max}`), sent when
-    /// the root layer's scrollback view offset moves -- see
-    /// `Server.reportScroll` (mouse wheel / scrollbar) and
-    /// `handleScrollView` (another client's browse cursor). Also covers
-    /// `scroll_offset` (a *layer's* viewport moving over its content
-    /// grid): one flag, because a client that wants to know when the view
-    /// moved wants both kinds.
-    scroll: bool = false,
-    /// `layout` server->client notifications, sent when the split tree is
-    /// re-laid-out and some pane's bounds changed -- a window resize or a
-    /// divider drag. Its own flag rather than folding into `resize`: the
-    /// payload is per-layer bounds, and a client with no panes shouldn't
-    /// have to parse them.
-    layout: bool = false,
-    /// `selection` server->client notifications (`SelectionState`), sent
-    /// when a layer's selection changes -- see `handleSetSelection` and
-    /// `Server.setSelection`.
-    selection: bool = false,
-    /// `copy_request` and `paste` server->client notifications -- the
-    /// clipboard interplay (see decisions.md's Selection & Clipboard
-    /// section). One flag covers both: a client that wants to answer
-    /// copy-with-nothing-selected also wants pasted text.
-    clipboard: bool = false,
-    /// `terminal_reply` server->client notifications -- the bytes a
-    /// `write_text` produced in answer to a `CSI 6n` / DA / DECRQM query
-    /// from the text it mirrored. glyphwire-shell subscribes while a pty
-    /// child is foregrounded and writes them to the pty master.
-    terminal: bool = false,
-    /// `context` server->client notifications (`{context, cols, rows}`),
-    /// sent when the visible context changes (`create_context` /
-    /// `activate_context` / `destroy_context`, or the disconnect-cull
-    /// auto-restore). A client managing its own context subscribes to
-    /// learn it's been backgrounded or brought back.
-    context: bool = false,
-    /// `theme` server->client notifications (`{name, dark, panel_style}`),
-    /// sent when the window theme changes, to connections whose context
-    /// follows it. A client that resolved a frame or a blend from the
-    /// theme itself re-reads it.
-    theme: bool = false,
-    /// Not a broadcast stream like the rest: subscribing to `"error"` just
-    /// tells this connection's `Dispatcher` to start recording its own
-    /// failed notifications into a ring (see `Dispatcher.error_ring`),
-    /// which the client pulls with `get_errors`. Named `_events` because
-    /// `error` is a keyword.
-    error_events: bool = false,
-    /// `pane_layout` / `pane_exit` server->client notifications -- the
-    /// window-manager stream. `pane_layout` is the only message that
-    /// reveals where panes sit, and `pane_exit` says a program in a pane
-    /// finished. Nothing but a window manager has a reason to subscribe,
-    /// which is why they are one flag: wanting one means wanting both.
-    panes: bool = false,
+/// A subscription stream: what a `subscribe` request names, and what
+/// `Subscriptions` holds one bit for. Subscription is opt-in per stream
+/// (the X11 event-mask precedent), so a client only parses what it asked
+/// for. Every pushed notification belongs to exactly one stream (see
+/// `PushEvent.route`); a stream can carry several.
+pub const Stream = enum {
+    /// `key_down` / `key_up`.
+    key,
+    /// `text` (`{text}`), committed text input -- see `Server.reportText`
+    /// / `handleReportText`. A separate stream from `key`: a client
+    /// wanting to edit a line subscribes to both (`key` for
+    /// navigation/chords, `text` for the characters).
+    text,
+    mouse_button,
+    /// `mouse_move` (`{px, cell}`), sent on a pointer cell change -- see
+    /// `Server.reportMouseMove` / `handleReportMouseMove`. Opt-in on its
+    /// own because a client that only cares about clicks doesn't want the
+    /// motion firehose; glyphwire-shell subscribes while a pty child has
+    /// motion reporting on.
+    mouse_move,
+    /// `resize` (`{cols, rows}`): the connection's own context changed
+    /// size -- see `Server.reportContextSizes`.
+    resize,
+    /// `shutdown` (`{grace_ms}`), sent once when the host window is
+    /// closing so a client can flush persistent state and exit cleanly --
+    /// see `Server.reportShutdown`. glyphwire-shell subscribes and treats
+    /// it like a typed `exit`.
+    shutdown,
+    /// `focus` (`{focused}`), sent when this connection gains or loses the
+    /// keyboard -- see `Server.syncConnectionFocus`. Only a client that
+    /// paints its own cursor has a reason to subscribe; zoe does, to
+    /// hollow its block out.
+    focus,
+    /// `scroll` (`{offset, max}`), sent when the root layer's scrollback
+    /// view offset moves -- see `Server.reportScroll` (mouse wheel /
+    /// scrollbar) and `handleScrollView` (another client's browse cursor).
+    /// Also carries `scroll_offset` (a *layer's* viewport moving over its
+    /// content grid): one stream, because a client that wants to know when
+    /// the view moved wants both kinds.
+    scroll,
+    /// `layout`, sent when the split tree is re-laid-out and some pane's
+    /// bounds changed -- a window resize or a divider drag -- and
+    /// `layer_resize`. Its own stream rather than folding into `resize`:
+    /// the payload is per-layer bounds, and a client with no panes
+    /// shouldn't have to parse them.
+    layout,
+    /// `selection` (`SelectionState`), sent when a layer's selection
+    /// changes -- see `handleSetSelection` and `Server.setSelection`.
+    selection,
+    /// `copy_request` and `paste` -- the clipboard interplay. One stream
+    /// covers both: a client that wants to answer copy-with-nothing-
+    /// selected also wants pasted text.
+    clipboard,
+    /// `terminal_reply` -- the bytes a `write_text` produced in answer to a
+    /// `CSI 6n` / DA / DECRQM query from the text it mirrored.
+    /// glyphwire-shell subscribes while a pty child is foregrounded and
+    /// writes them to the pty master.
+    terminal,
+    /// `context` (`{context, cols, rows}`), sent when the visible context
+    /// changes (`create_context` / `activate_context` / `destroy_context`,
+    /// or the disconnect-cull auto-restore). A client managing its own
+    /// context subscribes to learn it's been backgrounded or brought back.
+    context,
+    /// `theme` (`{name, dark, panel_style}`), sent when the window theme
+    /// changes, to connections whose context follows it. A client that
+    /// resolved a frame or a blend from the theme itself re-reads it.
+    theme,
+    /// Not a pushed stream like the rest: subscribing to `"error"` tells
+    /// this connection's `Dispatcher` to start recording its own failed
+    /// notifications into a ring (see `Dispatcher.error_ring`), which the
+    /// client pulls with `get_errors`.
+    @"error",
+    /// `pane_layout` / `pane_exit` / `pane_focus` -- the window-manager
+    /// stream. `pane_layout` is the only message that reveals where panes
+    /// sit. Nothing but a window manager has a reason to subscribe, which
+    /// is why they are one stream: wanting one means wanting all.
+    panes,
     /// `window_key_down` / `window_key_up` / `window_text` -- the key
     /// following the manager's registered prefix chord, addressed to the
     /// manager instead of reaching the focused pane's program. See
     /// `core.WindowPrefix` for why the session decides this rather than the
     /// manager.
-    window_keys: bool = false,
-    /// `remote_exit` server->client notifications -- a `start_remote`
-    /// session ended. Its own flag because only the program that asked for
-    /// a remote session is waiting on one, and it waits on its
-    /// `InputListener` connection rather than the `Client` that made the
-    /// request.
-    remote: bool = false,
+    window_keys,
+    /// `remote_exit` -- a `start_remote` session ended. Its own stream
+    /// because only the program that asked for a remote session is waiting
+    /// on one, and it waits on its `InputListener` connection rather than
+    /// the `Client` that made the request.
+    remote,
 
-    pub fn has(self: Subscriptions, event: []const u8) bool {
-        if (std.mem.eql(u8, event, "key")) return self.key;
-        if (std.mem.eql(u8, event, "text")) return self.text;
-        if (std.mem.eql(u8, event, "mouse_button")) return self.mouse_button;
-        if (std.mem.eql(u8, event, "mouse_move")) return self.mouse_move;
-        if (std.mem.eql(u8, event, "resize")) return self.resize;
-        if (std.mem.eql(u8, event, "shutdown")) return self.shutdown;
-        if (std.mem.eql(u8, event, "focus")) return self.focus;
-        if (std.mem.eql(u8, event, "scroll")) return self.scroll;
-        if (std.mem.eql(u8, event, "scroll_offset")) return self.scroll;
-        if (std.mem.eql(u8, event, "layout")) return self.layout;
-        if (std.mem.eql(u8, event, "layer_resize")) return self.layout;
-        if (std.mem.eql(u8, event, "selection")) return self.selection;
-        if (std.mem.eql(u8, event, "clipboard")) return self.clipboard;
-        // Broadcast under their own names, not the stream's, so the
-        // server's delivery rules (`Server.isFocusGatedEvent`) can name
-        // each one.
-        if (std.mem.eql(u8, event, "copy_request")) return self.clipboard;
-        if (std.mem.eql(u8, event, "paste")) return self.clipboard;
-        if (std.mem.eql(u8, event, "terminal")) return self.terminal;
-        // The name `write_text` broadcasts a reply under. Missing until
-        // now, so no `"terminal"` subscriber ever received one: a pty
-        // child's `CSI 6n` / DA query went unanswered.
-        if (std.mem.eql(u8, event, "terminal_reply")) return self.terminal;
-        if (std.mem.eql(u8, event, "context")) return self.context;
-        if (std.mem.eql(u8, event, "theme")) return self.theme;
-        if (std.mem.eql(u8, event, "error")) return self.error_events;
-        if (std.mem.eql(u8, event, "pane_layout")) return self.panes;
-        if (std.mem.eql(u8, event, "pane_exit")) return self.panes;
-        if (std.mem.eql(u8, event, "pane_focus")) return self.panes;
-        if (std.mem.eql(u8, event, "window_key")) return self.window_keys;
-        if (std.mem.eql(u8, event, "window_key_down")) return self.window_keys;
-        if (std.mem.eql(u8, event, "window_key_up")) return self.window_keys;
-        if (std.mem.eql(u8, event, "window_text")) return self.window_keys;
-        if (std.mem.eql(u8, event, "remote_exit")) return self.remote;
-        return false;
+    /// The stream `subscribe` means by `name`: a stream's own name, or the
+    /// name of any event it carries (so a client can name what it wants
+    /// rather than the stream), or null for a name this host doesn't know.
+    /// An unknown name is skipped rather than failing the subscribe, so a
+    /// client written against a newer host still gets the streams this one
+    /// has.
+    pub fn fromName(name: []const u8) ?Stream {
+        if (std.meta.stringToEnum(Stream, name)) |s| return s;
+        if (std.meta.stringToEnum(PushEvent, name)) |e| return e.route().stream;
+        // The name both window-key events went by before they were routed
+        // separately; clients written then still send it.
+        if (std.mem.eql(u8, name, "window_key")) return .window_keys;
+        return null;
+    }
+};
+
+/// How a pushed event picks its recipients among the connections
+/// subscribed to its stream. Applied in one place, `Server.broadcastIn`.
+pub const Delivery = enum {
+    /// Every subscriber, whatever its context.
+    fan_out,
+    /// Only the subscribers whose context is the one it came from: an
+    /// event naming a layer by its per-context handle, or a terminal's
+    /// answer to a query. Fanned out, htop's `CSI 6n` in one pane would
+    /// have its cursor-position reply written into every other pane's pty
+    /// child as stray input, and a `layout` for layer 3 would move
+    /// whatever layer 3 happened to be in every other pane's program.
+    context_scoped,
+    /// Only the subscriber whose context is on screen in the focused pane:
+    /// raw input, and anything that answers one keystroke.
+    focus_gated,
+    /// The window manager alone, never fanned out: a window command has
+    /// exactly one recipient by definition.
+    window_manager,
+    /// Sent by its own `Server` method, which builds a different body per
+    /// connection (`resize`, `focus`) or picks recipients by a rule of its
+    /// own (`theme`'s followers); never handed to `broadcastIn`.
+    addressed,
+};
+
+/// Every notification the server pushes, under the name the fan-out
+/// routes it by. That is the wire method except where one event covers a
+/// pair (`key` is `key_down` / `key_up`). Adding an event is one tag here
+/// and one row in `route`, whose exhaustive switch makes a forgotten rule
+/// a compile error rather than an event nobody receives.
+pub const PushEvent = enum {
+    key,
+    text,
+    mouse_button,
+    mouse_move,
+    resize,
+    shutdown,
+    focus,
+    scroll,
+    scroll_offset,
+    layout,
+    layer_resize,
+    selection,
+    copy_request,
+    paste,
+    terminal_reply,
+    context,
+    theme,
+    pane_layout,
+    pane_exit,
+    pane_focus,
+    window_key_down,
+    window_key_up,
+    window_text,
+    remote_exit,
+
+    pub const Route = struct { stream: Stream, delivery: Delivery };
+
+    pub fn route(self: PushEvent) Route {
+        return switch (self) {
+            .key => .{ .stream = .key, .delivery = .focus_gated },
+            .text => .{ .stream = .text, .delivery = .focus_gated },
+            .mouse_button => .{ .stream = .mouse_button, .delivery = .focus_gated },
+            .mouse_move => .{ .stream = .mouse_move, .delivery = .focus_gated },
+            .resize => .{ .stream = .resize, .delivery = .addressed },
+            .shutdown => .{ .stream = .shutdown, .delivery = .fan_out },
+            .focus => .{ .stream = .focus, .delivery = .addressed },
+            .scroll => .{ .stream = .scroll, .delivery = .context_scoped },
+            .scroll_offset => .{ .stream = .scroll, .delivery = .context_scoped },
+            .layout => .{ .stream = .layout, .delivery = .context_scoped },
+            // Names its context in the body, so every subscriber can tell
+            // whose layer it was.
+            .layer_resize => .{ .stream = .layout, .delivery = .fan_out },
+            .selection => .{ .stream = .selection, .delivery = .fan_out },
+            // Not raw input, but the direct answer to one keystroke
+            // (Ctrl+Shift+C) and so addressed the same way: exactly one
+            // program should answer it, and it is the one on screen.
+            // Fanned out, every `"clipboard"` subscriber answers with
+            // `set_clipboard` and the last write wins at random -- a
+            // backgrounded gw-shell overwriting salacommander's file
+            // paths with its own prompt line.
+            .copy_request => .{ .stream = .clipboard, .delivery = .focus_gated },
+            // Ctrl+Shift+V's text, which is typed input in all but name:
+            // fanned out, every pane's program inserted it.
+            .paste => .{ .stream = .clipboard, .delivery = .focus_gated },
+            .terminal_reply => .{ .stream = .terminal, .delivery = .context_scoped },
+            .context => .{ .stream = .context, .delivery = .fan_out },
+            .theme => .{ .stream = .theme, .delivery = .addressed },
+            .pane_layout => .{ .stream = .panes, .delivery = .fan_out },
+            .pane_exit => .{ .stream = .panes, .delivery = .fan_out },
+            .pane_focus => .{ .stream = .panes, .delivery = .fan_out },
+            .window_key_down => .{ .stream = .window_keys, .delivery = .window_manager },
+            .window_key_up => .{ .stream = .window_keys, .delivery = .window_manager },
+            .window_text => .{ .stream = .window_keys, .delivery = .window_manager },
+            // Broadcast rather than addressed: the waiter is the
+            // requesting program's `InputListener`, not the `Client` that
+            // sent `start_remote` (see `Server.reportRemoteExit`).
+            .remote_exit => .{ .stream = .remote, .delivery = .fan_out },
+        };
+    }
+};
+
+/// Which streams a connection has opted into. Set via the `subscribe`
+/// request; consulted by server.zig when fanning out a `Broadcast` from
+/// `HandleResult` to other connections.
+pub const Subscriptions = struct {
+    streams: std.EnumSet(Stream) = .empty,
+
+    /// Whether this connection subscribed to the stream `event` is on.
+    pub fn has(self: Subscriptions, event: PushEvent) bool {
+        return self.streams.contains(event.route().stream);
     }
 
-    fn setFromEvents(events: []const []const u8) Subscriptions {
+    pub fn hasStream(self: Subscriptions, stream: Stream) bool {
+        return self.streams.contains(stream);
+    }
+
+    fn fromNames(names: []const []const u8) Subscriptions {
         var s: Subscriptions = .{};
-        for (events) |e| {
-            if (std.mem.eql(u8, e, "key")) s.key = true;
-            if (std.mem.eql(u8, e, "text")) s.text = true;
-            if (std.mem.eql(u8, e, "mouse_button")) s.mouse_button = true;
-            if (std.mem.eql(u8, e, "mouse_move")) s.mouse_move = true;
-            if (std.mem.eql(u8, e, "resize")) s.resize = true;
-            if (std.mem.eql(u8, e, "shutdown")) s.shutdown = true;
-            if (std.mem.eql(u8, e, "focus")) s.focus = true;
-            if (std.mem.eql(u8, e, "scroll")) s.scroll = true;
-            if (std.mem.eql(u8, e, "scroll_offset")) s.scroll = true;
-            if (std.mem.eql(u8, e, "layout")) s.layout = true;
-            if (std.mem.eql(u8, e, "layer_resize")) s.layout = true;
-            if (std.mem.eql(u8, e, "selection")) s.selection = true;
-            if (std.mem.eql(u8, e, "clipboard")) s.clipboard = true;
-            if (std.mem.eql(u8, e, "copy_request")) s.clipboard = true;
-            if (std.mem.eql(u8, e, "paste")) s.clipboard = true;
-            if (std.mem.eql(u8, e, "terminal")) s.terminal = true;
-            if (std.mem.eql(u8, e, "context")) s.context = true;
-            if (std.mem.eql(u8, e, "theme")) s.theme = true;
-            if (std.mem.eql(u8, e, "error")) s.error_events = true;
-            if (std.mem.eql(u8, e, "panes")) s.panes = true;
-            // The event names are accepted as subscription names too, so a
-            // client can name what it wants rather than the flag.
-            if (std.mem.eql(u8, e, "pane_layout")) s.panes = true;
-            if (std.mem.eql(u8, e, "pane_exit")) s.panes = true;
-            if (std.mem.eql(u8, e, "pane_focus")) s.panes = true;
-            if (std.mem.eql(u8, e, "window_keys")) s.window_keys = true;
-            if (std.mem.eql(u8, e, "window_key")) s.window_keys = true;
-            if (std.mem.eql(u8, e, "window_text")) s.window_keys = true;
-            if (std.mem.eql(u8, e, "remote")) s.remote = true;
-            if (std.mem.eql(u8, e, "remote_exit")) s.remote = true;
+        for (names) |name| {
+            if (Stream.fromName(name)) |stream| s.streams.insert(stream);
         }
         return s;
     }
@@ -466,7 +523,7 @@ pub const Subscriptions = struct {
 /// connections, to keep it headless-testable -- see decisions.md's headless-first
 /// architecture note.
 pub const Broadcast = struct {
-    event: []const u8,
+    event: PushEvent,
     body: []u8,
 };
 
@@ -906,7 +963,7 @@ pub const Dispatcher = struct {
     /// sub-message, so batched notification failures are recorded too.
     fn dispatchEnvelope(self: *Dispatcher, alloc: std.mem.Allocator, envelope: Envelope) !HandleResult {
         return self.dispatchCatalog(alloc, envelope) catch |err| {
-            if (envelope.id == null and self.subscriptions.error_events) {
+            if (envelope.id == null and self.subscriptions.hasStream(.@"error")) {
                 self.recordError(envelope.method, err);
             }
             return err;
@@ -1446,7 +1503,7 @@ pub const Dispatcher = struct {
         // shell writes them to the pty master. See `core.Layer.takeReply`.
         if (layer.takeReply()) |reply| {
             const body = try rpc.terminalReplyNotification(alloc, reply);
-            return .{ .broadcast = .{ .event = "terminal_reply", .body = body } };
+            return .{ .broadcast = .{ .event = .terminal_reply, .body = body } };
         }
         return .{};
     }
@@ -1750,7 +1807,7 @@ pub const Dispatcher = struct {
             visible.root.width,
             visible.root.height,
         );
-        return .{ .broadcast = .{ .event = "context", .body = body } };
+        return .{ .broadcast = .{ .event = .context, .body = body } };
     }
 
     /// `create_context`: a fresh independent context (see `core.Session`),
@@ -2416,8 +2473,8 @@ pub const Dispatcher = struct {
         errdefer alloc.free(down);
         const up = try rpc.keyNotification(alloc, prefix.key(), false, mods);
         return .{
-            .broadcast = .{ .event = "key", .body = down },
-            .broadcast_after = .{ .event = "key", .body = up },
+            .broadcast = .{ .event = .key, .body = down },
+            .broadcast_after = .{ .event = .key, .body = up },
         };
     }
 
@@ -2516,7 +2573,7 @@ pub const Dispatcher = struct {
             bounds[i] = .{ .layer = b.layer, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
         }
         const body = try rpc.layoutNotification(alloc, bounds);
-        return .{ .broadcast = .{ .event = "layout", .body = body } };
+        return .{ .broadcast = .{ .event = .layout, .body = body } };
     }
 
     fn handleCreateSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
@@ -2852,7 +2909,7 @@ pub const Dispatcher = struct {
         // surface* by omitting the field still names that layer to
         // everyone else listening.
         const notif_body = try rpc.scrollNotification(alloc, self.surfaceOr(p.layer), new_offset, layer.history_len);
-        return .{ .response = resp_body, .broadcast = .{ .event = "scroll", .body = notif_body } };
+        return .{ .response = resp_body, .broadcast = .{ .event = .scroll, .body = notif_body } };
     }
 
     /// The modifiers to stamp on an input notification: the session's
@@ -2897,7 +2954,7 @@ pub const Dispatcher = struct {
                 .manager => {
                     const body = try rpc.windowKeyNotification(alloc, p.key, p.pressed, session.mods);
                     return .{ .broadcast = .{
-                        .event = if (p.pressed) "window_key_down" else "window_key_up",
+                        .event = if (p.pressed) .window_key_down else .window_key_up,
                         .body = body,
                     } };
                 },
@@ -2907,7 +2964,7 @@ pub const Dispatcher = struct {
         if (!changed) return .{};
 
         const notif_body = try rpc.keyNotification(alloc, p.key, p.pressed, self.currentMods());
-        return .{ .broadcast = .{ .event = "key", .body = notif_body } };
+        return .{ .broadcast = .{ .event = .key, .body = notif_body } };
     }
 
     /// A committed-text notification from an input-capturing client (see
@@ -2926,12 +2983,12 @@ pub const Dispatcher = struct {
         if (self.session) |session| {
             if (session.routeText() == .manager) {
                 const body = try rpc.windowTextNotification(alloc, p.text);
-                return .{ .broadcast = .{ .event = "window_text", .body = body } };
+                return .{ .broadcast = .{ .event = .window_text, .body = body } };
             }
         }
 
         const notif_body = try rpc.textNotification(alloc, p.text);
-        return .{ .broadcast = .{ .event = "text", .body = notif_body } };
+        return .{ .broadcast = .{ .event = .text, .body = notif_body } };
     }
 
     fn handleReportMouseButton(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
@@ -2945,7 +3002,7 @@ pub const Dispatcher = struct {
         if (!changed) return .{};
 
         const notif_body = try rpc.mouseButtonNotification(alloc, p.button, p.pressed, p.px, p.cell, p.view_offset, self.currentMods(), p.clicks);
-        return .{ .broadcast = .{ .event = "mouse_button", .body = notif_body } };
+        return .{ .broadcast = .{ .event = .mouse_button, .body = notif_body } };
     }
 
     /// Keeps `get_input_state`'s cursor fields current, and -- only when
@@ -2965,7 +3022,7 @@ pub const Dispatcher = struct {
         if (!cell_changed) return .{};
 
         const notif_body = try rpc.mouseMoveNotification(alloc, p.px, p.cell, self.currentMods());
-        return .{ .broadcast = .{ .event = "mouse_move", .body = notif_body } };
+        return .{ .broadcast = .{ .event = .mouse_move, .body = notif_body } };
     }
 
     fn handleSubscribe(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
@@ -2987,7 +3044,7 @@ pub const Dispatcher = struct {
                 };
             }
         }
-        self.subscriptions = Subscriptions.setFromEvents(parsed.value.events);
+        self.subscriptions = Subscriptions.fromNames(parsed.value.events);
 
         return try self.respond(alloc, id, protocol.SubscribeResult{ .subscribed = parsed.value.events });
     }
@@ -3372,7 +3429,7 @@ pub const Dispatcher = struct {
         const want = outline.desiredViewScroll(layer, focus) orelse return .{};
         const now = layer.scrollView(want, null);
         const body = try rpc.scrollNotification(alloc, self.surfaceOr(named_layer), now, layer.history_len);
-        return .{ .broadcast = .{ .event = "scroll", .body = body } };
+        return .{ .broadcast = .{ .event = .scroll, .body = body } };
     }
 
     /// `outline_set_all_collapsed`: one reflow and one repaint for the
@@ -3772,7 +3829,7 @@ pub const Dispatcher = struct {
     /// / `clear_selection`, so all three fan out the same shape.
     fn selectionBroadcast(alloc: std.mem.Allocator, layer: *const core.Layer) !HandleResult {
         const body = try rpc.selectionNotification(alloc, layer.sel.range);
-        return .{ .broadcast = .{ .event = "selection", .body = body } };
+        return .{ .broadcast = .{ .event = .selection, .body = body } };
     }
 
     fn handleSetSelection(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !HandleResult {
