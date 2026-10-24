@@ -100,22 +100,56 @@ extern "c" fn execvpe(
 ) c_int;
 
 /// Builds a full envp array for `spawn`'s `envp` argument: every entry of
-/// the *current* process's own environment (`c.environ`), followed by
-/// `extra` (each already a `NAME=VALUE` string). Allocates and returns
-/// the array itself (free with `alloc` once `spawn` returns -- the
-/// entries alias `c.environ` and `extra`, not copies, so only the outer
-/// array is ever freed here). Must be called before `fork` (walks
+/// the *current* process's own environment (`c.environ`), with `extra`
+/// (each already a `NAME=VALUE` string) laid over it. Allocates and
+/// returns the array itself (free with `alloc` once `spawn` returns --
+/// the entries alias `c.environ` and `extra`, not copies, so only the
+/// outer array is ever freed here). Must be called before `fork` (walks
 /// `c.environ` and allocates, neither of which `spawn`'s child may do
 /// after it).
 pub fn buildEnvWith(alloc: std.mem.Allocator, extra: []const [:0]const u8) ![:null]?[*:0]const u8 {
     var count: usize = 0;
     while (c.environ[count] != null) count += 1;
+    const base: []const ?[*:0]const u8 = @ptrCast(c.environ[0..count]);
+    return mergeEnv(alloc, base, extra);
+}
 
-    const out = try alloc.allocSentinel(?[*:0]const u8, count + extra.len, null);
-    var i: usize = 0;
-    while (i < count) : (i += 1) out[i] = c.environ[i];
-    for (extra, 0..) |e, j| out[count + j] = e.ptr;
+/// `base` with `extra` laid over it: an entry of `base` whose name an
+/// `extra` entry also sets is dropped, then every `extra` entry is
+/// appended. Replacing rather than just appending matters because
+/// `getenv` returns the *first* match: a glyphwire-host started from
+/// inside another one's pane carries that pane's `GLYPHWIRE_PANE`, and
+/// appending its own after it left every child it spawned attaching to
+/// the outer host's pane number.
+pub fn mergeEnv(alloc: std.mem.Allocator, base: []const ?[*:0]const u8, extra: []const [:0]const u8) ![:null]?[*:0]const u8 {
+    // Counted first so the array is exactly as long as what goes in it:
+    // callers free it with `alloc.free`, which needs the true length.
+    var kept: usize = 0;
+    for (base) |entry| {
+        if (!overridden(std.mem.span(entry.?), extra)) kept += 1;
+    }
+    const out = try alloc.allocSentinel(?[*:0]const u8, kept + extra.len, null);
+    var n: usize = 0;
+    for (base) |entry| {
+        if (overridden(std.mem.span(entry.?), extra)) continue;
+        out[n] = entry;
+        n += 1;
+    }
+    for (extra) |e| {
+        out[n] = e.ptr;
+        n += 1;
+    }
     return out;
+}
+
+/// Whether an `extra` entry sets the variable `entry` names.
+fn overridden(entry: []const u8, extra: []const [:0]const u8) bool {
+    const name = entry[0 .. std.mem.indexOfScalar(u8, entry, '=') orelse entry.len];
+    for (extra) |e| {
+        const eq = std.mem.indexOfScalar(u8, e, '=') orelse e.len;
+        if (std.mem.eql(u8, e[0..eq], name)) return true;
+    }
+    return false;
 }
 
 // A close-on-exec pipe carries the child's exec success/failure back to

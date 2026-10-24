@@ -86,6 +86,42 @@ fn socketPath(alloc: std.mem.Allocator, environ_map: *const std.process.Environ.
     return std.fmt.allocPrint(alloc, "{s}/glyphwire-{d}.sock", .{ dir, pid });
 }
 
+/// The variables a glyphwire session sets for the programs inside it,
+/// which mean nothing to a new host: they name a pane, a context, a
+/// layer and a result pipe of the *outer* host.
+const outer_session_vars = [_][]const u8{
+    "GLYPHWIRE_PANE",
+    "GLYPHWIRE_CTX",
+    "GLYPHWIRE_LAYER",
+    "GLYPHWIRE_RESULT_FD",
+};
+
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn close(fd: c_int) c_int;
+
+/// Forgets the glyphwire session this host was started from, if any.
+///
+/// The outer session's variables leave the process environment, which
+/// every pane child's is built from (`pty.buildEnvWith`); left there, the
+/// root shell attached to the outer host's pane number (`attach_pane
+/// failed: UnknownPane`). And the outer shell's result pipe is closed:
+/// `gw-shell` hands every foreground child the pipe's write end, and this
+/// host's own children would otherwise hold it for as long as they live,
+/// long after this process is gone, which kept the shell that launched it
+/// waiting on that pipe.
+fn forgetOuterSession(environ_map: *const std.process.Environ.Map) void {
+    if (environ_map.get("GLYPHWIRE_RESULT_FD")) |v| {
+        if (std.fmt.parseInt(c_int, v, 10)) |fd| {
+            if (fd > 2) _ = close(fd);
+        } else |_| {}
+    }
+    for (outer_session_vars) |name| {
+        var buf: [32]u8 = undefined;
+        const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{name}, 0) catch continue;
+        _ = unsetenv(z.ptr);
+    }
+}
+
 /// Resolves a sibling binary from this process's executable directory. The
 /// `zig build glyphwire` run step sets `GLYPHWIRE_BIN_DIR` because Zig may
 /// execute the just-built binary from its cache rather than `zig-out/bin`;
@@ -315,6 +351,11 @@ pub fn main(init: std.process.Init) !void {
 
     const socket_path = try socketPath(arena, init.environ_map);
 
+    // Started from inside another glyphwire session (a dev build run from
+    // a pane): drop what that session handed down before anything here
+    // spawns. See `forgetOuterSession`.
+    forgetOuterSession(init.environ_map);
+
     // The primary font may be a `.ttc` collection; find the index of the
     // wanted face inside it so both the metrics measured here and the atlas
     // packed later (in AppRunner.init) use the same face. When `fc-match`
@@ -440,6 +481,7 @@ pub fn main(init: std.process.Init) !void {
         try remote.launch();
     } else {
         var shell_env = try init.environ_map.clone(arena);
+        for (outer_session_vars) |name| _ = shell_env.swapRemove(name);
         try shell_env.put("GLYPHWIRE_SOCK", socket_path);
         try shell_env.put("GLYPHWIRE_CTX", glyphwire.default_context_id);
 

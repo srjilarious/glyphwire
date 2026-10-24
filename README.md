@@ -98,7 +98,7 @@ Each is an ordinary client of the protocol, versioned on its own.
 
 | App | Version | What it is |
 |---|---|---|
-| **`gw-shell`** | 0.10.2 | The shell `glyphwire` spawns. Pipelines, Lua config, fish-style autosuggestions, fish and Lua completions, powerline prompt, Ctrl+R / Alt+C through `gw-hist`, `gwssh`. |
+| **`gw-shell`** | 0.11.0 | The shell `glyphwire` spawns. Pipelines, Lua config, fish-style autosuggestions, fish and Lua completions, powerline prompt, Ctrl+R / Alt+C through `gw-hist`, `gwssh`. |
 | **`zoe`** | 0.19.0 | Modal editor: vim grammar with VS Code keys alongside. Split editor groups, workspaces, tree-sitter highlighting, LSP (diagnostics, hover, goto, completion), find and replace, folding, Lua extensions, unsaved-change backups. Keys in [`docs/zoe-keys.md`](docs/zoe-keys.md). |
 | **`gmux`** | 0.11.0 | Multiplexer as a pure window manager: it draws nothing and never touches a program's I/O, it only asks the server for panes. |
 | **`salacommander`** | 0.10.0 | Two-pane file manager: icons, tabs, sudo operations, trash, permission editing, drag and drop within and out of the window. |

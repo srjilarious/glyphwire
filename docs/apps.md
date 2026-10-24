@@ -33,7 +33,10 @@ The shell `glyphwire` spawns.
   layer (zoe's and salacommander's Ctrl+` panel), and `--context` on a
   context the host made for it (the context switcher's new shell).
 - **Jobs.** `exit` leaves background programs with a screen of their own
-  running.
+  running. Super+Delete stops a foreground program that ignores Ctrl+C:
+  SIGTERM to its process group, then SIGKILL after three seconds
+  (`keys{ kill_job }`). A program that exits while something it started
+  still holds its terminal or pipes no longer keeps the prompt waiting.
 
 ## zoe
 

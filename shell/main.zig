@@ -14,6 +14,8 @@ const complete = @import("shell_support").complete;
 const glob = @import("shell_support").glob;
 const hs = @import("shell_support").handshake;
 const config = @import("shell_support").config;
+const jobstop = @import("shell_support").jobstop;
+const keybind = @import("applib").keybind;
 const script_engine = @import("shell_support").script_engine;
 const themeconf = @import("themeconf");
 const history = @import("applib").history;
@@ -51,6 +53,11 @@ pub const default_prompt_left = "{cwd_full} > ";
 pub const err_color = glyphwire.Color.role(.message_error);
 /// `[1] zoe main.zig  (background)` and the other job notices.
 pub const job_color = glyphwire.Color.role(.accent);
+/// How long `pumpPipeline` keeps flushing a finished pipeline's output
+/// pipes. Only reached when something the pipeline started is still
+/// writing to them after every stage has exited.
+const pipe_flush_ms = 500;
+
 /// How long `hangUpJobs` waits after SIGHUP before SIGKILL, when the shell
 /// exits with jobs still in the background.
 pub const job_hangup_grace_ms = 500;
@@ -1519,6 +1526,9 @@ pub const Prompt = struct {
     /// loaded (so flipping it back on mid-config-reload isn't lossy) but
     /// left untouched.
     zj_enabled: bool = true,
+    /// The kill-job key (`keys{ kill_job }`, see `jobstop.zig`), or null
+    /// when it is turned off.
+    kill_job_key: ?keybind.Chord = (config.KeysConfig{}).killJobChord(),
     /// Directories `zj` never records or returns, from
     /// `zj{ exclude_dirs = { ... } }`, with a leading `~` expanded. Owned
     /// (built by `loadStartupConfig`); each string and the slice are
@@ -3635,6 +3645,10 @@ pub const Prompt = struct {
     /// interactive one.
     pub fn pumpPipeline(self: *Prompt, sp: *pipeexec.Spawned, sink: PipeSink) !void {
         var buf: [4096]u8 = undefined;
+        // The kill-job key's progress on this pipeline, timed from here.
+        var stop: jobstop.JobStop = .{};
+        const started = std.Io.Clock.Timestamp.now(self.client.io, .awake);
+        defer self.noteJobStop(stop);
 
         var stdin_rest: []const u8 = switch (sink) {
             .capture => |cap| cap.stdin,
@@ -3648,9 +3662,12 @@ pub const Prompt = struct {
         while (true) {
             _ = self.drainPipeOnce(sp, sink, &buf, 0);
 
+            const now_ms = started.untilNow(self.client.io).raw.toMilliseconds();
+            if (stop.tick(now_ms)) |sig| sp.signal(jobstop.posixSignal(sig));
+
             switch (sink) {
                 .interactive => {
-                    if (try self.forwardKeystroke(sp)) sp.signal(std.posix.SIG.INT);
+                    if (try self.forwardKeystroke(sp, &stop, now_ms)) sp.signal(std.posix.SIG.INT);
                 },
                 .capture => {
                     if (stdin_rest.len > 0 and sp.stdin_w >= 0) {
@@ -3661,18 +3678,24 @@ pub const Prompt = struct {
                             sp.stdin_w = -1;
                         }
                     }
-                    if (self.pollPipeInterrupt()) sp.signal(std.posix.SIG.INT);
+                    if (self.pollPipeInterrupt(sp, &stop, now_ms)) sp.signal(std.posix.SIG.INT);
                 },
                 .script_grid => {
-                    if (self.pollPipeInterrupt()) sp.signal(std.posix.SIG.INT);
+                    if (self.pollPipeInterrupt(sp, &stop, now_ms)) sp.signal(std.posix.SIG.INT);
                 },
             }
 
             if (sp.reapAll()) {
-                // Every writer is gone: the pipes EOF promptly. Flush
-                // what's buffered and stop.
+                // Every stage is gone: flush what's buffered and stop.
+                // Normally the pipes EOF promptly; but something a stage
+                // left running in the background holds their write ends
+                // too, and one that keeps writing would keep this loop
+                // going for as long as it lives. So the flush gets
+                // `pipe_flush_ms` at most, and that process its pipes.
+                const flush_start = std.Io.Clock.Timestamp.now(self.client.io, .awake);
                 while (sp.stdout_r >= 0 or sp.stderr_r >= 0) {
                     if (!self.drainPipeOnce(sp, sink, &buf, 50)) break;
+                    if (flush_start.untilNow(self.client.io).raw.toMilliseconds() >= pipe_flush_ms) break;
                 }
                 break;
             }
@@ -3753,7 +3776,9 @@ pub const Prompt = struct {
     /// caller SIGINTs the group); Ctrl-D closes stage 0's stdin. Simpler
     /// than `runCommand`'s pty loop -- no mode tracking, mouse or resize,
     /// since a pipe has no line discipline to match.
-    pub fn forwardKeystroke(self: *Prompt, sp: *pipeexec.Spawned) !bool {
+    ///
+    /// The kill-job key is handled here too, on `stop`, and swallowed.
+    pub fn forwardKeystroke(self: *Prompt, sp: *pipeexec.Spawned, stop: *jobstop.JobStop, now_ms: i64) !bool {
         const listener = self.listener orelse return false;
         const alloc = self.client.alloc;
 
@@ -3785,6 +3810,10 @@ pub const Prompt = struct {
             .key => |kev| {
                 defer alloc.free(kev.key);
                 if (!kev.pressed) return false;
+                if (self.isKillJobKey(kev)) {
+                    if (stop.press(now_ms)) |sig| sp.signal(jobstop.posixSignal(sig));
+                    return false;
+                }
                 const ctrl = kev.ctrl();
                 if (ctrl and std.mem.eql(u8, kev.key, "c")) return true;
                 if (ctrl and std.mem.eql(u8, kev.key, "d")) {
@@ -3810,13 +3839,15 @@ pub const Prompt = struct {
     /// Drains pending input events (dropped as type-ahead) while a
     /// non-interactive pipeline runs, returning true the moment it sees
     /// Ctrl-C -- the same shape as `hookPollInterrupt`.
-    pub fn pollPipeInterrupt(self: *Prompt) bool {
+    pub fn pollPipeInterrupt(self: *Prompt, sp: *pipeexec.Spawned, stop: *jobstop.JobStop, now_ms: i64) bool {
         const listener = self.listener orelse return false;
         var hit = false;
         while (listener.pollInputEvent()) |iev| switch (iev) {
             .key => |kev| {
                 defer self.client.alloc.free(kev.key);
-                if (kev.pressed and kev.ctrl() and std.mem.eql(u8, kev.key, "c"))
+                if (self.isKillJobKey(kev)) {
+                    if (stop.press(now_ms)) |sig| sp.signal(jobstop.posixSignal(sig));
+                } else if (kev.pressed and kev.ctrl() and std.mem.eql(u8, kev.key, "c"))
                     hit = true;
             },
             .text => |tev| self.client.alloc.free(tev.text),
@@ -3851,6 +3882,8 @@ pub const Prompt = struct {
     pub const chainReady = jobs.chainReady;
     pub const crash_report_lines = jobs.crash_report_lines;
     pub const reportCrash = jobs.reportCrash;
+    pub const isKillJobKey = jobs.isKillJobKey;
+    pub const noteJobStop = jobs.noteJobStop;
     pub const writeCrashLog = jobs.writeCrashLog;
     pub const hangUpJobs = jobs.hangUpJobs;
     pub const lingerForScreenJobs = jobs.lingerForScreenJobs;
@@ -4029,6 +4062,7 @@ pub const Prompt = struct {
         // `zj{}` settings. Copy the excludes into our own storage with a
         // leading `~` expanded, so the pure matcher can compare them
         // byte-for-byte against absolute paths.
+        self.kill_job_key = eng.cfg.keys.killJobChord();
         self.zj_enabled = eng.cfg.zj.enabled;
         if (eng.cfg.zj.exclude_dirs.len > 0) {
             var owned = try alloc.alloc([]const u8, eng.cfg.zj.exclude_dirs.len);

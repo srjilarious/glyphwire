@@ -22,6 +22,8 @@ const themeconf = @import("themeconf");
 const luaconf = @import("luaconf");
 const Lua = ziglua.Lua;
 const openaction = @import("openaction.zig");
+const jobstop = @import("jobstop.zig");
+const keybind = @import("applib").keybind;
 
 /// `shell.conf.lua` isn't a `config` table but a script of calls
 /// (`alias(...)`, `prompt{...}`) run through the session-long
@@ -167,6 +169,31 @@ pub const PromptConfig = struct {
     autosuggest: ?bool = null,
 };
 
+/// `keys{ kill_job = ... }`: the chord, the default, or turned off.
+pub const KillJobKey = union(enum) {
+    default,
+    off,
+    chord: keybind.Chord,
+};
+
+/// What a `keys{ ... }` call declared: the shell's own keys, the ones it
+/// acts on itself while a program holds the foreground. Merges key by
+/// key across calls, last write winning.
+pub const KeysConfig = struct {
+    /// Stops the foreground job: SIGTERM, then SIGKILL (see
+    /// `jobstop.zig`).
+    kill_job: KillJobKey = .default,
+
+    /// The kill-job chord to act on, or null when it is turned off.
+    pub fn killJobChord(self: KeysConfig) ?keybind.Chord {
+        return switch (self.kill_job) {
+            .default => keybind.Chord.parse(jobstop.default_chord) catch unreachable,
+            .off => null,
+            .chord => |ch| ch,
+        };
+    }
+};
+
 /// What a `zj{ ... }` call declared -- config for the `zj` directory-jump
 /// builtin (see `applib/zjump.zig`). Merges key by key across calls, last
 /// write winning. `exclude_dirs` strings are owned by the enclosing
@@ -218,6 +245,9 @@ pub const ShellConfig = struct {
     /// `zj{ ... }` settings for the directory-jump builtin. Merged key by
     /// key across calls; `exclude_dirs` strings live in `prompt_arena`.
     zj: ZjConfig = .{},
+    /// `keys{ ... }`: the shell's own keys. Merged key by key across
+    /// calls.
+    keys: KeysConfig = .{},
     /// `on{ ... }` event hooks. Merged key by key across calls;
     /// `chdir.command` lives in `prompt_arena`.
     on: OnConfig = .{},
@@ -262,6 +292,7 @@ pub const ShellConfig = struct {
         self.aliases.clearRetainingCapacity();
         self.prompt = .{};
         self.zj = .{};
+        self.keys = .{};
         self.on = .{};
         // `open_actions`' list backing is arena memory too, so it has to
         // be dropped wholesale rather than cleared -- the reset below is
@@ -316,6 +347,9 @@ pub fn installBindings(lua: *Lua) void {
 
     lua.pushFunction(ziglua.wrap(luaZj));
     lua.setGlobal("zj");
+
+    lua.pushFunction(ziglua.wrap(luaKeys));
+    lua.setGlobal("keys");
 
     lua.pushFunction(ziglua.wrap(luaOn));
     lua.setGlobal("on");
@@ -517,6 +551,30 @@ fn luaZj(lua: *Lua) !i32 {
             list[i - 1] = try arena.dupe(u8, lua.checkString(-1));
         }
         cfg.zj.exclude_dirs = list;
+    }
+    lua.pop(1);
+
+    return 0;
+}
+
+/// `keys{ kill_job = "super+delete" }` -- the shell's own keys. A chord
+/// string sets one, `false` turns it off, `true` puts the default back,
+/// and a missing key leaves the current value. A chord that doesn't
+/// parse raises.
+fn luaKeys(lua: *Lua) !i32 {
+    const cfg = g_active orelse return 0;
+    lua.checkType(1, .table);
+
+    _ = lua.getField(1, "kill_job");
+    if (!lua.isNoneOrNil(-1)) {
+        if (lua.isBoolean(-1)) {
+            cfg.keys.kill_job = if (lua.toBoolean(-1)) .default else .off;
+        } else {
+            const text = lua.checkString(-1);
+            const chord = keybind.Chord.parse(text) catch
+                lua.raiseErrorStr("keys: kill_job '%s' is not a chord (e.g. \"super+delete\")", .{text.ptr});
+            cfg.keys.kill_job = .{ .chord = chord };
+        }
     }
     lua.pop(1);
 

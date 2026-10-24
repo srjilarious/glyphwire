@@ -633,3 +633,43 @@ pub fn configResetLeavesTheStructReusableTest(_: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(res.config.open_actions.items.len, 0);
     try testz.expectEqual(res.config.prompt.left, null);
 }
+
+// ─── keys{ ... } ───────────────────────────────────────────────────────
+
+/// The kill-job key defaults to Super+Delete; a chord string replaces
+/// it, `false` turns it off and `true` puts the default back.
+pub fn configKeysKillJobTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    {
+        var res = try config.load(alloc, "");
+        defer res.deinit();
+        const chord = res.config.keys.killJobChord().?;
+        try testz.expectEqualStr(chord.key(), "delete");
+        try testz.expectTrue(chord.mods.super);
+        try testz.expectFalse(chord.mods.ctrl);
+    }
+    {
+        var res = try config.load(alloc, "keys{ kill_job = 'ctrl+shift+k' }");
+        defer res.deinit();
+        try testz.expectEqual(res.err, null);
+        const chord = res.config.keys.killJobChord().?;
+        try testz.expectEqualStr(chord.key(), "k");
+        try testz.expectTrue(chord.mods.ctrl and chord.mods.shift);
+    }
+    {
+        var res = try config.load(alloc, "keys{ kill_job = false }");
+        defer res.deinit();
+        try testz.expectTrue(res.config.keys.killJobChord() == null);
+    }
+    {
+        var res = try config.load(alloc, "keys{ kill_job = false }\nkeys{ kill_job = true }");
+        defer res.deinit();
+        try testz.expectTrue(res.config.keys.killJobChord().?.mods.super);
+    }
+    {
+        // A bad chord is an error, and the default stands.
+        var res = try config.load(alloc, "keys{ kill_job = 'hyper+x' }");
+        defer res.deinit();
+        try testz.expectTrue(res.err != null);
+        try testz.expectTrue(res.config.keys.killJobChord().?.mods.super);
+    }
+}

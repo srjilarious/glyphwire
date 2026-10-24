@@ -78,6 +78,14 @@ pub const PaneProcs = struct {
     socket_path: []const u8,
     environ: *const std.process.Environ.Map,
 
+    /// Guards `procs`, `shells` and `deferred_exits`.
+    ///
+    /// **Lock order: the server's `ctx_mutex` before this one**, never
+    /// the reverse. The dispatcher runs `spawn` and `kill` (through
+    /// `dispatch.PaneSpawner`) already holding `ctx_mutex`, so anything
+    /// here that needs both takes `ctx_mutex` first; the other order
+    /// deadlocks the moment a split lands while a pane is producing
+    /// output. A `Proc`'s own `mutex` is a leaf under either.
     mutex: std.Io.Mutex = .init,
     procs: std.AutoHashMapUnmanaged(glyphwire.PaneHandle, *Proc) = .empty,
     /// Shells the context switcher spawned (`spawnShell`), by the context
@@ -369,7 +377,12 @@ pub const PaneProcs = struct {
         const server = self.server;
         server.ctx_mutex.lockUncancelable(server.io);
         defer server.ctx_mutex.unlock(server.io);
-        const p = server.session.panePtr(pane) orelse return false;
+        return self.paneHeldLocked(pane);
+    }
+
+    /// `paneHeld` for a caller already holding `ctx_mutex`.
+    fn paneHeldLocked(self: *PaneProcs, pane: glyphwire.PaneHandle) bool {
+        const p = self.server.session.panePtr(pane) orelse return false;
         for (p.stack.items) |h| {
             if (h != p.base) return true;
         }
@@ -444,9 +457,8 @@ pub const PaneProcs = struct {
     }
 
     /// The directory of the first context in `top` the host started a
-    /// process for. Takes `self.mutex` (`pidFor`). Under `ctx_mutex` that
-    /// is the same nesting `spawn`'s `killProgram` already does on the
-    /// dispatcher's thread, the reverse of `pump`'s.
+    /// process for. Takes `self.mutex` (`pidFor`), inside `ctx_mutex` when
+    /// the caller holds it: the order on `mutex`.
     fn cwdIn(self: *PaneProcs, pane: glyphwire.PaneHandle, top: *const StackTop, buf: []u8) ?[]const u8 {
         for (top.handles[0..top.len]) |h| {
             var pid = self.pidFor(pane, h);
@@ -511,6 +523,9 @@ pub const PaneProcs = struct {
     /// pane it is actually drawing into.
     pub fn syncSizes(self: *PaneProcs) void {
         const server = self.server;
+        // `ctx_mutex` first: see the lock order on `mutex`.
+        server.ctx_mutex.lockUncancelable(server.io);
+        defer server.ctx_mutex.unlock(server.io);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -520,14 +535,10 @@ pub const PaneProcs = struct {
         while (sit.next()) |p| syncSize(server, p.*);
     }
 
+    /// Caller holds `ctx_mutex`.
     fn syncSize(server: *glyphwire.server.Server, proc: *Proc) void {
-        const size = blk: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
-            const pane = server.session.panePtr(proc.pane) orelse return;
-            break :blk .{ .cols = @max(pane.rect.cols, 1), .rows = @max(pane.rect.rows, 1) };
-        };
-        proc.pty.resize(@intCast(size.cols), @intCast(size.rows));
+        const pane = server.session.panePtr(proc.pane) orelse return;
+        proc.pty.resize(@intCast(@max(pane.rect.cols, 1)), @intCast(@max(pane.rect.rows, 1)));
     }
 
     /// Drains every PTY's output onto its context, and deals with any
@@ -552,7 +563,11 @@ pub const PaneProcs = struct {
         var done: [8]struct { proc: *Proc, hangup: bool } = undefined;
         var n_done: usize = 0;
 
+        const server = self.server;
         {
+            // `ctx_mutex` first: see the lock order on `mutex`.
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
 
@@ -580,7 +595,7 @@ pub const PaneProcs = struct {
 
                 if (n_done >= done.len) break;
                 const gone = proc.eof.load(.monotonic) or proc.pty.reaped();
-                if (gone or !self.contextExists(proc.context)) {
+                if (gone or server.session.contextPtr(proc.context) == null) {
                     done[n_done] = .{ .proc = proc, .hangup = !gone };
                     n_done += 1;
                 }
@@ -593,7 +608,7 @@ pub const PaneProcs = struct {
         for (done[0..n_done]) |d| {
             const context = d.proc.context;
             if (d.hangup) self.stopProc(d.proc) else self.destroyProc(d.proc);
-            self.server.destroyShellContext(alloc, context) catch |err| {
+            server.destroyShellContext(alloc, context) catch |err| {
                 std.log.err("glyphwire-host: dropping spawned shell context {d} failed: {t}", .{ context, err });
             };
         }
@@ -602,12 +617,14 @@ pub const PaneProcs = struct {
         // exiting closes its pane in this same pass: a pane whose program
         // has exited goes once nothing holds it open.
         {
+            server.ctx_mutex.lockUncancelable(server.io);
+            defer server.ctx_mutex.unlock(server.io);
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             var dit = self.deferred_exits.iterator();
             while (dit.next()) |e| {
                 if (n_exits >= exits.len) break;
-                if (self.paneHeld(e.key_ptr.*)) continue;
+                if (self.paneHeldLocked(e.key_ptr.*)) continue;
                 exits[n_exits] = .{ .pane = e.key_ptr.*, .status = e.value_ptr.* };
                 n_exits += 1;
             }
@@ -617,21 +634,14 @@ pub const PaneProcs = struct {
             if (self.programExited(pane)) self.bringForwardOverBase(alloc, pane);
         }
         for (exits[0..n_exits]) |e| {
-            self.server.reportPaneExit(alloc, e.pane, e.status) catch |err| {
+            server.reportPaneExit(alloc, e.pane, e.status) catch |err| {
                 std.log.err("glyphwire-host: pane_exit for pane {d} failed: {t}", .{ e.pane, err });
             };
         }
     }
 
-    fn contextExists(self: *PaneProcs, context: glyphwire.ContextHandle) bool {
-        const server = self.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
-        return server.session.contextPtr(context) != null;
-    }
-
     /// Moves one child's buffered PTY bytes onto its context's root
-    /// layer. Caller holds `self.mutex`.
+    /// layer. Caller holds `ctx_mutex`, then `self.mutex`.
     fn drainOne(self: *PaneProcs, proc: *Proc) void {
         proc.mutex.lockUncancelable(self.io);
         if (proc.out.items.len == 0) {
@@ -662,10 +672,7 @@ pub const PaneProcs = struct {
         }
         if (text.len == 0) return;
 
-        const server = self.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
-        const ctx = server.session.contextPtr(proc.context) orelse return;
+        const ctx = self.server.session.contextPtr(proc.context) orelse return;
         // `pty_mode` keeps the escape-sequence machine alive across calls,
         // so a `CSI` split across two `read()`s still parses as one -- see
         // `core.Layer.pty_mode`.

@@ -15,6 +15,7 @@ const handshake = @import("shell_support").handshake;
 const history = @import("applib").history;
 const keyencode = @import("shell_support").keyencode;
 const pty = @import("shell_support").pty;
+const jobstop = @import("shell_support").jobstop;
 const browsescroll = @import("shell_support").browsescroll;
 const promptrow = @import("shell_support").promptrow;
 const embed = @import("shell_support").embed;
@@ -1453,4 +1454,50 @@ pub fn jobstackBackOnTopWithTheJobGoneIsAnExitTest(_: std.Io, _: std.mem.Allocat
         .{ .context = 0, .title = "gw-shell", .visible = true, .shell = true },
     };
     try testz.expectTrue(std.meta.eql(jobstack.read(&entries, 0, 3), jobstack.Reading.none));
+}
+
+// ─── jobstop.JobStop ──────────────────────────────────────────────────
+
+/// The first press is SIGTERM; SIGKILL follows once the grace runs out,
+/// once; nothing happens before the key is pressed.
+pub fn jobStopTermThenKillAfterGraceTest(_: std.Io, _: std.mem.Allocator) !void {
+    var st: jobstop.JobStop = .{};
+    try testz.expectTrue(st.tick(100_000) == null);
+    try testz.expectTrue(st.sent() == null);
+
+    try testz.expectTrue(st.press(1000).? == .term);
+    try testz.expectTrue(st.sent().? == .term);
+    try testz.expectTrue(st.tick(1000 + jobstop.kill_grace_ms - 1) == null);
+    try testz.expectTrue(st.tick(1000 + jobstop.kill_grace_ms).? == .kill);
+    try testz.expectTrue(st.tick(1000 + jobstop.kill_grace_ms + 500) == null);
+    try testz.expectTrue(st.press(9000) == null);
+    try testz.expectTrue(st.sent().? == .kill);
+}
+
+/// A second press inside the grace kills at once, and the countdown
+/// then has nothing left to do.
+pub fn jobStopSecondPressKillsAtOnceTest(_: std.Io, _: std.mem.Allocator) !void {
+    var st: jobstop.JobStop = .{};
+    try testz.expectTrue(st.press(0).? == .term);
+    try testz.expectTrue(st.press(200).? == .kill);
+    try testz.expectTrue(st.tick(10_000) == null);
+}
+
+// ─── pty.mergeEnv ─────────────────────────────────────────────────────
+
+/// An override replaces the inherited entry of the same name rather than
+/// following it: `getenv` returns the first match, so an appended
+/// `GLYPHWIRE_PANE` behind an inherited one was never seen.
+pub fn mergeEnvReplacesInheritedNamesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const base = [_]?[*:0]const u8{ "HOME=/home/u", "GLYPHWIRE_PANE=2", "GLYPHWIRE_PANEL=x", "PATH=/bin" };
+    const env = try pty.mergeEnv(alloc, &base, &.{ "GLYPHWIRE_PANE=5", "NEW=1" });
+    defer alloc.free(env);
+    try testz.expectEqual(env.len, 5);
+    try testz.expectEqualStr(std.mem.span(env[0].?), "HOME=/home/u");
+    // A longer name that merely starts the same is kept.
+    try testz.expectEqualStr(std.mem.span(env[1].?), "GLYPHWIRE_PANEL=x");
+    try testz.expectEqualStr(std.mem.span(env[2].?), "PATH=/bin");
+    try testz.expectEqualStr(std.mem.span(env[3].?), "GLYPHWIRE_PANE=5");
+    try testz.expectEqualStr(std.mem.span(env[4].?), "NEW=1");
+    try testz.expectTrue(env[5] == null);
 }

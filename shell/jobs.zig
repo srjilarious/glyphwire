@@ -13,6 +13,7 @@ const crashlog = @import("shell_support").crashlog;
 const keyencode = @import("shell_support").keyencode;
 const parse = @import("shell_support").parse;
 const jobstack = @import("shell_support").jobstack;
+const jobstop = @import("shell_support").jobstop;
 
 const main = @import("main.zig");
 const Prompt = main.Prompt;
@@ -94,12 +95,14 @@ pub fn runCommandEnd(self: *Prompt, argv: []const []const u8) !RunEnd {
     // search is the first) can `write()` a value to
     // `$GLYPHWIRE_RESULT_FD` before exiting and have it become this
     // prompt's line once the child is reaped -- see `result_fd_env`
-    // and `readResultPipe`. No `O_CLOEXEC` on either end, matching
-    // `pipeexec.zig`'s pipes: the write end has to survive fork+exec
-    // into the child with no changes to `Pty.spawn` itself, and the
-    // child inheriting the unused read end too is harmless.
+    // and `readResultPipe`. No `O_CLOEXEC` on the write end, matching
+    // `pipeexec.zig`'s pipes: it has to survive fork+exec into the child
+    // with no changes to `Pty.spawn` itself. The read end is close-on-exec
+    // though: a child has no use for it, and every descendant would carry
+    // it on.
     var result_pipe: [2]c_int = undefined;
     if (c.pipe2(&result_pipe, 0) != 0) return error.PipeFailed;
+    _ = std.c.fcntl(result_pipe[0], std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC));
     const result_fd_var = try std.fmt.allocPrintSentinel(alloc, "{s}={d}", .{ result_fd_env, result_pipe[1] }, 0);
     defer alloc.free(result_fd_var);
 
@@ -198,6 +201,9 @@ pub const Job = struct {
     /// The result pipe's read end -- see `result_fd_env`.
     result_fd: c_int,
     started: std.Io.Clock.Timestamp,
+    /// The kill-job key's progress on this job (`jobstop.zig`). Kept on
+    /// the job so a `fg` doesn't restart the SIGKILL countdown.
+    stop: jobstop.JobStop = .{},
     /// The context the program drew its screen on, learned from this
     /// pane's stack while it ran (see `noteVisibleContext`). Null for a
     /// program that never made one: that includes every plain PTY
@@ -279,6 +285,9 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
     var stack_dirty = true;
 
     while (!pty.reaped()) {
+        // The kill-job key's SIGKILL, once SIGTERM's grace has run out.
+        if (job.stop.tick(jobMs(self, job))) |sig| pty.signalGroup(jobstop.posixSignal(sig));
+
         // Once the handshake resolves an aware child, it's drawing
         // over its own wire connection and never reads its own stdin
         // -- forwarding anything into its pty would just sit unread
@@ -363,7 +372,9 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
                 // the key on its own listener. Ctrl+Shift+C is copy.
                 .key => |kev| {
                     defer alloc.free(kev.key);
-                    if (kev.pressed and kev.ctrl() and !kev.shift() and std.mem.eql(u8, kev.key, "c"))
+                    if (self.isKillJobKey(kev)) {
+                        if (job.stop.press(jobMs(self, job))) |sig| pty.signalGroup(jobstop.posixSignal(sig));
+                    } else if (kev.pressed and kev.ctrl() and !kev.shift() and std.mem.eql(u8, kev.key, "c"))
                         pty.signalGroup(std.posix.SIG.INT);
                 },
                 .copy_request => {},
@@ -426,6 +437,11 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
         };
         defer alloc.free(ev.key);
         if (!ev.pressed) continue;
+        // The shell's own key, never the child's: not forwarded.
+        if (self.isKillJobKey(ev)) {
+            if (job.stop.press(jobMs(self, job))) |sig| pty.signalGroup(jobstop.posixSignal(sig));
+            continue;
+        }
         const mods = ptyMods(ev.mods);
         // A plain printable key (no ctrl/alt) is delivered as a `text`
         // event, not re-encoded here -- otherwise the child sees it
@@ -436,6 +452,27 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
         if (keyencode.toPtyBytesOpts(ev.key, mods, modes.encodeOpts(), &kb)) |seq| pty.writeAll(seq);
     }
     return .exited;
+}
+
+/// Milliseconds since `job` started: `JobStop`'s clock.
+fn jobMs(self: *Prompt, job: *const Job) i64 {
+    return job.started.untilNow(self.client.io).raw.toMilliseconds();
+}
+
+/// Whether `kev` is a press of the kill-job key (`keys{ kill_job }`).
+pub fn isKillJobKey(self: *const Prompt, kev: glyphwire.KeyEvent) bool {
+    const chord = self.kill_job_key orelse return false;
+    return kev.pressed and chord.matches(kev.key, kev.mods);
+}
+
+/// Prints the kill-job key's line under a job it stopped: which signal
+/// it took. A job the key never touched prints nothing.
+pub fn noteJobStop(self: *Prompt, stop: jobstop.JobStop) void {
+    const sig = stop.sent() orelse return;
+    const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = 0, .col = 0 };
+    if (cur.col != 0) self.drawText("\n", null, null) catch {};
+    self.drawText(jobstop.notice(sig), job_color, null) catch {};
+    self.drawText("\n", null, null) catch {};
 }
 
 /// Reads this pane's stack after a visibility change while `job` holds
@@ -469,12 +506,14 @@ pub fn finishForegroundJob(self: *Prompt, job: *Job) void {
     const alloc = self.client.alloc;
 
     // Child reaped -> its slave is closed -> the reader's next master
-    // read returns EOF/EIO and the thread exits on its own.
-    job.reader.join();
+    // read returns EOF/EIO and the thread exits on its own, unless
+    // something the child left running still holds the terminal -- see
+    // `joinReader`.
+    joinReader(self, job);
 
-    // Every process that held the write end (just the child) has now
-    // exited, so this is a bounded read to EOF, not a block -- see
-    // `readResultPipe`.
+    // Whatever the child wrote is in the pipe already; anything it left
+    // running may still hold the write end, so this reads what is there
+    // rather than waiting for EOF -- see `readResultPipe`.
     if (self.readResultPipe(job.result_fd) catch null) |line| {
         if (self.pending_result_line) |old| alloc.free(old);
         self.pending_result_line = line;
@@ -501,6 +540,7 @@ pub fn finishForegroundJob(self: *Prompt, job: *Job) void {
     // freezing scrollback and making the host wheel page the shell.
     self.drawText("\x1b[?1049l\x1b[!p", null, null) catch {};
 
+    self.noteJobStop(job.stop);
     self.reportCrash(job);
 
     // Record the run's outcome for the next prompt's `{exit}` / `{dur}`.
@@ -537,7 +577,7 @@ pub fn parkJob(self: *Prompt, job: *Job) !void {
         // running child.
         job.pty.signalGroup(std.posix.SIG.HUP);
         job.pty.wait();
-        job.reader.join();
+        joinReader(self, job);
         self.freeJob(job);
         return err;
     };
@@ -581,7 +621,7 @@ pub fn reportFinishedJobs(self: *Prompt) void {
             continue;
         }
         _ = self.jobs.orderedRemove(i);
-        job.reader.join();
+        joinReader(self, job);
         // Onto a row of its own, not the tail of the last command's
         // output.
         if (!fresh_row) {
@@ -740,7 +780,7 @@ fn hangUp(self: *Prompt, spare_screens: bool) void {
             // Nowhere to hold it for the grace period: hang it up now.
             job.pty.signalGroup(std.posix.SIG.KILL);
             job.pty.wait();
-            job.reader.join();
+            joinReader(self, job);
             self.freeJob(job);
         };
     }
@@ -760,7 +800,7 @@ fn hangUp(self: *Prompt, spare_screens: bool) void {
             job.pty.signalGroup(std.posix.SIG.KILL);
             job.pty.wait();
         }
-        job.reader.join();
+        joinReader(self, job);
         self.freeJob(job);
     }
 }
@@ -813,7 +853,7 @@ pub fn lingerForScreenJobs(self: *Prompt, listener: *glyphwire.InputListener) vo
                 continue;
             }
             _ = self.jobs.orderedRemove(i);
-            job.reader.join();
+            joinReader(self, job);
             self.freeJob(job);
         }
         if (self.jobs.items.len == 0) break;
@@ -827,13 +867,19 @@ pub fn lingerForScreenJobs(self: *Prompt, listener: *glyphwire.InputListener) vo
     }
 }
 
-/// Drains `read_fd` (the result pipe's read end) to EOF and returns
-/// what it held, trimming exactly one trailing `\n` for convenience --
+/// Reads what is waiting in `read_fd` (the result pipe's read end) and
+/// returns it, trimming exactly one trailing `\n` for convenience --
 /// or `null` if the child never wrote anything (the ordinary case: a
 /// plain command that doesn't know about `$GLYPHWIRE_RESULT_FD`, or a
 /// cancelled interactive picker). Caller frees a non-null result;
 /// caller also owns closing `read_fd` itself (see `runCommand`'s
 /// `defer`) -- this only reads.
+///
+/// It reads what is there rather than to EOF. The child has been reaped,
+/// so whatever it wrote is already in the pipe; but anything it started
+/// and left running inherited the write end too, and a read to EOF waits
+/// for the last of those (a dev host run from this shell kept its own
+/// shells alive and the prompt never came back).
 pub fn readResultPipe(self: *Prompt, read_fd: c_int) !?[]u8 {
     const alloc = self.client.alloc;
     var out: std.ArrayList(u8) = .empty;
@@ -841,6 +887,9 @@ pub fn readResultPipe(self: *Prompt, read_fd: c_int) !?[]u8 {
 
     var chunk: [1024]u8 = undefined;
     while (true) {
+        var pfd = [_]std.posix.pollfd{.{ .fd = read_fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        const ready = std.posix.poll(&pfd, 0) catch break;
+        if (ready == 0) break;
         const n = c.read(read_fd, &chunk, chunk.len);
         if (n <= 0) break;
         try out.appendSlice(alloc, chunk[0..@intCast(n)]);
@@ -874,7 +923,32 @@ pub const PtyReaderCtx = struct {
     /// The `mouse_report` value last sent for this child, so the
     /// reader only sends on a change (see `syncMouseReport`).
     mouse_report_sent: bool = false,
+    /// Set by `joinReader` to stop a reader still running after the
+    /// child is reaped; set by the reader itself as it returns.
+    stop: std.atomic.Value(bool) = .init(false),
+    done: std.atomic.Value(bool) = .init(false),
 };
+
+/// How long `joinReader` lets a reaped job's reader finish on its own.
+/// It normally ends within a read or two of the child exiting, as the
+/// terminal's last writer goes away.
+const reader_grace_ms: u32 = 300;
+
+/// Joins `job`'s reader thread once the child is reaped. The reader
+/// ends on its own when the terminal's last writer closes it, which is
+/// usually the child. But a background process the child left behind
+/// (`server &` in a script, a host started from this prompt) can hold
+/// it open indefinitely; after `reader_grace_ms` the reader is told to
+/// stop and the shell carries on, leaving that process running, as
+/// bash does.
+pub fn joinReader(self: *Prompt, job: *Job) void {
+    var waited: u32 = 0;
+    while (!job.reader_ctx.done.load(.acquire) and waited < reader_grace_ms) : (waited += 10) {
+        std.Io.sleep(self.client.io, .fromMilliseconds(10), .awake) catch break;
+    }
+    job.reader_ctx.stop.store(true, .release);
+    job.reader.join();
+}
 
 /// Mirrors the child's mouse-reporting modes onto the layer's
 /// `mouse_report` whenever `ModeTracker` says they flipped. On the
@@ -929,10 +1003,13 @@ pub fn ptyReaderThread(ctx: *PtyReaderCtx) void {
     defer text.deinit(alloc);
     const mirror: Mirror = .{ .carry = &carry, .text = &text };
 
+    defer ctx.done.store(true, .release);
+
     var buf: [4096]u8 = undefined;
-    while (true) {
+    // A short poll, so a `joinReader` stop is noticed promptly.
+    while (!ctx.stop.load(.acquire)) {
         var pfd = [_]std.posix.pollfd{.{ .fd = ctx.master, .events = std.posix.POLL.IN, .revents = 0 }};
-        _ = std.posix.poll(&pfd, 1000) catch break;
+        _ = std.posix.poll(&pfd, 100) catch break;
         if (pfd[0].revents == 0) continue; // timeout, nothing ready
 
         const n = std.c.read(ctx.master, &buf, buf.len);

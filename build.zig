@@ -16,7 +16,7 @@ const suite_version = @import("build.zig.zon").version;
 const program_versions = [_]struct { name: []const u8, version: []const u8 }{
     .{ .name = "glyphwire", .version = "0.13.0" },
     .{ .name = "glyphwire-server", .version = "0.11.0" },
-    .{ .name = "gw-shell", .version = "0.10.2" },
+    .{ .name = "gw-shell", .version = "0.11.0" },
     .{ .name = "gw-agent", .version = "0.8.0" },
     .{ .name = "gw-ls", .version = "0.8.0" },
     .{ .name = "gw-hist", .version = "0.8.0" },

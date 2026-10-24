@@ -17,7 +17,7 @@
 -- loops / conditionals / `string` / `table` all work. It runs in the
 -- shell's session-long Lua state, so a `function` (or `defcmd`) it
 -- defines stays callable as a builtin afterwards. glyphwire adds:
--- `alias(name, value)`, `prompt{ ... }`, `zj{ ... }`, `on{ ... }`,
+-- `alias(name, value)`, `prompt{ ... }`, `zj{ ... }`, `keys{ ... }`, `on{ ... }`,
 -- `defcmd(name, fn)`, `defcomplete(name, fn)`,
 -- and the `sh` table (`sh.setenv` / `sh.unsetenv` / `sh.getenv` /
 -- `sh.cwd` / `sh.chdir` / `sh.realpath`). See the Scripts section below.
@@ -105,6 +105,21 @@
 -- zj{
 --   enabled = true,                       -- set false to turn it off
 --   exclude_dirs = { "/tmp", "~/scratch" }, -- never record or return these (or anything under them)
+-- }
+
+
+---- Shell keys ----------------------------------------------------------
+--
+-- Keys the shell acts on itself while a program is running in front of
+-- it. They are never passed to the program.
+--
+-- kill_job stops the foreground program when Ctrl+C won't: SIGTERM to
+-- its whole process group, then SIGKILL three seconds later if anything
+-- in it is still running (pressing the key again sends SIGKILL at once).
+-- A chord string sets it, false turns it off.
+--
+-- keys{
+--   kill_job = "super+delete",
 -- }
 
 
