@@ -11,6 +11,7 @@ const std = @import("std");
 const core = @import("core.zig");
 
 const Color = core.Color;
+const Decoration = core.Decoration;
 const HAlign = core.HAlign;
 const IconScale = core.IconScale;
 const ImageHandle = core.ImageHandle;
@@ -56,11 +57,15 @@ pub fn tableMakeRoom(layer: *Layer, cur_row: *usize, scrolled: *usize, piece_h: 
     cur_row.* -|= n;
 }
 
-pub fn setCellText(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
+pub fn setCellText(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle, deco: Decoration) void {
     const c = layer.cellSigned(row, col) orelse return;
     c.setGrapheme(grapheme);
-    c.style.fg = fg;
-    c.style.bg = if (bg) |b| .{ .color = b } else default_style.bg;
+    c.style = .{
+        .fg = fg,
+        .bg = if (bg) |b| .{ .color = b } else default_style.bg,
+        .underline = deco.underline,
+        .strike = deco.strike,
+    };
     c.metadata_id = metadata_id;
     c.meta_focus = false;
     c.wide = .narrow;
@@ -74,13 +79,17 @@ pub fn setCellText(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg
 /// `(row, col + 1)` becomes a blank spacer carrying the lead's resolved
 /// style + `metadata_id`. Caller guarantees `col + 1` is in range. Used
 /// by `writeCellRun` so table cells advance the same way `writeText` does.
-pub fn setCellWide(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle) void {
+pub fn setCellWide(layer: *Layer, row: i64, col: usize, grapheme: []const u8, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle, deco: Decoration) void {
     if (col + 1 >= layer.width) return;
     const cells = layer.rowAtSigned(row) orelse return;
     const lead = &cells[col];
     lead.setGrapheme(grapheme);
-    lead.style.fg = fg;
-    lead.style.bg = if (bg) |b| .{ .color = b } else default_style.bg;
+    lead.style = .{
+        .fg = fg,
+        .bg = if (bg) |b| .{ .color = b } else default_style.bg,
+        .underline = deco.underline,
+        .strike = deco.strike,
+    };
     lead.metadata_id = metadata_id;
     lead.meta_focus = false;
     lead.wide = .wide_lead;

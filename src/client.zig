@@ -1364,8 +1364,12 @@ pub const Client = struct {
         number: f64,
     };
 
+    /// A cell's text: `display`, or `spans` for a cell styled in runs
+    /// (struck, underlined, a link of its own), whose texts joined are
+    /// its display text. Set `spans` and `display` is ignored.
     pub const TableCellInput = struct {
-        display: []const u8,
+        display: []const u8 = "",
+        spans: ?[]const TableSpanInput = null,
         sort_key: ?SortKeyInput = null,
         /// An icon-registry name (`draw_icon`'s `name` convention) --
         /// resolved server-side, same "fail loud on an unknown name"
@@ -1373,6 +1377,19 @@ pub const Client = struct {
         icon: ?[]const u8 = null,
         fg: ?core.Color = null,
         metadata_id: ?core.MetadataHandle = null,
+    };
+
+    /// One run of a `TableCellInput.spans` cell: `Span` without the
+    /// fields a table lays out itself. Omitted `fg`/`metadata_id` are the
+    /// cell's; an omitted `bg` is the row's.
+    pub const TableSpanInput = struct {
+        text: []const u8,
+        fg: ?core.Color = null,
+        bg: ?core.Color = null,
+        metadata_id: ?core.MetadataHandle = null,
+        underline: ?core.Underline = null,
+        underline_color: ?core.Color = null,
+        strikethrough: ?bool = null,
     };
 
     /// `create_table(layer?, row?, col?, columns, style?)` -- a request.

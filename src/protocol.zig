@@ -331,7 +331,7 @@ pub const ListContextsResult = struct {
 
 /// The version of this protocol, as `docs/protocol.md`'s header gives
 /// it. Bumped with that document, not with any program.
-pub const protocol_version = "0.12.0";
+pub const protocol_version = "0.13.0";
 
 /// `get_version`'s result: the program serving the session and the
 /// protocol it speaks. `program` is its executable name
@@ -395,14 +395,32 @@ pub const TableStyle = struct {
 /// JSON string depending on the column -- a number parses as `.number`,
 /// a string as `.text`, anything else (or the field omitted) falls back
 /// to a copy of `display`.
+///
+/// Exactly one of `display` and `spans`: a styled cell sends `spans`, and
+/// its display text is their texts joined.
 pub const TableCell = struct {
-    display: []const u8,
+    display: ?[]const u8 = null,
+    spans: ?[]const TableSpan = null,
     sort_key: ?std.json.Value = null,
     /// An icon-registry name, resolved the same way `draw_icon`'s `name`
     /// is (`Context.iconHandle`).
     icon: ?[]const u8 = null,
     fg: ?Color = null,
     metadata_id: ?core.MetadataHandle = null,
+};
+
+/// One styled run of a table cell -- `write_text`'s `SpanParams` without
+/// the fields a table lays out itself (`scale`, `transparent_bg`). An
+/// omitted `fg`/`metadata_id` is the cell's; an omitted `bg` is the row's
+/// (an `alt_row_bg` stripe, or transparent).
+pub const TableSpan = struct {
+    text: []const u8,
+    fg: ?Color = null,
+    bg: ?Color = null,
+    metadata_id: ?core.MetadataHandle = null,
+    underline: ?[]const u8 = null,
+    underline_color: ?Color = null,
+    strikethrough: ?bool = null,
 };
 
 /// A column as reported back by `table_get_state` -- `kind`/`h_align`

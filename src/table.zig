@@ -23,6 +23,7 @@ const cell_paint = @import("cell_paint.zig");
 
 const Color = core.Color;
 const Context = core.Context;
+const Decoration = core.Decoration;
 const HAlign = core.HAlign;
 const ImageHandle = core.ImageHandle;
 const ImageInfo = core.ImageInfo;
@@ -173,17 +174,35 @@ pub const SortKey = union(enum) {
 /// `fg` is per-cell (`null` means `default_style.fg`) since a table has
 /// no notion of "kind" of its own -- glyphwire-ls's directory/symlink/
 /// file coloring is caller data, same as it always was.
+/// `runs` is empty for a plain cell; a cell sent as `spans` carries one
+/// run per span, back to back over `display` (their texts joined).
 pub const TableCell = struct {
     display: []u8,
     sort_key: SortKey,
     icon: ?ImageHandle = null,
     fg: ?Color = null,
     metadata_id: ?MetadataHandle = null,
+    runs: []CellRun = &.{},
 
     pub fn deinit(self: TableCell, alloc: std.mem.Allocator) void {
         alloc.free(self.display);
         self.sort_key.deinit(alloc);
+        alloc.free(self.runs);
     }
+};
+
+/// One styled stretch of a cell's `display`, from a `table_set_rows`
+/// span: the bytes from the previous run's `end` up to this one's. Stored
+/// as byte offsets rather than texts because a cell wraps and ellipsizes
+/// as one string -- each painted line is a slice of `display`, so its
+/// glyphs find their run by offset. A null `fg`/`bg`/`metadata_id` is the
+/// cell's own (`bg`: the row's background).
+pub const CellRun = struct {
+    end: usize,
+    fg: ?Color = null,
+    bg: ?Color = null,
+    metadata_id: ?MetadataHandle = null,
+    deco: Decoration = .{},
 };
 
 pub const TableRow = struct {
@@ -666,7 +685,7 @@ pub const Table = struct {
         var col = content_start_col;
         for (self.columns, 0..) |column, i| {
             if (i > 0) {
-                writeCellRun(layer, row, col, "", 1, .start, fg, self.style.header_bg, null, false);
+                writeCellRun(layer, row, col, "", 1, .start, .{ .fg = fg, .bg = self.style.header_bg }, false);
                 col += 1;
             }
             const width = self.headerColWidth(i);
@@ -682,9 +701,9 @@ pub const Table = struct {
                     "{s} {s}",
                     .{ column.name, sortArrowGlyph(self.sort_dir) },
                 ) catch column.name;
-                writeCellRun(layer, row, col, label, width, column.h_align, fg, self.style.header_bg, null, false);
+                writeCellRun(layer, row, col, label, width, column.h_align, .{ .fg = fg, .bg = self.style.header_bg }, false);
             } else {
-                writeCellRun(layer, row, col, column.name, width, column.h_align, fg, self.style.header_bg, null, false);
+                writeCellRun(layer, row, col, column.name, width, column.h_align, .{ .fg = fg, .bg = self.style.header_bg }, false);
             }
             col += width;
         }
@@ -735,9 +754,15 @@ pub const Table = struct {
 
             const text_col = col + icon_reserve;
             const text_width = width -| icon_reserve;
-            const fg = cell.fg orelse default_style.fg;
+            const pen: CellPen = .{
+                .fg = cell.fg orelse default_style.fg,
+                .bg = row_bg,
+                .metadata_id = cell.metadata_id,
+                .runs = cell.runs,
+                .display = cell.display,
+            };
             switch (column.overflow) {
-                .ellipsis => writeCellRun(layer, mid_row, text_col, cell.display, text_width, column.h_align, fg, row_bg, cell.metadata_id, column.focus),
+                .ellipsis => writeCellRun(layer, mid_row, text_col, cell.display, text_width, column.h_align, pen, column.focus),
                 .wrap => {
                     // Wrapped at the nominal width (see `wrapWidth`), each
                     // line padded out to the header's. The first line sits
@@ -746,9 +771,9 @@ pub const Table = struct {
                     var it = WrapIterator.init(cell.display, self.wrapWidth(ctx, i, cell));
                     var line: i64 = 0;
                     while (it.next()) |text| : (line += 1) {
-                        writeCellRun(layer, mid_row + line, text_col, text, text_width, column.h_align, fg, row_bg, cell.metadata_id, column.focus and line == 0);
+                        writeCellRun(layer, mid_row + line, text_col, text, text_width, column.h_align, pen, column.focus and line == 0);
                     }
-                    if (line == 0) writeCellRun(layer, mid_row, text_col, "", text_width, column.h_align, fg, row_bg, cell.metadata_id, column.focus);
+                    if (line == 0) writeCellRun(layer, mid_row, text_col, "", text_width, column.h_align, pen, column.focus);
                 },
             }
 
@@ -835,7 +860,7 @@ fn fillRowBg(layer: *Layer, top_row: i64, content_start_col: usize, content_widt
         const r = top_row + @as(i64, @intCast(line));
         var c = content_start_col;
         const end = @min(content_start_col + content_width, layer.width);
-        while (c < end) : (c += 1) setCellText(layer, r, c, "", default_style.fg, bg, null);
+        while (c < end) : (c += 1) setCellText(layer, r, c, "", default_style.fg, bg, null, .{});
     }
 }
 
@@ -869,7 +894,10 @@ fn drawBorderTile(layer: *Layer, ctx: *const Context, row: i64, col: usize, box_
 /// alignment padding) as its span's focus cell -- see `Cell.meta_focus`
 /// and `TableColumn.focus`. Nothing is marked when the run has no body at
 /// all (an empty `text`, or a column too narrow to fit a single glyph).
-fn writeCellRun(layer: *Layer, row: i64, col: usize, text: []const u8, width: usize, h_align: HAlign, fg: Color, bg: ?Color, metadata_id: ?MetadataHandle, focus: bool) void {
+/// Each glyph takes `pen`'s ink at its offset; the "…" takes the last
+/// glyph's, so a cut-off struck run stays struck to the edge, and the
+/// padding takes the cell's plain ink, never a run's line or link.
+fn writeCellRun(layer: *Layer, row: i64, col: usize, text: []const u8, width: usize, h_align: HAlign, pen: CellPen, focus: bool) void {
     if (width == 0 or col >= layer.width) return;
     if (layer.rowAtSigned(row) == null) return; // row not in the retained buffer
     const end_col = @min(col + width, layer.width);
@@ -884,29 +912,33 @@ fn writeCellRun(layer: *Layer, row: i64, col: usize, text: []const u8, width: us
         .center => pad / 2,
     };
 
+    const plain = pen.plain();
     var c = col;
     var n: usize = 0;
     while (n < lead and c < end_col) : (n += 1) {
-        setCellText(layer, row, c, " ", fg, bg, metadata_id);
+        setCellText(layer, row, c, " ", plain.fg, plain.bg, plain.metadata_id, .{});
         c += 1;
     }
 
     const view = std.unicode.Utf8View.init(text) catch (std.unicode.Utf8View.init("") catch unreachable);
     var it = view.iterator();
     var written: usize = 0; // display cells of the body written so far
+    var last = plain; // the ink of the last glyph written, for the "…"
     while (written < keep and c < end_col) {
         const cp_bytes = it.nextCodepointSlice() orelse break;
         const w = codepointWidth(std.unicode.utf8Decode(cp_bytes) catch 0xFFFD);
         if (written + w > keep) break;
         const body_start = c;
+        const ink = pen.at(cp_bytes);
         if (w == 2) {
             if (c + 1 >= end_col) break; // wide glyph won't fit the column tail
-            setCellWide(layer, row, c, cp_bytes, fg, bg, metadata_id);
+            setCellWide(layer, row, c, cp_bytes, ink.fg, ink.bg, ink.metadata_id, ink.deco);
             c += 2;
         } else {
-            setCellText(layer, row, c, cp_bytes, fg, bg, metadata_id);
+            setCellText(layer, row, c, cp_bytes, ink.fg, ink.bg, ink.metadata_id, ink.deco);
             c += 1;
         }
+        last = ink;
         // The first glyph of the body, once it's actually been written --
         // `setCell*` clears `meta_focus`, so the mark has to go on after.
         if (focus and written == 0) {
@@ -916,9 +948,52 @@ fn writeCellRun(layer: *Layer, row: i64, col: usize, text: []const u8, width: us
     }
 
     if (truncate and c < end_col) {
-        setCellText(layer, row, c, "\u{2026}", fg, bg, metadata_id);
+        setCellText(layer, row, c, "\u{2026}", last.fg, last.bg, last.metadata_id, last.deco);
         c += 1;
     }
 
-    while (c < end_col) : (c += 1) setCellText(layer, row, c, " ", fg, bg, metadata_id);
+    while (c < end_col) : (c += 1) setCellText(layer, row, c, " ", plain.fg, plain.bg, plain.metadata_id, .{});
 }
+
+/// How `writeCellRun` inks a cell: the cell's own `fg`/`bg`/`metadata_id`,
+/// plus its `runs` (none for a header or a plain cell), which a glyph
+/// looks up by its byte offset into `display`.
+const CellPen = struct {
+    fg: Color,
+    bg: ?Color,
+    metadata_id: ?MetadataHandle = null,
+    runs: []const CellRun = &.{},
+    /// The cell text `runs` index into. Every `text` `writeCellRun` is
+    /// given with this pen is a slice of it (a wrapped line, or the
+    /// whole thing).
+    display: []const u8 = "",
+
+    const Ink = struct {
+        fg: Color,
+        bg: ?Color,
+        metadata_id: ?MetadataHandle,
+        deco: Decoration,
+    };
+
+    fn plain(self: CellPen) Ink {
+        return .{ .fg = self.fg, .bg = self.bg, .metadata_id = self.metadata_id, .deco = .{} };
+    }
+
+    /// The ink for `glyph`, a slice of `display`: its run's, with the
+    /// cell's filling whatever the run leaves null.
+    fn at(self: CellPen, glyph: []const u8) Ink {
+        const start = @intFromPtr(self.display.ptr);
+        const addr = @intFromPtr(glyph.ptr);
+        if (addr < start or addr >= start + self.display.len) return self.plain();
+        const off = addr - start;
+        for (self.runs) |r| {
+            if (off < r.end) return .{
+                .fg = r.fg orelse self.fg,
+                .bg = r.bg orelse self.bg,
+                .metadata_id = r.metadata_id orelse self.metadata_id,
+                .deco = r.deco,
+            };
+        }
+        return self.plain();
+    }
+};

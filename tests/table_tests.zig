@@ -1259,6 +1259,44 @@ pub fn wrapIteratorBreaksAtWordsTest(_: std.Io, _: std.mem.Allocator) !void {
 /// height is part of the table's footprint, and re-sorting on the wrap
 /// column (which widens it for the arrow) keeps the same height, since
 /// wrapping uses the nominal width.
+/// `TableCellInput.spans` reaches the server through the client: each
+/// span draws in its own colour, the cell's `fg` where a span has none.
+pub fn tableCellSpansFromClientColourTheirOwnTextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-table-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+
+    const table = try client.createTable(null, 0, 0, &.{
+        .{ .name = "A", .width = 6 },
+    }, .{ .borders = false, .header_separator = false });
+
+    try client.tableSetRows(null, table, &.{
+        &.{.{ .fg = .{ .r = 10, .g = 10, .b = 10 }, .spans = &.{
+            .{ .text = "ab", .fg = .{ .r = 250, .g = 0, .b = 0 }, .strikethrough = true },
+            .{ .text = "cd" },
+        } }},
+    });
+
+    var snap = try client.getCells();
+    defer snap.deinit();
+    try testz.expectEqualStr("a", snap.cellAt(1, 0).grapheme);
+    try testz.expectEqual(snap.cellAt(1, 1).fg.r, 250);
+    try testz.expectEqualStr("c", snap.cellAt(1, 2).grapheme);
+    try testz.expectEqual(snap.cellAt(1, 2).fg.r, 10);
+}
+
 pub fn tableWrapColumnGrowsRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var ctx = try glyphwire.Context.init(alloc, 30, 10, 0);
     defer ctx.deinit();

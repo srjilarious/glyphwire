@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.12.0 — pre-1.0 draft.**
+**Version 0.13.0 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -567,8 +567,8 @@ are `{"row":<int>,"col":<int>}`, both 0-based, origin top-left.
 ### 4.5 Table
 
 A server-side table widget: columns with widths, alignment and sort
-behaviour; rows of cells with display text, an optional sort key, an
-optional icon and an optional metadata id. The host owns layout, sorting,
+behaviour; rows of cells with display text (plain, or styled in spans), an
+optional sort key, an optional icon and an optional metadata id. The host owns layout, sorting,
 borders and striping — a client sets rows and reads back where the table
 painted. Sorting a 10,000-row listing costs one message, not a redraw.
 
@@ -1235,12 +1235,20 @@ ellipsize.
 `max_icon_px` bounds a body icon's rendered height in pixels; omitted, the
 row height alone bounds it.
 
-**Row cell** — `{display, sort_key?, icon?, fg?, metadata_id?}`. `rows` is
-an array of arrays of these. A row whose length does not match the column
-count reports `TableRowShapeMismatch`. `sort_key` is a raw JSON value: a
-number sorts numerically, a string sorts as text, anything else or omitted
-falls back to `display`. `icon` resolves against the same catalog
-`draw_icon` uses.
+**Row cell** — `{display | spans, sort_key?, icon?, fg?, metadata_id?}`.
+`rows` is an array of arrays of these. A row whose length does not match
+the column count reports `TableRowShapeMismatch`. A cell sends exactly one
+of `display` and `spans` (else `InvalidSpans`). `spans` is an array of
+`{text, fg?, bg?, metadata_id?, underline?, underline_color?,
+strikethrough?}`, `write_text`'s span shape without `scale` and
+`transparent_bg`: the texts joined are the cell's display text, which is
+what sizes, wraps, ellipsizes and (by default) sorts it, and each glyph
+draws in its own span's style. A span's omitted `fg` and `metadata_id` are
+the cell's, an omitted `bg` is the row's. Alignment padding never carries
+a span's line or link; a `…` takes the style of the glyph before it.
+`sort_key` is a raw JSON value: a number sorts numerically, a string sorts
+as text, anything else or omitted falls back to the display text. `icon`
+resolves against the same catalog `draw_icon` uses.
 
 `table_set_sort` sets the sort column and `direction` (`"none"`,
 `"ascending"`, `"descending"`). An unrecognised option string in any table

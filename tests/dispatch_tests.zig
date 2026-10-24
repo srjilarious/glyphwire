@@ -5732,3 +5732,139 @@ pub fn writeTextStrikethroughPerSpanTest(io: std.Io, alloc: std.mem.Allocator) !
     try testz.expectTrue(layer.cell(0, 0).style.strike);
     try testz.expectFalse(layer.cell(0, 1).style.strike);
 }
+
+/// Creates a borderless, unruled table at (0, 0) -- header on row 0,
+/// body from row 1 -- with `columns` (a JSON array) and sends it `rows`
+/// (a JSON array of arrays). Returns its handle.
+fn tableWithRows(alloc: std.mem.Allocator, d: *dispatch.Dispatcher, ctx: *glyphwire.Context, columns: []const u8, rows: []const u8) !glyphwire.TableHandle {
+    const create = try std.fmt.allocPrint(alloc,
+        \\{{"jsonrpc":"2.0","id":1,"method":"create_table","params":{{"row":0,"col":0,"columns":{s},"style":{{"borders":false,"header_separator":false}}}}}}
+    , .{columns});
+    defer alloc.free(create);
+    freeResult(alloc, try d.handle(alloc, create));
+    const handle = ctx.root.table_order.items[ctx.root.table_order.items.len - 1];
+    const set_rows = try std.fmt.allocPrint(alloc,
+        \\{{"jsonrpc":"2.0","method":"table_set_rows","params":{{"table":{d},"rows":{s}}}}}
+    , .{ handle, rows });
+    defer alloc.free(set_rows);
+    try notifyThrough(alloc, d, set_rows);
+    return handle;
+}
+
+/// A `spans` cell joins its texts into `display` (and so its default sort
+/// key), and each glyph takes its own span's colour and line, the cell's
+/// `fg` filling in where a span has none. The alignment padding takes the
+/// cell's plain ink; a "…" takes the last glyph's, so a cut-off struck
+/// run stays struck to the column's edge.
+pub fn tableCellSpansStyleTheirOwnTextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    // A = cols 0..3, gap 4, B = cols 5..8.
+    const handle = try tableWithRows(alloc, &d, &ctx,
+        \\[{"name":"A","width":4},{"name":"B","width":4}]
+    ,
+        \\[[{"fg":{"r":10,"g":10,"b":10},"spans":[{"text":"ab","strikethrough":true,"fg":{"r":250,"g":0,"b":0}},{"text":"c"}]},
+        \\  {"spans":[{"text":"x"},{"text":"yzwv","strikethrough":true}]}]]
+    );
+    const table = ctx.root.tables.getPtr(handle).?;
+    try testz.expectEqualStr("abc", table.rows[0].cells[0].display);
+    try testz.expectEqualStr("abc", table.rows[0].cells[0].sort_key.text);
+
+    const layer = ctx.layerPtr(glyphwire.root_layer_handle).?;
+    try testz.expectTrue(layer.cell(1, 0).style.strike);
+    try testz.expectTrue(layer.cell(1, 1).style.strike);
+    try testz.expectEqual(layer.cell(1, 1).style.fg.r, 250);
+    try testz.expectFalse(layer.cell(1, 2).style.strike);
+    try testz.expectEqual(layer.cell(1, 2).style.fg.r, 10);
+    try testz.expectEqualStr(" ", layer.cell(1, 3).grapheme());
+    try testz.expectFalse(layer.cell(1, 3).style.strike);
+
+    // "xyzwv" is cut to "xyz…".
+    try testz.expectFalse(layer.cell(1, 5).style.strike);
+    try testz.expectTrue(layer.cell(1, 6).style.strike);
+    try testz.expectEqualStr("\u{2026}", layer.cell(1, 8).grapheme());
+    try testz.expectTrue(layer.cell(1, 8).style.strike);
+}
+
+/// A wrapped `spans` cell keeps each span's style on whichever line its
+/// text lands, and a span's `metadata_id` tags only its own glyphs.
+pub fn tableCellSpansSurviveWrapAndCarryTheirOwnMetadataTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 6, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    freeResult(alloc, try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_metadata","params":{"json":"{}"}}
+    ));
+    _ = try tableWithRows(alloc, &d, &ctx,
+        \\[{"name":"A","width":3,"overflow":"wrap"}]
+    ,
+        \\[[{"spans":[{"text":"aa "},{"text":"bb","strikethrough":true,"metadata_id":1}]}]]
+    );
+    const layer = ctx.layerPtr(glyphwire.root_layer_handle).?;
+    try testz.expectEqualStr("a", layer.cell(1, 0).grapheme());
+    try testz.expectFalse(layer.cell(1, 0).style.strike);
+    try testz.expectTrue(layer.cell(1, 0).metadata_id == null);
+    try testz.expectEqualStr("b", layer.cell(2, 0).grapheme());
+    try testz.expectTrue(layer.cell(2, 1).style.strike);
+    try testz.expectEqual(layer.cell(2, 1).metadata_id.?, 1);
+    // The padding after "bb" is the cell's: no line, no link.
+    try testz.expectFalse(layer.cell(2, 2).style.strike);
+    try testz.expectTrue(layer.cell(2, 2).metadata_id == null);
+}
+
+/// Re-sorting repaints each row's cells in place, so a struck cell's line
+/// moves with its row instead of staying on the screen line it was drawn
+/// on.
+pub fn tableResortMovesStrikethroughWithItsRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    const handle = try tableWithRows(alloc, &d, &ctx,
+        \\[{"name":"A","width":3,"sortable":true}]
+    ,
+        \\[[{"spans":[{"text":"b","strikethrough":true}]}],[{"display":"a"}]]
+    );
+    const layer = ctx.layerPtr(glyphwire.root_layer_handle).?;
+    try testz.expectTrue(layer.cell(1, 0).style.strike);
+    try testz.expectFalse(layer.cell(2, 0).style.strike);
+
+    const sort = try std.fmt.allocPrint(alloc,
+        \\{{"jsonrpc":"2.0","method":"table_set_sort","params":{{"table":{d},"column":0,"direction":"ascending"}}}}
+    , .{handle});
+    defer alloc.free(sort);
+    try notifyThrough(alloc, &d, sort);
+    try testz.expectEqualStr("a", layer.cell(1, 0).grapheme());
+    try testz.expectFalse(layer.cell(1, 0).style.strike);
+    try testz.expectTrue(layer.cell(2, 0).style.strike);
+}
+
+/// A cell sends exactly one of `display` and `spans`.
+pub fn tableCellNeedsExactlyOneOfDisplayAndSpansTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 20, 4, 0);
+    defer ctx.deinit();
+    var d = dispatch.Dispatcher.init(&ctx);
+
+    freeResult(alloc, try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_table","params":{"row":0,"col":0,"columns":[{"name":"A","width":3}]}}
+    ));
+    const handle = ctx.root.table_order.items[0];
+    for ([_][]const u8{
+        \\{"display":"a","spans":[{"text":"a"}]}
+        ,
+        \\{"fg":{"r":1,"g":1,"b":1}}
+    }) |cell| {
+        const msg = try std.fmt.allocPrint(alloc,
+            \\{{"jsonrpc":"2.0","method":"table_set_rows","params":{{"table":{d},"rows":[[{s}]]}}}}
+        , .{ handle, cell });
+        defer alloc.free(msg);
+        try testz.expectError(d.handle(alloc, msg), dispatch.DispatchError.InvalidSpans);
+    }
+}

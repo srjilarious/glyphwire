@@ -69,11 +69,12 @@ pub const ImageOp = struct {
 };
 
 pub const TableCell = struct {
+    /// `spans`' texts joined: what the column is sized and wrapped by.
     text: []const u8,
-    tone: Tone = .body,
-    /// The first link in the cell, if any -- a native table cell carries
-    /// one metadata id, so a cell is clickable as a whole.
-    link: ?usize = null,
+    /// One per inline run, each with its own style and link, so a struck
+    /// word, inline code or a link inside a cell draws as it would in a
+    /// paragraph.
+    spans: []Span,
 };
 
 pub const TableColumn = struct {
@@ -643,14 +644,15 @@ const Builder = struct {
         const top = self.row;
         try self.ops.append(self.a, .{ .table = .{ .row = top, .col = col, .columns = columns, .rows = rows } });
 
-        // Record link positions on each cell's first line. Body rows
-        // start at `top + 3` (top border, header, separator), each as
-        // tall as `tableRowHeight` says.
+        // Record link positions at the start of each cell's first line
+        // (close enough to jump to, even for a link further along the
+        // cell). Body rows start at `top + 3` (top border, header,
+        // separator), each as tall as `tableRowHeight` says.
         var r = top + 3;
         for (rows) |row| {
             var c = col + 1;
             for (row, columns) |cell, column| {
-                if (cell.link) |li| self.notePos(li, r, c);
+                for (cell.spans) |s| if (s.link) |li| self.notePos(li, r, c);
                 c += column.width + 1;
             }
             r += tableRowHeight(columns, row);
@@ -659,14 +661,15 @@ const Builder = struct {
     }
 
     fn tableCell(self: *Builder, runs: []const Run) !TableCell {
-        var cell: TableCell = .{ .text = try zmd.Inline.plainText(self.a, runs) };
-        var all_code = runs.len > 0;
-        for (runs) |r| {
-            if (cell.link == null and r.link != null) cell.link = r.link;
-            if (!r.style.code) all_code = false;
-        }
-        if (all_code) cell.tone = .code;
-        return cell;
+        const spans = try self.a.alloc(Span, runs.len);
+        for (runs, spans) |r, *s| s.* = .{
+            // An image shows its alt text and a hard break a space, as
+            // `plainText` has them, so the spans join to `text`.
+            .text = if (r.kind == .line_break) " " else r.text,
+            .style = r.style,
+            .link = r.link,
+        };
+        return .{ .text = try zmd.Inline.plainText(self.a, runs), .spans = spans };
     }
 
     // ── Inline flow ─────────────────────────────────────────────────────

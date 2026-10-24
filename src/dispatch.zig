@@ -3647,7 +3647,9 @@ pub const Dispatcher = struct {
         };
     }
 
-    /// One `table_set_rows` cell: dupes `display`, resolves `sort_key`
+    /// One `table_set_rows` cell: dupes `display` (or joins `spans`'
+    /// texts into it, one `CellRun` per span -- exactly one of the two,
+    /// else `InvalidSpans`), resolves `sort_key`
     /// (a raw JSON number/string -- see `protocol.TableCell`'s doc comment,
     /// falling back to a copy of `display` for anything else or when
     /// omitted), resolves `icon`'s name against the icon catalog (erroring
@@ -3655,15 +3657,40 @@ pub const Dispatcher = struct {
     /// treatment `draw_icon`'s `name` already gets), and validates
     /// `metadata_id` the same way `write_text`/`draw_icon`'s already is.
     fn buildTableCell(self: *Dispatcher, alloc: std.mem.Allocator, cj: protocol.TableCell) !core.TableCell {
-        const display = try alloc.dupe(u8, cj.display);
+        var display: []u8 = undefined;
+        var runs: []core.CellRun = &.{};
+        if (cj.display) |d| {
+            if (cj.spans != null) return DispatchError.InvalidSpans;
+            display = try alloc.dupe(u8, d);
+        } else if (cj.spans) |spans| {
+            var text: std.ArrayList(u8) = .empty;
+            errdefer text.deinit(alloc);
+            runs = try alloc.alloc(core.CellRun, spans.len);
+            errdefer alloc.free(runs);
+            for (spans, runs) |s, *r| {
+                try text.appendSlice(alloc, s.text);
+                r.* = .{
+                    .end = text.items.len,
+                    .fg = try optColorFromJson(s.fg),
+                    .bg = try optColorFromJson(s.bg),
+                    .metadata_id = try self.resolveMetadata(s.metadata_id),
+                    .deco = .{
+                        .underline = try parseUnderline(s.underline, s.underline_color),
+                        .strike = s.strikethrough orelse false,
+                    },
+                };
+            }
+            display = try text.toOwnedSlice(alloc);
+        } else return DispatchError.InvalidSpans;
         errdefer alloc.free(display);
+        errdefer alloc.free(runs);
 
         const sort_key: core.SortKey = if (cj.sort_key) |v| switch (v) {
             .integer => |n| .{ .number = @floatFromInt(n) },
             .float => |n| .{ .number = n },
             .string => |s| .{ .text = try alloc.dupe(u8, s) },
-            else => .{ .text = try alloc.dupe(u8, cj.display) },
-        } else .{ .text = try alloc.dupe(u8, cj.display) };
+            else => .{ .text = try alloc.dupe(u8, display) },
+        } else .{ .text = try alloc.dupe(u8, display) };
         errdefer sort_key.deinit(alloc);
 
         const icon_handle: ?core.ImageHandle = if (cj.icon) |name|
@@ -3679,6 +3706,7 @@ pub const Dispatcher = struct {
             .icon = icon_handle,
             .fg = if (cj.fg) |c| try colorFromJson(c) else null,
             .metadata_id = metadata_id,
+            .runs = runs,
         };
     }
 

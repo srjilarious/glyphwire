@@ -292,6 +292,29 @@ pub fn tableColumnsShrinkToFitTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(lay.rows, 1 + 6 + 1);
 }
 
+/// A table cell keeps its inline runs as spans, each with its own style
+/// and link, joining to the cell's text -- so a partly struck cell
+/// strikes only its `~~...~~` part.
+pub fn tableCellKeepsEachRunsStyleAndLinkTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var doc = try parse(alloc, "| A |\n|---|\n| ~~old~~ `x` [l](u) |\n");
+    defer doc.deinit();
+    var lay = try layout.layout(alloc, &doc, .{ .width = 40 });
+    defer lay.deinit();
+    const cell = lay.ops[0].table.rows[0][0];
+    try testz.expectEqualStr("old x l", cell.text);
+    try testz.expectEqualStr("old", cell.spans[0].text);
+    try testz.expectTrue(cell.spans[0].style.strike);
+    try testz.expectFalse(cell.spans[1].style.strike);
+    var code = false;
+    var link = false;
+    for (cell.spans) |s| {
+        if (s.style.code) code = true;
+        if (s.link != null) link = true;
+    }
+    try testz.expectTrue(code);
+    try testz.expectTrue(link);
+}
+
 fn expectFit(alloc: std.mem.Allocator, want: []const usize, min: []const usize, dashes: []const usize, avail: usize, expected: []const usize) !void {
     var out: [8]usize = undefined;
     try layout.fitColumnWidths(alloc, want, min, dashes, avail, out[0..want.len]);

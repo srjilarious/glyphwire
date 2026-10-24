@@ -12,10 +12,10 @@
 //! own, reported back as `scroll_offset`. Nothing is redrawn to scroll.
 //!
 //! Every link occurrence gets a metadata blob (`{"kind":"link","href":...}`)
-//! tagged on every cell it covers -- text, a table cell, or each row of a
-//! linked image. A click resolves through `get_metadata`, Tab/Shift+Tab
-//! move a highlight (`set_highlight`) through them in reading order and
-//! Enter follows the highlighted one. What following means is `nav.zig`'s
+//! tagged on every cell it covers -- its text, in a paragraph or a table
+//! cell, or each row of a linked image. A click resolves through
+//! `get_metadata`, Tab/Shift+Tab move a highlight (`set_highlight`)
+//! through them in reading order and Enter follows the highlighted one. What following means is `nav.zig`'s
 //! call: a `#section` scrolls, a local Markdown file replaces the page
 //! (with Backspace/Alt+Left and Alt+Right as back and forward), and
 //! everything else goes to `xdg-open`.
@@ -612,18 +612,27 @@ pub const Ui = struct {
         });
         try self.tables.append(self.alloc, handle);
 
-        const rows = try self.alloc.alloc([]glyphwire.Client.TableCellInput, t.rows.len);
-        defer {
-            for (rows) |r| self.alloc.free(r);
-            self.alloc.free(rows);
-        }
+        // Rows, cells and spans all live until the one send.
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const rows = try a.alloc([]glyphwire.Client.TableCellInput, t.rows.len);
         for (t.rows, rows) |src, *dst| {
-            dst.* = try self.alloc.alloc(glyphwire.Client.TableCellInput, src.len);
-            for (src, dst.*) |cell, *out| out.* = .{
-                .display = cell.text,
-                .fg = if (cell.link != null) fg_link else if (cell.tone == .code) fg_code else fg_body,
-                .metadata_id = if (cell.link) |li| self.metas.items[li] else null,
-            };
+            dst.* = try a.alloc(glyphwire.Client.TableCellInput, src.len);
+            for (src, dst.*) |cell, *out| {
+                // Each run styled as `render` styles it in a paragraph:
+                // its colour, inline code's background, a link's own
+                // metadata, `~~struck~~`'s line.
+                const spans = try a.alloc(glyphwire.Client.TableSpanInput, cell.spans.len);
+                for (cell.spans, spans) |s, *o| o.* = .{
+                    .text = s.text,
+                    .fg = spanColor(s),
+                    .bg = if (s.style.code) bg_inline_code else null,
+                    .metadata_id = if (s.link) |li| self.metas.items[li] else null,
+                    .strikethrough = if (s.style.strike) true else null,
+                };
+                out.* = .{ .spans = spans, .fg = fg_body };
+            }
         }
         try c.tableSetRows(self.page_layer, handle, rows);
     }

@@ -514,7 +514,7 @@ pub const Outline = struct {
         const indent = @as(usize, v.node.depth) * self.style.indent;
         var i: usize = 0;
         while (i < indent and col < row_end) : (i += 1) {
-            setCellText(layer, row, col, " ", fg, bg, v.node.metadata_id);
+            setCellText(layer, row, col, " ", fg, bg, v.node.metadata_id, .{});
             col += 1;
         }
 
@@ -522,17 +522,17 @@ pub const Outline = struct {
             const glyph = if (v.node.collapsed) self.style.marker_collapsed else self.style.marker_expanded;
             const mfg = self.style.marker_fg orelse fg;
             if (col < row_end) {
-                setCellText(layer, row, col, glyph, mfg, bg, v.node.metadata_id);
+                setCellText(layer, row, col, glyph, mfg, bg, v.node.metadata_id, .{});
                 col += 1;
             }
             if (col < row_end) {
-                setCellText(layer, row, col, " ", mfg, bg, v.node.metadata_id);
+                setCellText(layer, row, col, " ", mfg, bg, v.node.metadata_id, .{});
                 col += 1;
             }
         } else {
             var m: usize = 0;
             while (m < outline_marker_cols and col < row_end) : (m += 1) {
-                setCellText(layer, row, col, " ", fg, bg, v.node.metadata_id);
+                setCellText(layer, row, col, " ", fg, bg, v.node.metadata_id, .{});
                 col += 1;
             }
         }
@@ -542,7 +542,7 @@ pub const Outline = struct {
                 setCellIconOver(layer, row, col, handle, .fit, .center, .center, null, v.node.metadata_id);
                 col += 1;
                 if (col < row_end) {
-                    setCellText(layer, row, col, " ", fg, bg, v.node.metadata_id);
+                    setCellText(layer, row, col, " ", fg, bg, v.node.metadata_id, .{});
                     col += 1;
                 }
             }
@@ -550,7 +550,7 @@ pub const Outline = struct {
 
         col = writeRunSequence(layer, row, col, row_end, v.node.runs, bg, v.node.metadata_id);
         while (col < row_end) : (col += 1) {
-            setCellText(layer, row, col, " ", fg, bg, v.node.metadata_id);
+            setCellText(layer, row, col, " ", fg, bg, v.node.metadata_id, .{});
         }
     }
 };
@@ -595,10 +595,10 @@ fn writeRunSequence(
             const w = codepointWidth(std.unicode.utf8Decode(cp_bytes) catch 0xFFFD);
             if (w == 2) {
                 if (c + 1 >= limit) break;
-                setCellWide(layer, row, c, cp_bytes, run.fg, run_bg, id);
+                setCellWide(layer, row, c, cp_bytes, run.fg, run_bg, id, .{});
                 c += 2;
             } else {
-                setCellText(layer, row, c, cp_bytes, run.fg, run_bg, id);
+                setCellText(layer, row, c, cp_bytes, run.fg, run_bg, id, .{});
                 c += 1;
             }
         }

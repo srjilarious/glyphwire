@@ -3,7 +3,7 @@
 
 ![Version Badge](https://img.shields.io/badge/Version-0.30.0-brightgreen)
 ![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0-%23f7a41d?logo=zig)
-![Protocol Badge](https://img.shields.io/badge/Protocol-0.12.0-blueviolet)
+![Protocol Badge](https://img.shields.io/badge/Protocol-0.13.0-blueviolet)
 [![License](https://img.shields.io/badge/License-MPL--2.0%20%7C%20GPL--3.0%20%7C%20CC--BY--4.0-blue)](#license)
 
 A 2D-grid terminal replacement. Programs talk to the display over a local
@@ -29,7 +29,7 @@ splits and panes back.
 
 ## The protocol
 
-The wire protocol is at **version 0.12.0**, a pre-1.0 draft.
+The wire protocol is at **version 0.13.0**, a pre-1.0 draft.
 [`docs/protocol.md`](docs/protocol.md) is the normative specification
 (CC-BY-4.0), enough to write a client or a host in any language without
 reading the Zig. [`docs/api.md`](docs/api.md) is the annotated message
@@ -102,7 +102,7 @@ Each is an ordinary client of the protocol, versioned on its own.
 | **`zoe`** | 0.24.0 | Modal editor: vim grammar with VS Code keys alongside. Split editor groups, workspaces, tree-sitter highlighting, LSP (diagnostics, hover, goto, completion), find and replace, folding, Lua extensions, unsaved-change backups. Keys in [`docs/zoe-keys.md`](docs/zoe-keys.md). |
 | **`gmux`** | 0.11.0 | Multiplexer as a pure window manager: it draws nothing and never touches a program's I/O, it only asks the server for panes. |
 | **`salacommander`** | 0.11.0 | Two-pane file manager: icons, tabs, sudo operations, trash, permission editing, drag and drop within and out of the window. |
-| **`gwmd`** | 0.9.0 | Markdown reader: scaled headings, GFM tables as native tables, inline images, links, selection that copies paragraphs whole. |
+| **`gwmd`** | 0.10.0 | Markdown reader: scaled headings, GFM tables as native tables, inline images, links, selection that copies paragraphs whole. |
 | **`gw-read`** | 0.9.1 | Comic and manga reader: zoom and pan, Mokuro OCR overlays, dictionary lookup, AI bubble translation, Anki mining. |
 | **`gw-ls`** | 0.8.0 | `ls` as an icon grid, or a long listing in a table that stays sortable after it exits. |
 | **`gw-grep`** | 0.8.0 | ripgrep hits as a collapsible, highlighted outline in the scrollback. |

@@ -3493,6 +3493,7 @@ pub const sortArrowGlyph = @import("table.zig").sortArrowGlyph;
 pub const TableColumn = @import("table.zig").TableColumn;
 pub const SortKey = @import("table.zig").SortKey;
 pub const TableCell = @import("table.zig").TableCell;
+pub const CellRun = @import("table.zig").CellRun;
 pub const TableRow = @import("table.zig").TableRow;
 pub const TableStyle = @import("table.zig").TableStyle;
 pub const Table = @import("table.zig").Table;

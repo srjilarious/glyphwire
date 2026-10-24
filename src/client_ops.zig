@@ -28,6 +28,7 @@ const SetFgOpts = Client.SetFgOpts;
 const SetUnderlineOpts = Client.SetUnderlineOpts;
 const DrawIconOpts = Client.DrawIconOpts;
 const TableCellInput = Client.TableCellInput;
+const TableSpanInput = Client.TableSpanInput;
 const TableStyleInput = Client.TableStyleInput;
 const SortKeyInput = Client.SortKeyInput;
 const OutlineNodeInput = Client.OutlineNodeInput;
@@ -744,16 +745,22 @@ pub fn Ops(comptime Self: type) type {
         pub fn tableSetRows(self: *Self, layer: ?core.LayerHandle, table: core.TableHandle, rows: []const []const TableCellInput) !void {
             const alloc = scratchAlloc(self);
             const wire_rows = try alloc.alloc([]protocol.TableCell, rows.len);
+            @memset(wire_rows, &.{});
             defer {
-                for (wire_rows) |r| alloc.free(r);
+                for (wire_rows) |r| {
+                    for (r) |c| if (c.spans) |s| alloc.free(s);
+                    alloc.free(r);
+                }
                 alloc.free(wire_rows);
             }
             for (rows, 0..) |row, ri| {
                 const wire_row = try alloc.alloc(protocol.TableCell, row.len);
+                for (wire_row) |*w| w.* = .{};
                 wire_rows[ri] = wire_row;
                 for (row, 0..) |c, ci| {
                     wire_row[ci] = .{
-                        .display = c.display,
+                        .display = if (c.spans == null) c.display else null,
+                        .spans = if (c.spans) |s| try tableSpansToWire(alloc, s) else null,
                         .sort_key = sortKeyToJson(c.sort_key),
                         .icon = c.icon,
                         .fg = colorToJson(c.fg),
@@ -983,6 +990,20 @@ fn spansToWire(alloc: std.mem.Allocator, spans: []const Span) ![]protocol.SpanPa
         .metadata_id = s.metadata_id,
         .transparent_bg = s.transparent_bg,
         .scale = if (s.scale) |sc| @tagName(sc) else null,
+        .underline = if (s.underline) |u| @tagName(u) else null,
+        .underline_color = colorToJson(s.underline_color),
+        .strikethrough = s.strikethrough,
+    };
+    return out;
+}
+
+fn tableSpansToWire(alloc: std.mem.Allocator, spans: []const TableSpanInput) ![]protocol.TableSpan {
+    const out = try alloc.alloc(protocol.TableSpan, spans.len);
+    for (spans, out) |s, *w| w.* = .{
+        .text = s.text,
+        .fg = colorToJson(s.fg),
+        .bg = colorToJson(s.bg),
+        .metadata_id = s.metadata_id,
         .underline = if (s.underline) |u| @tagName(u) else null,
         .underline_color = colorToJson(s.underline_color),
         .strikethrough = s.strikethrough,
