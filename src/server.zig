@@ -14,10 +14,17 @@ const conn_stream = @import("conn_stream.zig");
 pub const ConnStream = conn_stream.ConnStream;
 
 /// Tracks one accepted connection long enough for *other* connections'
-/// dispatch to push a notification to it -- see `Server.broadcastToOthers`.
+/// dispatch to push a notification to it -- see `Server.broadcastIn`.
 /// Lives on the stack frame of whichever call is serving it (`acceptOne`
 /// or a `serveForever`-spawned thread), registered in `Server.connections`
 /// for exactly that lifetime.
+///
+/// Locking, field by field: `stream` is written under `write_mutex`;
+/// `route` and `focus_sent` are read and written under
+/// `Server.registry_mutex` (the connection's own thread may read `route`
+/// without it, being its only writer); `format` is written once, by the
+/// connection's own thread, before anything can read it (see `format`).
+/// `alloc` and `id` never change.
 pub const Connection = struct {
     stream: ConnStream,
     /// Held for `send`'s framing allocation (`wire.framedAlloc` for a
@@ -34,27 +41,10 @@ pub const Connection = struct {
     /// responses to its own requests, but another connection's dispatch
     /// may concurrently push a subscribed notification to it too.
     write_mutex: std.Io.Mutex = .init,
-    /// Mirrors `Dispatcher.subscriptions` after each `handle` call --
-    /// kept here (not read from the `Dispatcher`) so `broadcastToOthers`
-    /// can consult it without needing a `Dispatcher` per connection.
-    subscriptions: dispatch.Subscriptions = .{},
-    /// Mirrors `Dispatcher.active_ctx` after each `handle` call, same as
-    /// `subscriptions` -- so `broadcast` can withhold a raw input event
-    /// (`key`/`text`/`mouse_*`) from a connection whose context isn't the
-    /// one currently visible. Starts at the root context (what a fresh
-    /// connection inherits).
-    active_ctx: core.ContextHandle = core.root_context_handle,
-    /// Mirrors `Dispatcher.active_pane`, same as `active_ctx`. What
-    /// `reportResize` uses to send each connection *its own pane's* size
-    /// rather than the window's.
-    active_pane: core.PaneHandle = core.root_pane_handle,
-    /// Mirrors `Dispatcher.attached` after each `handle`: whether this
-    /// connection may act on `active_ctx`. A connection that may not is
-    /// pushed nothing at all -- no input, no layout, no selection -- so
-    /// a process that merely reached the socket learns nothing about what
-    /// is on screen until it presents a token. Starts false: a fresh
-    /// connection is attached to nothing.
-    attached: bool = false,
+    /// What the fan-out reads to decide whether this connection gets a
+    /// push. Guarded by `registry_mutex`, the lock every fan-out already
+    /// holds while it walks `connections`.
+    route: Route = .{},
     /// The last `focus` value sent to this connection (see
     /// `syncConnectionFocus`). Starts true: a client assumes it has focus
     /// until told otherwise, so a fresh one that does is sent nothing.
@@ -62,9 +52,47 @@ pub const Connection = struct {
     focus_sent: bool = true,
     /// How this connection's bodies are encoded (see `wire.Format`), learnt
     /// from its first bytes. Settled before anything can be pushed to it:
-    /// every push is gated on a subscription, and subscribing takes a
-    /// frame.
+    /// every push is gated on a subscription, subscribing takes a frame,
+    /// and the `route` carrying that subscription is published under
+    /// `registry_mutex` after this was set -- so any reader that sees a
+    /// subscription sees the format too. Written only when it changes,
+    /// which is on the first frame alone.
     format: wire.Format = .json,
+
+    /// The copy of a connection's `Dispatcher` state that the fan-out
+    /// needs, kept here so `broadcastIn` can filter without a `Dispatcher`
+    /// per connection. One value rather than separate fields so it is
+    /// published in one assignment under `registry_mutex` (`publishRoute`):
+    /// a reader always sees the subscriptions and context of the same
+    /// moment, never a stream the connection had already unsubscribed from
+    /// next to the context it moved to afterwards.
+    pub const Route = struct {
+        /// `Dispatcher.subscriptions`.
+        subscriptions: dispatch.Subscriptions = .{},
+        /// `Dispatcher.active_ctx`: so a raw input event (`key` / `text` /
+        /// `mouse_*`) can be withheld from a connection whose context isn't
+        /// the one on screen in the focused pane, and a context-scoped one
+        /// sent only to that context's clients. Starts at the root context
+        /// (what a fresh connection inherits).
+        active_ctx: core.ContextHandle = core.root_context_handle,
+        /// `Dispatcher.attached()`: whether this connection may act on
+        /// `active_ctx`. A connection that may not is pushed nothing at all
+        /// -- no input, no layout, no selection -- so a process that merely
+        /// reached the socket learns nothing about what is on screen until
+        /// it presents a token. Starts false: a fresh connection is
+        /// attached to nothing.
+        attached: bool = false,
+
+        /// `d`'s current route. Reads the session's membership tables
+        /// (`attached`), so the caller holds `ctx_mutex`.
+        fn of(d: *const dispatch.Dispatcher) Route {
+            return .{ .subscriptions = d.subscriptions, .active_ctx = d.active_ctx, .attached = d.attached() };
+        }
+
+        fn eql(a: Route, b: Route) bool {
+            return std.meta.eql(a, b);
+        }
+    };
 
     /// Sends a server-pushed message. `msgpack_body` is always
     /// MessagePack -- the `rpc.zig` builders make one body for every
@@ -302,11 +330,21 @@ pub const Server = struct {
                 d.active_ctx = g;
                 d.active_pane = d.ctx.pane;
             }
-            conn.active_ctx = d.active_ctx;
-            conn.active_pane = d.active_pane;
-            conn.attached = d.attached();
             break :blk d;
         };
+        // Published outside `ctx_mutex`: the fan-out takes `ctx_mutex`
+        // inside `registry_mutex` (`reportContextSizes`), so taking them
+        // the other way round here could deadlock. Until this lands the
+        // connection reads as unattached and is pushed nothing, which is
+        // what it is.
+        {
+            const route = blk: {
+                self.ctx_mutex.lockUncancelable(self.io);
+                defer self.ctx_mutex.unlock(self.io);
+                break :blk Connection.Route.of(&d);
+            };
+            self.publishRoute(&conn, route);
+        }
         var decoder: wire.FrameDecoder = .{ .detect = true };
         defer decoder.deinit(alloc);
 
@@ -322,7 +360,7 @@ pub const Server = struct {
                 // The first frame settled the format; every later one
                 // re-asserts it for free.
                 d.format = decoder.format;
-                conn.format = decoder.format;
+                if (conn.format != decoder.format) conn.format = decoder.format;
 
                 // Decoded once, here: the envelope's `id` and `method` are
                 // what decide how a failure is reported below, and the
@@ -362,7 +400,7 @@ pub const Server = struct {
                     continue;
                 }
 
-                const handle_result = blk: {
+                const handle_result, const route = blk: {
                     self.ctx_mutex.lockUncancelable(self.io);
                     defer self.ctx_mutex.unlock(self.io);
                     const r = d.handleEnvelope(alloc, envelope);
@@ -372,7 +410,9 @@ pub const Server = struct {
                     // (the host's caret/selection view and the in-process
                     // `report*` path) pointing at it.
                     self.ctx = self.session.focusedContext();
-                    break :blk r;
+                    // Read here, under the lock: `attached()` consults the
+                    // session's membership tables.
+                    break :blk .{ r, Connection.Route.of(&d) };
                 };
 
                 // A notification's dispatch error (e.g. draw_icon naming
@@ -392,10 +432,10 @@ pub const Server = struct {
                     }
                     break :result dispatch.HandleResult{};
                 };
-                conn.subscriptions = d.subscriptions;
-                conn.attached = d.attached();
-                conn.active_ctx = d.active_ctx;
-                conn.active_pane = d.active_pane;
+                // Before the response and any broadcast this frame
+                // produced, so a client told "subscribed" is already
+                // routed as subscribed.
+                self.publishRoute(&conn, route);
 
                 if (result.response) |r| {
                     defer alloc.free(r);
@@ -446,6 +486,16 @@ pub const Server = struct {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
         try self.connections.append(alloc, conn);
+    }
+
+    /// Makes `route` what the fan-out sees for `conn`. Called by `conn`'s
+    /// own thread, its only writer, which is why the unlocked comparison
+    /// is safe: most frames change nothing, and they skip the lock.
+    fn publishRoute(self: *Server, conn: *Connection, route: Connection.Route) void {
+        if (conn.route.eql(route)) return;
+        self.registry_mutex.lockUncancelable(self.io);
+        defer self.registry_mutex.unlock(self.io);
+        conn.route = route;
     }
 
     fn unregisterConnection(self: *Server, alloc: std.mem.Allocator, conn: *Connection) void {
@@ -597,10 +647,10 @@ pub const Server = struct {
 
         for (self.connections.items) |other| {
             if (sender != null and other == sender.?) continue;
-            if (!other.attached) continue;
-            if (!other.subscriptions.has(event)) continue;
-            if (gated and other.active_ctx != focused) continue;
-            if (scope) |s| if (other.active_ctx != s) continue;
+            if (!other.route.attached) continue;
+            if (!other.route.subscriptions.has(event)) continue;
+            if (gated and other.route.active_ctx != focused) continue;
+            if (scope) |s| if (other.route.active_ctx != s) continue;
             other.send(self.io, body) catch |err| {
                 std.log.err("glyphwire broadcast to a connection failed: {t}", .{err});
             };
@@ -862,9 +912,9 @@ pub const Server = struct {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
         for (self.connections.items) |conn| {
-            if (!conn.attached) continue;
-            if (!conn.subscriptions.has("focus")) continue;
-            const has = window and conn.active_ctx == focused_ctx;
+            if (!conn.route.attached) continue;
+            if (!conn.route.subscriptions.has("focus")) continue;
+            const has = window and conn.route.active_ctx == focused_ctx;
             if (has == conn.focus_sent) continue;
             conn.send(self.io, if (has) on else off) catch |err| {
                 std.log.err("glyphwire: focus to a connection failed: {t}", .{err});
@@ -1002,9 +1052,9 @@ pub const Server = struct {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
         for (self.connections.items) |conn| {
-            if (!conn.attached) continue;
-            if (!conn.subscriptions.has("theme")) continue;
-            if (std.mem.indexOfScalar(core.ContextHandle, followers.items, conn.active_ctx) == null) continue;
+            if (!conn.route.attached) continue;
+            if (!conn.route.subscriptions.has("theme")) continue;
+            if (std.mem.indexOfScalar(core.ContextHandle, followers.items, conn.route.active_ctx) == null) continue;
             conn.send(self.io, body) catch |err| {
                 std.log.err("glyphwire theme notification to a connection failed: {t}", .{err});
             };
@@ -1060,12 +1110,12 @@ pub const Server = struct {
         defer self.registry_mutex.unlock(self.io);
 
         for (self.connections.items) |conn| {
-            if (!conn.attached) continue;
-            if (!conn.subscriptions.has("resize")) continue;
+            if (!conn.route.attached) continue;
+            if (!conn.route.subscriptions.has("resize")) continue;
             const size = blk: {
                 self.ctx_mutex.lockUncancelable(self.io);
                 defer self.ctx_mutex.unlock(self.io);
-                const ctx = self.session.contextPtr(conn.active_ctx) orelse continue;
+                const ctx = self.session.contextPtr(conn.route.active_ctx) orelse continue;
                 break :blk .{ .cols = ctx.root.width, .rows = ctx.root.height };
             };
             const body = try rpc.resizeNotification(alloc, size.cols, size.rows);
@@ -1188,9 +1238,9 @@ pub const Server = struct {
         self.registry_mutex.lockUncancelable(self.io);
         defer self.registry_mutex.unlock(self.io);
         for (self.connections.items) |conn| {
-            if (conn.active_ctx != context) continue;
-            if (!conn.attached) continue;
-            if (!conn.subscriptions.has(event)) continue;
+            if (conn.route.active_ctx != context) continue;
+            if (!conn.route.attached) continue;
+            if (!conn.route.subscriptions.has(event)) continue;
             conn.send(self.io, down) catch |err| {
                 std.log.err("glyphwire: {s} tap to a connection failed: {t}", .{ event, err });
                 continue;
@@ -1220,7 +1270,7 @@ pub const Server = struct {
             if (target == 0) continue;
             for (self.connections.items) |conn| {
                 if (conn.id != target) continue;
-                if (!conn.subscriptions.has(event)) continue;
+                if (!conn.route.subscriptions.has(event)) continue;
                 conn.send(self.io, body) catch |err| {
                     std.log.err("glyphwire: window command to the manager failed: {t}", .{err});
                 };

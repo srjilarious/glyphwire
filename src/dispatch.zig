@@ -1873,7 +1873,7 @@ pub const Dispatcher = struct {
 
     /// Whether this connection may act on its own active context -- the
     /// gate every context-scoped message passes (`dispatchCatalog`), and
-    /// what server.zig mirrors onto `Connection.attached` to keep pushed
+    /// what server.zig mirrors onto `Connection.Route.attached` to keep pushed
     /// events away from a connection that has no business seeing them. A
     /// fresh connection is not attached to anything until it presents a
     /// token or creates a context of its own.
