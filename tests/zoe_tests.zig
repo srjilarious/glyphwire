@@ -7377,3 +7377,74 @@ pub fn popupsDirtyCoversEveryPopupTest(_: std.Io, _: std.mem.Allocator) !void {
         try testz.expectFalse(set.anyDirty());
     }
 }
+
+// ─── Views: two editors over one buffer ───────────────────────────────
+
+/// What `Ui.syncView` does for a tab: replay the journal since its mark,
+/// skipping its own edits.
+fn followOthers(ed: *Editor, mark: *u64) void {
+    const edits = ed.buf.editsSince(mark.*) orelse {
+        ed.clampToText();
+        mark.* = ed.buf.edit_seq;
+        return;
+    };
+    for (edits) |e| {
+        if (e.author != ed.author) ed.followEdit(e);
+    }
+    mark.* = ed.buf.edit_seq;
+}
+
+/// An edit made through one view moves the other's cursor along with the
+/// text around it, and leaves the editing view's own cursor where its
+/// editor put it.
+pub fn viewsFollowEachOthersEditsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const buf = try alloc.create(zoe.buffer.Buffer);
+    defer alloc.destroy(buf);
+    buf.* = try zoe.buffer.Buffer.initFromText(alloc, "one\ntwo\nthree\n");
+    defer buf.deinit();
+    buf.track_edits = true;
+
+    var a = try Editor.initView(alloc, buf, null);
+    defer a.deinit();
+    a.author = 1;
+    var b = try Editor.initView(alloc, buf, null);
+    defer b.deinit();
+    b.author = 2;
+    var a_mark: u64 = 0;
+    var b_mark: u64 = 0;
+
+    // B sits on "three".
+    b.moveCursorTo(8);
+    // A types two lines at the top.
+    _ = try keys.feed(&a, "Onew<cr>new<esc>");
+    try expectText(alloc, buf, "new\nnew\none\ntwo\nthree\n");
+    const a_cursor = a.cursor;
+    followOthers(&a, &a_mark);
+    followOthers(&b, &b_mark);
+    try testz.expectEqual(a.cursor, a_cursor);
+    try testz.expectEqual(b.cursor, 16);
+    try testz.expectEqual(b.pos().line, 4);
+
+    // B deletes the line A's cursor is on; A lands where it was.
+    _ = try keys.feed(&b, "ggdd");
+    followOthers(&a, &a_mark);
+    followOthers(&b, &b_mark);
+    try expectText(alloc, buf, "new\none\ntwo\nthree\n");
+    try testz.expectTrue(a.cursor <= buf.len());
+
+    // A journal dropped past a view's mark: it clamps into the text.
+    b.moveCursorTo(buf.len() - 1);
+    buf.clearEdits();
+    _ = try keys.feed(&a, "ggdG");
+    followOthers(&b, &b_mark);
+    try testz.expectTrue(b.cursor <= buf.len());
+}
+
+/// Freeing an editor that borrows its buffer leaves the buffer alone.
+pub fn viewEditorDoesNotFreeABorrowedBufferTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var buf = try zoe.buffer.Buffer.initFromText(alloc, "abc");
+    defer buf.deinit();
+    var ed = try Editor.initView(alloc, &buf, "x.txt");
+    ed.deinit();
+    try testz.expectEqual(buf.len(), 3);
+}

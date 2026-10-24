@@ -50,7 +50,7 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 | `closeTab` | Ctrl+F4, Ctrl+W x | Close the shown tab (`:bd`); refused on a modified buffer |
 | `closeTabsLeft` / `closeTabsRight` / `closeOtherTabs` | (unbound) | Close the tabs left of the shown one, right of it, or all but it (`:tabcloseleft`, `:tabcloseright`, `:tabonly`); modified tabs stay open and are counted on the statusline |
 | `newBuffer` | Ctrl+Shift+N | A new `[No Name]` scratch tab beside the shown one (`:enew`) |
-| `windowPrefix` | Ctrl+W | Then `v` / `s` split, `q` / `c` close the group, `x` close the tab, `w` (or Ctrl+W) next group, `z` zoom the group, `h` `j` `k` `l` / arrows focus, Shift+`H` `J` `K` `L` / Shift+arrows move the tab |
+| `windowPrefix` | Ctrl+W | Then `v` / `s` split (a second view of the file), `q` / `c` close the group, `x` close the tab, `w` (or Ctrl+W) next group, `z` zoom the group, `h` `j` `k` `l` / arrows focus, Shift+`H` `J` `K` `L` / Shift+arrows move the tab |
 | `focusLeft` `focusRight` `focusUp` `focusDown` | Ctrl+Left / Right / Up / Down, Ctrl+L / K / J | Focus the group (or tree) that way |
 | `moveTabLeft` `moveTabRight` `moveTabUp` `moveTabDown` | (unbound; Ctrl+W Shift+H / L / K / J) | Move the shown tab to the group that way, splitting a new group off on that side if there is none. A group left without tabs closes |
 | `zoomGroup` | (unbound; Ctrl+W z) | The focused group fills the editor area, the other groups hidden (the sidebar stays); again to restore (`:zoom`). Splitting, closing or moving to another group unzooms first |
@@ -285,7 +285,7 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:bd` `:bd!` | Close the tab |
 | `:tabcloseleft` `:tabcloseright` `:tabonly` (`:tabo`) | Close the tabs left / right of the shown one, or all the others; with `!` modified ones too |
 | `:enew` | New `[No Name]` scratch tab |
-| `:vs [path]` `:sp [path]` `:clo` | Split / close a group |
+| `:vs [path]` `:sp [path]` `:clo` | Split / close a group. A split with no path shows a second view of the current file |
 | `:cd [dir]` `:pwd` | Working directory (in a workspace, `:cd` leaves the sidebar's folders alone) |
 | `:addfolder dir` | Add a folder to the sidebar's workspace |
 | `:rmfolder [dir]` | Take a folder out of the workspace (bare: the one the tree cursor is in) |

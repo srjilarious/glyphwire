@@ -47,7 +47,10 @@ A modal text editor: vim's grammar with VS Code's keys alongside it.
 - File tree, tab strips and buffers in a host-side split tree.
   `:vsplit` / `:split` (or Ctrl+W v / s) split the editor into groups side
   by side or stacked, each with its own tab strip, resized by dragging the
-  divider between them.
+  divider between them. A file can be open in several groups at once, each
+  view with its own cursor and scroll over the one text: a split starts as
+  a second view of the current file, and opening a file another group has
+  open gives this group a view of it. Edits, undo and saves are shared.
 - Resting the pointer on a tab shows the file's full path. A strip with
   more tabs than fit scrolls sideways with the wheel or the `‹` / `›`
   arrows at its ends, and Ctrl+Shift+E finds the current file in the tree.

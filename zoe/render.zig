@@ -31,6 +31,7 @@ const lineedit = @import("applib").lineedit;
 const ui = @import("ui.zig");
 const Ui = ui.Ui;
 const Bounds = ui.Bounds;
+const Document = @import("document.zig").Document;
 const Color = ui.Color;
 const Group = ui.Group;
 const TreeDirty = ui.TreeDirty;
@@ -571,11 +572,18 @@ pub fn stepHighlight(self: *Ui) void {
             const h = if (slot.doc.hl) |*x| x else continue;
             if (!h.parsing()) continue;
             const progress = h.continueParse(self.parseBudget(parse_slice_ms)) catch .done;
-            if (progress == .done and slot == g.slot()) {
-                slot.full_redraw = true;
-                g.buffer_dirty = true;
-            }
+            if (progress == .done) self.repaintViewsOf(slot.doc);
         }
+    }
+}
+
+/// Every group showing `doc` repaints it in full.
+pub fn repaintViewsOf(self: *Ui, doc: *const Document) void {
+    for (self.group_list.items) |g| {
+        const s = g.slot();
+        if (s.doc != doc) continue;
+        s.full_redraw = true;
+        g.buffer_dirty = true;
     }
 }
 

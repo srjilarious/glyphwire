@@ -769,10 +769,10 @@ pub const Slot = struct {
 /// layout tree (`zoe/groups.zig`) as one leaf, and in the host's split
 /// tree as `col_split`.
 ///
-/// A file is open in at most one group: opening one that is already
-/// open elsewhere focuses its tab there (`openFile`). That is what lets
-/// a `Slot` -- editor, undo, parse tree, language-server document --
-/// stay the one owner of its buffer.
+/// A group shows a document at most once. Opening a file that another
+/// group has open gives this group a second view of the same document
+/// (`openFile`, `newView`): one text, undo history and parse tree, each
+/// view with its own cursor and scroll.
 pub const Group = struct {
     id: groups.GroupId,
     tabs_layer: glyphwire.LayerHandle,
@@ -818,6 +818,14 @@ pub const Group = struct {
 
     buffer_dirty: bool = true,
     tabs_dirty: bool = true,
+
+    /// The tab showing `doc`, if this group has one.
+    pub fn viewOf(self: *const Group, doc: *const Document) ?usize {
+        for (self.buffers.items, 0..) |s, i| {
+            if (s.doc == doc) return i;
+        }
+        return null;
+    }
 
     pub fn slot(self: *const Group) *Slot {
         return self.buffers.items[self.active];
@@ -1850,6 +1858,48 @@ pub const Ui = struct {
         return slot;
     }
 
+    /// A new tab on `from`'s document, set up the way `from` is -- the
+    /// same settings, and its cursor and scroll to start from -- but its
+    /// own from then on. Unlisted, like `newSlot`'s: the caller adds it
+    /// to a group.
+    pub fn newView(self: *Ui, from: *Slot) !*Slot {
+        // `from`'s cursor is the one copied, so it has to have followed
+        // the other views first.
+        _ = self.syncView(from);
+        const slot = try self.alloc.create(Slot);
+        errdefer self.alloc.destroy(slot);
+        slot.* = .{ .ed = try Editor.initView(self.alloc, &from.doc.buf, from.ed.path), .doc = from.doc };
+        from.doc.refs += 1;
+
+        const ed = &slot.ed;
+        const src = &from.ed;
+        ed.author = self.next_author;
+        self.next_author += 1;
+        ed.keymaps = src.keymaps;
+        ed.cmd_history = src.cmd_history;
+        ed.search_history = src.search_history;
+        ed.line_comment = src.line_comment;
+        ed.colon_block = src.colon_block;
+        ed.hot_exit = src.hot_exit;
+        ed.page_lines = src.page_lines;
+        ed.line_numbers = src.line_numbers;
+        ed.tab_width = src.tab_width;
+        ed.expand_tab = src.expand_tab;
+        ed.show_whitespace = src.show_whitespace;
+        ed.wrap = src.wrap;
+        ed.auto_indent = src.auto_indent;
+        ed.auto_close = src.auto_close;
+        ed.fold_column = src.fold_column;
+        ed.moveCursorTo(src.cursor);
+
+        slot.top_line = from.top_line;
+        slot.top_sub = from.top_sub;
+        slot.left_col = from.left_col;
+        slot.view_mark = from.doc.buf.edit_seq;
+        slot.rows_mark = from.doc.buf.edit_seq;
+        return slot;
+    }
+
     /// Points a slot's highlighter at the grammar for `path` (by
     /// extension), or clears it. Cheap and idempotent.
     pub fn selectHighlightLanguage(self: *Ui, slot: *Slot, path: ?[]const u8) void {
@@ -2082,6 +2132,12 @@ pub const Ui = struct {
             // Before `grp` moves: `unzoom` shows every group but `grp`.
             self.unzoom() catch {};
             self.grp.markRedraw();
+            // Into another view of the same file: an insert session left
+            // open in the one being left ends here, so the two views'
+            // typing never shares a `u`.
+            // (A group being closed has let go of its tabs already, and
+            // `buf` with them: it is only read while the group has one.)
+            if (self.grp.buffers.items.len > 0 and g.slot().doc == self.buf.doc) self.buf.doc.buf.closeUndoGroup();
             self.grp = g;
             self.buf = g.slot();
             _ = self.syncView(self.buf);
@@ -2099,16 +2155,18 @@ pub const Ui = struct {
     /// `:vsplit` / `:split` and Ctrl+W v / s: a new group beside (or
     /// under) the focused one, which gets the keyboard.
     ///
-    /// A file is only ever open in one group, so the new group can't show
-    /// a second view of the current buffer the way vim's would. It takes
-    /// the current tab instead -- "put this file over there" -- and the
-    /// group it left keeps the rest of its tabs, or a scratch buffer if
-    /// that was its only one. `:vsplit <path>` opens that file in the
-    /// new group instead (moving its tab there if it is open already).
-    /// `side` is where the new group goes: after (right of / below) the
-    /// focused one for every command, before it only for Ctrl+W Shift+H /
-    /// K moving a tab off the left or top edge.
+    /// The new group shows a second view of the current file, the way
+    /// vim's does: the same text, its own cursor and scroll. `:vsplit
+    /// <path>` opens that file there instead (a view of it if it is
+    /// open already). `side` is where the new group goes: after (right
+    /// of / below) the focused one for every command, before it only for
+    /// Ctrl+W Shift+H / K moving a tab off the left or top edge, which
+    /// passes `move` to take the tab itself rather than a view of it.
     pub fn splitGroup(self: *Ui, orientation: groups.Orientation, side: groups.Side, path: ?[]const u8) !void {
+        return self.splitGroupWith(orientation, side, path, false);
+    }
+
+    pub fn splitGroupWith(self: *Ui, orientation: groups.Orientation, side: groups.Side, path: ?[]const u8, move: bool) !void {
         if (self.focus == .tree) self.setFocus(.buffer);
         const from = self.grp;
 
@@ -2118,7 +2176,7 @@ pub const Ui = struct {
         var moved: ?*Slot = null;
         if (path) |p| {
             if (self.findPath(p)) |hit| {
-                moved = hit.group.buffers.items[hit.index];
+                fresh = try self.newView(hit.group.buffers.items[hit.index]);
             } else {
                 fresh = self.newSlot(p) catch |err| switch (err) {
                     error.NotTextFile => {
@@ -2129,8 +2187,10 @@ pub const Ui = struct {
                     else => return err,
                 };
             }
-        } else {
+        } else if (move) {
             moved = self.buf;
+        } else {
+            fresh = try self.newView(self.buf);
         }
         errdefer if (fresh) |f| f.deinit(self.alloc);
 
@@ -2188,8 +2248,11 @@ pub const Ui = struct {
         const at = self.findSlot(slot) orelse return;
         const from = at.group;
         if (from == to) return;
-        const dest = @min(index orelse to.buffers.items.len, to.buffers.items.len);
-        try to.buffers.insert(self.alloc, dest, slot);
+        // `to` has a view of this document already: that one comes
+        // forward, and the moved tab goes (a group shows a document once).
+        const existing = to.viewOf(slot.doc);
+        const dest = existing orelse @min(index orelse to.buffers.items.len, to.buffers.items.len);
+        if (existing == null) try to.buffers.insert(self.alloc, dest, slot);
         _ = from.buffers.orderedRemove(at.index);
         if (from.buffers.items.len == 0) {
             const scratch = try self.newSlot(null);
@@ -2206,9 +2269,13 @@ pub const Ui = struct {
         from.markRedraw();
 
         to.active = dest;
-        // The layer it lands on has never shown this buffer.
-        slot.full_redraw = true;
-        slot.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
+        if (existing != null) {
+            slot.deinit(self.alloc);
+        } else {
+            // The layer it lands on has never shown this buffer.
+            slot.full_redraw = true;
+            slot.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
+        }
         to.markRedraw();
         if (from == self.grp) self.buf = from.slot();
         if (to == self.grp) self.buf = to.slot();
@@ -2237,12 +2304,19 @@ pub const Ui = struct {
 
         // Its only tab: take it out by hand, so `moveSlot` doesn't leave a
         // scratch buffer behind, and close the group it leaves.
-        const dest = @min(index orelse to.buffers.items.len, to.buffers.items.len);
-        try to.buffers.insert(self.alloc, dest, slot);
-        _ = from.buffers.orderedRemove(at.index);
-        to.active = dest;
-        slot.full_redraw = true;
-        slot.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
+        if (to.viewOf(slot.doc)) |i| {
+            // `to` has a view of it already, which stands in for it.
+            _ = from.buffers.orderedRemove(at.index);
+            to.active = i;
+            slot.deinit(self.alloc);
+        } else {
+            const dest = @min(index orelse to.buffers.items.len, to.buffers.items.len);
+            try to.buffers.insert(self.alloc, dest, slot);
+            _ = from.buffers.orderedRemove(at.index);
+            to.active = dest;
+            slot.full_redraw = true;
+            slot.pushed_bar = .{ std.math.maxInt(usize), 0, 0, 0 };
+        }
         // Before the group goes: `grp` must not be left pointing at it.
         self.focusGroup(to);
         const removed = self.layout.remove(from.id) catch return;
@@ -2289,7 +2363,7 @@ pub const Ui = struct {
             .left, .up => .before,
             .right, .down => .after,
         };
-        try self.splitGroup(orientation, side, null);
+        try self.splitGroupWith(orientation, side, null, true);
     }
 
     /// `:close` and Ctrl+W q / c: closes the focused group, its tabs
@@ -2311,8 +2385,16 @@ pub const Ui = struct {
         // Its tabs go along to `to` -- except a lone, untouched scratch
         // buffer: carrying an empty `[No Name]` over is just clutter.
         const lone = g.buffers.items.len == 1;
+        // A tab whose document `to` has a view of already goes, since a
+        // group shows a document once; `to`'s own view stands in for it.
+        var shown_in_to: ?*Slot = null;
         for (g.buffers.items) |slot| {
             if (lone and slot.ed.path == null and !slot.ed.buf.dirty and slot.ed.buf.len() == 0) {
+                slot.deinit(self.alloc);
+                continue;
+            }
+            if (to.viewOf(slot.doc)) |i| {
+                if (slot == shown) shown_in_to = to.buffers.items[i];
                 slot.deinit(self.alloc);
                 continue;
             }
@@ -2322,7 +2404,7 @@ pub const Ui = struct {
         }
         // `to` shows what `g` was showing, if that came along.
         for (to.buffers.items, 0..) |slot, i| {
-            if (slot == shown) to.active = i;
+            if (slot == shown or slot == shown_in_to) to.active = i;
         }
         g.buffers.clearRetainingCapacity();
         // Before the group goes: `grp` must not be left pointing at it.
@@ -4310,7 +4392,7 @@ pub const Ui = struct {
     /// Closes and frees every buffer in `g`, leaving its list empty.
     pub fn releaseSlots(self: *Ui, g: *Group) void {
         for (g.buffers.items) |slot| {
-            self.lspDidClose(slot);
+            if (slot.doc.refs == 1) self.lspDidClose(slot);
             slot.deinit(self.alloc);
         }
         g.buffers.clearRetainingCapacity();
@@ -4364,8 +4446,12 @@ pub const Ui = struct {
         var shown: ?*Slot = null;
         for (spec.files, 0..) |path, i| {
             _ = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch continue;
-            if (self.findPath(path) != null) continue;
-            const slot = self.newSlot(path) catch |err| switch (err) {
+            // Open in an earlier group: this one gets a view of it.
+            const open: ?*Slot = if (self.findPath(path)) |at| at.group.buffers.items[at.index] else null;
+            if (open) |o| {
+                if (g.viewOf(o.doc) != null) continue;
+            }
+            const slot = (if (open) |o| self.newView(o) else self.newSlot(path)) catch |err| switch (err) {
                 error.NotTextFile => continue,
                 else => return err,
             };
@@ -4785,17 +4871,18 @@ pub const Ui = struct {
     /// buffer being left keeps its text, its cursor and its parse tree,
     /// so coming back to it is a switch rather than a reload.
     pub fn openFile(self: *Ui, path: []const u8) !void {
-        // Open in another group already: that group and tab get the
-        // focus, since a file is never open in two.
         if (self.findPath(path)) |at| {
-            if (at.group != self.grp) {
-                const keep_tree = self.focus == .tree;
-                self.focusGroup(at.group);
-                // Picking a file in the tree leaves the keyboard there, as
-                // it does when the file opens in the focused group.
-                if (keep_tree) self.setFocus(.tree);
+            const open = at.group.buffers.items[at.index];
+            if (self.grp.viewOf(open.doc)) |i| {
+                self.setActive(i);
+            } else {
+                // Open in another group: a second view of it here, beside
+                // the shown tab, starting where the other one is.
+                const view = try self.newView(open);
+                errdefer view.deinit(self.alloc);
+                try self.grp.buffers.insert(self.alloc, self.grp.active + 1, view);
+                self.setActive(self.grp.active + 1);
             }
-            self.setActive(at.index);
             self.buf.ed.setStatus("\"{s}\"", .{path});
             return;
         }
@@ -5263,19 +5350,24 @@ pub const Ui = struct {
     pub fn closeBuffer(self: *Ui, index: usize, force: bool) !void {
         if (index >= self.grp.buffers.items.len) return;
         const slot = self.grp.buffers.items[index];
-        if (slot.ed.buf.dirty and !force) {
+        // Another tab still showing the document keeps its edits, so
+        // closing this view of it loses nothing and needs no `!`.
+        const last = slot.doc.refs == 1;
+        if (last and slot.ed.buf.dirty and !force) {
             self.buf.ed.setStatus("E37: No write since last change (add ! to override)", .{});
             self.status_dirty = true;
             return;
         }
 
-        // A forced close throws the unsaved edits away, backup included;
-        // a clean tab's backup is one still waiting to be recovered.
-        if (slot.ed.buf.dirty) self.dropBackup(slot);
-
-        // While the slot still exists: `didClose` needs its path, and the
-        // stored diagnostics go with it.
-        self.lspDidClose(slot);
+        if (last) {
+            // A forced close throws the unsaved edits away, backup
+            // included; a clean tab's backup is one still waiting to be
+            // recovered.
+            if (slot.ed.buf.dirty) self.dropBackup(slot);
+            // While the slot still exists: `didClose` needs its path, and
+            // the stored diagnostics go with it.
+            self.lspDidClose(slot);
+        }
 
         const closed_active = index == self.grp.active;
         _ = self.grp.buffers.orderedRemove(index);
@@ -5337,7 +5429,8 @@ pub const Ui = struct {
         while (i > 0) {
             i -= 1;
             if (!which.takes(self.grp.active, i)) continue;
-            if (self.grp.buffers.items[i].ed.buf.dirty and !force) {
+            const s = self.grp.buffers.items[i];
+            if (s.ed.buf.dirty and s.doc.refs == 1 and !force) {
                 kept += 1;
                 continue;
             }
@@ -5383,6 +5476,12 @@ pub const Ui = struct {
             return;
         };
         if (target) |t| {
+            // Every view of it: they are one file.
+            for (self.group_list.items) |g| {
+                for (g.buffers.items) |s| {
+                    if (s.doc == self.buf.doc and s != self.buf) s.ed.setPath(t) catch {};
+                }
+            }
             self.buf.ed.setPath(t) catch {};
             // Saved under a new extension, it may be another language now.
             self.buf.ed.line_comment = self.lineCommentFor(t);
@@ -5404,8 +5503,10 @@ pub const Ui = struct {
         self.buf.doc.gone = false;
         self.lspDidSave();
         // The tab loses its `+` (and any deleted mark), and a `:w <name>`
-        // also renamed it.
-        self.grp.tabs_dirty = true;
+        // also renamed it -- in every group showing the file.
+        for (self.group_list.items) |g| {
+            if (g.viewOf(self.buf.doc) != null) g.tabs_dirty = true;
+        }
         self.buf.ed.setStatus("\"{s}\" {d}L written", .{ dest, self.buf.ed.buf.lineCount() });
     }
 
@@ -5768,6 +5869,7 @@ pub const Ui = struct {
     pub const parseBudget = render_ui.parseBudget;
     pub const highlightPending = render_ui.highlightPending;
     pub const stepHighlight = render_ui.stepHighlight;
+    pub const repaintViewsOf = render_ui.repaintViewsOf;
     pub const addDirtyLine = render_ui.addDirtyLine;
     pub const renderChangedRows = render_ui.renderChangedRows;
     pub const dirtyLineListed = render_ui.dirtyLineListed;
