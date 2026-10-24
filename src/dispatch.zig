@@ -9,19 +9,18 @@ const codec = @import("codec.zig");
 const wire = @import("wire.zig");
 const version = @import("version.zig");
 
-/// Dispatches decoded JSON-RPC message bodies (the wire module's frame
-/// payloads) against a headless `Context`. This is the message-catalog
-/// subset needed to prove the vertical slice works end to end — just
-/// enough of `write_text` and `get_property`/`set_property` for the
-/// slice's "hello" round trip, not the fuller catalog from decisions.md
-/// (still an open item there).
+/// Dispatches decoded message bodies (the wire module's frame payloads,
+/// JSON or MessagePack) against one connection's `Context`, through the
+/// method catalog below.
 ///
-/// Per decisions.md's Protocol Shape: draw/state-change commands
-/// (`write_text`, `set_property`) are notifications with no response;
-/// `get_property` is a request since it needs to return a value.
-/// JSON-RPC error *responses* aren't implemented yet — malformed or
-/// unrecognized messages surface as Zig errors instead, since there's no
-/// socket layer yet to decide how to report them to a peer.
+/// Draw and state-change commands (`write_text`, `set_property`, ...) are
+/// notifications with no response, so a client can stream them without
+/// waiting on a round trip; anything that has to return a value
+/// (`get_property`, `create_layer`, ...) is a request. A handler fails
+/// with one of these errors: server.zig answers a failed request with a
+/// JSON-RPC error response (`errorCode` picks the code) and logs a failed
+/// notification, recording it for `get_errors` if the connection
+/// subscribed to `"error"`. Either way the connection carries on.
 pub const DispatchError = error{
     UnknownMethod,
     UnknownProperty,
@@ -54,9 +53,8 @@ pub const DispatchError = error{
     /// A socket connection issued `destroy_layer` for a layer it doesn't
     /// own (never created and never `adopt_layer`'d) -- see
     /// `handleDestroyLayer`. `destroy_layer` is a notification with no
-    /// response channel, so server.zig turns this into a logged warning
-    /// and the layer is left intact; a real JSON-RPC error response would
-    /// need the still-unbuilt error-response path (roadmap Milestone 0).
+    /// response channel, so server.zig logs it (and records it for a
+    /// connection subscribed to `"error"`); the layer is left intact.
     LayerPermissionDenied,
     InvalidIconOption,
     /// `write_text`'s `scale` wasn't `"x1"`, `"x1_5"`, `"x2"`, or `"x3"`.
@@ -1053,9 +1051,10 @@ pub const Dispatcher = struct {
     }
 
     /// Method name -> handler and who may send it. A compile-time
-    /// perfect-hash map built from the adapters above; replaces what was a
-    /// ~60-branch `if/else` chain of `std.mem.eql` on `envelope.method`.
-    /// Adding a message is one row here, saying who may send it. `dispatchEnvelope` (error recording) and `handleBatch` both
+    /// perfect-hash map built from the adapters above, so the method name
+    /// is looked up once rather than compared against every name in turn.
+    /// Adding a message is one row here, saying who may send it.
+    /// `dispatchEnvelope` (error recording) and `handleBatch` both
     /// route through `dispatchCatalog`, so a batched sub-message and a
     /// standalone one still hit precisely the same handler.
     const catalog = std.StaticStringMap(CatalogEntry).initComptime(.{

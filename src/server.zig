@@ -88,13 +88,13 @@ pub const Connection = struct {
     }
 };
 
-/// A Unix-domain socket server serving one `Context` to any number of
-/// concurrently connected clients, each on its own thread (Milestone 4
-/// added the socket; concurrent connections were added once input events
-/// needed one process reporting input while others stay connected to
-/// receive it). Fans out `key_down`/`key_up`/`mouse_button` notifications
-/// to whichever connections subscribed -- see dispatch.zig's
-/// `Subscriptions`/`Broadcast`.
+/// A Unix-domain socket server serving one `Session` (its contexts and
+/// panes) to any number of concurrently connected clients, each on its
+/// own thread. Each connection's frames go through its own `Dispatcher`
+/// under `ctx_mutex`; whatever a frame produces for other clients (input,
+/// layout, selection, pane and context changes, ...) is fanned out to the
+/// connections subscribed to it -- see dispatch.zig's `Subscriptions` /
+/// `Broadcast` and `broadcastIn`'s delivery rules.
 ///
 /// Meant to be embedded, not just run standalone: whatever process owns
 /// `ctx` can bind a `Server` alongside it and read/write `ctx` directly

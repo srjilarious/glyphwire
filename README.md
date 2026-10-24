@@ -29,7 +29,7 @@ splits and panes back.
 
 ## The protocol
 
-The wire protocol is at **version 0.10.0**, a pre-1.0 draft.
+The wire protocol is at **version 0.11.0**, a pre-1.0 draft.
 [`docs/protocol.md`](docs/protocol.md) is the normative specification
 (CC-BY-4.0), enough to write a client or a host in any language without
 reading the Zig. [`docs/api.md`](docs/api.md) is the annotated message
@@ -60,10 +60,10 @@ catalog with per-message implementation status.
   resolves it at draw time, so a theme switch recolours what is already on
   screen.
 
-Known gaps, called out in the spec: a failed request severs the connection
-rather than returning an error response, and there is no capability
-negotiation yet (`get_version` reports the host and protocol version, but
-nothing adapts to it). Both are expected before 1.0.
+Known gap, called out in the spec: there is no capability negotiation yet
+(`get_version` reports the host and protocol version, but nothing adapts to
+it). It is expected before 1.0. A failed request is answered with a
+JSON-RPC error response and the connection carries on.
 
 ### Server-side features
 
@@ -98,17 +98,17 @@ Each is an ordinary client of the protocol, versioned on its own.
 
 | App | Version | What it is |
 |---|---|---|
-| **`gw-shell`** | 0.11.0 | The shell `glyphwire` spawns. Pipelines, Lua config, fish-style autosuggestions, fish and Lua completions, powerline prompt, Ctrl+R / Alt+C through `gw-hist`, `gwssh`. |
-| **`zoe`** | 0.19.0 | Modal editor: vim grammar with VS Code keys alongside. Split editor groups, workspaces, tree-sitter highlighting, LSP (diagnostics, hover, goto, completion), find and replace, folding, Lua extensions, unsaved-change backups. Keys in [`docs/zoe-keys.md`](docs/zoe-keys.md). |
+| **`gw-shell`** | 0.12.0 | The shell `glyphwire` spawns. Pipelines, Lua config, fish-style autosuggestions, fish and Lua completions, powerline prompt, Ctrl+R / Alt+C through `gw-hist`, `gwssh`. |
+| **`zoe`** | 0.24.0 | Modal editor: vim grammar with VS Code keys alongside. Split editor groups, workspaces, tree-sitter highlighting, LSP (diagnostics, hover, goto, completion), find and replace, folding, Lua extensions, unsaved-change backups. Keys in [`docs/zoe-keys.md`](docs/zoe-keys.md). |
 | **`gmux`** | 0.11.0 | Multiplexer as a pure window manager: it draws nothing and never touches a program's I/O, it only asks the server for panes. |
-| **`salacommander`** | 0.10.0 | Two-pane file manager: icons, tabs, sudo operations, trash, permission editing, drag and drop within and out of the window. |
-| **`gwmd`** | 0.8.0 | Markdown reader: scaled headings, GFM tables as native tables, inline images, links. |
-| **`gw-read`** | 0.9.0 | Comic and manga reader: zoom and pan, Mokuro OCR overlays, dictionary lookup, AI bubble translation, Anki mining. |
+| **`salacommander`** | 0.11.0 | Two-pane file manager: icons, tabs, sudo operations, trash, permission editing, drag and drop within and out of the window. |
+| **`gwmd`** | 0.8.1 | Markdown reader: scaled headings, GFM tables as native tables, inline images, links. |
+| **`gw-read`** | 0.9.1 | Comic and manga reader: zoom and pan, Mokuro OCR overlays, dictionary lookup, AI bubble translation, Anki mining. |
 | **`gw-ls`** | 0.8.0 | `ls` as an icon grid, or a long listing in a table that stays sortable after it exits. |
 | **`gw-grep`** | 0.8.0 | ripgrep hits as a collapsible, highlighted outline in the scrollback. |
-| **`gw-hist`** | 0.8.0 | Fuzzy history and frecent-directory search for `gw-shell`. |
-| **`gw-view`** | 0.8.0 | Image viewer, inline or interactive. |
-| **`gw-agent`** | 0.8.0 | The remote end of an ssh session; bridges remote clients onto one trunk. |
+| **`gw-hist`** | 0.8.1 | Fuzzy history and frecent-directory search for `gw-shell`. |
+| **`gw-view`** | 0.8.1 | Image viewer, inline or interactive. |
+| **`gw-agent`** | 0.9.0 | The remote end of an ssh session; bridges remote clients onto one trunk. |
 
 Developer tools: `glyphwire-probe` drives and inspects a live session
 from the command line (`zig build probe`), and `glyphwire-demo`,
@@ -153,10 +153,12 @@ Each program also has its own run step (`zig build zoe`, `zig build gwmd`,
 
 Every program answers `--version` (or `-V`) with its own version, the
 glyphwire release and the `git describe` it was built from, e.g. `zoe
-0.19.0 (glyphwire 0.21.0, 1b122a9)`. Each program's number is a line in
+0.24.0 (glyphwire 0.29.0, 1b122a9)`. Each program's number is a line in
 `program_versions` at the top of `build.zig`, bumped when that program
 changes in a release, and the release's own number is `build.zig.zon`'s
-`version`. A client can ask the host the same with the `get_version`
+`version`. The numbers quoted in this README, the website and the spec's
+header are copied from those by `scripts/sync-versions.py`, and CI fails
+when they are stale. A client can ask the host the same with the `get_version`
 request.
 
 CI builds `glyphwire-linux-x86_64.tar.gz`, a `.deb` and an Arch

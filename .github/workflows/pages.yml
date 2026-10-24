@@ -38,6 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The site quotes the protocol version; refuse to publish a stale one.
+      - name: Check quoted versions
+        run: scripts/sync-versions.py --check
       - name: Assemble site
         run: scripts/build-site.sh _site
       - uses: actions/configure-pages@v5

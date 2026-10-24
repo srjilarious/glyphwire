@@ -73,9 +73,8 @@ zig build package         # only the shipped programs, grammars and assets
 
 ## Tests
 
-**Every change must keep `zig build tests` green.** It is currently
-937 tests and takes about eight seconds; there is no excuse for skipping
-it.
+**Every change must keep `zig build tests` green.** The full suite takes
+about ten seconds; there is no excuse for skipping it.
 
 ```sh
 zig build tests            # everything
@@ -306,6 +305,9 @@ Before opening a pull request:
 - `scripts/check-licenses.py` passes (new files carry the right SPDX header,
   and no MPL file imports a GPL module)
 - the protocol spec is updated if the wire changed
+- `scripts/sync-versions.py --check` passes, if you bumped a version (run
+  `scripts/sync-versions.py` to copy the new numbers into the README, the
+  site and the spec's header)
 - you are in `CONTRIBUTORS.md`, if this is your first contribution
 
 Keep pull requests focused. A refactor and a behaviour change in one branch

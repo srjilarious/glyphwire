@@ -64,6 +64,13 @@ jobs:
         with:
           version: 0.17.0
 
+      # The README, the site and the spec's header quote version numbers
+      # whose sources are build.zig, build.zig.zon and src/protocol.zig.
+      # Fails when a bump forgot `scripts/sync-versions.py`.
+      - name: Check quoted versions
+        working-directory: glyphwire
+        run: scripts/sync-versions.py --check
+
       # `zig build package` (defined in build.zig) installs only the shipped
       # programs, assets, grammars and desktop files, skipping the test
       # runner and the internal server/client/table-demo tools. This is the
