@@ -304,8 +304,8 @@ pub const Panes = struct {
     /// Takes `ctx_mutex` itself.
     fn overlayContext(self: *const Panes) ?glyphwire.ContextHandle {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
         const h = server.session.overlay_pane orelse return null;
         const pane = server.session.panePtr(h) orelse return null;
         if (!pane.mapped) return null;
@@ -327,8 +327,8 @@ pub const Panes = struct {
     /// one the user can mean to grab.
     pub fn edgeAt(self: *const Panes, px: f32, py: f32) ?struct { edge: Band.Edge, rect: geometry.RectPx } {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
 
         var it = server.session.panes.valueIterator();
         while (it.next()) |pane| {
@@ -363,8 +363,8 @@ pub const Panes = struct {
     /// pixel -- the occlusion test `dividerAt` runs on a layer band.
     fn layerCovers(self: *const Panes, h: glyphwire.ContextHandle, px: f32, py: f32) bool {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
         const ctx = server.session.contextPtr(h) orelse return false;
         const t = hit.layerUnder(ctx, px, py) orelse return false;
         return !t.is_root;
@@ -382,8 +382,8 @@ pub const Panes = struct {
         const pos = eng.inputs.mouse.pos();
 
         {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             self.syncLocked();
         }
         const pressed = eng.inputs.mouse.pressed(.left);
@@ -457,8 +457,8 @@ pub const Panes = struct {
         switch (drag.level) {
             .pane => {
                 {
-                    server.ctx_mutex.lockUncancelable(server.io);
-                    defer server.ctx_mutex.unlock(server.io);
+                    const session_lock = server.lockSession();
+                    defer session_lock.unlock();
                     server.session.movePaneDivider(drag.split, drag.index, travelled) catch {};
                 }
                 server.applyPaneLayout(self.app.alloc) catch |err| {
@@ -467,8 +467,8 @@ pub const Panes = struct {
             },
             .layer => |ctx_handle| {
                 {
-                    server.ctx_mutex.lockUncancelable(server.io);
-                    defer server.ctx_mutex.unlock(server.io);
+                    const session_lock = server.lockSession();
+                    defer session_lock.unlock();
                     const ctx = server.session.contextPtr(ctx_handle) orelse return;
                     ctx.moveDivider(drag.split, drag.index, travelled) catch {};
                 }

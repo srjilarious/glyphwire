@@ -550,8 +550,8 @@ pub const App = struct {
     fn syncWindowTitle(self: *App, eng: *Engine) void {
         const server = self.server;
         const next = blk: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             break :blk self.window_title.update(server.session.focusedContext().title.items);
         };
         if (next) |title| eng.window.setTitle(title);
@@ -569,8 +569,8 @@ pub const App = struct {
         var caret_shape: CursorShape = self.caret.shapeFor(null);
         var focus_rgb: u32 = 0;
         {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             // Publish the latest profiler numbers for `get_property
             // "profile"` while we already hold the lock the wire handler
             // reads them under. Inert when profiling is off.

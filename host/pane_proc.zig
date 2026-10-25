@@ -117,6 +117,27 @@ pub const PaneProcs = struct {
         };
     }
 
+    /// `mutex`, held; what `lockProcs` returns.
+    const ProcsLock = struct {
+        procs: *PaneProcs,
+
+        fn unlock(self: ProcsLock) void {
+            self.procs.mutex.unlock(self.procs.io);
+            glyphwire.server.leaveBelowSession();
+        }
+    };
+
+    /// Takes `mutex`, telling the server it ranks below `ctx_mutex` (see
+    /// the lock order on `mutex`): a debug build then fails an assertion
+    /// if anything under it reaches for the session, rather than
+    /// deadlocking against a dispatcher that holds the two the other way
+    /// round.
+    fn lockProcs(self: *PaneProcs) ProcsLock {
+        self.mutex.lockUncancelable(self.io);
+        glyphwire.server.enterBelowSession();
+        return .{ .procs = self };
+    }
+
     pub fn deinit(self: *PaneProcs) void {
         var it = self.procs.valueIterator();
         while (it.next()) |p| self.destroyProc(p.*);
@@ -178,8 +199,8 @@ pub const PaneProcs = struct {
         const proc = try self.start(pane, grant, argv, cols, rows, cwd);
         errdefer self.stopProc(proc);
         {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
+            const procs_lock = self.lockProcs();
+            defer procs_lock.unlock();
             try self.procs.put(self.alloc, pane, proc);
             _ = self.deferred_exits.remove(pane);
         }
@@ -193,8 +214,8 @@ pub const PaneProcs = struct {
     pub fn spawnShell(self: *PaneProcs, pane: glyphwire.PaneHandle, cwd: ?[]const u8) !glyphwire.ContextHandle {
         const server = self.server;
         const size = blk: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             const p = server.session.panePtr(pane) orelse return error.UnknownPane;
             break :blk .{ .cols = @max(p.rect.cols, 1), .rows = @max(p.rect.rows, 1) };
         };
@@ -202,8 +223,8 @@ pub const PaneProcs = struct {
         const context = try server.createShellContext(self.alloc, pane);
         errdefer server.destroyShellContext(self.alloc, context) catch {};
         const grant = blk: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             break :blk server.session.contextGrant(context) orelse return error.UnknownContext;
         };
 
@@ -212,8 +233,8 @@ pub const PaneProcs = struct {
         const proc = try self.start(pane, grant, &.{ "gw-shell", "--context", handle_arg }, size.cols, size.rows, cwd);
         errdefer self.stopProc(proc);
 
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        const procs_lock = self.lockProcs();
+        defer procs_lock.unlock();
         try self.shells.put(self.alloc, context, proc);
         return context;
     }
@@ -353,8 +374,8 @@ pub const PaneProcs = struct {
         var doomed: std.ArrayList(*Proc) = .empty;
         defer doomed.deinit(self.alloc);
         {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
+            const procs_lock = self.lockProcs();
+            defer procs_lock.unlock();
             _ = self.deferred_exits.remove(pane);
             var it = self.shells.valueIterator();
             while (it.next()) |p| {
@@ -368,8 +389,8 @@ pub const PaneProcs = struct {
     /// Stops and reaps `pane`'s own program, leaving its spawned shells.
     fn killProgram(self: *PaneProcs, pane: glyphwire.PaneHandle) void {
         const proc = blk: {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
+            const procs_lock = self.lockProcs();
+            defer procs_lock.unlock();
             const kv = self.procs.fetchRemove(pane) orelse return;
             break :blk kv.value;
         };
@@ -390,8 +411,8 @@ pub const PaneProcs = struct {
     /// pane, the root one included (`App.update`).
     pub fn paneHeld(self: *PaneProcs, pane: glyphwire.PaneHandle) bool {
         const server = self.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
         return self.paneHeldLocked(pane);
     }
 
@@ -407,8 +428,8 @@ pub const PaneProcs = struct {
     /// Whether `pane`'s own program has exited while the pane is held
     /// open (`paneHeld`).
     pub fn programExited(self: *PaneProcs, pane: glyphwire.PaneHandle) bool {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        const procs_lock = self.lockProcs();
+        defer procs_lock.unlock();
         return self.deferred_exits.contains(pane);
     }
 
@@ -417,20 +438,20 @@ pub const PaneProcs = struct {
     /// on. Null for anything else (a program's own context, or the root
     /// pane's first shell, which `main` started).
     pub fn setRootShellPid(self: *PaneProcs, pid: ?std.posix.pid_t) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        const procs_lock = self.lockProcs();
+        defer procs_lock.unlock();
         self.root_shell_pid = pid;
     }
 
     fn rootShellPid(self: *PaneProcs) ?std.posix.pid_t {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        const procs_lock = self.lockProcs();
+        defer procs_lock.unlock();
         return self.root_shell_pid;
     }
 
     pub fn pidFor(self: *PaneProcs, pane: glyphwire.PaneHandle, context: glyphwire.ContextHandle) ?std.posix.pid_t {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        const procs_lock = self.lockProcs();
+        defer procs_lock.unlock();
         if (self.shells.get(context)) |p| return p.pty.pid;
         const p = self.procs.get(pane) orelse return null;
         return if (p.context == context) p.pty.pid else null;
@@ -451,8 +472,8 @@ pub const PaneProcs = struct {
         var top: StackTop = undefined;
         {
             const server = self.server;
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             top = self.stackTop(pane) orelse return null;
         }
         return self.cwdIn(pane, &top, buf);
@@ -511,8 +532,8 @@ pub const PaneProcs = struct {
     pub fn bringForwardOverBase(self: *PaneProcs, alloc: std.mem.Allocator, pane: glyphwire.PaneHandle) void {
         const server = self.server;
         const target = blk: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             const p = server.session.panePtr(pane) orelse return;
             const stack = p.stack.items;
             if (stack.len < 2 or stack[stack.len - 1] != p.base) return;
@@ -538,8 +559,8 @@ pub const PaneProcs = struct {
     /// input to a plain child. Aware children get their input over the
     /// wire instead and ignore this.
     pub fn write(self: *PaneProcs, pane: glyphwire.PaneHandle, bytes: []const u8) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        const procs_lock = self.lockProcs();
+        defer procs_lock.unlock();
         const proc = self.procs.get(pane) orelse return;
         proc.pty.writeAll(bytes);
     }
@@ -551,10 +572,10 @@ pub const PaneProcs = struct {
     pub fn syncSizes(self: *PaneProcs) void {
         const server = self.server;
         // `ctx_mutex` first: see the lock order on `mutex`.
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
+        const procs_lock = self.lockProcs();
+        defer procs_lock.unlock();
 
         var it = self.procs.valueIterator();
         while (it.next()) |p| syncSize(server, p.*);
@@ -593,10 +614,10 @@ pub const PaneProcs = struct {
         const server = self.server;
         {
             // `ctx_mutex` first: see the lock order on `mutex`.
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
+            const procs_lock = self.lockProcs();
+            defer procs_lock.unlock();
 
             // A program that exits goes to `deferred_exits` first; the
             // pass below decides whether its pane is still held open.
@@ -644,10 +665,10 @@ pub const PaneProcs = struct {
         // exiting closes its pane in this same pass: a pane whose program
         // has exited goes once nothing holds it open.
         {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
+            const procs_lock = self.lockProcs();
+            defer procs_lock.unlock();
             var dit = self.deferred_exits.iterator();
             while (dit.next()) |e| {
                 if (n_exits >= exits.len) break;

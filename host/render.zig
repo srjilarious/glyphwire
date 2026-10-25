@@ -1889,8 +1889,8 @@ pub const Renderer = struct {
         // that paints no background of its own (a shell) shows it.
         const bg = blk: {
             const server = self.app.server;
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             break :blk server.session.theme.theme.roleColor(.bg);
         };
         eng.renderer.clear(
@@ -1902,8 +1902,8 @@ pub const Renderer = struct {
 
         {
             const server = self.app.server;
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
 
             const sb_t0: ?std.Io.Timestamp = if (self.app.profiler.active()) self.app.profiler.now() else null;
             self.syncBatches(eng);
@@ -1943,8 +1943,8 @@ pub const Renderer = struct {
         // but the layers it draws.
         {
             const server = self.app.server;
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             if (server.session.overlay_pane) |h| if (server.session.panePtr(h)) |pane| if (pane.mapped) {
                 const ctx_handle = pane.top();
                 if (server.session.contextPtr(ctx_handle)) |ctx| {
@@ -2136,8 +2136,8 @@ pub const Renderer = struct {
         const view = self.app.switcher.view() orelse self.app.theme_switcher.view() orelse return;
 
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
 
         const pane = server.session.panePtr(view.pane) orelse return;
         const area: modal_list.Rect = .{ .row = pane.rect.row, .col = pane.rect.col, .rows = pane.rect.rows, .cols = pane.rect.cols };
@@ -2514,8 +2514,8 @@ pub const Renderer = struct {
         var gutter: i32 = 0;
         {
             const server = self.app.server;
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             // Whatever the grid was sized against -- a context that opts
             // the bar out has no gutter to crop off, unless a pane tree
             // is keeping it reserved.
@@ -2615,8 +2615,8 @@ pub const Renderer = struct {
         const server = self.app.server;
         // The window theme's: a band between panes belongs to no program.
         const color, const bg, const focus = blk: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             self.app.panes.syncLocked();
             break :blk .{
                 themeColor(&server.session.theme, .pane_divider),
@@ -2791,8 +2791,8 @@ pub const Renderer = struct {
         var owned: bool = undefined;
         var enabled: bool = undefined;
         {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             history_len = server.ctx.root.history_len;
             height = server.ctx.root.height;
             view_scroll = server.ctx.root.view_scroll;

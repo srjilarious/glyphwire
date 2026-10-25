@@ -162,8 +162,8 @@ pub const Switcher = struct {
         const hide_base = self.app.paneProgramExited(self.pane);
 
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
 
         const session = &server.session;
         const pane = session.panePtr(self.pane) orelse {

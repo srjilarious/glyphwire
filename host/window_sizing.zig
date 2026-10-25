@@ -109,8 +109,8 @@ pub const WindowSizing = struct {
     /// resize it may produce is debounced like any other.
     fn gutterPx(self: *WindowSizing) i32 {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
         return geometry.rightGutterPx(server.ctx.window_scrollbar, server.session.root_pane_split != null);
     }
 

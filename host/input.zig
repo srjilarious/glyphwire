@@ -290,8 +290,8 @@ pub const KeyInput = struct {
         }
 
         const view_offset = blk: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             break :blk server.ctx.root.view_scroll;
         };
 
@@ -386,8 +386,8 @@ pub const KeyInput = struct {
     pub fn syncRepeatTiming(self: *KeyInput, eng: *Engine) void {
         const server = self.app.server;
         const override, const gen, const ctx_handle = blk: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             const handle = server.session.focusedContextHandle();
             const ctx = server.session.focusedContext();
             break :blk .{ ctx.key_repeat, ctx.key_repeat_gen, handle };

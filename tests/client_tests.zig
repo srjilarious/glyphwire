@@ -1173,8 +1173,8 @@ pub fn fullscreenOpenSeatsAContextTest(io: std.Io, alloc: std.mem.Allocator) !vo
     // The root background goes out last, as a notification.
     _ = try client.getSize();
     {
-        srv.ctx_mutex.lockUncancelable(io);
-        defer srv.ctx_mutex.unlock(io);
+        const session_lock = srv.lockSession();
+        defer session_lock.unlock();
         const c = srv.session.contextPtr(opened.grant.context) orelse return error.TestUnexpectedResult;
         try testz.expectEqualStr(c.title.items, "probe");
         try testz.expectTrue(!c.caret_visible);
@@ -1185,7 +1185,7 @@ pub fn fullscreenOpenSeatsAContextTest(io: std.Io, alloc: std.mem.Allocator) !vo
     // `destroy_context` is a notification; any request after it on the
     // same connection is answered only once it has been applied.
     _ = try client.getSize();
-    srv.ctx_mutex.lockUncancelable(io);
-    defer srv.ctx_mutex.unlock(io);
+    const session_lock = srv.lockSession();
+    defer session_lock.unlock();
     try testz.expectTrue(srv.session.contextPtr(opened.grant.context) == null);
 }

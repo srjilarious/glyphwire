@@ -70,8 +70,8 @@ pub const Caret = struct {
     pub fn tickBlink(self: *Caret, delta_ms: f64) void {
         const server = self.app.server;
         const now: @TypeOf(self.blink_ref) = blk: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             // Watch whichever layer the caret actually tracks -- the
             // focused pane's cursor for `gmux`, the root cursor otherwise
             // -- so the blink phase still resets the instant the caret
@@ -162,8 +162,8 @@ pub const Caret = struct {
     pub fn pinIfUnpinned(self: *Caret) void {
         if (self.pin != null) return;
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
         const root = &server.ctx.root;
         self.pin = .{
             .row = root.cursor.row,
@@ -193,8 +193,8 @@ pub const Caret = struct {
     pub fn reconcilePin(self: *Caret) void {
         const pin = self.pin orelse return;
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
         const root = &server.ctx.root;
         if (root.cursor.row != pin.row or root.cursor.col != pin.col or root.view_scroll <= pin.base_scroll) {
             self.pin = null;

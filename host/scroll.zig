@@ -82,8 +82,8 @@ pub const Scroll = struct {
     /// Topmost first, same reason as `panes.scrollablePaneAt`.
     fn paneBarAt(self: *Scroll, px: f32, py: f32) ?PaneBars {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
 
         // Only the pane under the pointer can own a bar there, so resolve
         // the pane first instead of searching every context's layers.
@@ -124,8 +124,8 @@ pub const Scroll = struct {
     /// thumb somewhere the content isn't.
     fn paneBarsFor(self: *Scroll, context: glyphwire.ContextHandle, handle: glyphwire.LayerHandle) ?PaneBars {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
 
         const ctx = server.session.contextPtr(context) orelse return null;
         const layer = ctx.layers.getPtr(handle) orelse return null;
@@ -223,8 +223,8 @@ pub const Scroll = struct {
     fn pagePane(self: *Scroll, hit: PaneBars, vertical: bool, backward: bool) void {
         const server = self.app.server;
         const page: i64 = page: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             const ctx = server.session.contextPtr(hit.context) orelse break :page 1;
             const layer = ctx.layers.getPtr(hit.layer) orelse break :page 1;
             const n = if (vertical) layer.viewportRows() else layer.viewportCols();
@@ -257,8 +257,8 @@ pub const Scroll = struct {
     /// predicate and why it's separated out.
     pub fn screenOwnedByProgram(self: *Scroll) bool {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
         return rootOwned(&server.ctx.root);
     }
 
@@ -297,8 +297,8 @@ pub const Scroll = struct {
         const target = target: {
             const server = self.app.server;
             const pos = eng.inputs.mouse.pos();
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             const cell = geometry.cellFromPixel(pos.x, pos.y);
             const at = server.paneAtCell(cell.row, cell.col) orelse break :target null;
             const pane = panes_mod.scrollablePaneAt(at.context, at.ctx, pos.x, pos.y);
@@ -440,8 +440,8 @@ pub const Scroll = struct {
         var view_scroll: usize = undefined;
         var enabled: bool = undefined;
         {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             history_len = server.ctx.root.history_len;
             height = server.ctx.root.height;
             view_scroll = server.ctx.root.view_scroll;

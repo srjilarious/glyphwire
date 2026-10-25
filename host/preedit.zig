@@ -65,8 +65,8 @@ pub const Preedit = struct {
 
         const cell = blk: {
             const server = self.app.server;
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             const root = &server.ctx.root;
             const view: usize = if (scroll.rootOwned(root)) 0 else root.view_scroll;
             break :blk self.app.caret.screenCell(root, view);

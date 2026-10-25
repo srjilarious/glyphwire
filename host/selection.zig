@@ -93,8 +93,8 @@ pub const Selection = struct {
     /// used to convert a screen row to a scroll-stable `SelectionPoint`.
     fn rootViewScroll(self: *Selection) usize {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
         return server.ctx.root.view_scroll;
     }
 
@@ -121,8 +121,8 @@ pub const Selection = struct {
     /// a drag over a layer's text is unambiguously about *that* text.
     fn layerAt(self: *Selection, px: f32, py: f32) ?LayerHit {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
 
         const ctx = server.ctx;
         const origin = geometry.contextOrigin(ctx);
@@ -173,8 +173,8 @@ pub const Selection = struct {
     /// the wrong cell.
     fn layerFor(self: *Selection, handle: glyphwire.LayerHandle) ?LayerHit {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
 
         const ctx = server.ctx;
         const layer = ctx.layers.getPtr(handle) orelse return null;
@@ -302,8 +302,8 @@ pub const Selection = struct {
         var crow: usize = undefined;
         var ccol: usize = undefined;
         {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             const root = &server.ctx.root;
             vs = root.view_scroll;
             crow = root.cursor.row;
@@ -345,8 +345,8 @@ pub const Selection = struct {
         var hist: usize = undefined;
         var vs: usize = undefined;
         {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             const root = &server.ctx.root;
             width = root.width;
             height = root.height;

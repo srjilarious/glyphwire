@@ -60,8 +60,8 @@ pub const OutlineToggle = struct {
         var follow: ?struct { layer: ?glyphwire.LayerHandle, offset: usize } = null;
 
         {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
 
             const ctx = server.ctx;
             const target = hit.layerUnder(ctx, pos.x, pos.y) orelse return false;

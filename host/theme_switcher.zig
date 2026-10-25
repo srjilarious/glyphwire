@@ -102,8 +102,8 @@ pub const ThemeSwitcher = struct {
         if (self.names.len == 0) return;
         const server = self.app.server;
         {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             self.pane = server.session.focusedPaneHandle();
             self.original = server.session.theme;
         }

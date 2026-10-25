@@ -162,8 +162,8 @@ pub const DragOut = struct {
 
     fn takeRequest(self: *DragOut) ?glyphwire.DragPayload {
         const server = self.app.server;
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
         return server.ctx.takeDragRequest();
     }
 
@@ -177,8 +177,8 @@ pub const DragOut = struct {
             std.log.err("focusPaneAt failed: {t}", .{err});
         };
 
-        server.ctx_mutex.lockUncancelable(server.io);
-        defer server.ctx_mutex.unlock(server.io);
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
         const ctx = server.ctx;
         const target = hit.layerUnder(ctx, pos.x, pos.y) orelse return null;
         const layer = target.layer;
@@ -227,8 +227,8 @@ pub const DragOut = struct {
         var icon_png: ?[]u8 = null;
         defer if (icon_png) |b| alloc.free(b);
         const style = blk: {
-            server.ctx_mutex.lockUncancelable(server.io);
-            defer server.ctx_mutex.unlock(server.io);
+            const session_lock = server.lockSession();
+            defer session_lock.unlock();
             const ctx = server.ctx;
             if (payload.icon) |name| {
                 if (ctx.iconHandle(name)) |h| {
