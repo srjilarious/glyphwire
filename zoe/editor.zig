@@ -930,6 +930,8 @@ pub const Editor = struct {
             .jump,
             .cut,
             .paste,
+            .gotoDefinition,
+            .showHover,
             .complete,
             => {},
 

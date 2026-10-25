@@ -545,3 +545,23 @@ pub fn codeSplitsJoinAndChromeIsUnselectableTest(_: std.Io, alloc: std.mem.Alloc
     // The tag, the rule, the quote's one bar.
     try testz.expectEqual(chrome, 3);
 }
+
+// ─── Following the file on disk ─────────────────────────────────────────
+
+/// A changed file reloads, a deleted one is reported once, and one that
+/// comes back after that reloads again.
+pub fn fileWatchDecidesReloadAndGoneTest(_: std.Io, _: std.mem.Allocator) !void {
+    const fw = md.filewatch;
+    const a: fw.Stamp = .{ .size = 10, .mtime_ns = 100 };
+    const b: fw.Stamp = .{ .size = 10, .mtime_ns = 200 };
+    const c: fw.Stamp = .{ .size = 12, .mtime_ns = 100 };
+
+    try testz.expectEqual(fw.decide(a, a), .none);
+    try testz.expectEqual(fw.decide(a, b), .reload);
+    try testz.expectEqual(fw.decide(a, c), .reload);
+    try testz.expectEqual(fw.decide(a, null), .gone);
+    // Already reported gone: no repeat while it stays gone...
+    try testz.expectEqual(fw.decide(null, null), .none);
+    // ...and back is read again, whatever its stamp.
+    try testz.expectEqual(fw.decide(null, a), .reload);
+}

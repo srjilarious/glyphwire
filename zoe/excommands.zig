@@ -46,6 +46,8 @@ pub const commands = [_]ExCommand{
     .{ .name = "tabcloseleft", .label = "", .action = .closeTabsLeft },
     .{ .name = "tabcloseright", .label = "", .action = .closeTabsRight },
     .{ .name = "tabonly", .label = "", .action = .closeOtherTabs },
+    .{ .name = "tabcloseleft!", .label = "Close Tabs to the Left Discarding Changes" },
+    .{ .name = "tabcloseright!", .label = "Close Tabs to the Right Discarding Changes" },
     .{ .name = "tabonly!", .label = "Close Other Tabs Discarding Changes" },
     .{ .name = "vsplit", .label = "Split Group Right" },
     .{ .name = "split", .label = "Split Group Down" },
@@ -55,6 +57,16 @@ pub const commands = [_]ExCommand{
     .{ .name = "%s", .label = "Substitute in File", .prefill = "%s/" },
     .{ .name = "noh", .label = "Clear Search Highlight" },
     .{ .name = "set", .label = "Set Option", .prefill = "set " },
+    // `:set`'s options one row each, so they can be found by what they
+    // do; each waits on the `:` line for its value. Wrap is the
+    // `toggleWordWrap` action's row.
+    .{ .name = "set lineno", .label = "Set Line Numbers (off, absolute, relative)", .prefill = "set lineno=" },
+    .{ .name = "set tabwidth", .label = "Set Tab Width", .prefill = "set tabwidth=" },
+    .{ .name = "set expandtab", .label = "Set Indent with Spaces (on, off)", .prefill = "set expandtab=" },
+    .{ .name = "set whitespace", .label = "Set Show Whitespace (on, off)", .prefill = "set whitespace=" },
+    .{ .name = "set autoindent", .label = "Set Auto Indent (on, off)", .prefill = "set autoindent=" },
+    .{ .name = "set autoclose", .label = "Set Auto Close Brackets (on, off)", .prefill = "set autoclose=" },
+    .{ .name = "set foldcolumn", .label = "Set Fold Column (on, off)", .prefill = "set foldcolumn=" },
     .{ .name = "cd", .label = "Change Directory", .prefill = "cd " },
     .{ .name = "pwd", .label = "Show Working Directory" },
     .{ .name = "addfolder", .label = "Add Folder to Workspace", .prefill = "addfolder " },

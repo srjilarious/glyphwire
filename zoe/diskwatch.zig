@@ -14,7 +14,7 @@
 //! the stat and these rules are the same whichever wakes them. Polling
 //! is the default -- a stat per open file per second costs nothing,
 //! works the same everywhere, and sees an editor's save-by-rename without
-//! watching directories. inotify (`zoe/inotify.zig`) answers within
+//! watching directories. inotify (`applib/inotify.zig`) answers within
 //! `settle_ms` instead of up to a second, and does nothing at all while
 //! nothing changes.
 //!

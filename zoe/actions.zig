@@ -97,6 +97,11 @@ pub const Action = enum {
     /// The system clipboard, pasted after the cursor (vim's `p`), or over
     /// a selection.
     paste,
+    /// The language server's definition of / documentation for what is
+    /// under the cursor: normal mode's `gd` and `K`, by name. Unbound by
+    /// default, since those keys are vim's grammar (see the top).
+    gotoDefinition,
+    showHover,
     /// Ask the language servers for completions here.
     complete,
 
@@ -179,11 +184,13 @@ pub const Action = enum {
     /// itself, Ctrl+W's prefix (it waits for a key the palette has just
     /// taken), completion (insert mode's, and its chord's space is
     /// swallowed), and the keys that move the cursor or type -- running
-    /// "Left" or "Backspace" by name is never quicker than the key.
+    /// "Left" or "Backspace" by name is never quicker than the key. The
+    /// start and end of the file stay in: the palette is where someone
+    /// who doesn't know `gg` / `G` looks for them.
     pub fn inPalette(self: Action) bool {
         return switch (self) {
             .none, .commandPalette, .windowPrefix, .complete => false,
-            .left, .right, .up, .down, .lineStart, .lineEnd, .wordLeft, .wordRight, .subwordLeft, .subwordRight, .fileStart, .fileEnd, .pageUp, .pageDown => false,
+            .left, .right, .up, .down, .lineStart, .lineEnd, .wordLeft, .wordRight, .subwordLeft, .subwordRight, .pageUp, .pageDown => false,
             .selectLeft, .selectRight, .selectUp, .selectDown, .selectLineStart, .selectLineEnd, .selectWordLeft, .selectWordRight, .selectSubwordLeft, .selectSubwordRight, .selectFileStart, .selectFileEnd => false,
             .newline, .insertTab, .backspace, .deleteForward, .deleteWordBack, .deleteWordForward, .deleteSubwordBack, .deleteSubwordForward => false,
             else => true,
@@ -223,6 +230,10 @@ pub const Action = enum {
             .cut => "Cut to Clipboard",
             .jump => "Jump to Word",
             .selectTheme => "Select Color Theme",
+            .fileStart => "Go to Start of File",
+            .fileEnd => "Go to End of File",
+            .gotoDefinition => "Go to Definition",
+            .showHover => "Show Hover Documentation",
             else => null,
         };
     }

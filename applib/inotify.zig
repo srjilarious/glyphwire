@@ -1,19 +1,20 @@
 // Copyright (c) 2026 Jeff DeWall
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
-//! The inotify half of `file_watch = "inotify"` (see `zoe/diskwatch.zig`).
+//! "Something changed in these directories": an inotify instance whose
+//! thread wakes a program's run loop (zoe's `file_watch = "inotify"`,
+//! see `zoe/diskwatch.zig`; gwmd's reload of the open file).
 //!
 //! It only says *that* something changed, never what. A thread blocks on
 //! the inotify fd, and any event at all sets `changed` and wakes the run
-//! loop (`InputListener.wake`), which then runs the same stat-based disk
-//! check the poller does. So there is no event decoding to get wrong:
-//! the kernel's job is to end the wait early, and the stats decide.
+//! loop (`InputListener.wake`), which then stats whatever it cares about.
+//! So there is no event decoding to get wrong: the kernel's job is to end
+//! the wait early, and the stats decide.
 //!
-//! Directories are watched, not files: a file replaced by a rename is a
-//! new inode a file watch would lose, and a directory watch also sees a
-//! deletion, a creation, and the entries the tree pane lists. The set is
-//! the parent of every open buffer plus the tree's roots and expanded
-//! folders, re-synced each turn of the run loop by `begin` / `want` /
+//! Directories are watched, not files: a file replaced by a rename (how
+//! most editors save) is a new inode a file watch would lose, and a
+//! directory watch also sees a deletion and a creation. The caller
+//! re-syncs the set each turn of its loop with `begin` / `want` /
 //! `sweep` -- a mark and sweep over a map, so a turn that changes nothing
 //! allocates nothing. A directory that doesn't exist can't be watched;
 //! a file that later appears in it is noticed when something else wakes
@@ -30,8 +31,8 @@ const linux = std.os.linux;
 
 /// What a watched directory reports: content written, metadata touched,
 /// entries created, deleted or renamed, and the directory itself going.
-/// Opens and reads are left out, which matters: zoe stats and reads these
-/// directories itself, and must not wake itself doing so.
+/// Opens and reads are left out, which matters: the caller stats and reads
+/// these directories itself, and must not wake itself doing so.
 const mask: u32 = linux.IN.MODIFY | linux.IN.ATTRIB | linux.IN.CLOSE_WRITE |
     linux.IN.MOVED_FROM | linux.IN.MOVED_TO | linux.IN.CREATE | linux.IN.DELETE |
     linux.IN.DELETE_SELF | linux.IN.MOVE_SELF | linux.IN.ONLYDIR;

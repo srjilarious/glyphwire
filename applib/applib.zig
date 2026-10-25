@@ -71,6 +71,8 @@
 //!                salacommander)
 //!   `gridlayout` column-major grid packing (gw-ls, salacommander)
 //!   `icons`      file name -> icon name (gw-ls, salacommander, zoe)
+//!   `inotify`    waking a run loop when watched directories change
+//!                (zoe's `file_watch`, gwmd's reload)
 //!   `interrupt`  keeping Ctrl+C from killing an interactive program
 //!                (zoe, gw-hist, salacommander, gmux)
 //!   `syntax`     tree-sitter highlighting: grammar registry, theme,
@@ -86,6 +88,7 @@
 
 pub const lineedit = @import("lineedit.zig");
 pub const interrupt = @import("interrupt.zig");
+pub const inotify = @import("inotify.zig");
 pub const keybind = @import("keybind");
 pub const shellpanel = @import("shellpanel.zig");
 pub const wordsplit = @import("wordsplit.zig");

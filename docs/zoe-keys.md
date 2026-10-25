@@ -39,7 +39,7 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 |---|---|---|
 | `save` | Ctrl+S | `:w`, leaving the mode and selection alone |
 | `findFile` | Ctrl+P | Fuzzy file finder |
-| `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key, and every `:` command, by name, with its `:` form and its chord in the current mode (`Close Tab  :bd  Ctrl+F4`). Typing `bd` or `:bd` finds it too. A `:` command that takes an argument (`:addfolder`, `:wsopen`, `:theme`) puts the `:` line up for it; the rest run. Recently run ones list first |
+| `commandPalette` | Ctrl+Shift+P | Command palette: every action below that isn't a motion or a typing key (Go to Start / End of File excepted), and every `:` command (each `:set` option a row of its own), by name, with its `:` form and its chord in the current mode (`Close Tab  :bd  Ctrl+F4`). Typing `bd` or `:bd` finds it too. A `:` command that takes an argument (`:addfolder`, `:wsopen`, `:theme`) puts the `:` line up for it; the rest run. Recently run ones list first |
 | `listExtensions` | (unbound; `:extensions`) | Every extension zoe could load, built in or in `~/.config/glyphwire/zoe/extensions/`, and whether it loaded. Enter on one with a user file opens it |
 | `selectTheme` | (unbound; `:themes`) | Every theme `:theme` can switch to (built-ins, `theme.lua`'s, `zoe.conf.lua`'s), filtered by typing like the palette; `light` or `dark` finds those. The highlighted one is applied as the cursor moves, Enter keeps it for this run (`:wssave` records it), Escape or a click outside puts back the one from before |
 | `toggleTree` | Ctrl+B, Ctrl+N | Show / hide the file tree. Ctrl+B is VS Code's chord; under gmux it is the prefix, so use Ctrl+N or gmux's Ctrl+B Ctrl+B |
@@ -48,7 +48,7 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
 | `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |
 | `closeTab` | Ctrl+F4, Ctrl+W x | Close the shown tab (`:bd`); refused on a modified buffer |
-| `closeTabsLeft` / `closeTabsRight` / `closeOtherTabs` | (unbound) | Close the tabs left of the shown one, right of it, or all but it (`:tabcloseleft`, `:tabcloseright`, `:tabonly`); modified tabs stay open and are counted on the statusline |
+| `closeTabsLeft` / `closeTabsRight` / `closeOtherTabs` | (unbound) | Close the tabs left of the shown one, right of it, or all but it (`:tabcloseleft`, `:tabcloseright`, `:tabonly`); modified tabs stay open and are counted on the statusline, and each `:` form with `!` closes those too |
 | `newBuffer` | Ctrl+Shift+N | A new `[No Name]` scratch tab beside the shown one (`:enew`) |
 | `windowPrefix` | Ctrl+W | Then `v` / `s` split (a second view of the file), `q` / `c` close the group, `x` close the tab, `w` (or Ctrl+W) next group, `z` zoom the group, `h` `j` `k` `l` / arrows focus, Shift+`H` `J` `K` `L` / Shift+arrows move the tab |
 | `focusLeft` `focusRight` `focusUp` `focusDown` | Ctrl+Left / Right / Up / Down, Ctrl+L / K / J | Focus the group (or tree) that way |
@@ -58,6 +58,7 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 | `jump` | Shift+Enter | Two-letter labels over every word start on the focused pane's visible rows, the nearest to the cursor first (home row letters). Typing a label's first letter hides the labels it doesn't start and leaves the second letter of the rest; the second moves the cursor there. Backspace takes the first letter back; Escape, any other key, a click or a scroll cancels. Extends a selection, and records a jumplist entry |
 | `cut` | Ctrl+Shift+X | Selection (or line) to the clipboard, removed |
 | `paste` | (unbound; the host's Ctrl+Shift+V) | Clipboard after the cursor, or over a selection |
+| `gotoDefinition` / `showHover` | (unbound; `gd` / `K` in normal mode) | The language server's definition of, or documentation for, what is under the cursor |
 | `complete` | Ctrl+Space (insert) | Ask the language servers for completions |
 
 Host chords also apply: Ctrl+Shift+C copy and Ctrl+Shift+V paste, Ctrl+- /
@@ -72,7 +73,7 @@ Ctrl+= font size, Super+F10 theme switcher, Super+F12 job switcher.
 | `pageUp` / `pageDown` | PageUp / PageDown (also Ctrl+U / Ctrl+D in normal and visual) |
 | `subwordLeft` / `subwordRight` | Ctrl+Left / Ctrl+Right (insert) |
 | `wordLeft` / `wordRight` | Alt+Left / Alt+Right |
-| `fileStart` / `fileEnd` | Ctrl+Home / Ctrl+End (insert) |
+| `fileStart` / `fileEnd` | Ctrl+Home / Ctrl+End (insert); in the palette as Go to Start / End of File |
 | `selectLeft` `selectRight` `selectUp` `selectDown` | Shift+arrows |
 | `selectLineStart` / `selectLineEnd` | Shift+Home / Shift+End |
 | `selectSubwordLeft` / `selectSubwordRight` | Ctrl+Shift+Left / Right |

@@ -30,14 +30,20 @@
 //! code block's language tag are written unselectable, so none of the
 //! layout's furniture comes along. Double-clicking the filename in the
 //! statusline copies the page's absolute path.
+//!
+//! The open file is watched: written from elsewhere (an editor in the
+//! next pane), the page re-reads and redraws where it was scrolled to,
+//! the way `r` does by hand (`filewatch.zig`).
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 const homepath = @import("applib").homepath;
+const inotify = @import("applib").inotify;
 const actions = @import("actions.zig");
 const zmd = @import("zmd");
 const layout_mod = @import("layout.zig");
 const nav = @import("nav.zig");
+const filewatch = @import("filewatch.zig");
 
 const Layout = layout_mod.Layout;
 const Tone = layout_mod.Tone;
@@ -176,6 +182,15 @@ pub const Ui = struct {
     /// Every key, by action: `actions.defaults`.
     keymap: actions.Keymap = .{},
 
+    /// The page's directory, watched so an outside write reloads it.
+    /// Null where inotify can't start; the file is polled instead.
+    watcher: ?*inotify.Watcher = null,
+    /// The page's file as last read, or null once it was reported gone
+    /// (`filewatch.decide`).
+    disk: ?filewatch.Stamp = null,
+    /// When the next look at the file is due, if one is armed.
+    disk_due: ?std.Io.Clock.Timestamp = null,
+
     pub fn init(
         alloc: std.mem.Allocator,
         io: std.Io,
@@ -223,6 +238,8 @@ pub const Ui = struct {
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .max_width = max_width,
+            // Without it the page still follows the file, a second late.
+            .watcher = inotify.Watcher.start(alloc, listener) catch null,
         };
         return self;
     }
@@ -238,6 +255,7 @@ pub const Ui = struct {
         self.forward.deinit(alloc);
         if (self.message) |m| alloc.free(m);
         self.keymap.deinit(alloc);
+        if (self.watcher) |w| w.stop();
         self.client.destroyContext(self.context) catch {};
         alloc.destroy(self);
     }
@@ -247,12 +265,18 @@ pub const Ui = struct {
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
             if (self.status_dirty) try self.renderStatus();
-            const first = try self.listener.next(.none) orelse continue;
-            try self.handleEvent(first);
-            while (!self.quit) {
-                const ev = self.listener.pollNext() orelse break;
-                try self.handleEvent(ev);
+            // The watcher's thread ends this wait early (`wake`, which
+            // `next` returns as no event); the poll's beat ends it on time.
+            self.armDiskCheck();
+            const timeout: std.Io.Timeout = if (self.disk_due) |due| .{ .deadline = due } else .none;
+            if (try self.listener.next(timeout)) |first| {
+                try self.handleEvent(first);
+                while (!self.quit) {
+                    const ev = self.listener.pollNext() orelse break;
+                    try self.handleEvent(ev);
+                }
             }
+            if (self.diskCheckDue()) try self.checkDisk();
         }
     }
 
@@ -299,6 +323,7 @@ pub const Ui = struct {
         const page = (try self.readPage(path)) orelse return;
         self.closePage();
         self.page = page;
+        self.watchPage();
         try self.loadImages();
         try self.relayout();
         self.scrollTo(self.anchorRow(fragment) orelse 0);
@@ -928,6 +953,69 @@ pub const Ui = struct {
         if (!same) try self.open(v.path, "");
         self.setFocus(null);
         self.scrollTo(v.scroll);
+    }
+
+    // ── Following the file on disk ──────────────────────────────────────
+
+    /// Points the watch at the page's directory and remembers the version
+    /// just read. Called on every `open`, so following a link moves the
+    /// watch with it.
+    fn watchPage(self: *Ui) void {
+        const p = &(self.page orelse return);
+        self.disk = self.diskStamp(p.path);
+        self.disk_due = null;
+        const w = self.watcher orelse return;
+        w.begin();
+        // A directory that can't be watched leaves the page unfollowed
+        // until something else (`r`, a link) reads it again.
+        w.want(p.dir()) catch {};
+        w.sweep() catch {};
+        // Whatever woke the watch before this read is already on screen.
+        _ = w.takeChanged();
+    }
+
+    fn diskStamp(self: *Ui, path: []const u8) ?filewatch.Stamp {
+        const st = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return null;
+        return .{ .size = st.size, .mtime_ns = st.mtime.nanoseconds };
+    }
+
+    /// Arms the look at the file: `settle_ms` after the watcher saw
+    /// something, or every `poll_ms` without a watcher. One already armed
+    /// is left alone.
+    fn armDiskCheck(self: *Ui) void {
+        if (self.disk_due != null or self.page == null) return;
+        const ms: i64 = if (self.watcher) |w| blk: {
+            if (!w.takeChanged()) return;
+            break :blk filewatch.settle_ms;
+        } else filewatch.poll_ms;
+        self.disk_due = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromMilliseconds(ms), .clock = .awake });
+    }
+
+    fn diskCheckDue(self: *Ui) bool {
+        const due = self.disk_due orelse return false;
+        return due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toNanoseconds() >= 0;
+    }
+
+    /// Stats the page's file and follows it: re-reads a changed one,
+    /// reports a deleted one once.
+    fn checkDisk(self: *Ui) !void {
+        self.disk_due = null;
+        const p = &(self.page orelse return);
+        const current = self.diskStamp(p.path);
+        switch (filewatch.decide(self.disk, current)) {
+            .none => {},
+            .gone => {
+                self.disk = null;
+                try self.setMessage("{s}: deleted on disk", .{p.displayName()});
+            },
+            .reload => {
+                // Taken first, so a read that fails (the file caught
+                // mid-write) isn't retried until it changes again.
+                self.disk = current;
+                self.clearMessage();
+                try self.reload();
+            },
+        }
     }
 
     /// Re-reads the file from disk, keeping the scroll position.

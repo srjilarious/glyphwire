@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # glyphwire
 
-![Version Badge](https://img.shields.io/badge/Version-0.34.0-brightgreen)
+![Version Badge](https://img.shields.io/badge/Version-0.35.0-brightgreen)
 ![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0-%23f7a41d?logo=zig)
 ![Protocol Badge](https://img.shields.io/badge/Protocol-0.14.0-blueviolet)
 [![License](https://img.shields.io/badge/License-MPL--2.0%20%7C%20GPL--3.0%20%7C%20CC--BY--4.0-blue)](#license)
@@ -99,10 +99,10 @@ Each is an ordinary client of the protocol, versioned on its own.
 | App | Version | What it is |
 |---|---|---|
 | **`gw-shell`** | 0.13.0 | The shell `glyphwire` spawns. Pipelines, Lua config, fish-style autosuggestions, fish and Lua completions, powerline prompt, Ctrl+R / Alt+C through `gw-hist`, `gwssh`. |
-| **`zoe`** | 0.25.0 | Modal editor: vim grammar with VS Code keys alongside. Split editor groups, workspaces, tree-sitter highlighting, LSP (diagnostics, hover, goto, completion), find and replace, folding, Lua extensions, unsaved-change backups. Keys in [`docs/zoe-keys.md`](docs/zoe-keys.md). |
+| **`zoe`** | 0.26.0 | Modal editor: vim grammar with VS Code keys alongside. Split editor groups, workspaces, tree-sitter highlighting, LSP (diagnostics, hover, goto, completion), find and replace, folding, Lua extensions, unsaved-change backups. Keys in [`docs/zoe-keys.md`](docs/zoe-keys.md). |
 | **`gmux`** | 0.12.0 | Multiplexer as a window manager: it never touches a program's I/O, it only asks the server for panes. A command palette (`Ctrl-B P`) and a drag-to-rearrange layout mode (`Ctrl-B m`) draw on a pane of its own raised over the window. |
 | **`salacommander`** | 0.12.0 | Two-pane file manager: icons, tabs, sudo operations, trash, permission editing, drag and drop within and out of the window. |
-| **`gwmd`** | 0.10.0 | Markdown reader: scaled headings, GFM tables as native tables, inline images, links, selection that copies paragraphs whole. |
+| **`gwmd`** | 0.11.0 | Markdown reader: scaled headings, GFM tables as native tables, inline images, links, selection that copies paragraphs whole. |
 | **`gw-read`** | 0.9.1 | Comic and manga reader: zoom and pan, Mokuro OCR overlays, dictionary lookup, AI bubble translation, Anki mining. |
 | **`gw-ls`** | 0.9.0 | `ls` as an icon grid, or a long listing in a table that stays sortable after it exits. |
 | **`gw-grep`** | 0.8.0 | ripgrep hits as a collapsible, highlighted outline in the scrollback. |
@@ -153,7 +153,7 @@ Each program also has its own run step (`zig build zoe`, `zig build gwmd`,
 
 Every program answers `--version` (or `-V`) with its own version, the
 glyphwire release and the `git describe` it was built from, e.g. `zoe
-0.25.0 (glyphwire 0.34.0, 1b122a9)`. Each program's number is a line in
+0.26.0 (glyphwire 0.35.0, 1b122a9)`. Each program's number is a line in
 `program_versions` at the top of `build.zig`, bumped when that program
 changes in a release, and the release's own number is `build.zig.zon`'s
 `version`. The numbers quoted in this README, the website and the spec's

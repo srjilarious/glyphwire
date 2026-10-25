@@ -4912,6 +4912,20 @@ pub fn keymapsJumpAndWordWrapChordsTest(_: std.Io, alloc: std.mem.Allocator) !vo
     try testz.expectFalse(actions.Action.subwordLeft.inPalette());
 }
 
+/// The palette lists the start and end of the file and the LSP's `gd` /
+/// `K`, under names someone who doesn't know the keys would look for.
+pub fn paletteListsFileEndsAndLspLookupsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const A = actions.Action;
+    for ([_]A{ .fileStart, .fileEnd, .gotoDefinition, .showHover }) |a| {
+        try testz.expectTrue(a.inPalette());
+        try testz.expectTrue(a.paletteLabel() != null);
+    }
+    try testz.expectEqualStr(A.fileStart.paletteLabel().?, "Go to Start of File");
+    try testz.expectTrue(A.gotoDefinition.isUi());
+    try testz.expectTrue(A.showHover.isUi());
+    try testz.expectFalse(A.fileEnd.isUi());
+}
+
 // ─── `:` commands in the palette (excommands.zig) ───────────────────────
 
 const excommands = zoe.excommands;
@@ -4937,6 +4951,31 @@ pub fn excommandsMergedWithAnActionAreInThePaletteTest(_: std.Io, _: std.mem.All
     try testz.expectEqualStr(excommands.forAction(.closeTab).?, "bd");
     try testz.expectEqualStr(excommands.forAction(.save).?, "w");
     try testz.expectTrue(excommands.forAction(.toggleTree) == null);
+}
+
+pub fn excommandsSetRowsNameRealOptionsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    // Each `:set` row's prefill, finished with a value its option takes,
+    // runs without vim's unknown-option or bad-value errors.
+    var n: usize = 0;
+    for (excommands.commands) |c| {
+        const pre = c.prefill orelse continue;
+        if (!std.mem.startsWith(u8, pre, "set ") or !std.mem.endsWith(u8, pre, "=")) continue;
+        n += 1;
+        const value = if (std.mem.endsWith(u8, pre, "lineno="))
+            "relative"
+        else if (std.mem.endsWith(u8, pre, "tabwidth="))
+            "4"
+        else
+            "on";
+        const line = try std.fmt.allocPrint(alloc, "{s}{s}", .{ pre, value });
+        defer alloc.free(line);
+        var ed = try Editor.initFromText(alloc, "x", null);
+        defer ed.deinit();
+        _ = try ed.runCommandLine(line);
+        try testz.expectFalse(std.mem.startsWith(u8, ed.status.items, "E518:"));
+        try testz.expectFalse(std.mem.startsWith(u8, ed.status.items, "E474:"));
+    }
+    try testz.expectEqual(n, 7);
 }
 
 pub fn openCommandLineLeavesInsertModeWithTheTextUpTest(_: std.Io, alloc: std.mem.Allocator) !void {

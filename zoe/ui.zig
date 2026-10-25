@@ -54,7 +54,7 @@ const ls_icons = @import("applib").icons;
 const editor = @import("editor.zig");
 const motion = @import("motion.zig");
 const diskwatch = @import("diskwatch.zig");
-const inotify_mod = @import("inotify.zig");
+const inotify_mod = @import("applib").inotify;
 const display = @import("display.zig");
 const softwrap = @import("wrap.zig");
 const search = @import("search.zig");
@@ -2602,6 +2602,12 @@ pub const Ui = struct {
                 if (!in_buffer) return false;
                 try self.pasteFromClipboard(true);
             },
+            // `gd` and `K` by name: the same requests, for the buffer the
+            // cursor is in.
+            .gotoDefinition, .showHover => {
+                if (!in_buffer) return false;
+                self.requestLsp(if (action == .gotoDefinition) .definition else .hover);
+            },
             // Completions here and now, whatever has (or hasn't) been
             // typed. The space the chord also types is swallowed.
             .complete => {
@@ -5111,7 +5117,7 @@ pub const Ui = struct {
     /// folders. Run every loop turn, which costs a map lookup per
     /// directory -- cheaper than hooking every place a buffer opens,
     /// closes or is renamed. A watch that can't be added is skipped (see
-    /// `zoe/inotify.zig`).
+    /// `applib/inotify.zig`).
     fn syncWatches(self: *Ui, w: *inotify_mod.Watcher) void {
         w.begin();
         for (self.group_list.items) |g| {
