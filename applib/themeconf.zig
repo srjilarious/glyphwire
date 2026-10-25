@@ -299,22 +299,52 @@ pub fn loadShared(
     return loadFile(arena, gpa, io, environ, shared_conf_name);
 }
 
-/// The theme a program's own config (`conf_name`, e.g.
-/// `salacommander.conf.lua`) names, resolved against its `themes` and
-/// `theme.lua`'s; null when it names none, and the program should follow
-/// the window's. Runs the file for its theme keys alone, so a program
-/// whose config parser has no arena to keep theme strings in needn't
-/// change it. Strings borrow from `arena`.
+/// A program config's `theme` / `themes`, read by the program's own
+/// config loader from the Lua state it already has open, with an arena
+/// of its own to keep the strings in. For a config struct that frees its
+/// fields one by one and has nowhere else to put a theme's: the arena is
+/// on the heap, so the struct can be copied by value and still free it
+/// once.
+pub const Owned = struct {
+    parsed: Parsed,
+    arena: *std.heap.ArenaAllocator,
+
+    /// `read`, into a new arena. Null when the config names no `theme`
+    /// (its `themes` alone change nothing for the program), or on OOM.
+    pub fn read(lua: *Lua, gpa: std.mem.Allocator, source: []const u8) ?Owned {
+        const arena = gpa.create(std.heap.ArenaAllocator) catch return null;
+        arena.* = .init(gpa);
+        const parsed = themeconf_read(lua, arena.allocator(), source);
+        if (parsed.name == null) {
+            arena.deinit();
+            gpa.destroy(arena);
+            return null;
+        }
+        return .{ .parsed = parsed, .arena = arena };
+    }
+
+    pub fn deinit(self: Owned, gpa: std.mem.Allocator) void {
+        self.arena.deinit();
+        gpa.destroy(self.arena);
+    }
+};
+
+const themeconf_read = read;
+
+/// The theme a program's own config named (`own`, from `Owned.read`),
+/// resolved against its `themes` and `theme.lua`'s; null when it named
+/// none, and the program should follow the window's. Only `theme.lua` is
+/// run here: the program's file was read once, by its own loader.
+/// Strings borrow from `arena`.
 pub fn programTheme(
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     io: std.Io,
     environ: *const std.process.Environ.Map,
-    conf_name: []const u8,
+    own: ?Owned,
 ) ?theme.Theme {
-    const own = loadFile(arena, gpa, io, environ, conf_name);
-    if (own.name == null) return null;
-    return own.resolve(arena, loadShared(arena, gpa, io, environ));
+    const o = own orelse return null;
+    return o.parsed.resolve(arena, loadShared(arena, gpa, io, environ));
 }
 
 /// `loadFile`'s parse, over config text already in hand.

@@ -21,6 +21,7 @@ const ai = @import("ai.zig");
 const anki = @import("anki.zig");
 const mokuro = @import("mokuro.zig");
 const actions = @import("actions.zig");
+const themeconf = @import("themeconf");
 
 pub const conf_name = "read.conf.lua";
 const conf: luaconf.Conf = .{ .prog = "gw-read", .name = conf_name };
@@ -226,6 +227,11 @@ pub const ReadConfig = struct {
     /// `actions.Keymaps.apply`. Owned; freed by `deinit`.
     keys: []actions.Override = &.{},
 
+    /// `theme` / `themes`, read from the same Lua run as everything else
+    /// (`applib/themeconf.zig`). Null when the config names no theme and
+    /// gw-read follows the window's. Owned; freed by `deinit`.
+    theme: ?themeconf.Owned = null,
+
     /// `anki_fields` when it came from the Lua file; freed by `deinit`
     /// (the field names themselves are in `owned`).
     owned_fields: ?[]anki.FieldMap = null,
@@ -240,6 +246,7 @@ pub const ReadConfig = struct {
         self.owned.deinit(alloc);
         if (self.owned_fields) |f| alloc.free(f);
         alloc.free(self.keys);
+        if (self.theme) |t| t.deinit(alloc);
         self.* = .{};
     }
 
@@ -393,6 +400,7 @@ const Apply = struct {
         if (conf.uint(lua, usize, "anki_image_quality", .{ .min = 1, .max = 100 })) |v| cfg.anki_image_quality = v;
         loadAnkiFields(self.alloc, lua, cfg);
         cfg.keys = conf.scopedKeys(lua, self.alloc, actions.Scope, actions.Action);
+        cfg.theme = themeconf.Owned.read(lua, self.alloc, conf_name);
 
         // A `cache_pages` smaller than what the prefetch wants resident means
         // every prefetched page evicts the one being read. Nudge rather than

@@ -309,6 +309,18 @@ pub fn stateTrimsToTheNewestEntriesOnSaveTest(_: std.Io, alloc: std.mem.Allocato
 
 // ─── config (read.conf.lua) ─────────────────────────────────────────────
 
+/// `theme` is read in the same Lua run as everything else (review C5).
+pub fn configReadsThemeInSameRunTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var result = rconfig.load(alloc, "config = { theme = { base = \"nord\" } }");
+    defer result.deinit(alloc);
+    const t = result.config.theme orelse return error.TestExpectedTheme;
+    try testz.expectEqualStr(t.parsed.name.?, "config");
+
+    var none = rconfig.load(alloc, "config = { mode = \"fit\" }");
+    defer none.deinit(alloc);
+    try testz.expectTrue(none.config.theme == null);
+}
+
 pub fn configDefaultsAreMangaShapedTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var result = rconfig.load(alloc, "");
     defer result.deinit(alloc);

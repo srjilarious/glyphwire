@@ -111,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
     // the window's. Borrows from `theme_arena`.
     var theme_arena: std.heap.ArenaAllocator = .init(alloc);
     defer theme_arena.deinit();
-    const own_theme = themeconf.programTheme(theme_arena.allocator(), alloc, io, init.environ_map, sala.config.conf_name);
+    const own_theme = themeconf.programTheme(theme_arena.allocator(), alloc, io, init.environ_map, cfg.theme);
 
     var conn = cli.connectOrFail(io, alloc, init.environ_map, "salacommander", &.{
         "key",

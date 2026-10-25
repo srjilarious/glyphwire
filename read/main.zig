@@ -174,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
     // window's. Borrows from `theme_arena`.
     var theme_arena: std.heap.ArenaAllocator = .init(alloc);
     defer theme_arena.deinit();
-    const own_theme = themeconf.programTheme(theme_arena.allocator(), alloc, io, init.environ_map, read.config.conf_name);
+    const own_theme = themeconf.programTheme(theme_arena.allocator(), alloc, io, init.environ_map, conf.theme);
 
     const ui = try read.Ui.init(alloc, &conn.client, conn.listener, book, conf, .{
         .page = start_page,

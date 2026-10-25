@@ -1315,6 +1315,26 @@ pub fn configReadsSettingsAndKeysTest(_: std.Io, alloc: std.mem.Allocator) !void
     try testz.expectTrue(km.lookup("F11", .{}) == null);
 }
 
+/// `theme` comes out of the one Lua run that reads the rest of the
+/// config (review C5): no second VM runs the file for it. A config with
+/// `themes` but no `theme` follows the window, so keeps nothing.
+pub fn configReadsThemeInSameRunTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var r = config.load(alloc,
+        \\config = {
+        \\  theme = "mine",
+        \\  themes = { mine = { base = "nord", keyword = "#010203" } },
+        \\}
+    );
+    defer r.deinit(alloc);
+    const t = r.config.theme orelse return error.TestExpectedTheme;
+    try testz.expectEqualStr(t.parsed.name.?, "mine");
+    try testz.expectEqual(t.parsed.customs.len, 1);
+
+    var none = config.load(alloc, "config = { themes = { mine = { base = \"nord\" } } }");
+    defer none.deinit(alloc);
+    try testz.expectTrue(none.config.theme == null);
+}
+
 /// `page_lines` is how far PageUp/PageDown move, defaulting to 6. A
 /// number >= 1 replaces it; 0 is nothing, not "a screenful", so it is
 /// clamped up to 1 -- the rule zoe's `page_lines` follows too. A value

@@ -22,6 +22,7 @@ const keybind = @import("applib").keybind;
 const openaction = @import("openaction.zig");
 const glyphwire = @import("glyphwire");
 const dividerconf = @import("dividerconf");
+const themeconf = @import("themeconf");
 const shellpanel = @import("applib").shellpanel;
 
 pub const conf_name = "salacommander.conf.lua";
@@ -69,6 +70,10 @@ pub const Config = struct {
     /// between the panes (`applib/dividerconf.zig`). Empty, the default,
     /// inherits the host's `pane_divider_style`.
     divider_style: glyphwire.divider_style.Override = .{},
+    /// `theme` / `themes`, read from the same Lua run as everything else
+    /// (`applib/themeconf.zig`). Null when the config names no theme and
+    /// salacommander follows the window's. Owned; freed by `deinit`.
+    theme: ?themeconf.Owned = null,
     /// `shell_position`: where the Ctrl+` shell panel sits -- `"bottom"`
     /// (the default), `"top"`, `"left"`, `"right"` or `"float"`.
     shell_position: shellpanel.Position = .bottom,
@@ -92,6 +97,8 @@ pub const Config = struct {
         self.open_actions = &.{};
         if (self.editor) |e| alloc.free(e);
         self.editor = null;
+        if (self.theme) |t| t.deinit(alloc);
+        self.theme = null;
     }
 
     /// The template F4 runs. Borrowed from the config.
@@ -155,6 +162,7 @@ const Apply = struct {
         cfg.menu_keys = conf.keysNamed(lua, self.alloc, "menu_keys", actions.Action);
         cfg.open_actions = readOpenActions(self.alloc, lua) catch &.{};
         cfg.divider_style = dividerconf.read(lua, conf_name);
+        cfg.theme = themeconf.Owned.read(lua, self.alloc, conf_name);
         if (conf.enumValue(lua, shellpanel.Position, "shell_position")) |v| cfg.shell_position = v;
         if (conf.uint(lua, u8, "shell_float_percent", float_percent)) |v| cfg.shell_float_percent = v;
         if (conf.string(lua, "editor")) |v| {
