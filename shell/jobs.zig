@@ -84,7 +84,7 @@ pub fn runCommandEnd(self: *Prompt, argv: []const []const u8) !RunEnd {
     for (argv_bufs.items, 0..) |b, i| argv_z[i] = b.ptr;
 
     // Size the pty from the grid so a curses-ish child lays out right.
-    const size = self.drawGetSize() catch glyphwire.LayerSize{ .cols = self.grid_cols, .rows = 24 };
+    const size = self.client.getSize() catch glyphwire.LayerSize{ .cols = self.grid_cols, .rows = 24 };
 
     // Monotonic start time of the whole run, for `{dur}` on the next
     // prompt (this reduced std has no `std.time.Timer`).
@@ -132,7 +132,7 @@ pub fn runCommandEnd(self: *Prompt, argv: []const []const u8) !RunEnd {
             error.CommandNotFound => std.fmt.bufPrint(&buf, "{s}: command not found", .{argv[0]}) catch "command not found",
             else => std.fmt.bufPrint(&buf, "{s}: {t}", .{ argv[0], err }) catch "failed to start command",
         };
-        try self.drawText(msg, err_color, null);
+        try self.client.writeText(msg, .{ .fg = err_color });
         // Couldn't start it: record a status so `{exit}` reflects the
         // failure, but no duration (it never ran).
         self.last_status = if (err == error.CommandNotFound) 127 else 1;
@@ -469,10 +469,10 @@ pub fn isKillJobKey(self: *const Prompt, kev: glyphwire.KeyEvent) bool {
 /// it took. A job the key never touched prints nothing.
 pub fn noteJobStop(self: *Prompt, stop: jobstop.JobStop) void {
     const sig = stop.sent() orelse return;
-    const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = 0, .col = 0 };
-    if (cur.col != 0) self.drawText("\n", null, null) catch {};
-    self.drawText(jobstop.notice(sig), job_color, null) catch {};
-    self.drawText("\n", null, null) catch {};
+    const cur = self.client.getCursor(.{}) catch glyphwire.Cursor{ .row = 0, .col = 0 };
+    if (cur.col != 0) self.client.writeText("\n", .{}) catch {};
+    self.client.writeText(jobstop.notice(sig), .{ .fg = job_color }) catch {};
+    self.client.writeText("\n", .{}) catch {};
 }
 
 /// Reads this pane's stack after a visibility change while `job` holds
@@ -538,7 +538,7 @@ pub fn finishForegroundJob(self: *Prompt, job: *Job) void {
     // set a bottom-margin scroll region on the *primary* screen (no
     // alt screen) and would otherwise leave `regionActive()` stuck,
     // freezing scrollback and making the host wheel page the shell.
-    self.drawText("\x1b[?1049l\x1b[!p", null, null) catch {};
+    self.client.writeText("\x1b[?1049l\x1b[!p", .{}) catch {};
 
     self.noteJobStop(job.stop);
     self.reportCrash(job);
@@ -586,7 +586,7 @@ pub fn parkJob(self: *Prompt, job: *Job) !void {
     self.drawSetMouseReport(false) catch {};
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "[{d}] {s}  (background)", .{ job.id, self.jobTitle(job) }) catch "[?] (background)";
-    try self.drawText(msg, job_color, null);
+    try self.client.writeText(msg, .{ .fg = job_color });
 }
 
 /// What `jobs` and the background notice call `job`: its context's
@@ -626,15 +626,15 @@ pub fn reportFinishedJobs(self: *Prompt) void {
         // output.
         if (!fresh_row) {
             fresh_row = true;
-            const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = 0, .col = 0 };
-            if (cur.col != 0) self.drawText("\n", null, null) catch {};
+            const cur = self.client.getCursor(.{}) catch glyphwire.Cursor{ .row = 0, .col = 0 };
+            if (cur.col != 0) self.client.writeText("\n", .{}) catch {};
         }
         var buf: [256]u8 = undefined;
         const msg = if (job.pty.exit_code == 0)
             std.fmt.bufPrint(&buf, "[{d}] done  {s}\n", .{ job.id, job.name }) catch "[?] done\n"
         else
             std.fmt.bufPrint(&buf, "[{d}] exit {d}  {s}\n", .{ job.id, job.pty.exit_code, job.name }) catch "[?] done\n";
-        self.drawText(msg, job_color, null) catch {};
+        self.client.writeText(msg, .{ .fg = job_color }) catch {};
         self.reportCrash(job);
         if (job.rest) |rest| {
             job.rest = null;
@@ -696,24 +696,24 @@ pub fn reportCrash(self: *Prompt, job: *Job) void {
     defer if (log_path) |p| alloc.free(p);
 
     // Onto a row of its own, not the tail of whatever was last drawn.
-    const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = 0, .col = 0 };
-    if (cur.col != 0) self.drawText("\n", null, null) catch {};
+    const cur = self.client.getCursor(.{}) catch glyphwire.Cursor{ .row = 0, .col = 0 };
+    if (cur.col != 0) self.client.writeText("\n", .{}) catch {};
     var banner_buf: [192]u8 = undefined;
     const banner = std.fmt.bufPrint(&banner_buf, "{s}; its last output:\n", .{what}) catch "crashed; its last output:\n";
-    self.drawText(banner, err_color, null) catch {};
+    self.client.writeText(banner, .{ .fg = err_color }) catch {};
 
     const shown = crashlog.lastLines(output, crash_report_lines);
     if (shown.len > 0) {
-        self.drawText(shown, null, null) catch {};
-        if (shown[shown.len - 1] != '\n') self.drawText("\n", null, null) catch {};
+        self.client.writeText(shown, .{}) catch {};
+        if (shown[shown.len - 1] != '\n') self.client.writeText("\n", .{}) catch {};
     } else {
-        self.drawText("(nothing)\n", null, null) catch {};
+        self.client.writeText("(nothing)\n", .{}) catch {};
     }
 
     if (log_path) |p| {
         var line_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
         const line = std.fmt.bufPrint(&line_buf, "full log: {s}\n", .{p}) catch "";
-        self.drawText(line, err_color, null) catch {};
+        self.client.writeText(line, .{ .fg = err_color }) catch {};
     }
 }
 
@@ -825,13 +825,13 @@ pub fn lingerForScreenJobs(self: *Prompt, listener: *glyphwire.InputListener) vo
     if (self.jobs.items.len == 0) return;
 
     self.client.setContextTitle("gw-shell (exited)") catch {};
-    const cur = self.drawGetCursor() catch glyphwire.Cursor{ .row = 0, .col = 0 };
-    if (cur.col != 0) self.drawText("\n", null, null) catch {};
-    self.drawText("exited; keeping its programs running:\n", job_color, null) catch {};
+    const cur = self.client.getCursor(.{}) catch glyphwire.Cursor{ .row = 0, .col = 0 };
+    if (cur.col != 0) self.client.writeText("\n", .{}) catch {};
+    self.client.writeText("exited; keeping its programs running:\n", .{ .fg = job_color }) catch {};
     for (self.jobs.items) |job| {
         var buf: [256]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "  [{d}] {s}\n", .{ job.id, self.jobTitle(job) }) catch "  [?]\n";
-        self.drawText(line, job_color, null) catch {};
+        self.client.writeText(line, .{ .fg = job_color }) catch {};
     }
 
     // Off this shell's dead prompt, if that is what is showing.
@@ -1045,7 +1045,7 @@ pub fn ptyReaderThread(ctx: *PtyReaderCtx) void {
     // A character the child's last write cut short.
     if (aware != true) {
         carry.finish(alloc, &text) catch {};
-        if (text.items.len > 0) self.drawText(text.items, null, null) catch {};
+        if (text.items.len > 0) self.client.writeText(text.items, .{}) catch {};
     }
 }
 
@@ -1068,6 +1068,6 @@ pub fn emitChunk(ctx: *PtyReaderCtx, real_out: *std.Io.File.Writer, mirror: Mirr
         real_out.interface.flush() catch {};
     } else {
         mirror.carry.feed(self.client.alloc, bytes, mirror.text) catch return;
-        if (mirror.text.items.len > 0) self.drawText(mirror.text.items, null, null) catch {};
+        if (mirror.text.items.len > 0) self.client.writeText(mirror.text.items, .{}) catch {};
     }
 }

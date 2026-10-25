@@ -102,13 +102,13 @@ pub fn writeDefaultPrefix(self: *Prompt, sink: ChainSink) !glyphwire.Cursor {
     var prefix_buf: [std.fs.max_path_bytes + 4]u8 = undefined;
     const prefix = std.fmt.bufPrint(&prefix_buf, "{s} > ", .{cwd}) catch "> ";
 
-    const start = try self.drawGetCursor();
+    const start = try self.client.getCursor(.{});
 
     var local = self.client.batch();
     defer local.deinit();
     const b: *glyphwire.Client.Batch = sink orelse &local;
-    try self.batchSetCursor(b, start.row, start.col);
-    try self.batchText(b, prefix, null, null);
+    try b.setCursor(start.row, start.col, .{});
+    try b.writeText(prefix, .{});
     if (sink == null) {
         var res = try local.send();
         res.deinit();
@@ -310,7 +310,7 @@ pub fn writeTemplatedPrefix(self: *Prompt, p: *const config.PromptConfig, sink: 
     var bufs: PromptDataBufs = .{};
     var data = self.buildPromptData(&bufs, p);
 
-    const start = try self.drawGetCursor();
+    const start = try self.client.getCursor(.{});
 
     var local = self.client.batch();
     defer local.deinit();
@@ -416,21 +416,19 @@ pub fn chainWidth(count: usize, seg_sum: usize, sep: []const u8, head: []const u
 pub const ChainSink = ?*glyphwire.Client.Batch;
 
 pub fn sinkSetCursor(self: *Prompt, sink: ChainSink, row: usize, col: usize) !void {
-    if (sink) |b| try self.batchSetCursor(b, row, col) else try self.drawSetCursor(row, col);
+    if (sink) |b| try b.setCursor(row, col, .{}) else try self.client.setCursor(row, col, .{});
 }
 
 pub fn sinkWriteText(self: *Prompt, sink: ChainSink, text: []const u8, fg: ?glyphwire.Color, bg: ?glyphwire.Color) !void {
-    if (sink) |b| try self.batchText(b, text, fg, bg) else try self.drawText(text, fg, bg);
+    if (sink) |b| try b.writeText(text, .{ .fg = fg, .bg = bg }) else try self.client.writeText(text, .{ .fg = fg, .bg = bg });
 }
 
 pub fn sinkWriteTextTransparent(self: *Prompt, sink: ChainSink, text: []const u8, fg: ?glyphwire.Color) !void {
-    if (sink) |b| try b.writeText(text, .{ .layer = self.layer, .fg = fg, .transparent_bg = true }) else try self.drawTextTransparent(text, fg);
+    if (sink) |b| try b.writeText(text, .{ .fg = fg, .transparent_bg = true }) else try self.client.writeText(text, .{ .fg = fg, .transparent_bg = true });
 }
 
-pub fn sinkDrawIconStyled(self: *Prompt, sink: ChainSink, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
-    var o = opts;
-    o.layer = self.layer;
-    if (sink) |b| try b.drawIcon(row, col, name, o) else try self.drawIconStyled(row, col, name, o);
+pub fn sinkDrawIcon(self: *Prompt, sink: ChainSink, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
+    if (sink) |b| try b.drawIcon(row, col, name, opts) else try self.client.drawIcon(row, col, name, opts);
 }
 
 /// Draws a rendered chain left to right starting at `(row, start_col)`:
@@ -530,7 +528,7 @@ pub fn drawRightChain(self: *Prompt) !void {
     // the input line: the idle-tick caller gates on `browse_pos == null`
     // and `renderInputLine` only runs for the live line.
     const caret = self.caretCell();
-    try self.batchSetCursor(&b, caret.row, caret.col);
+    try b.setCursor(caret.row, caret.col, .{});
     var res = try b.send();
     res.deinit();
     self.profiler.add(.batch_sends, 1);
@@ -562,13 +560,13 @@ pub fn writePowerlinePrefix(self: *Prompt, p: *const config.PromptConfig, sink: 
     // below works with an on-grid `top` and the recorded
     // `line_start_row` can't end up one past the last row (which made
     // every later `renderInputLine` / idle refresh scroll again).
-    const start = try self.drawGetCursor();
+    const start = try self.client.getCursor(.{});
     var top = start.row;
     if (self.grid_rows > 0 and top + self.prompt_lines > self.grid_rows) {
         const overshoot = top + self.prompt_lines - self.grid_rows;
-        try self.batchSetCursor(b, self.grid_rows - 1, 0);
+        try b.setCursor(self.grid_rows - 1, 0, .{});
         var k: usize = 0;
-        while (k < overshoot) : (k += 1) try self.batchText(b, "\n", null, null);
+        while (k < overshoot) : (k += 1) try b.writeText("\n", .{});
         top -= overshoot;
     }
     self.pl_top_row = top;
@@ -622,16 +620,16 @@ pub fn writePowerlinePrefix(self: *Prompt, p: *const config.PromptConfig, sink: 
     if (self.prompt_lines >= 2) {
         // `top + prompt_lines <= grid_rows` now, so this row is on-grid.
         const irow = top + self.prompt_lines - 1;
-        try self.batchSetCursor(b, irow, 0);
-        if (input_prefix.len > 0) try self.batchText(b, input_prefix, null, null);
+        try b.setCursor(irow, 0, .{});
+        if (input_prefix.len > 0) try b.writeText(input_prefix, .{});
         self.line_start_row = irow;
         self.line_start_col = prompt_template.displayWidth(input_prefix);
         self.input_max_col = self.grid_cols;
     } else {
         var col = left_end;
-        try self.batchSetCursor(b, top, col);
+        try b.setCursor(top, col, .{});
         if (input_prefix.len > 0) {
-            try self.batchText(b, input_prefix, null, null);
+            try b.writeText(input_prefix, .{});
             col += prompt_template.displayWidth(input_prefix);
         }
         self.line_start_row = top;
@@ -692,7 +690,7 @@ pub fn emitOps(self: *Prompt, sink: ChainSink, ops: []const prompt_template.Op, 
                 try self.sinkWriteText(sink, t, opts.fg, null);
             }
             if (sink == null) {
-                const cur = try self.drawGetCursor();
+                const cur = try self.client.getCursor(.{});
                 cur_row = cur.row;
                 cur_col = cur.col;
             } else {
@@ -708,7 +706,7 @@ pub fn emitOps(self: *Prompt, sink: ChainSink, ops: []const prompt_template.Op, 
             // step past the `icon_cols` cells it covers. Without them:
             // the old aspect-fit-in-one-cell behavior.
             if (self.icon_max_h > 0) {
-                try self.sinkDrawIconStyled(sink, cur_row, cur_col, name, .{
+                try self.sinkDrawIcon(sink, cur_row, cur_col, name, .{
                     .scale = .natural,
                     .h_align = .start,
                     .v_align = .center,
@@ -717,7 +715,7 @@ pub fn emitOps(self: *Prompt, sink: ChainSink, ops: []const prompt_template.Op, 
                 });
                 cur_col += self.icon_cols;
             } else {
-                try self.sinkDrawIconStyled(sink, cur_row, cur_col, name, .{ .foreground = opts.transparent });
+                try self.sinkDrawIcon(sink, cur_row, cur_col, name, .{ .foreground = opts.transparent });
                 cur_col += 1;
             }
             try self.sinkSetCursor(sink, cur_row, cur_col);
@@ -828,9 +826,9 @@ pub fn appendInputLine(self: *Prompt, b: *glyphwire.Client.Batch) !void {
     if (self.grid_rows > 0 and self.line_start_row + rows > self.grid_rows) {
         const overshoot = @min(self.line_start_row + rows - self.grid_rows, self.line_start_row);
         if (overshoot > 0) {
-            try self.batchSetCursor(b, self.grid_rows - 1, 0);
+            try b.setCursor(self.grid_rows - 1, 0, .{});
             var k: usize = 0;
-            while (k < overshoot) : (k += 1) try self.batchText(b, "\n", null, null);
+            while (k < overshoot) : (k += 1) try b.writeText("\n", .{});
             self.line_start_row -= overshoot;
             self.pl_top_row -|= overshoot;
         }
@@ -847,8 +845,8 @@ pub fn appendInputLine(self: *Prompt, b: *glyphwire.Client.Batch) !void {
         const left = if (idx == 0) self.line_start_col else continuation_prefix.len;
         const right = if (idx == 0 and self.input_max_col > left + 1) self.input_max_col else self.grid_cols;
         if (idx > 0) {
-            try self.batchSetCursor(b, screen_row, 0);
-            try self.batchText(b, continuation_prefix, autocomplete_hint_color, null);
+            try b.setCursor(screen_row, 0, .{});
+            try b.writeText(continuation_prefix, .{ .fg = autocomplete_hint_color });
         }
         try appendInputRow(self, b, buf, row_start, row_end, screen_row, left, right, idx == caret_line, idx == rows - 1);
         row_start = row_end + 1;
@@ -857,12 +855,12 @@ pub fn appendInputLine(self: *Prompt, b: *glyphwire.Client.Batch) !void {
     // Rows a longer buffer used and this one doesn't (a joined line,
     // a recalled shorter entry).
     if (self.input_rows_drawn > rows) {
-        try self.batchClear(b, self.line_start_row + rows, 0, self.input_rows_drawn - rows, null);
+        try b.clear(.{ .row = self.line_start_row + rows, .rows = self.input_rows_drawn - rows });
     }
     self.input_rows_drawn = rows;
 
     const caret = self.caretCell();
-    try self.batchSetCursor(b, caret.row, @min(caret.col, self.grid_cols -| 1));
+    try b.setCursor(caret.row, @min(caret.col, self.grid_cols -| 1), .{});
 }
 
 /// One input row of `appendInputLine`: `buf[row_start..row_end]` drawn
@@ -933,10 +931,10 @@ fn appendInputRow(
     const fill = @min(fill_w, spaces.len);
     @memset(spaces[0..fill], ' ');
 
-    try self.batchSetCursor(b, screen_row, left);
-    if (visible.len > 0) try self.batchText(b, visible, null, null);
-    if (hint_end > 0) try self.batchText(b, self.completion_hint.items[0..hint_end], autocomplete_hint_color, null);
-    if (fill > 0) try self.batchText(b, spaces[0..fill], null, null);
+    try b.setCursor(screen_row, left, .{});
+    if (visible.len > 0) try b.writeText(visible, .{});
+    if (hint_end > 0) try b.writeText(self.completion_hint.items[0..hint_end], .{ .fg = autocomplete_hint_color });
+    if (fill > 0) try b.writeText(spaces[0..fill], .{});
 }
 
 /// Puts the server cursor at the caret's screen cell (`caretCell`). Used
@@ -944,7 +942,7 @@ fn appendInputRow(
 /// redrawing) and the foreground loop's caret restore.
 pub fn placeInputCursor(self: *Prompt) !void {
     const caret = self.caretCell();
-    try self.drawSetCursor(caret.row, caret.col);
+    try self.client.setCursor(caret.row, caret.col, .{});
 }
 
 /// A fresh prompt: writes the prefix, resets the line, repaints the

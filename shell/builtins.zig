@@ -123,7 +123,7 @@ pub fn runBuiltin(self: *Prompt, argv: []const []const u8) !u8 {
         return self.doFg(argv[1..]);
     }
     if (std.mem.eql(u8, argv[0], "alias")) {
-        try self.drawText("alias: only supported as a standalone command", err_color, null);
+        try self.client.writeText("alias: only supported as a standalone command", .{ .fg = err_color });
         return 2;
     }
     if (self.script_engine) |eng| {
@@ -153,7 +153,7 @@ pub fn doJobs(self: *Prompt) !u8 {
     for (self.jobs.items) |job| {
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "[{d}] {s}\n", .{ job.id, self.jobTitle(job) }) catch continue;
-        try self.drawText(msg, null, null);
+        try self.client.writeText(msg, .{});
     }
     return 0;
 }
@@ -164,25 +164,25 @@ pub fn doJobs(self: *Prompt) !u8 {
 pub fn doFg(self: *Prompt, args: []const []const u8) !u8 {
     self.reportFinishedJobs();
     if (self.jobs.items.len == 0) {
-        try self.drawText("fg: no current job", err_color, null);
+        try self.client.writeText("fg: no current job", .{ .fg = err_color });
         return 1;
     }
     const index: usize = if (args.len == 0) self.jobs.items.len - 1 else blk: {
         const spec = std.mem.trimStart(u8, args[0], "%");
         const id = std.fmt.parseInt(u32, spec, 10) catch {
-            try self.drawText("fg: usage: fg [n]", err_color, null);
+            try self.client.writeText("fg: usage: fg [n]", .{ .fg = err_color });
             return 2;
         };
         for (self.jobs.items, 0..) |job, i| {
             if (job.id == id) break :blk i;
         }
         var buf: [64]u8 = undefined;
-        try self.drawText(std.fmt.bufPrint(&buf, "fg: {d}: no such job", .{id}) catch "fg: no such job", err_color, null);
+        try self.client.writeText(std.fmt.bufPrint(&buf, "fg: {d}: no such job", .{id}) catch "fg: no such job", .{ .fg = err_color });
         return 1;
     };
     const job = self.jobs.items[index];
     const ctx = job.context orelse {
-        try self.drawText("fg: that job has no screen to bring back", err_color, null);
+        try self.client.writeText("fg: that job has no screen to bring back", .{ .fg = err_color });
         return 1;
     };
     _ = self.jobs.orderedRemove(index);
@@ -222,7 +222,7 @@ pub fn doCd(self: *Prompt, args: []const []const u8) !void {
     const raw_target: []const u8 = if (args.len > 0) args[0] else "~";
 
     const target = (if (args.len > 0) raw_target else self.expandTilde(raw_target)) catch {
-        try self.drawText("cd: HOME not set", err_color, null);
+        try self.client.writeText("cd: HOME not set", .{ .fg = err_color });
         return;
     };
     defer if (target.ptr != raw_target.ptr) alloc.free(target);
@@ -348,19 +348,19 @@ pub fn recordVisit(self: *Prompt) void {
 /// hand over its own pane binding, not ours.
 pub fn doGwssh(self: *Prompt, args: []const []const u8) !u8 {
     const spec = remotecmd.parse(args) catch |err| {
-        try self.drawText(remotecmd.errorText(err), err_color, null);
+        try self.client.writeText(remotecmd.errorText(err), .{ .fg = err_color });
         return 2;
     };
 
     const listener = self.listener orelse {
-        try self.drawText("gwssh: no interactive session", err_color, null);
+        try self.client.writeText("gwssh: no interactive session", .{ .fg = err_color });
         return 1;
     };
 
     const session = self.client.startRemote(spec.dest, spec.ssh_args, self.remoteAgentCommand(spec)) catch |err| {
         var buf: [160]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "gwssh: {s}: {t}", .{ spec.dest, err }) catch "gwssh: could not start remote session";
-        try self.drawText(msg, err_color, null);
+        try self.client.writeText(msg, .{ .fg = err_color });
         return 1;
     };
 
@@ -416,7 +416,7 @@ pub fn reportRemoteFailure(self: *Prompt, spec: remotecmd.Spec, status: u8) !voi
     else
         std.fmt.bufPrint(&buf, "gwssh: {s}: could not connect (ssh exited {d})", .{ spec.dest, status }) catch
             "gwssh: could not connect";
-    try self.drawText(msg, err_color, null);
+    try self.client.writeText(msg, .{ .fg = err_color });
 }
 
 /// Parks until the remote session `session` ends, keeping this
@@ -498,13 +498,13 @@ pub fn doZj(self: *Prompt, args: []const []const u8) !void {
     const alloc = self.client.alloc;
 
     if (self.zdb == null) {
-        try self.drawText("zj: directory database unavailable", err_color, null);
+        try self.client.writeText("zj: directory database unavailable", .{ .fg = err_color });
         return;
     }
 
     if (args.len == 0) {
         const home = self.environ_map.get("HOME") orelse {
-            try self.drawText("zj: HOME not set", err_color, null);
+            try self.client.writeText("zj: HOME not set", .{ .fg = err_color });
             return;
         };
         self.chdir(home) catch |err| try self.reportZjError(home, err);
@@ -533,7 +533,7 @@ pub fn doZj(self: *Prompt, args: []const []const u8) !void {
         defer alloc.free(joined);
         var msg: [320]u8 = undefined;
         const line = std.fmt.bufPrint(&msg, "zj: no match for '{s}'", .{joined}) catch "zj: no match";
-        try self.drawText(line, err_color, null);
+        try self.client.writeText(line, .{ .fg = err_color });
         return;
     };
 
@@ -554,7 +554,7 @@ pub fn doZj(self: *Prompt, args: []const []const u8) !void {
 pub fn reportZjError(self: *Prompt, target: []const u8, err: anyerror) !void {
     var buf: [320]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "zj: {s}: {t}", .{ target, err }) catch "zj: jump failed";
-    try self.drawText(msg, err_color, null);
+    try self.client.writeText(msg, .{ .fg = err_color });
 }
 
 /// Whether `path` opens as a directory. Used by `zj`'s "single
@@ -580,7 +580,7 @@ pub fn expandTilde(self: *Prompt, target: []const u8) ![]const u8 {
 pub fn reportCdError(self: *Prompt, target: []const u8, err: anyerror) !void {
     var buf: [160]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "cd: {s}: {t}", .{ target, err }) catch "cd: failed";
-    try self.drawText(msg, err_color, null);
+    try self.client.writeText(msg, .{ .fg = err_color });
 }
 
 /// `alias` builtin. Given a `NAME=VALUE` argument
@@ -615,7 +615,7 @@ pub fn listAliases(self: *Prompt) !void {
         const value = self.aliases.get(name).?;
         var buf: [1024]u8 = undefined;
         const rendered = std.fmt.bufPrint(&buf, "alias {s}='{s}'\n", .{ name, value }) catch continue;
-        try self.drawText(rendered, null, null);
+        try self.client.writeText(rendered, .{});
     }
 }
 
@@ -628,7 +628,7 @@ pub fn doUnalias(self: *Prompt, names: []const []const u8) !void {
         if (!self.aliases.remove(alloc, name)) {
             var buf: [160]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "unalias: {s}: not found", .{name}) catch "unalias: not found";
-            try self.drawText(msg, err_color, null);
+            try self.client.writeText(msg, .{ .fg = err_color });
         }
     }
 }
@@ -714,7 +714,7 @@ pub fn reportBadEnvName(self: *Prompt, comptime builtin: []const u8, name: []con
     var buf: [200]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, builtin ++ ": `{s}`: not a valid variable name", .{name}) catch
         builtin ++ ": not a valid variable name";
-    try self.drawText(msg, err_color, null);
+    try self.client.writeText(msg, .{ .fg = err_color });
 }
 
 /// Writes the whole environment to the grid, one `NAME=VALUE` per
@@ -742,7 +742,7 @@ pub fn printEnv(self: *Prompt) !void {
         }
     }.lessThan);
 
-    for (lines.items) |l| try self.drawText(l, null, null);
+    for (lines.items) |l| try self.client.writeText(l, .{});
 }
 
 /// `reload` builtin -- re-reads `shell.conf.lua` and applies it to the
@@ -765,16 +765,16 @@ pub fn doReload(self: *Prompt, args: []const []const u8) !u8 {
     const alloc = self.client.alloc;
 
     if (args.len > 0) {
-        try self.drawText("reload: takes no arguments\n", err_color, null);
+        try self.client.writeText("reload: takes no arguments\n", .{ .fg = err_color });
         return 2;
     }
 
     const config_dir = self.config_dir orelse {
-        try self.drawText("reload: no config directory ($HOME and $XDG_CONFIG_HOME are unset)\n", err_color, null);
+        try self.client.writeText("reload: no config directory ($HOME and $XDG_CONFIG_HOME are unset)\n", .{ .fg = err_color });
         return 1;
     };
     const eng = self.script_engine orelse {
-        try self.drawText("reload: the script engine isn't running\n", err_color, null);
+        try self.client.writeText("reload: the script engine isn't running\n", .{ .fg = err_color });
         return 1;
     };
 
@@ -784,11 +784,11 @@ pub fn doReload(self: *Prompt, args: []const []const u8) !u8 {
     const source = self.readConfSource(config_dir) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.FileNotFound => {
-            try self.drawText("reload: no shell.conf.lua to reload\n", err_color, null);
+            try self.client.writeText("reload: no shell.conf.lua to reload\n", .{ .fg = err_color });
             return 1;
         },
         error.ReadFailed => {
-            try self.drawText("reload: could not read shell.conf.lua\n", err_color, null);
+            try self.client.writeText("reload: could not read shell.conf.lua\n", .{ .fg = err_color });
             return 1;
         },
     };
@@ -837,6 +837,6 @@ pub fn doReload(self: *Prompt, args: []const []const u8) !u8 {
         eng.cfg.aliases.items.len,
         eng.cfg.open_actions.items.len,
     }) catch "reload: shell.conf.lua\n";
-    try self.drawText(line, null, null);
+    try self.client.writeText(line, .{});
     return 0;
 }

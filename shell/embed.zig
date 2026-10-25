@@ -9,8 +9,9 @@
 //!
 //!     gw-shell --embed <context>,<layer>[,<control-fd>]
 //!
-//! and the shell `attach_context`es onto it and draws everything on that
-//! layer (`Prompt.layer`, and the `draw*` helpers around it). Nothing
+//! and the shell `attach_context`es onto it and `attach_layer`s that
+//! layer, so everything it draws lands there with no layer named
+//! (`Prompt.layer` remains for the click mapping). Nothing
 //! about the prompt changes: same line editor, same pty loop, same
 //! scrollback -- the layer is created with its own `scrollback_rows`, so
 //! even Ctrl+Up browsing works inside the panel.

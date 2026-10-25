@@ -883,7 +883,7 @@ pub fn recomputeAndDrawPicker(self: *Prompt, move_delta: isize) anyerror!void {
     var b = self.client.batch();
     defer b.deinit();
     const top = self.inputBottomRow() + 1;
-    try self.batchClear(&b, top, 0, @max(st.drawn_rows, visible), self.grid_cols);
+    try b.clear(.{ .row = top, .rows = @max(st.drawn_rows, visible), .cols = self.grid_cols });
 
     i = 0;
     while (i < visible) : (i += 1) {
@@ -892,28 +892,28 @@ pub fn recomputeAndDrawPicker(self: *Prompt, move_delta: isize) anyerror!void {
         const selected = idx == st.list.selected;
         const dim: ?glyphwire.Color = if (selected) null else autocomplete_hint_color;
 
-        try self.batchSetCursor(&b, top + i, 0);
-        try self.batchText(&b, if (selected) "> " else "  ", dim, null);
+        try b.setCursor(top + i, 0, .{});
+        try b.writeText(if (selected) "> " else "  ", .{ .fg = dim });
 
         const name_cols = clipWidth(cand.name, name_w);
-        try self.batchText(&b, cand.name[0..name_cols.bytes], dim, null);
+        try b.writeText(cand.name[0..name_cols.bytes], .{ .fg = dim });
         if (cand.source == .dir and name_cols.bytes == cand.name.len and name_cols.width < name_w) {
-            try self.batchText(&b, "/", dim, null);
+            try b.writeText("/", .{ .fg = dim });
         }
 
         // Second column: two spaces past the name column.
         const col2 = marker_w + name_w + 2;
         if (col2 >= self.grid_cols) continue;
-        try self.batchSetCursor(&b, top + i, col2);
+        try b.setCursor(top + i, col2, .{});
         const room = self.grid_cols - col2;
         if (cand.desc.len > 0) {
             const d = clipWidth(cand.desc, room);
-            try self.batchText(&b, cand.desc[0..d.bytes], autocomplete_hint_color, null);
+            try b.writeText(cand.desc[0..d.bytes], .{ .fg = autocomplete_hint_color });
         } else {
             var tag_buf: [32]u8 = undefined;
             const tag = std.fmt.bufPrint(&tag_buf, "[{s}]", .{completionSourceTag(cand.source)}) catch "";
             const t = clipWidth(tag, room);
-            try self.batchText(&b, tag[0..t.bytes], autocomplete_hint_color, null);
+            try b.writeText(tag[0..t.bytes], .{ .fg = autocomplete_hint_color });
         }
     }
 
@@ -945,9 +945,9 @@ pub fn reservePickerRows(self: *Prompt, rows_needed: usize) !void {
     const overshoot = need_bottom - self.grid_rows + 1;
     var b = self.client.batch();
     defer b.deinit();
-    try self.batchSetCursor(&b, self.grid_rows - 1, 0);
+    try b.setCursor(self.grid_rows - 1, 0, .{});
     var k: usize = 0;
-    while (k < overshoot) : (k += 1) try self.batchText(&b, "\n", null, null);
+    while (k < overshoot) : (k += 1) try b.writeText("\n", .{});
     var res = try b.send();
     res.deinit();
     self.line_start_row -|= overshoot;
@@ -992,7 +992,7 @@ pub fn closeCompletionPicker(self: *Prompt) !void {
 
     var b = self.client.batch();
     defer b.deinit();
-    try self.batchClear(&b, self.inputBottomRow() + 1, 0, st.drawn_rows, self.grid_cols);
+    try b.clear(.{ .row = self.inputBottomRow() + 1, .rows = st.drawn_rows, .cols = self.grid_cols });
     try self.appendInputLine(&b);
     var res = try b.send();
     res.deinit();
