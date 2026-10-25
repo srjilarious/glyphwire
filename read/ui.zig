@@ -1105,17 +1105,8 @@ pub const Ui = struct {
 
         // Wipe first: a page narrower than the last one would otherwise
         // leave the previous page's right-hand columns behind.
-        try c.clearOn(self.page_layer, 0, 0, null, null);
-        try c.drawImageOn(
-            self.page_layer,
-            entry.handle,
-            0,
-            0,
-            self.layout.rows,
-            self.layout.cols,
-            self.layout.scale,
-            .{},
-        );
+        try c.clear(.{ .layer = self.page_layer });
+        try c.drawImage(entry.handle, .{ .layer = self.page_layer, .row = 0, .col = 0, .row_span = self.layout.rows, .col_span = self.layout.cols, .scale = self.layout.scale });
         try c.setLayerScrollOffset(self.page_layer, self.pan.row, self.pan.col);
 
         // The marks and the crop box are in the scaled page's pixels, and
@@ -1529,7 +1520,7 @@ pub const Ui = struct {
 
         try b.setLayerSize(self.dialog_layer, shape.box_cols, shape.box_rows);
         try b.setLayerCellPosition(self.dialog_layer, at.row, at.col);
-        try b.clearOn(self.dialog_layer, 0, 0, null, null);
+        try b.clear(.{ .layer = self.dialog_layer });
         try b.setLayerSelectionFlow(self.dialog_layer, .{});
 
         // Allocated rather than a fixed buffer: a scaled dialog is up to
@@ -1595,7 +1586,7 @@ pub const Ui = struct {
         try b.setLayerCellPosition(self.dialog_layer, at.row, at.col);
         // Filled rather than cleared to transparent: a short column
         // leaves slots no glyph paints, which would otherwise be holes.
-        try b.clearArea(.{ .layer = self.dialog_layer, .bg = bg_dialog });
+        try b.clear(.{ .layer = self.dialog_layer, .bg = bg_dialog });
         try b.setLayerSelectionFlow(self.dialog_layer, .{ .mode = .vertical_rl, .column_cols = col_cells, .origin_col = shape.text_left });
 
         const h_line = try repeatAlloc(self.alloc, box_h, inner + 2);
@@ -2069,7 +2060,7 @@ pub const Ui = struct {
         try b.setLayerScrollbars(layer, self.side_max_scroll > 0, false);
         try b.setLayerScrollOffset(layer, self.side_scroll, 0);
         try b.setLayerCellPosition(layer, slot.row, slot.col);
-        try b.clearOn(layer, 0, 0, null, null);
+        try b.clear(.{ .layer = layer });
 
         const h_line = try repeatAlloc(self.alloc, box_h, interior);
         defer self.alloc.free(h_line);
@@ -2163,7 +2154,7 @@ pub const Ui = struct {
 
         try batch.setLayerSize(self.dict_build_layer, box_cols, box_rows);
         try batch.setLayerCellPosition(self.dict_build_layer, (self.win.rows -| box_rows) / 2, (self.win.cols -| box_cols) / 2);
-        try batch.clearOn(self.dict_build_layer, 0, 0, null, null);
+        try batch.clear(.{ .layer = self.dict_build_layer });
 
         var h_buf: [config_mod.ocr_dialog_cols_max * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, interior);
@@ -2200,9 +2191,9 @@ pub const Ui = struct {
         var blanks_buf: [512]u8 = undefined;
         const band_len = @min(self.win.cols, blanks_buf.len);
         @memset(blanks_buf[0..band_len], ' ');
-        try c.setCursorOn(self.status_layer, 0, 0);
+        try c.setCursor(0, 0, .{ .layer = self.status_layer });
         try c.writeText(blanks_buf[0..band_len], .{ .layer = self.status_layer, .fg = fg_status, .bg = bg_status });
-        try c.setCursorOn(self.status_layer, 0, 0);
+        try c.setCursor(0, 0, .{ .layer = self.status_layer });
 
         var buf: [512]u8 = undefined;
 
@@ -2254,7 +2245,7 @@ pub const Ui = struct {
             self.layout.scale * 100,
         }) catch "";
         const at: usize = self.win.cols -| right.len;
-        try c.setCursorOn(self.status_layer, 0, at);
+        try c.setCursor(0, at, .{ .layer = self.status_layer });
         try c.writeText(right, .{ .layer = self.status_layer, .fg = fg_status, .bg = bg_status });
 
         if (self.help_visible) try self.renderHelp();
@@ -2396,7 +2387,7 @@ pub const Ui = struct {
     /// very first visible frame is already the finished dialog.
     fn buildHelp(self: *Ui, b: *glyphwire.Client.Batch) !void {
         try b.setLayerCellPosition(self.help_layer, (self.win.rows -| help_rows) / 2, (self.win.cols -| help_cols) / 2);
-        try b.clearOn(self.help_layer, 0, 0, null, null);
+        try b.clear(.{ .layer = self.help_layer });
 
         var h_buf: [help_interior * box_h.len]u8 = undefined;
         const h_line = repeatInto(&h_buf, box_h, help_interior);

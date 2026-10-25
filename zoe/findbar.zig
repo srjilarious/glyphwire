@@ -153,7 +153,7 @@ pub fn render(batch: *Batch, layer: glyphwire.LayerHandle, l: Layout, ed: *const
 
     // A resize keeps whatever the old cells held, and a shorter count
     // or a replace row going away would otherwise leave it behind.
-    try batch.clearArea(.{ .layer = layer });
+    try batch.clear(.{ .layer = layer });
 
     // The find row.
     try renderField(batch, layer, l, 0, &ed.cmdline, ed.find_field == .find, ed.find_fresh, ed.search_failed);

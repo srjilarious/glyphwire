@@ -424,27 +424,20 @@ pub const Client = struct {
     // -- Text, clearing and the cursor --
     pub const writeText = ops.writeText;
     pub const writeSpans = ops.writeSpans;
-    pub const clearArea = ops.clearArea;
     pub const setBg = ops.setBg;
     pub const setFg = ops.setFg;
     pub const setUnderline = ops.setUnderline;
     pub const setCursor = ops.setCursor;
-    pub const setCursorOn = ops.setCursorOn;
     pub const insertCells = ops.insertCells;
     pub const deleteCells = ops.deleteCells;
     pub const moveContent = ops.moveContent;
     pub const tagMetadata = ops.tagMetadata;
     pub const clear = ops.clear;
-    pub const clearOn = ops.clearOn;
 
     // -- Images and icons --
     pub const destroyImage = ops.destroyImage;
     pub const drawImage = ops.drawImage;
-    pub const drawImageOn = ops.drawImageOn;
     pub const drawIcon = ops.drawIcon;
-    pub const drawIconStyled = ops.drawIconStyled;
-    pub const drawIconOn = ops.drawIconOn;
-    pub const drawIconOnStyled = ops.drawIconOnStyled;
 
     // -- Layers and contexts --
     pub const destroyLayer = ops.destroyLayer;
@@ -602,10 +595,52 @@ pub const Client = struct {
     };
 
     /// `clear`'s options: the region (defaulting to the whole layer) and
-    /// an optional fill colour. Shared by `Client.clearArea` and
-    /// `Batch.clearArea`.
+    /// an optional fill colour. Shared by `Client.clear` and
+    /// `Batch.clear`.
+    /// The options of a call whose only option is where it lands. Kept
+    /// a struct, like `TextOpts`, so every call spells its layer the same
+    /// way (`.{}` or `.{ .layer = l }`) and an option can join later
+    /// without touching the callers.
+    pub const LayerOpts = struct {
+        /// null = this connection's surface: the root layer, unless it sent
+        /// `attach_layer`.
+        layer: ?core.LayerHandle = null,
+    };
+
+    /// `draw_image`'s placement. The image is anchored at `(row, col)`
+    /// (the layer's cursor when either is null, as for `write_text`) and
+    /// clipped to `row_span` x `col_span` cells rather than stretched to
+    /// fill them -- see decisions.md's Image section.
+    pub const DrawImageOpts = struct {
+        /// null = the surface.
+        layer: ?core.LayerHandle = null,
+        row: ?usize = null,
+        col: ?usize = null,
+        row_span: usize,
+        col_span: usize,
+        /// The uniform factor the image is drawn at: `1.0` is its natural
+        /// pixel size, `< 1.0` shrinks it (glyphwire-view passes
+        /// `target_width_px / image_width_px` for `--size fit-width`).
+        /// Choosing spans that match the *scaled* shape is the caller's
+        /// job; `getImageInfo`, `getCellMetrics` and `getSize` give it what
+        /// it needs.
+        scale: f32 = 1.0,
+        /// A sub-rectangle of the image to sample (a sprite sheet); `.{}`
+        /// is the whole image.
+        src: core.ImageSrcRect = .{},
+    };
+
+    /// `get_cells`' options.
+    pub const CellsOpts = struct {
+        /// null = the surface.
+        layer: ?core.LayerHandle = null,
+        /// Rows of history scrolled back (see `core.Layer.viewRow`); 0 is
+        /// the live viewport.
+        view_offset: usize = 0,
+    };
+
     pub const ClearOpts = struct {
-        /// null = the root layer.
+        /// null = the surface.
         layer: ?core.LayerHandle = null,
         row: usize = 0,
         col: usize = 0,
@@ -659,16 +694,10 @@ pub const Client = struct {
         underline_color: ?core.Color = null,
     };
 
-    /// `get_property(layer, "cursor")` -- a request.
-    pub fn getCursor(self: *Client) !core.Cursor {
-        return self.getCursorOn(null);
-    }
-
-    /// `get_property(layer, "cursor")` for a named layer -- the read half
-    /// of `setCursorOn`, for a client drawing terminal-style output onto
-    /// a layer that isn't its root (`gw-shell --embed`).
-    pub fn getCursorOn(self: *Client, layer: ?core.LayerHandle) !core.Cursor {
-        var parsed = try self.request(protocol.CursorResult, "get_property", .{ .layer = layer, .property = "cursor" });
+    /// `get_property(layer?, "cursor")` -- a request. The read half of
+    /// `setCursor`.
+    pub fn getCursor(self: *Client, opts: LayerOpts) !core.Cursor {
+        var parsed = try self.request(protocol.CursorResult, "get_property", .{ .layer = opts.layer, .property = "cursor" });
         defer parsed.deinit();
         return .{ .row = parsed.value.result.row, .col = parsed.value.result.col };
     }
@@ -693,73 +722,35 @@ pub const Client = struct {
         return .{ .cols = parsed.value.result.cols, .rows = parsed.value.result.rows };
     }
 
-    /// `get_cells(layer?)` -- a request returning a full row-major
-    /// snapshot of the root layer's visible viewport. Owns its own parsed JSON arena; caller must call
-    /// `.deinit()` on the result. `.{ .layer = ... }`, not a bare `.{}`:
-    /// an empty anonymous struct serializes as a JSON *array* (Zig's
-    /// tuple encoding), not `{}` -- fine for a method the server never
-    /// parses params for, but `get_cells` now does (`GetCellsParams`), so
-    /// it needs a real single-field object on the wire.
-    pub fn getCells(self: *Client) !CellsSnapshot {
-        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = @as(?core.LayerHandle, null) });
+    /// `get_cells(layer?, view_offset?)` -- a request returning a full
+    /// row-major snapshot of a layer's visible viewport (`opts.layer`
+    /// null is the surface), or of it scrolled back `opts.view_offset`
+    /// rows into its history. Owns its own parsed JSON arena; caller must
+    /// call `.deinit()` on the result.
+    pub fn getCells(self: *Client, opts: CellsOpts) !CellsSnapshot {
+        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = opts.layer, .view_offset = opts.view_offset });
         return .{ .parsed = parsed };
     }
 
-    /// `get_cells(layer)` for a specific (non-root) layer -- see
-    /// `getCells` for the root-layer version.
-    pub fn getCellsOn(self: *Client, layer: core.LayerHandle) !CellsSnapshot {
-        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = layer });
-        return .{ .parsed = parsed };
-    }
-
-    /// `get_cells(layer?, view_offset)` -- the root layer's grid as it
-    /// appears scrolled back by `view_offset` rows
-    /// of history (see `core.Layer.viewRow`). `view_offset == 0` is
-    /// identical to `getCells`.
-    pub fn getCellsView(self: *Client, view_offset: usize) !CellsSnapshot {
-        return self.getCellsViewOn(null, view_offset);
-    }
-
-    /// `get_cells(layer, view_offset)` -- `getCellsView` for a named
-    /// layer, for a client whose scrollback lives on one of its own.
-    pub fn getCellsViewOn(self: *Client, layer: ?core.LayerHandle, view_offset: usize) !CellsSnapshot {
-        const parsed = try self.request(protocol.CellsResult, "get_cells", .{ .layer = layer, .view_offset = view_offset });
-        return .{ .parsed = parsed };
-    }
-
-    /// `get_property(layer, "scroll")` -- a request returning
-    /// the root layer's scrollback view state
-    /// (`{offset, max}`): `offset` rows of history currently showing
-    /// above the live viewport, out of `max` retained. `scrollView` is
-    /// how a client moves it; `InputListener` subscribed to `"scroll"` is
-    /// the live-updating counterpart.
-    pub fn getScroll(self: *Client) !core.LayerScroll {
-        return self.getScrollOn(null);
-    }
-
-    /// `get_property(layer, "scroll")` for a named layer -- the
-    /// scrollback view of a layer created with `scrollback_rows`.
-    pub fn getScrollOn(self: *Client, layer: ?core.LayerHandle) !core.LayerScroll {
-        var parsed = try self.request(protocol.ScrollResult, "get_property", .{ .layer = layer, .property = "scroll" });
+    /// `get_property(layer?, "scroll")` -- a request returning a layer's
+    /// scrollback view state (`{offset, max}`): `offset` rows of history
+    /// currently showing above the live viewport, out of `max` retained.
+    /// `scrollView` is how a client moves it; `InputListener` subscribed
+    /// to `"scroll"` is the live-updating counterpart.
+    pub fn getScroll(self: *Client, opts: LayerOpts) !core.LayerScroll {
+        var parsed = try self.request(protocol.ScrollResult, "get_property", .{ .layer = opts.layer, .property = "scroll" });
         defer parsed.deinit();
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }
 
-    /// `scroll_view(layer?, offset?, delta?)` -- a request that moves
-    /// the root layer's scrollback view offset
-    /// (see `core.Layer.scrollView`) and returns the resulting `{offset,
-    /// max}`. `offset` is an absolute target in rows; `delta` is added
-    /// after; the result is clamped to `0..max`. Passing neither is a
-    /// pure query. The server also broadcasts a `scroll` notification to
-    /// other `"scroll"` subscribers.
-    pub fn scrollView(self: *Client, offset: ?usize, delta: ?i64) !core.LayerScroll {
-        return self.scrollViewOn(null, offset, delta);
-    }
-
-    /// `scroll_view(layer, offset?, delta?)` -- `scrollView` aimed at a
-    /// named layer.
-    pub fn scrollViewOn(self: *Client, layer: ?core.LayerHandle, offset: ?usize, delta: ?i64) !core.LayerScroll {
-        var parsed = try self.request(protocol.ScrollResult, "scroll_view", .{ .layer = layer, .offset = offset, .delta = delta });
+    /// `scroll_view(layer?, offset?, delta?)` -- a request that moves a
+    /// layer's scrollback view offset (see `core.Layer.scrollView`) and
+    /// returns the resulting `{offset, max}`. `offset` is an absolute
+    /// target in rows; `delta` is added after; the result is clamped to
+    /// `0..max`. Passing neither is a pure query. The server also
+    /// broadcasts a `scroll` notification to other `"scroll"` subscribers.
+    pub fn scrollView(self: *Client, offset: ?usize, delta: ?i64, opts: LayerOpts) !core.LayerScroll {
+        var parsed = try self.request(protocol.ScrollResult, "scroll_view", .{ .layer = opts.layer, .offset = offset, .delta = delta });
         defer parsed.deinit();
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }
@@ -926,7 +917,7 @@ pub const Client = struct {
         return .{ .width = parsed.value.result.width, .height = parsed.value.result.height };
     }
 
-    /// `scale`/`h_align`/`v_align`/`max_w`/`max_h` for `drawIconStyled` --
+    /// `scale`/`h_align`/`v_align`/`max_w`/`max_h` for `drawIcon` --
     /// see `core.IconBg`'s doc comment. Defaults match `drawIcon`'s
     /// behavior. `max_w`/`max_h` only apply when `scale == .natural`.
     /// Shared by `Client` and `Batch`.
@@ -1395,7 +1386,7 @@ pub const Client = struct {
 
     /// `create_table(layer?, row?, col?, columns, style?)` -- a request.
     /// `row`/`col` default to the layer's current cursor, same convention
-    /// `drawIconStyled` already uses. Returns a fresh
+    /// `drawIcon` already uses. Returns a fresh
     /// handle for `tableSetRows`/`tableSetSort`/`tableSetStyle`/
     /// `destroyTable`/`tableGetState` -- the table has no rows yet, so
     /// nothing is painted until `tableSetRows`.
@@ -1636,7 +1627,7 @@ pub const Client = struct {
     /// `create_metadata(json)` -- a request. Stores `json` verbatim (the
     /// server never parses it, only stores/returns it -- see decisions.md's
     /// Metadata section) and returns a fresh handle that
-    /// `writeText`/`drawIconStyled`'s `metadata_id`, `getMetadata`,
+    /// `writeText`/`drawIcon`'s `metadata_id`, `getMetadata`,
     /// or `destroyMetadata` can reference.
     pub fn createMetadata(self: *Client, json: []const u8) !core.MetadataHandle {
         var parsed = try self.request(protocol.CreateMetadataResult, "create_metadata", .{ .json = json });
@@ -1985,27 +1976,20 @@ pub const Client = struct {
         // -- Text, clearing and the cursor --
         pub const writeText = batch_ops.writeText;
         pub const writeSpans = batch_ops.writeSpans;
-        pub const clearArea = batch_ops.clearArea;
         pub const setBg = batch_ops.setBg;
         pub const setFg = batch_ops.setFg;
         pub const setUnderline = batch_ops.setUnderline;
         pub const setCursor = batch_ops.setCursor;
-        pub const setCursorOn = batch_ops.setCursorOn;
         pub const insertCells = batch_ops.insertCells;
         pub const deleteCells = batch_ops.deleteCells;
         pub const moveContent = batch_ops.moveContent;
         pub const tagMetadata = batch_ops.tagMetadata;
         pub const clear = batch_ops.clear;
-        pub const clearOn = batch_ops.clearOn;
 
         // -- Images and icons --
         pub const destroyImage = batch_ops.destroyImage;
         pub const drawImage = batch_ops.drawImage;
-        pub const drawImageOn = batch_ops.drawImageOn;
         pub const drawIcon = batch_ops.drawIcon;
-        pub const drawIconStyled = batch_ops.drawIconStyled;
-        pub const drawIconOn = batch_ops.drawIconOn;
-        pub const drawIconOnStyled = batch_ops.drawIconOnStyled;
 
         // -- Layers and contexts --
         pub const destroyLayer = batch_ops.destroyLayer;
@@ -2650,7 +2634,7 @@ pub const TextEvent = struct { text: []const u8 };
 /// `key` and `text` share a timeline -- the host sends `key_down enter`
 /// and the `text` for what preceded it on the same connection -- so a
 /// line editor has to consume them from a single ordered queue
-/// (`pollInputEvent` / `waitInputEvent`), not two, or "type then Enter"
+/// (`InputListener.next` / `pollNext`, with `Event.asInput`), not two, or "type then Enter"
 /// races. Each variant owns its string, freed like the standalone
 /// events above.
 pub const InputEvent = union(enum) {
@@ -2730,8 +2714,7 @@ pub const MouseButtonEvent = struct {
 /// Only arrives on a cell change (the server coalesces per-pixel motion).
 pub const MouseMoveEvent = struct { px: PxPos, cell: CellPos, mods: core.Mods = .{} };
 /// One `resize` notification: the window's new size in cells. No owned
-/// memory (unlike `KeyEvent.key`), so `pollResizeEvent` hands it back by
-/// value with nothing for the caller to free.
+/// memory (unlike `KeyEvent.key`): nothing for the caller to free.
 pub const ResizeEvent = struct { cols: usize, rows: usize };
 
 /// One `shutdown` notification: the host window is closing. `grace_ms` is
@@ -2807,8 +2790,7 @@ pub const PaneBounds = struct {
 };
 
 /// A queued `pane_layout` notification: the panes whose window rects
-/// changed. Owns `panes`; `pollPaneLayoutEvent` hands ownership to the
-/// caller. Only a window manager ever subscribes to this -- it is the one
+/// changed. Owns `panes`, freed by `Event.deinit`. Only a window manager ever subscribes to this -- it is the one
 /// message that exposes pane geometry.
 pub const PaneLayoutEvent = struct {
     panes: []PaneBounds,
@@ -2971,9 +2953,9 @@ pub const Event = union(enum) {
 /// Every notification wakes it -- resize, scroll, layout and context
 /// included -- so there is no reason to poll on a fixed interval, and
 /// events come out in the order the host sent them (a resize that arrived
-/// after a keystroke is handled after it). The per-stream `pollX`/`waitX`
-/// methods are kept as filters over the same queue for programs that only
-/// care about one stream.
+/// after a keystroke is handled after it). There are no per-stream
+/// pollers: a loop that only cares about one stream still takes every
+/// event, so nothing it ignores piles up behind it.
 ///
 /// Deliberately a separate connection from `Client`: interleaving
 /// unsolicited push notifications with synchronous request/response
@@ -2997,8 +2979,8 @@ pub const InputListener = struct {
     /// Every queued notification, oldest first. See `Event`.
     events: std.ArrayList(Event) = .empty,
     /// Posted once per appended event (not on a coalescing replace), so
-    /// `next`/`waitX` block instead of polling. Not kept in exact sync with
-    /// `events.items.len` -- a `pollX` pops without taking a permit -- so a
+    /// `next` blocks instead of polling. Not kept in exact sync with
+    /// `events.items.len` -- `pollNext` pops without taking a permit -- so a
     /// waiter re-checks the queue after every wake and treats an empty one
     /// as a spurious wake.
     sem: std.Io.Semaphore = .{},
@@ -3150,7 +3132,7 @@ pub const InputListener = struct {
         }
     }
 
-    /// Wakes a blocked `next` / `waitX` from another thread, without
+    /// Wakes a blocked `next` from another thread, without
     /// queueing an event: the waiter returns `null` exactly as it would on
     /// a timeout, which every caller already handles by going round its
     /// loop again.
@@ -3215,125 +3197,10 @@ pub const InputListener = struct {
         return self.state.isKeyDown(key);
     }
 
-    fn isInput(ev: Event) bool {
-        return ev.asInput() != null;
-    }
-
-    /// Pops the oldest queued input event (key, text, paste, copy request,
-    /// shutdown, or a window-manager key/text), if any (non-blocking).
-    /// Caller must free it with `InputEvent.deinit` and the same allocator
-    /// passed to `connect`.
-    pub fn pollInputEvent(self: *InputListener) ?InputEvent {
-        const ev = self.takeFirst(isInput) orelse return null;
-        return ev.asInput().?;
-    }
-
-    /// Blocks until *any* event is queued or `timeout` elapses, then
-    /// returns the oldest input event if there is one (null otherwise, or
-    /// on timeout). Wakes for every stream, so a loop that drains other
-    /// queues after this returns handles them immediately -- but `next`
-    /// is the better shape for a new loop.
-    pub fn waitInputEvent(self: *InputListener, timeout: std.Io.Timeout) !?InputEvent {
-        // A `wake` releases this too, and reads as "nothing" -- the same
-        // answer this already gives for a wake on a non-input event.
-        if (self.woken.swap(false, .acquire)) return self.pollInputEvent();
-        self.sem.waitTimeout(self.io, timeout) catch |err| switch (err) {
-            error.Timeout => return null,
-            error.Canceled => |e| return e,
-        };
-        _ = self.woken.swap(false, .acquire);
-        return self.pollInputEvent();
-    }
-
     pub fn isMouseButtonDown(self: *InputListener, button: []const u8) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.state.isMouseButtonDown(button);
-    }
-
-    /// Generates the non-blocking `pollX` for one payload-carrying `Event`
-    /// variant: removes the oldest event of that kind and returns its
-    /// payload. Ownership passes to the caller exactly as `Event.deinit`
-    /// would have freed it.
-    fn Poller(comptime tag: std.meta.Tag(Event)) type {
-        return struct {
-            fn matches(ev: Event) bool {
-                return ev == tag;
-            }
-            fn poll(self: *InputListener) ?@FieldType(Event, @tagName(tag)) {
-                const ev = self.takeFirst(matches) orelse return null;
-                return @field(ev, @tagName(tag));
-            }
-            fn wait(self: *InputListener, timeout: std.Io.Timeout) !?@FieldType(Event, @tagName(tag)) {
-                const ev = try self.waitFirst(timeout, matches) orelse return null;
-                return @field(ev, @tagName(tag));
-            }
-        };
-    }
-
-    /// Oldest queued mouse button event, if any. Free with
-    /// `MouseButtonEvent.deinit`.
-    pub fn pollMouseButtonEvent(self: *InputListener) ?MouseButtonEvent {
-        return Poller(.mouse_button).poll(self);
-    }
-
-    /// Blocks until a mouse button event is queued or `timeout` elapses.
-    pub fn waitMouseButtonEvent(self: *InputListener, timeout: std.Io.Timeout) !?MouseButtonEvent {
-        return Poller(.mouse_button).wait(self, timeout);
-    }
-
-    /// Oldest queued `mouse_move`, if any. Nothing to free. Only produced
-    /// while subscribed to `"mouse_move"`.
-    pub fn pollMouseMoveEvent(self: *InputListener) ?MouseMoveEvent {
-        return Poller(.mouse_move).poll(self);
-    }
-
-    /// Blocks until a `mouse_move` is queued or `timeout` elapses.
-    pub fn waitMouseMoveEvent(self: *InputListener, timeout: std.Io.Timeout) !?MouseMoveEvent {
-        return Poller(.mouse_move).wait(self, timeout);
-    }
-
-    /// Oldest queued `terminal_reply`. The caller owns the returned slice
-    /// and frees it with the `connect` allocator. Only produced while
-    /// subscribed to `"terminal"`.
-    pub fn pollTerminalReply(self: *InputListener) ?[]u8 {
-        return Poller(.terminal_reply).poll(self);
-    }
-
-    /// Oldest queued `scroll_offset`, if any. Nothing to free.
-    pub fn pollScrollOffsetEvent(self: *InputListener) ?ScrollOffsetEvent {
-        return Poller(.scroll_offset).poll(self);
-    }
-
-    /// Oldest queued `layout`, if any. **The caller owns the result** and
-    /// must `deinit` it.
-    pub fn pollLayoutEvent(self: *InputListener) ?LayoutEvent {
-        return Poller(.layout).poll(self);
-    }
-
-    /// Oldest queued `pane_layout`, if any. The caller must `deinit` it.
-    pub fn pollPaneLayoutEvent(self: *InputListener) ?PaneLayoutEvent {
-        return Poller(.pane_layout).poll(self);
-    }
-
-    /// Oldest queued `pane_exit`, if any. Nothing to free.
-    pub fn pollPaneExitEvent(self: *InputListener) ?PaneExitEvent {
-        return Poller(.pane_exit).poll(self);
-    }
-
-    /// Oldest queued `remote_exit`, if any. Nothing to free.
-    pub fn pollRemoteExitEvent(self: *InputListener) ?RemoteExitEvent {
-        return Poller(.remote_exit).poll(self);
-    }
-
-    /// Oldest queued `resize`, if any. Nothing to free.
-    pub fn pollResizeEvent(self: *InputListener) ?ResizeEvent {
-        return Poller(.resize).poll(self);
-    }
-
-    /// Blocks until a `resize` is queued or `timeout` elapses.
-    pub fn waitResizeEvent(self: *InputListener, timeout: std.Io.Timeout) !?ResizeEvent {
-        return Poller(.resize).wait(self, timeout);
     }
 
     /// The most recently pushed window size, or null if no `resize`
@@ -3346,16 +3213,6 @@ pub const InputListener = struct {
         return self.last_size;
     }
 
-    /// Oldest queued `scroll`, if any. Nothing to free.
-    pub fn pollScrollEvent(self: *InputListener) ?ScrollEvent {
-        return Poller(.scroll).poll(self);
-    }
-
-    /// Blocks until a `scroll` is queued or `timeout` elapses.
-    pub fn waitScrollEvent(self: *InputListener, timeout: std.Io.Timeout) !?ScrollEvent {
-        return Poller(.scroll).wait(self, timeout);
-    }
-
     /// The most recently pushed scrollback view offset, or null if no
     /// `scroll` notification has arrived yet -- a live-cache read (like
     /// `size`).
@@ -3363,16 +3220,6 @@ pub const InputListener = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.last_scroll;
-    }
-
-    /// Oldest queued `context`, if any. Nothing to free.
-    pub fn pollContextEvent(self: *InputListener) ?ContextEvent {
-        return Poller(.context).poll(self);
-    }
-
-    /// Blocks until a `context` is queued or `timeout` elapses.
-    pub fn waitContextEvent(self: *InputListener, timeout: std.Io.Timeout) !?ContextEvent {
-        return Poller(.context).wait(self, timeout);
     }
 
     /// The most recently pushed visible-context event, or null if none

@@ -452,7 +452,7 @@ pub const Popup = struct {
     fn renderList(self: *Popup, b: *Batch, l: *const List, cols: usize, rows: usize) !void {
         const s = self.chrome.style;
         if (l.matchCount() == 0) return self.chrome.drawEmpty(b);
-        try b.clearArea(.{ .layer = self.chrome.list_layer });
+        try b.clear(.{ .layer = self.chrome.list_layer });
         for (0..rows) |i| {
             const c = l.matchAt(l.list.top + i) orelse break;
             const is_selected = l.list.top + i == l.list.selected;

@@ -314,8 +314,8 @@ pub const Ui = struct {
         try c.setLayerCellPosition(self.page_layer, self.layout.row, self.layout.col);
         // Wipe first: a smaller image would otherwise leave the last
         // size's right-hand columns behind.
-        try c.clearOn(self.page_layer, 0, 0, null, null);
-        try c.drawImageOn(self.page_layer, self.handle, 0, 0, self.layout.rows, self.layout.cols, self.layout.scale, .{});
+        try c.clear(.{ .layer = self.page_layer });
+        try c.drawImage(self.handle, .{ .layer = self.page_layer, .row = 0, .col = 0, .row_span = self.layout.rows, .col_span = self.layout.cols, .scale = self.layout.scale });
         try c.setLayerScrollOffset(self.page_layer, self.pan.row, self.pan.col);
         self.status_dirty = true;
     }
@@ -325,7 +325,7 @@ pub const Ui = struct {
         const layer = self.status_layer;
         var b = self.client.batch();
         defer b.deinit();
-        try b.clearArea(.{ .layer = layer, .bg = bg_status });
+        try b.clear(.{ .layer = layer, .bg = bg_status });
 
         const name = std.fs.path.basename(self.path);
         try b.writeText(name, .{ .layer = layer, .row = 0, .col = 1, .fg = fg_name, .bg = bg_status, .max_cols = self.win.cols -| 2 });

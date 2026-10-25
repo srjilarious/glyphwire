@@ -458,7 +458,7 @@ fn benchEndToEnd(io: std.Io, alloc: std.mem.Allocator, out: *std.Io.Writer) !voi
         {
             const n = 3000;
             const t0 = now(io);
-            for (0..n) |_| _ = try client.getCursor();
+            for (0..n) |_| _ = try client.getCursor(.{});
             results[i].request_us = nsSince(io, t0) / n / 1000;
         }
 
@@ -467,7 +467,7 @@ fn benchEndToEnd(io: std.Io, alloc: std.mem.Allocator, out: *std.Io.Writer) !voi
             const n = 100;
             const t0 = now(io);
             for (0..n) |_| {
-                var snap = try client.getCells();
+                var snap = try client.getCells(.{});
                 snap.deinit();
             }
             results[i].cells_us = nsSince(io, t0) / n / 1000;

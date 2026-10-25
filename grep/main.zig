@@ -328,7 +328,7 @@ fn draw(
     for (built.nodes) |*n| n.metadata_id = tagger.resolve(n.metadata_id);
 
     const layer = try client.getSize();
-    const cursor = try client.getCursor();
+    const cursor = try client.getCursor(.{});
     const outline = try client.createOutline(null, cursor.row, 0, layer.cols, .{});
     try client.outlineSetNodes(null, outline, built.nodes);
 
@@ -338,13 +338,13 @@ fn draw(
     const past = state.painted.row + state.painted.rows;
     const bottom = layer.rows -| 1;
     if (past <= bottom) {
-        try client.setCursor(past, 0);
+        try client.setCursor(past, 0, .{});
     } else {
         // The outline was taller than the window, so it scrolled the layer
         // as it drew and its footprint fills the viewport. Land on the
         // last row and emit a newline to scroll one blank in, the same
         // gap `gw-ls -l` leaves in that case.
-        try client.setCursor(bottom, 0);
+        try client.setCursor(bottom, 0, .{});
         try client.writeText("\n", .{});
     }
 

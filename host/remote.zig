@@ -735,21 +735,27 @@ const AuthClient = struct {
     }
 
     fn clearGrid(self: *AuthClient) void {
-        self.client.clear(0, 0, null, null) catch {};
+        self.client.clear(.{}) catch {};
     }
 
     fn run(self: *AuthClient, prompt: []const u8, out: []u8) ![]const u8 {
         const masked = containsAnyCase(prompt, "password") or containsAnyCase(prompt, "passphrase");
 
         self.clearGrid();
-        self.client.setCursor(1, 0) catch {};
+        self.client.setCursor(1, 0, .{}) catch {};
         self.client.writeText(trimForGrid(prompt), .{}) catch {};
 
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(self.alloc);
 
         while (true) {
-            const ev = (try self.listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(60_000), .clock = .awake } })) orelse continue;
+            const any_ev = (try self.listener.next(.{ .duration = .{ .raw = .fromMilliseconds(60_000), .clock = .awake } })) orelse continue;
+            // Only typing matters to a password prompt; the rest is
+            // dropped as it arrives.
+            const ev = any_ev.asInput() orelse {
+                any_ev.deinit(self.alloc);
+                continue;
+            };
             defer ev.deinit(self.alloc);
             switch (ev) {
                 .text => |t| {
@@ -781,8 +787,8 @@ const AuthClient = struct {
     }
 
     fn redrawInput(self: *AuthClient, text: []const u8, masked: bool) !void {
-        self.client.clear(3, 0, 1, null) catch {};
-        self.client.setCursor(3, 0) catch {};
+        self.client.clear(.{ .row = 3, .rows = 1 }) catch {};
+        self.client.setCursor(3, 0, .{}) catch {};
         if (masked) {
             var buf: [128]u8 = undefined;
             const n = @min(buf.len, text.len);

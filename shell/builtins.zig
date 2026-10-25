@@ -18,7 +18,6 @@ const remotecmd = @import("shell_support").remotecmd;
 const main = @import("main.zig");
 const Prompt = main.Prompt;
 const c = main.c;
-const drainResizes = main.drainResizes;
 const err_color = main.err_color;
 const provisioned_agent_path = main.provisioned_agent_path;
 const zjExistsProbe = main.zjExistsProbe;
@@ -368,9 +367,10 @@ pub fn doGwssh(self: *Prompt, args: []const []const u8) !u8 {
     const outcome = self.waitOutRemote(listener, session);
 
     // The remote shell left its own output on this pane's grid, and
-    // may have resized it; the caller's prompt redraw picks up from
-    // wherever that ended, like returning from any foreground program.
-    drainResizes(listener, self);
+    // may have resized it (`waitOutRemote` noted any resize); the
+    // caller's prompt redraw picks up from wherever that ended, like
+    // returning from any foreground program.
+    self.applyPendingResize(false) catch {};
     if (!outcome.started) try self.reportRemoteFailure(spec, outcome.status);
     self.last_status = outcome.status;
     self.have_status = true;
@@ -443,19 +443,22 @@ pub const RemoteOutcome = struct {
 pub fn waitOutRemote(self: *Prompt, listener: *glyphwire.InputListener, session: u64) RemoteOutcome {
     const alloc = self.client.alloc;
     while (true) {
-        while (listener.pollRemoteExitEvent()) |ev| {
-            if (ev.session != session) continue;
-            return .{
-                .status = std.math.cast(u8, ev.status) orelse 1,
-                .started = ev.started,
-            };
-        }
-
         // The wait is woken by `remote_exit` itself; the timeout is
         // only a floor on how long a missed wake-up could cost.
-        const ev = (listener.waitInputEvent(.{
+        const any_ev = (listener.next(.{
             .duration = .{ .raw = .fromMilliseconds(200), .clock = .awake },
         }) catch null) orelse continue;
+        const ev = any_ev.asInput() orelse {
+            defer any_ev.deinit(alloc);
+            switch (any_ev) {
+                .remote_exit => |rev| if (rev.session == session) return .{
+                    .status = std.math.cast(u8, rev.status) orelse 1,
+                    .started = rev.started,
+                },
+                else => self.noteOffPromptEvent(any_ev),
+            }
+            continue;
+        };
 
         switch (ev) {
             .key => |kev| {

@@ -368,7 +368,7 @@ pub fn renderBuffer(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
             const col = at.col;
             self.caret_at = .{ .row = row, .left = at.left };
             if (self.caretShape() != null) {
-                try batch.setCursorOn(self.grp.buffer_layer, row, col);
+                try batch.setCursor(row, col, .{ .layer = self.grp.buffer_layer });
             } else {
                 const under = try self.cursorGrapheme();
                 defer self.alloc.free(under);
@@ -979,7 +979,7 @@ pub fn renderHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     try self.popups.hover.place(batch, .{ .row = r.row, .col = r.col, .rows = r.rows, .cols = r.cols });
     // A resize keeps whatever the old cells held, so the frame ring
     // (which is otherwise never written) is blanked every time.
-    try batch.clearArea(.{ .layer = self.popups.hover.layer });
+    try batch.clear(.{ .layer = self.popups.hover.layer });
 
     // A rule's run: `cols` wide, so it crosses the frame cells and
     // meets the nine-patch's border at both edges.
@@ -1072,7 +1072,7 @@ pub fn renderTabTip(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     try self.popups.tab_tip.place(batch, .{ .row = r.row, .col = r.col, .rows = tabs.tip_rows, .cols = r.cols });
     // A resize keeps whatever the old cells held, so the corner cells
     // (which are otherwise never written) are blanked every time.
-    try batch.clearArea(.{ .layer = self.popups.tab_tip.layer });
+    try batch.clear(.{ .layer = self.popups.tab_tip.layer });
     // Transparent, so the panel is the text's background. Between the
     // two corner cells, and padded so a shorter path than last time
     // leaves nothing behind.
@@ -1463,7 +1463,7 @@ pub fn flushRowGroup(
 /// not a run of spaces.
 pub fn writeSpaces(self: *Ui, batch: *glyphwire.client.Client.Batch, r: usize, col: usize, n: usize) !void {
     if (n == 0) return;
-    try batch.clearArea(.{ .layer = self.grp.buffer_layer, .row = r, .col = col, .rows = 1, .cols = n, .bg = role(.bg) });
+    try batch.clear(.{ .layer = self.grp.buffer_layer, .row = r, .col = col, .rows = 1, .cols = n, .bg = role(.bg) });
 }
 
 /// The active buffer's lines as `layoutRowMap` reads them.
@@ -1924,15 +1924,14 @@ pub fn renderTree(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
             // shrink it back to the narrow cell width. Falls back to
             // `.fit` if the cell metrics somehow didn't load.
             const natural = self.cell_px_h > 0;
-            try batch.drawIconOnStyled(self.tree_layer, r, e.depth * tree_mod.indent_cols, iconFor(e), .{
-                .scale = if (natural) .natural else .fit,
+            try batch.drawIcon(r, e.depth * tree_mod.indent_cols, iconFor(e), .{ .layer = self.tree_layer, .scale = if (natural) .natural else .fit,
                 .h_align = .start,
                 .v_align = .center,
                 .max_h = if (natural) self.cell_px_h else null,
                 .foreground = true,
             });
         } else {
-            try batch.clearArea(.{ .layer = self.tree_layer, .row = r, .rows = 1, .cols = content_cols, .bg = role(.sidebar_bg) });
+            try batch.clear(.{ .layer = self.tree_layer, .row = r, .rows = 1, .cols = content_cols, .bg = role(.sidebar_bg) });
         }
     }
 
@@ -2008,8 +2007,7 @@ pub fn renderTreeEditRow(self: *Ui, batch: *glyphwire.client.Client.Batch, conte
             ls_icons.iconForFileName(text) orelse ls_icons.iconForExtension(text),
     };
     const natural = self.cell_px_h > 0;
-    try batch.drawIconOnStyled(self.tree_layer, te.row, indent, icon, .{
-        .scale = if (natural) .natural else .fit,
+    try batch.drawIcon(te.row, indent, icon, .{ .layer = self.tree_layer, .scale = if (natural) .natural else .fit,
         .h_align = .start,
         .v_align = .center,
         .max_h = if (natural) self.cell_px_h else null,
@@ -2091,7 +2089,7 @@ pub fn renderTabs(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(self.alloc);
 
-    try batch.clearArea(.{ .layer = self.grp.tabs_layer, .row = 0, .rows = 1, .bg = role(.tab_bar_bg) });
+    try batch.clear(.{ .layer = self.grp.tabs_layer, .row = 0, .rows = 1, .bg = role(.tab_bar_bg) });
 
     for (self.grp.tab_spans.items, labels.items, 0..) |span, tab, i| {
         const active = i == self.grp.active;

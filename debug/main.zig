@@ -131,7 +131,7 @@ fn runLine(client: *glyphwire.Client, alloc: std.mem.Allocator, io: std.Io, out:
 }
 
 fn dumpCells(client: *glyphwire.Client, out: *std.Io.Writer, layer: u32) !void {
-    var snap = try client.getCellsOn(@intCast(layer));
+    var snap = try client.getCells(.{ .layer = @intCast(layer) });
     defer snap.deinit();
     var row: usize = 0;
     while (row < snap.rows()) : (row += 1) {

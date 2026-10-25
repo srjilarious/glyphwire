@@ -393,7 +393,7 @@ pub const Panel = struct {
         self.sent_cwd = null;
         self.visible = false;
         self.focused = false;
-        self.client.clearOn(self.layer, 0, 0, null, null) catch {};
+        self.client.clear(.{ .layer = self.layer }) catch {};
         self.client.setLayerVisible(self.layer, false) catch {};
         self.client.setLayerVisible(self.frame_layer, false) catch {};
         self.client.setCaretVisible(false) catch {};

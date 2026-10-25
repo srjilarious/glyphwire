@@ -594,7 +594,7 @@ const Ui = struct {
         // left. A drawn caret rather than the host's -- a text layer's
         // cursor property is the *next write* position, not a visual
         // marker.
-        try b.clearArea(.{ .layer = self.header_layer, .row = 1, .rows = 1 });
+        try b.clear(.{ .layer = self.header_layer, .row = 1, .rows = 1 });
         try b.writeText(self.scratch.items, .{
             .layer = self.header_layer,
             .row = 1,
@@ -637,7 +637,7 @@ const Ui = struct {
             } else {
                 // Rows past the last match: back to transparent, which
                 // the layer background paints.
-                try b.clearArea(.{ .layer = self.list_layer, .row = row, .rows = 1 });
+                try b.clear(.{ .layer = self.list_layer, .row = row, .rows = 1 });
             }
         }
     }

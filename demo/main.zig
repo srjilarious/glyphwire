@@ -51,7 +51,7 @@ fn drawTileFrame(client: *glyphwire.Client, row: usize, col: usize, rows: usize,
             const left = c == col;
             const right = c == last_col;
             const piece: []const u8 = if (top and left) "box/tl" else if (top and right) "box/tr" else if (bottom and left) "box/bl" else if (bottom and right) "box/br" else if (top) "box/t" else if (bottom) "box/b" else if (left) "box/l" else if (right) "box/r" else continue;
-            try client.drawIconStyled(r, c, piece, .{ .scale = .stretch });
+            try client.drawIcon(r, c, piece, .{ .scale = .stretch });
         }
     }
 }
@@ -103,10 +103,10 @@ fn run(init: std.process.Init) !void {
     // already-drawn-on grid (e.g. running it twice from the shell prompt)
     // would otherwise leave stale content peeking out from under/around
     // whatever's redrawn this time.
-    try client.clear(0, 0, null, null);
+    try client.clear(.{});
 
     for (runs) |r| {
-        try client.setCursor(r.row, r.col);
+        try client.setCursor(r.row, r.col, .{});
         try client.writeText(r.text, .{ .fg = r.fg, .bg = r.bg });
     }
 
@@ -119,41 +119,41 @@ fn run(init: std.process.Init) !void {
     // size (`get_cell_metrics`); without it the strip falls back to a
     // plain one-cell `.fit` `draw_icon`.
     try drawTileFrame(&client, panel_row, panel_col, panel_rows, panel_cols);
-    try client.setCursor(panel_row + 1, panel_col + 2);
+    try client.setCursor(panel_row + 1, panel_col + 2, .{});
     try client.writeText("icons + box tiles", .{ .fg = rgb(255, 255, 255) });
 
     const icon_names = [_][]const u8{ "file/folder", "file/file", "file/audio", "file/image", "file/video", "file/archive", "file/executable", "file/drive" };
     const metrics = client.getCellMetrics() catch null;
 
-    try client.setCursor(panel_row + 3, panel_col + 2);
+    try client.setCursor(panel_row + 3, panel_col + 2, .{});
     try client.writeText("fill (1 line tall):", .{ .fg = rgb(180, 180, 180) });
     for (icon_names, 0..) |name, i| {
         const col = icon_col0 + i * 3;
         if (metrics) |m| {
-            try client.drawIconStyled(fill_icon_row, col, name, .{
+            try client.drawIcon(fill_icon_row, col, name, .{
                 .scale = .natural,
                 .h_align = .start,
                 .v_align = .center,
                 .max_h = m.h,
             });
         } else {
-            try client.drawIcon(fill_icon_row, col, name);
+            try client.drawIcon(fill_icon_row, col, name, .{});
         }
     }
 
-    try client.setCursor(panel_row + 6, panel_col + 2);
+    try client.setCursor(panel_row + 6, panel_col + 2, .{});
     try client.writeText("large (3 lines tall):", .{ .fg = rgb(180, 180, 180) });
     for (icon_names, 0..) |name, i| {
         const col = icon_col0 + i * 5;
         if (metrics) |m| {
-            try client.drawIconStyled(large_icon_row, col, name, .{
+            try client.drawIcon(large_icon_row, col, name, .{
                 .scale = .natural,
                 .h_align = .start,
                 .v_align = .center,
                 .max_h = 3 * m.h,
             });
         } else {
-            try client.drawIcon(large_icon_row, col, name);
+            try client.drawIcon(large_icon_row, col, name, .{});
         }
     }
 
@@ -162,13 +162,13 @@ fn run(init: std.process.Init) !void {
     // Sans Mono CJK face, Japanese kana + kanji from the same face). Any
     // codepoint no face provides would show as a tofu box.
     const intl_row = panel_row + panel_rows + 1;
-    try client.setCursor(intl_row, 0);
+    try client.setCursor(intl_row, 0, .{});
     try client.writeText("hello world, in more scripts:", .{ .fg = rgb(200, 200, 200) });
-    try client.setCursor(intl_row + 1, 2);
+    try client.setCursor(intl_row + 1, 2, .{});
     try client.writeText("Greek:   \u{0393}\u{03B5}\u{03B9}\u{03B1} \u{03C3}\u{03BF}\u{03C5} \u{039A}\u{03CC}\u{03C3}\u{03BC}\u{03B5}", .{ .fg = rgb(126, 200, 255) });
-    try client.setCursor(intl_row + 2, 2);
+    try client.setCursor(intl_row + 2, 2, .{});
     try client.writeText("Russian: \u{041F}\u{0440}\u{0438}\u{0432}\u{0435}\u{0442}, \u{043C}\u{0438}\u{0440}", .{ .fg = rgb(255, 184, 108) });
-    try client.setCursor(intl_row + 3, 2);
+    try client.setCursor(intl_row + 3, 2, .{});
     try client.writeText("Japanese: \u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\u{4E16}\u{754C}", .{ .fg = rgb(80, 250, 123) });
 
     // Underline styles: the five `write_text` takes, then the two cases that
@@ -177,7 +177,7 @@ fn run(init: std.process.Init) !void {
     // highlighting), and the same thing arriving as an escape sequence in a
     // mirrored program's output.
     const ul_row = intl_row + 5;
-    try client.setCursor(ul_row, 0);
+    try client.setCursor(ul_row, 0, .{});
     try client.writeText("underline styles:", .{ .fg = rgb(200, 200, 200) });
     const styles = [_]glyphwire.Underline{ .single, .double, .curly, .dotted, .dashed };
     for (styles, 0..) |style, i| {
@@ -224,5 +224,5 @@ fn run(init: std.process.Init) !void {
     // its next prompt one row below wherever the cursor ends up after a
     // child runs (see Prompt.submitLine), so leaving it higher up made the
     // next prompt overwrite this output.
-    try client.setCursor(ul_row + 4 + styles.len, 0);
+    try client.setCursor(ul_row + 4 + styles.len, 0, .{});
 }

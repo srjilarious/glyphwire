@@ -194,8 +194,8 @@ pub fn main(init: std.process.Init) !void {
     // past its bottom edge so whatever runs next continues below the
     // image instead of overlapping it. Same get-cursor/draw/set-cursor
     // shape glyphwire-ls uses per entry -- see its writeGrid doc comment.
-    const cur = try client.getCursor();
-    try client.drawImage(handle, null, null, rows, cols, scale, .{});
+    const cur = try client.getCursor(.{});
+    try client.drawImage(handle, .{ .row_span = rows, .col_span = cols, .scale = scale });
 
     // `cur.row + rows` is the target row *before* `drawImage` ran, but an
     // image tall enough to reach the layer's bottom edge already scrolled
@@ -216,10 +216,10 @@ pub fn main(init: std.process.Init) !void {
     // tracked next row at the grid height so `resolveRow` isn't handed a
     // runaway overshoot" shape core_tests.zig's
     // `manyLinesPastBottomCursorCappedAtHeight...Test` covers.
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     const grid_rows = snapshot.rows();
     snapshot.deinit();
-    try client.setCursor(@min(cur.row + rows, grid_rows), 0);
+    try client.setCursor(@min(cur.row + rows, grid_rows), 0, .{});
 
     // Every request above has already round-tripped, so the image and the
     // follow-up cursor move are committed server-side -- nothing left to

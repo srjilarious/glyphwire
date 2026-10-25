@@ -58,9 +58,9 @@ fn run(init: std.process.Init) !void {
     var client = try glyphwire.Client.connectFromEnv(init.io, alloc, init.environ_map);
     defer client.deinit();
 
-    try client.clear(0, 0, null, null);
+    try client.clear(.{});
 
-    try client.setCursor(0, 0);
+    try client.setCursor(0, 0, .{});
     try client.writeText("glyphwire table demo", .{ .fg = rgb(0, 255, 255) });
 
     const bordered_rows = try buildRows(alloc, 3);
@@ -75,7 +75,7 @@ fn run(init: std.process.Init) !void {
     // engine) rather than asking the server to report it back.
     const ruled_col = 40 + 4;
 
-    try client.setCursor(2, ruled_col);
+    try client.setCursor(2, ruled_col, .{});
     try client.writeText("ruled, no border:", .{ .fg = rgb(255, 255, 255) });
 
     const ruled_rows = try buildRows(alloc, 2);
@@ -86,7 +86,7 @@ fn run(init: std.process.Init) !void {
     try client.tableSetRows(null, ruled, ruled_rows);
     const bare_col = ruled_col + 31 + 4;
 
-    try client.setCursor(2, bare_col);
+    try client.setCursor(2, bare_col, .{});
     try client.writeText("bare:", .{ .fg = rgb(255, 255, 255) });
 
     const bare_rows = try buildRows(alloc, 2);
@@ -96,7 +96,7 @@ fn run(init: std.process.Init) !void {
     }, .{ .borders = false, .header_separator = false });
     try client.tableSetRows(null, bare, bare_rows);
 
-    try client.setCursor(2 + entries.len + 4, 0);
+    try client.setCursor(2 + entries.len + 4, 0, .{});
 
     // Stay open until dismissed (any keypress) rather than returning
     // immediately -- same reasoning as view/main.zig's identical wait:
@@ -108,7 +108,11 @@ fn run(init: std.process.Init) !void {
     const listener = glyphwire.InputListener.connectFromEnv(init.io, alloc, init.environ_map, &.{"key"}) catch return;
     defer listener.deinit();
     while (true) {
-        const input_ev = (try listener.waitInputEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse continue;
+        const any_ev = (try listener.next(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse continue;
+        const input_ev = any_ev.asInput() orelse {
+            any_ev.deinit(alloc);
+            continue;
+        };
         defer input_ev.deinit(alloc);
         switch (input_ev) {
             .key => |k| if (k.pressed) return,

@@ -428,9 +428,9 @@ pub fn sinkWriteTextTransparent(self: *Prompt, sink: ChainSink, text: []const u8
 }
 
 pub fn sinkDrawIconStyled(self: *Prompt, sink: ChainSink, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
-    if (sink) |b| {
-        if (self.layer) |l| try b.drawIconOnStyled(l, row, col, name, opts) else try b.drawIconStyled(row, col, name, opts);
-    } else try self.drawIconStyled(row, col, name, opts);
+    var o = opts;
+    o.layer = self.layer;
+    if (sink) |b| try b.drawIcon(row, col, name, o) else try self.drawIconStyled(row, col, name, o);
 }
 
 /// Draws a rendered chain left to right starting at `(row, start_col)`:

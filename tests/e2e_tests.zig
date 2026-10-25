@@ -254,7 +254,7 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
 
     try waitForCell(&reporter, 3, text_col + 2, "z");
 
-    var snapshot = try reporter.getCells();
+    var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     try testz.expectEqualStr(">", snapshot.cellAt(0, arrow_col).grapheme);
     try testz.expectEqualStr("n", snapshot.cellAt(0, text_col).grapheme);
@@ -330,7 +330,7 @@ pub fn shellPowerlinePromptDrawsSegmentTextOnItsBackgroundTest(_: std.Io, alloc:
     try waitForCell(&reporter, 0, 0, "A");
     try waitForCell(&reporter, 0, 1, "B");
 
-    var snapshot = try reporter.getCells();
+    var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
 
     // The text sits on the segment's blue background, not on blank cells.
@@ -414,7 +414,7 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
     // added; waiting on the "/" proves the directory suffix ran.
     try waitForCell(&reporter, 0, text_col + 6, "/");
 
-    var snapshot = try reporter.getCells();
+    var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     try testz.expectEqualStr("s", snapshot.cellAt(0, text_col + 3).grapheme);
     try testz.expectEqualStr("r", snapshot.cellAt(0, text_col + 4).grapheme);
@@ -482,7 +482,7 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
 
     try waitForCell(&reporter, 0, text_col + 6, "/");
 
-    var snapshot = try reporter.getCells();
+    var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     const hinted_c = snapshot.cellAt(0, text_col + 5);
     const hinted_slash = snapshot.cellAt(0, text_col + 6);
@@ -495,7 +495,7 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     try testz.expectEqual(hinted_slash.fg.g, 120);
     try testz.expectEqual(hinted_slash.fg.b, 120);
 
-    const cur = try reporter.getCursor();
+    const cur = try reporter.getCursor(.{});
     try testz.expectEqual(cur.row, @as(usize, 0));
     try testz.expectEqual(cur.col, text_col + 5);
 
@@ -503,7 +503,7 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     try reporter.reportKey("left", false);
     try waitForCursorCol(&reporter, text_col + 4);
 
-    var left_snapshot = try reporter.getCells();
+    var left_snapshot = try reporter.getCells(.{});
     defer left_snapshot.deinit();
     const left_c = left_snapshot.cellAt(0, text_col + 5);
     const left_slash = left_snapshot.cellAt(0, text_col + 6);
@@ -516,7 +516,7 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     try reporter.reportKey("right", false);
     try waitForCursorCol(&reporter, text_col + 5);
 
-    var right_snapshot = try reporter.getCells();
+    var right_snapshot = try reporter.getCells(.{});
     defer right_snapshot.deinit();
     const right_c = right_snapshot.cellAt(0, text_col + 5);
     const right_slash = right_snapshot.cellAt(0, text_col + 6);
@@ -529,7 +529,7 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     try reporter.reportKey("right", false);
     try waitForCursorCol(&reporter, text_col + 7);
 
-    var accepted = try reporter.getCells();
+    var accepted = try reporter.getCells(.{});
     defer accepted.deinit();
     try testz.expectEqualStr("c", accepted.cellAt(0, text_col + 5).grapheme);
     try testz.expectEqualStr("/", accepted.cellAt(0, text_col + 6).grapheme);
@@ -591,7 +591,7 @@ pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: st
     // Sorted candidates: debug, demo, docker, docs -- row 1 (right below
     // the input line) is "debug", the initial selection.
     try waitForCell(&reporter, 1, 0, ">");
-    var opened = try reporter.getCells();
+    var opened = try reporter.getCells(.{});
     defer opened.deinit();
     try testz.expectEqualStr(">", opened.cellAt(1, 0).grapheme);
     try testz.expectEqualStr("d", opened.cellAt(1, 2).grapheme);
@@ -608,7 +608,7 @@ pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: st
     try reporter.reportKey("down", false);
     try waitForCell(&reporter, 2, 0, ">");
 
-    var moved = try reporter.getCells();
+    var moved = try reporter.getCells(.{});
     defer moved.deinit();
     try testz.expectEqualStr(" ", moved.cellAt(1, 0).grapheme); // debug: no longer selected
     try testz.expectEqualStr(">", moved.cellAt(2, 0).grapheme); // demo: now selected
@@ -619,7 +619,7 @@ pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: st
     // "cd d" + "emo/" -> "cd demo/"; also proves the picker's rows were
     // cleared (Enter doesn't submit the line -- see `acceptCompletionPicker`).
     try waitForCell(&reporter, 0, text_col + 7, "/");
-    var accepted = try reporter.getCells();
+    var accepted = try reporter.getCells(.{});
     defer accepted.deinit();
     try testz.expectEqualStr("e", accepted.cellAt(0, text_col + 4).grapheme);
     try testz.expectEqualStr("m", accepted.cellAt(0, text_col + 5).grapheme);
@@ -685,7 +685,7 @@ pub fn shellCtrlBackspaceAndDeleteRemoveWholeWordsTest(_: std.Io, alloc: std.mem
     // "echo foo bar" -> "echo foo " (the trailing space Ctrl+Left would
     // have stopped just past is kept; only "bar" itself is deleted).
     try waitForCursorCol(&reporter, text_col + 9);
-    var after_backspace = try reporter.getCells();
+    var after_backspace = try reporter.getCells(.{});
     defer after_backspace.deinit();
     try testz.expectEqualStr(" ", after_backspace.cellAt(0, text_col + 8).grapheme);
     try testz.expectEqualStr(" ", after_backspace.cellAt(0, text_col + 9).grapheme);
@@ -701,14 +701,14 @@ pub fn shellCtrlBackspaceAndDeleteRemoveWholeWordsTest(_: std.Io, alloc: std.mem
 
     // "echo foo " -> " foo " ("echo" deleted, cursor stays at column 0).
     try waitForCell(&reporter, 0, text_col, " ");
-    var after_delete = try reporter.getCells();
+    var after_delete = try reporter.getCells(.{});
     defer after_delete.deinit();
     try testz.expectEqualStr(" ", after_delete.cellAt(0, text_col).grapheme);
     try testz.expectEqualStr("f", after_delete.cellAt(0, text_col + 1).grapheme);
     try testz.expectEqualStr("o", after_delete.cellAt(0, text_col + 2).grapheme);
     try testz.expectEqualStr("o", after_delete.cellAt(0, text_col + 3).grapheme);
     try testz.expectEqualStr(" ", after_delete.cellAt(0, text_col + 4).grapheme);
-    const cur = try reporter.getCursor();
+    const cur = try reporter.getCursor(.{});
     try testz.expectEqual(cur.col, text_col);
 }
 
@@ -809,12 +809,12 @@ pub fn shellCtrlRLoadsResultFdLineIntoPromptTest(_: std.Io, alloc: std.mem.Alloc
     // the line's *end* so the wait can't pass on a half-drawn line.
     const line = "echo ctrlr-e2e-marker";
     try waitForCell(&reporter, 0, text_col + line.len - 1, "r");
-    var snapshot = try reporter.getCells();
+    var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     for (line, 0..) |ch, i| {
         try testz.expectEqualStr(&.{ch}, snapshot.cellAt(0, text_col + i).grapheme);
     }
-    const cur = try reporter.getCursor();
+    const cur = try reporter.getCursor(.{});
     try testz.expectEqual(cur.col, text_col + line.len);
 }
 
@@ -899,7 +899,7 @@ pub fn shellCtrlRSeedsGwHistWithTypedLineTest(_: std.Io, alloc: std.mem.Allocato
 
     const line = "echo seed=[git com]";
     try waitForCell(&reporter, 0, text_col + line.len - 1, "]");
-    var snapshot = try reporter.getCells();
+    var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     for (line, 0..) |ch, i| {
         try testz.expectEqualStr(&.{ch}, snapshot.cellAt(0, text_col + i).grapheme);
@@ -969,7 +969,7 @@ pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator
     // "n" landing proves the whole expanded name made it across.
     try waitForCell(&reporter, 1, 12, "n");
 
-    var snapshot = try reporter.getCells();
+    var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     for ("build.zig.zon", 0..) |expected_ch, i| {
         var expected_buf: [1]u8 = .{expected_ch};
@@ -1064,7 +1064,7 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     // capture started.
     try waitForCell(&reporter, 1, 4, "o");
 
-    var snapshot = try reporter.getCells();
+    var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     for ("hello", 0..) |expected_ch, i| {
         var expected_buf: [1]u8 = .{expected_ch};
@@ -1136,7 +1136,7 @@ pub fn shellRunsATwoStagePipelineTest(_: std.Io, alloc: std.mem.Allocator) !void
     // Wait for the last "O" of "HELLO" so the whole word is proven across.
     try waitForCell(&reporter, 1, 4, "O");
 
-    var snapshot = try reporter.getCells();
+    var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     for ("HELLO", 0..) |expected_ch, i| {
         var expected_buf: [1]u8 = .{expected_ch};
@@ -1334,9 +1334,9 @@ pub fn shellPowerlinePromptStableAfterOutputScrollTest(_: std.Io, alloc: std.mem
 /// The row of the 2-line powerline prompt's input line, or an error if
 /// the cursor isn't currently on a ">"-at-col-0 input row (mid-redraw).
 fn promptInputRow(reporter: *glyphwire.Client) !usize {
-    const cur = try reporter.getCursor();
+    const cur = try reporter.getCursor(.{});
     if (cur.col != 2 or cur.row >= 24) return error.NotOnInputRow;
-    var snap = try reporter.getCells();
+    var snap = try reporter.getCells(.{});
     defer snap.deinit();
     if (!std.mem.eql(u8, snap.cellAt(cur.row, 0).grapheme, ">")) return error.NotOnInputRow;
     return cur.row;
@@ -1451,7 +1451,7 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     // rather than false-passing on an empty listing.
     try waitForCell(&reporter, 2, 4, "m");
 
-    var snapshot = try reporter.getCells();
+    var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     for ("marker.txt", 0..) |expected_ch, i| {
         var expected_buf: [1]u8 = .{expected_ch};
@@ -1490,7 +1490,7 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
 fn waitForCursorRow(client: *glyphwire.Client, want_row: usize) !void {
     var attempts: usize = 0;
     while (attempts < 1000) : (attempts += 1) {
-        const cur = try client.getCursor();
+        const cur = try client.getCursor(.{});
         if (cur.row == want_row) return;
         std.Io.sleep(client.io, .fromMilliseconds(10), .awake) catch {};
     }
@@ -1501,7 +1501,7 @@ fn waitForCursorRow(client: *glyphwire.Client, want_row: usize) !void {
 fn waitForCursorCol(client: *glyphwire.Client, want_col: usize) !void {
     var attempts: usize = 0;
     while (attempts < 1000) : (attempts += 1) {
-        const cur = try client.getCursor();
+        const cur = try client.getCursor(.{});
         if (cur.col == want_col) return;
         std.Io.sleep(client.io, .fromMilliseconds(10), .awake) catch {};
     }
@@ -1648,7 +1648,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     var found = false;
     var attempts: usize = 0;
     while (attempts < 1000 and !found) : (attempts += 1) {
-        var snapshot = try reporter.getCells();
+        var snapshot = try reporter.getCells(.{});
         defer snapshot.deinit();
         var col: usize = 0;
         while (col + 6 <= snapshot.cols()) : (col += 1) {
@@ -1787,7 +1787,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
 fn waitForTextInRows(client: *glyphwire.Client, alloc: std.mem.Allocator, row_limit: usize, expected: []const u8) !void {
     var attempts: usize = 0;
     while (attempts < 1000) : (attempts += 1) {
-        var snapshot = try client.getCells();
+        var snapshot = try client.getCells(.{});
         defer snapshot.deinit();
         var row: usize = 0;
         while (row < row_limit) : (row += 1) {
@@ -2159,7 +2159,7 @@ pub fn lsMultipleOperandsGroupsLooseFilesThenDirsTest(_: std.Io, alloc: std.mem.
 fn waitForCell(client: *glyphwire.Client, row: usize, col: usize, expected: []const u8) !void {
     var attempts: usize = 0;
     while (attempts < 1000) : (attempts += 1) {
-        var snapshot = try client.getCells();
+        var snapshot = try client.getCells(.{});
         defer snapshot.deinit();
         if (std.mem.eql(u8, snapshot.cellAt(row, col).grapheme, expected)) return;
         std.Io.sleep(client.io, .fromMilliseconds(10), .awake) catch {};
@@ -2219,7 +2219,7 @@ pub fn shellWithContextFlagDrawsOnThatContextNotTheVisibleOneTest(_: std.Io, all
 
     // Nothing reached the base context, which is still the one on screen.
     try reporter.attachContext(glyphwire.root_context_handle);
-    var base = try reporter.getCells();
+    var base = try reporter.getCells(.{});
     defer base.deinit();
     try testz.expectFalse(std.mem.eql(u8, base.cellAt(0, arrow_col).grapheme, ">"));
 

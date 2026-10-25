@@ -57,7 +57,7 @@ pub fn createTableAndSetRowsPaintsHeaderAndBodyTest(io: std.Io, alloc: std.mem.A
         &.{ .{ .display = "bravo" }, .{ .display = "9" } },
     });
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
 
     // Header row.
@@ -111,7 +111,7 @@ pub fn tableColumnHAlignEndRightAlignsTextTest(io: std.Io, alloc: std.mem.Alloca
         &.{.{ .display = "9" }},
     });
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
 
     try testz.expectEqualStr(" ", snapshot.cellAt(1, 0).grapheme);
@@ -156,7 +156,7 @@ pub fn tableCellIconFillsLineAtDefaultRowHeightTest(io: std.Io, alloc: std.mem.A
         &.{.{ .display = "x", .icon = "file" }},
     });
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
 
     const icon_cell = snapshot.cellAt(1, 0);
@@ -205,7 +205,7 @@ pub fn tableStyleMaxIconPxCapsBodyIconTest(io: std.Io, alloc: std.mem.Allocator)
     }, .{ .borders = false, .header_separator = false, .row_height = 3 });
     try client.tableSetRows(null, uncapped, &.{&.{.{ .display = "y", .icon = "file" }}});
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
 
     // The icon sits on the body row block's middle line: header at the
@@ -252,7 +252,7 @@ pub fn tableCellIconFallsBackToFitWithoutCellMetricsTest(io: std.Io, alloc: std.
         &.{.{ .display = "x", .icon = "file" }},
     });
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
 
     const icon_cell = snapshot.cellAt(1, 0);
@@ -298,7 +298,7 @@ pub fn tableBodyIconCompositesOverAltRowBgTest(io: std.Io, alloc: std.mem.Alloca
     });
 
     {
-        var snapshot = try client.getCells();
+        var snapshot = try client.getCells(.{});
         defer snapshot.deinit();
 
         // Grid row 2 is the second data row (`display_i == 1`) -- the
@@ -322,7 +322,7 @@ pub fn tableBodyIconCompositesOverAltRowBgTest(io: std.Io, alloc: std.mem.Alloca
         &.{.{ .display = "b", .icon = "file" }},
     });
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
 
     // Header at grid row 10, first data-row block rows 11-13, second
@@ -369,7 +369,7 @@ pub fn tableSetSortReordersRowsByNumericSortKeyTest(io: std.Io, alloc: std.mem.A
     });
 
     {
-        var snapshot = try client.getCells();
+        var snapshot = try client.getCells(.{});
         defer snapshot.deinit();
         // Unsorted: insertion order.
         try testz.expectEqualStr("c", snapshot.cellAt(1, 0).grapheme);
@@ -379,7 +379,7 @@ pub fn tableSetSortReordersRowsByNumericSortKeyTest(io: std.Io, alloc: std.mem.A
 
     try client.tableSetSort(null, table, 1, .ascending);
     {
-        var snapshot = try client.getCells();
+        var snapshot = try client.getCells(.{});
         defer snapshot.deinit();
         try testz.expectEqualStr("a", snapshot.cellAt(1, 0).grapheme);
         try testz.expectEqualStr("b", snapshot.cellAt(2, 0).grapheme);
@@ -388,7 +388,7 @@ pub fn tableSetSortReordersRowsByNumericSortKeyTest(io: std.Io, alloc: std.mem.A
 
     try client.tableSetSort(null, table, 1, .descending);
     {
-        var snapshot = try client.getCells();
+        var snapshot = try client.getCells(.{});
         defer snapshot.deinit();
         try testz.expectEqualStr("c", snapshot.cellAt(1, 0).grapheme);
         try testz.expectEqualStr("b", snapshot.cellAt(2, 0).grapheme);
@@ -426,7 +426,7 @@ pub fn tableSetStyleTogglesAltRowBgTest(io: std.Io, alloc: std.mem.Allocator) !v
     });
 
     {
-        var snapshot = try client.getCells();
+        var snapshot = try client.getCells(.{});
         defer snapshot.deinit();
         // No striping yet: second row's background is still default.
         try testz.expectEqual(snapshot.cellAt(2, 0).bg.?.r, 0);
@@ -438,7 +438,7 @@ pub fn tableSetStyleTogglesAltRowBgTest(io: std.Io, alloc: std.mem.Allocator) !v
         .alt_row_bg = .{ .r = 30, .g = 30, .b = 30, .a = 255 },
     });
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
     try testz.expectEqual(snapshot.cellAt(1, 0).bg.?.r, 0);
     try testz.expectEqual(snapshot.cellAt(2, 0).bg.?.r, 30);
@@ -472,7 +472,7 @@ pub fn destroyTableBlanksItsRegionTest(io: std.Io, alloc: std.mem.Allocator) !vo
     });
 
     {
-        var snapshot = try client.getCells();
+        var snapshot = try client.getCells(.{});
         defer snapshot.deinit();
         try testz.expectEqualStr("N", snapshot.cellAt(0, 0).grapheme);
         try testz.expectEqualStr("a", snapshot.cellAt(1, 0).grapheme);
@@ -480,7 +480,7 @@ pub fn destroyTableBlanksItsRegionTest(io: std.Io, alloc: std.mem.Allocator) !vo
 
     try client.destroyTable(null, table);
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
     try testz.expectEqualStr("", snapshot.cellAt(0, 0).grapheme);
     try testz.expectEqualStr("", snapshot.cellAt(1, 0).grapheme);
@@ -519,7 +519,7 @@ pub fn tableNearLayerBottomScrollsToFitInsteadOfClippingTest(io: std.Io, alloc: 
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     defer client.deinit();
 
-    try client.setCursor(0, 0);
+    try client.setCursor(0, 0, .{});
     try client.writeText("!", .{ .fg = .{ .r = 255, .g = 255, .b = 255 } });
 
     // Anchored at row 3 of a 5-row layer wanting 3 total lines (header +
@@ -534,7 +534,7 @@ pub fn tableNearLayerBottomScrollsToFitInsteadOfClippingTest(io: std.Io, alloc: 
         &.{.{ .display = "b" }},
     });
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
 
     // The sentinel was scrolled off (evicted -- no scrollback configured).
@@ -634,7 +634,7 @@ pub fn createTableOnAnotherConnectionDefaultsToFirstConnectionsCursorTest(io: st
     // `Prompt.submitLine` does before spawning a command.
     var shell_conn = try glyphwire.Client.connect(io, alloc, socket_path);
     defer shell_conn.deinit();
-    try shell_conn.setCursor(5, 3);
+    try shell_conn.setCursor(5, 3, .{});
     // `setCursor` is a notification -- fire-and-forget. Force it through
     // connection A's dispatch before connection B creates its table below:
     // dispatch is strictly in-order and mutex-guarded, so a round trip on
@@ -736,7 +736,7 @@ pub fn tableOversizedShowsTailTest(io: std.Io, alloc: std.mem.Allocator) !void {
 
     // A sentinel on row 0, standing in for the shell's prompt / `total`
     // line -- it should scroll into history intact, not get buried.
-    try client.setCursor(0, 0);
+    try client.setCursor(0, 0, .{});
     try client.writeText("S", .{ .fg = .{ .r = 255, .g = 255, .b = 255 } });
 
     // header + 10 body rows * row_height 1 == 11 lines in a 6-row
@@ -759,7 +759,7 @@ pub fn tableOversizedShowsTailTest(io: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(state.painted.row, 0);
     try testz.expectEqual(state.painted.rows, 6);
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
     // The live tail "e".."j" fills rows 0-5 -- no blank row anywhere.
     try testz.expectEqualStr("e", snapshot.cellAt(0, 0).grapheme);
@@ -768,10 +768,10 @@ pub fn tableOversizedShowsTailTest(io: std.Io, alloc: std.mem.Allocator) !void {
     // Rendering from row 2 then scrolling 7 rows (11 lines - (6 - 2)
     // on-screen) puts the header 5 rows above the viewport and the
     // sentinel 7 -- both still holding their real content, not blanked.
-    var hist5 = try client.getCellsView(5);
+    var hist5 = try client.getCells(.{ .view_offset = 5 });
     defer hist5.deinit();
     try testz.expectEqualStr("N", hist5.cellAt(0, 0).grapheme); // "Name" header
-    var hist7 = try client.getCellsView(7);
+    var hist7 = try client.getCells(.{ .view_offset = 7 });
     defer hist7.deinit();
     try testz.expectEqualStr("S", hist7.cellAt(0, 0).grapheme);
 }
@@ -932,7 +932,7 @@ pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Alloc
 
     {
         // Unsorted: plain "Name", "X" header starts at the nominal col 5.
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         try testz.expectEqualStr("N", snap.cellAt(0, 0).grapheme);
         try testz.expectEqualStr("X", snap.cellAt(0, 5).grapheme);
@@ -941,7 +941,7 @@ pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Alloc
 
     try client.tableSetSort(null, table, 0, .ascending);
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         try testz.expectEqualStr("N", snap.cellAt(0, 0).grapheme);
         try testz.expectEqualStr("e", snap.cellAt(0, 3).grapheme);
@@ -954,7 +954,7 @@ pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Alloc
 
     try client.tableSetSort(null, table, 0, .descending);
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         try testz.expectEqualStr("\u{25BE}", snap.cellAt(0, 5).grapheme); // ▾
         try testz.expectEqualStr("b", snap.cellAt(1, 0).grapheme);
@@ -962,7 +962,7 @@ pub fn tableSortedHeaderShowsDirectionArrowTest(io: std.Io, alloc: std.mem.Alloc
 
     try client.tableSetSort(null, table, null, .none);
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         // Arrow gone, column back to its nominal width: "X" at col 5.
         try testz.expectEqualStr("X", snap.cellAt(0, 5).grapheme);
@@ -1008,17 +1008,17 @@ pub fn tableRepaintAfterScrollKeepsPositionTest(io: std.Io, alloc: std.mem.Alloc
     // Push three line feeds from the bottom row: the whole table moves up
     // three rows, its header into scrollback. Body "c"/"a"/"b" (rows 1-3)
     // are now at live rows -2/-1/0, so live row 0 shows "b".
-    try client.setCursor(7, 0);
+    try client.setCursor(7, 0, .{});
     try client.writeText("\n\n\n", .{});
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         try testz.expectEqualStr("b", snap.cellAt(0, 0).grapheme);
     }
 
     // Before sorting: no arrow on the (scrolled-back) header yet.
     {
-        var hist = try client.getCellsView(3);
+        var hist = try client.getCells(.{ .view_offset = 3 });
         defer hist.deinit();
         try testz.expectEqualStr("N", hist.cellAt(0, 0).grapheme);
         try testz.expectNotEqualStr("\u{25B4}", hist.cellAt(0, 5).grapheme);
@@ -1029,7 +1029,7 @@ pub fn tableRepaintAfterScrollKeepsPositionTest(io: std.Io, alloc: std.mem.Alloc
     // now shows "c" (the third sorted row).
     try client.tableSetSort(null, table, 0, .ascending);
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         try testz.expectEqualStr("c", snap.cellAt(0, 0).grapheme);
     }
@@ -1038,17 +1038,17 @@ pub fn tableRepaintAfterScrollKeepsPositionTest(io: std.Io, alloc: std.mem.Alloc
     // back up shows the header with its arrow and the body in sorted order
     // (a / b above the live "c").
     {
-        var h1 = try client.getCellsView(1);
+        var h1 = try client.getCells(.{ .view_offset = 1 });
         defer h1.deinit();
         try testz.expectEqualStr("b", h1.cellAt(0, 0).grapheme);
     }
     {
-        var h2 = try client.getCellsView(2);
+        var h2 = try client.getCells(.{ .view_offset = 2 });
         defer h2.deinit();
         try testz.expectEqualStr("a", h2.cellAt(0, 0).grapheme);
     }
     {
-        var h3 = try client.getCellsView(3);
+        var h3 = try client.getCells(.{ .view_offset = 3 });
         defer h3.deinit();
         try testz.expectEqualStr("N", h3.cellAt(0, 0).grapheme);
         try testz.expectEqualStr("\u{25B4}", h3.cellAt(0, 5).grapheme);
@@ -1089,7 +1089,7 @@ pub fn tableTopLiveFollowsResizeTest(io: std.Io, alloc: std.mem.Allocator) !void
     // `table_set_rows` is a notification; force the server to process it
     // (and its `render`) before the resize by issuing a request.
     {
-        var s = try client.getCells();
+        var s = try client.getCells(.{});
         s.deinit();
     }
 
@@ -1101,7 +1101,7 @@ pub fn tableTopLiveFollowsResizeTest(io: std.Io, alloc: std.mem.Allocator) !void
     // A re-sort must repaint at the shifted position, not the original.
     try client.tableSetSort(null, table, 0, .ascending);
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         try testz.expectEqualStr("N", snap.cellAt(4, 0).grapheme);
         // "Name" (4) + " ▴" (2) == the column's width 6, so no widening:
@@ -1150,7 +1150,7 @@ pub fn tableCaseInsensitiveColumnFoldsWhenSortedTest(io: std.Io, alloc: std.mem.
 
     try client.tableSetSort(null, table, 0, .ascending);
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         try testz.expectEqualStr("a", snap.cellAt(1, 0).grapheme); // apple
         try testz.expectEqualStr("B", snap.cellAt(2, 0).grapheme); // Bat
@@ -1197,7 +1197,7 @@ pub fn tableFocusColumnMarksItsBodyCellTest(io: std.Io, alloc: std.mem.Allocator
     });
 
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         // Row 1 is the first body row: "drwx" at 0-3, "alpha" at 5-9.
         try testz.expectEqualStr("d", snap.cellAt(1, 0).grapheme);
@@ -1289,7 +1289,7 @@ pub fn tableCellSpansFromClientColourTheirOwnTextTest(io: std.Io, alloc: std.mem
         } }},
     });
 
-    var snap = try client.getCells();
+    var snap = try client.getCells(.{});
     defer snap.deinit();
     try testz.expectEqualStr("a", snap.cellAt(1, 0).grapheme);
     try testz.expectEqual(snap.cellAt(1, 1).fg.r, 250);
@@ -1326,7 +1326,7 @@ pub fn tableWrapColumnGrowsRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
     });
 
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         // Row 1: the ellipsis column is cut off, Desc's first line.
         try testz.expectEqualStr("a", snap.cellAt(1, 0).grapheme);
@@ -1346,7 +1346,7 @@ pub fn tableWrapColumnGrowsRowTest(io: std.Io, alloc: std.mem.Allocator) !void {
 
     try client.tableSetSort(null, table, 1, .descending);
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         try testz.expectEqualStr("b", snap.cellAt(1, 0).grapheme);
         // The sorted column is two cells wider now but wraps the same.

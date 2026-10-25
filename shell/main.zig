@@ -495,17 +495,6 @@ fn waitForSocketReady(io: std.Io, socket_path: []const u8) !void {
 /// `glyphwire.configDirPath`.
 const configDirPath = glyphwire.configDirPath;
 
-/// Drains every queued `resize` into `prompt.pending_resize` (see
-/// `Prompt.noteResize`) and then applies it if the size has settled
-/// (`applyPendingResize`). The prompt is *not* redrawn while a resize is
-/// still in flight.
-pub fn drainResizes(listener: *glyphwire.InputListener, prompt: *Prompt) void {
-    var last: ?glyphwire.ResizeEvent = null;
-    while (listener.pollResizeEvent()) |rev| last = rev;
-    if (last) |rev| prompt.noteResize(rev.cols, rev.rows);
-    prompt.applyPendingResize(false) catch {};
-}
-
 /// An event's modifiers as `key_encode` wants them -- shared by every key
 /// and mouse encoder here. Always the event's own `mods`, stamped by the
 /// host when it generated the event: sampling the live down-set instead
@@ -1954,42 +1943,42 @@ pub const Prompt = struct {
     }
 
     pub fn drawSetCursor(self: *Prompt, row: usize, col: usize) !void {
-        if (self.layer) |l| return self.client.setCursorOn(l, row, col);
-        try self.client.setCursor(row, col);
+        if (self.layer) |l| return self.client.setCursor(row, col, .{ .layer = l });
+        try self.client.setCursor(row, col, .{});
     }
 
     pub fn batchSetCursor(self: *Prompt, b: *glyphwire.Client.Batch, row: usize, col: usize) !void {
-        if (self.layer) |l| return b.setCursorOn(l, row, col);
-        try b.setCursor(row, col);
+        if (self.layer) |l| return b.setCursor(row, col, .{ .layer = l });
+        try b.setCursor(row, col, .{});
     }
 
     pub fn batchClear(self: *Prompt, b: *glyphwire.Client.Batch, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-        try b.clearOn(self.layer, row, col, rows, cols);
+        try b.clear(.{ .layer = self.layer, .row = row, .col = col, .rows = rows, .cols = cols });
     }
 
     pub fn drawGetCursor(self: *Prompt) !glyphwire.Cursor {
-        return self.client.getCursorOn(self.layer);
+        return self.client.getCursor(.{ .layer = self.layer });
     }
 
     pub fn drawClear(self: *Prompt, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-        try self.client.clearOn(self.layer, row, col, rows, cols);
+        try self.client.clear(.{ .layer = self.layer, .row = row, .col = col, .rows = rows, .cols = cols });
     }
 
     pub fn drawScrollView(self: *Prompt, offset: ?usize, delta: ?i64) !glyphwire.LayerScroll {
-        return self.client.scrollViewOn(self.layer, offset, delta);
+        return self.client.scrollView(offset, delta, .{ .layer = self.layer });
     }
 
     pub fn drawGetScroll(self: *Prompt) !glyphwire.LayerScroll {
-        return self.client.getScrollOn(self.layer);
+        return self.client.getScroll(.{ .layer = self.layer });
     }
 
     pub fn drawGetCells(self: *Prompt) !glyphwire.CellsSnapshot {
-        if (self.layer) |l| return self.client.getCellsOn(l);
-        return self.client.getCells();
+        if (self.layer) |l| return self.client.getCells(.{ .layer = l });
+        return self.client.getCells(.{});
     }
 
     pub fn drawGetCellsView(self: *Prompt, view_offset: usize) !glyphwire.CellsSnapshot {
-        return self.client.getCellsViewOn(self.layer, view_offset);
+        return self.client.getCells(.{ .layer = self.layer, .view_offset = view_offset });
     }
 
     pub fn drawGetMetadata(self: *Prompt, row: usize, col: usize, view_offset: usize) @TypeOf(self.client.getMetadata(null, 0, 0, 0)) {
@@ -2013,8 +2002,9 @@ pub const Prompt = struct {
     }
 
     pub fn drawIconStyled(self: *Prompt, row: usize, col: usize, name: []const u8, opts: glyphwire.Client.DrawIconOpts) !void {
-        if (self.layer) |l| return self.client.drawIconOnStyled(l, row, col, name, opts);
-        try self.client.drawIconStyled(row, col, name, opts);
+        var o = opts;
+        o.layer = self.layer;
+        try self.client.drawIcon(row, col, name, o);
     }
 
     /// A cell the host reported, in the surface's own frame -- or null
@@ -3665,7 +3655,7 @@ pub const Prompt = struct {
     /// pipes onto the grid (or into capture buffers), feeds stdin, and
     /// turns Ctrl-C into a group SIGINT. Non-blocking `poll` throughout so
     /// output appears as it happens; a 20 ms poll timeout paces the
-    /// non-interactive sinks and `listener.waitInputEvent` paces the
+    /// non-interactive sinks and `nextInput` paces the
     /// interactive one.
     pub fn pumpPipeline(self: *Prompt, sp: *pipeexec.Spawned, sink: PipeSink) !void {
         var buf: [4096]u8 = undefined;
@@ -3795,6 +3785,44 @@ pub const Prompt = struct {
         return read_any;
     }
 
+    /// The next input event for a loop that runs while the prompt isn't
+    /// reading (a pipeline, a script builtin, a remote session), or null.
+    /// `timeout` null takes only what is already queued; otherwise this
+    /// waits up to `timeout` and returns null on any other event, so the
+    /// caller's loop gets its turn.
+    ///
+    /// Every other event is taken off the queue too, so none piles up
+    /// behind a long run: a resize, or a scroll of this prompt's surface,
+    /// is recorded the way the prompt loop would (`noteOffPromptEvent`),
+    /// and the rest is dropped. A click made while a command ran is not
+    /// owed to the prompt that comes back.
+    pub fn nextInput(self: *Prompt, listener: *glyphwire.InputListener, timeout: ?std.Io.Timeout) ?glyphwire.InputEvent {
+        while (true) {
+            const ev = if (timeout) |t|
+                (listener.next(t) catch null) orelse return null
+            else
+                listener.pollNext() orelse return null;
+            if (ev.asInput()) |iev| return iev;
+            defer ev.deinit(self.client.alloc);
+            self.noteOffPromptEvent(ev);
+            if (timeout != null) return null;
+        }
+    }
+
+    /// The part of `handleSessionEvent` that still applies while a
+    /// command holds the prompt: a resize is recorded for the next
+    /// prompt (`noteResize`, applied once the command is done), and a
+    /// host-driven scroll of this surface keeps `view_scroll` current.
+    pub fn noteOffPromptEvent(self: *Prompt, ev: glyphwire.Event) void {
+        switch (ev) {
+            .resize => |rev| self.noteResize(rev.cols, rev.rows),
+            .scroll => |sev| if (sev.layer == self.layer) {
+                self.view_scroll = sev.offset;
+            },
+            else => {},
+        }
+    }
+
     /// Interactive pipeline stdin: waits briefly for one input event and
     /// forwards it to stage 0. Returns true if the event was Ctrl-C (the
     /// caller SIGINTs the group); Ctrl-D closes stage 0's stdin. Simpler
@@ -3806,9 +3834,9 @@ pub const Prompt = struct {
         const listener = self.listener orelse return false;
         const alloc = self.client.alloc;
 
-        const ev = (listener.waitInputEvent(.{
+        const ev = self.nextInput(listener, .{
             .duration = .{ .raw = .fromMilliseconds(25), .clock = .awake },
-        }) catch null) orelse return false;
+        }) orelse return false;
 
         switch (ev) {
             .text => |tev| {
@@ -3866,7 +3894,7 @@ pub const Prompt = struct {
     pub fn pollPipeInterrupt(self: *Prompt, sp: *pipeexec.Spawned, stop: *jobstop.JobStop, now_ms: i64) bool {
         const listener = self.listener orelse return false;
         var hit = false;
-        while (listener.pollInputEvent()) |iev| switch (iev) {
+        while (self.nextInput(listener, null)) |iev| switch (iev) {
             .key => |kev| {
                 defer self.client.alloc.free(kev.key);
                 if (self.isKillJobKey(kev)) {
@@ -4354,7 +4382,7 @@ fn hookPollInterrupt(ctx: *anyopaque) bool {
     const self: *Prompt = @ptrCast(@alignCast(ctx));
     const listener = self.listener orelse return false;
     var hit = false;
-    while (listener.pollInputEvent()) |iev| switch (iev) {
+    while (self.nextInput(listener, null)) |iev| switch (iev) {
         .key => |kev| {
             defer self.client.alloc.free(kev.key);
             if (kev.pressed and kev.ctrl() and std.mem.eql(u8, kev.key, "c"))

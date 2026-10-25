@@ -520,12 +520,12 @@ pub const Ui = struct {
         // drawn.
         var b = c.batch();
         defer b.deinit();
-        try b.clearOn(self.page_layer, 0, 0, null, null);
+        try b.clear(.{ .layer = self.page_layer });
         try self.padMargins(&b, l);
         var spans: std.ArrayList(glyphwire.Client.Span) = .empty;
         defer spans.deinit(self.alloc);
         for (l.ops) |op| switch (op) {
-            .fill => |f| try b.clearArea(.{ .layer = self.page_layer, .row = f.row, .col = f.col, .rows = f.rows, .cols = f.cols, .bg = bg_code }),
+            .fill => |f| try b.clear(.{ .layer = self.page_layer, .row = f.row, .col = f.col, .rows = f.rows, .cols = f.cols, .bg = bg_code }),
             .text => |t| {
                 spans.clearRetainingCapacity();
                 for (t.spans) |s| {
@@ -554,7 +554,7 @@ pub const Ui = struct {
             .image => |im| {
                 const img = p.images.get(im.src) orelse continue;
                 const handle = img.handle orelse continue;
-                try b.drawImageOn(self.page_layer, handle, im.row, im.col, im.rows, im.cols, im.scale, .{});
+                try b.drawImage(handle, .{ .layer = self.page_layer, .row = im.row, .col = im.col, .row_span = im.rows, .col_span = im.cols, .scale = im.scale });
                 // A linked image: tag every cell it covers, leaving the
                 // picture (the cells' background) in place.
                 if (im.link) |li| {

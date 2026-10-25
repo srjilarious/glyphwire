@@ -459,7 +459,7 @@ pub const Popup = struct {
     fn renderList(self: *Popup, b: *Batch, l: *const List, cols: usize, rows: usize) !void {
         const s = self.chrome.style;
         if (l.entries.items.len == 0) return self.chrome.drawEmpty(b);
-        try b.clearArea(.{ .layer = self.chrome.list_layer });
+        try b.clear(.{ .layer = self.chrome.list_layer });
 
         // Column widths from the widest name and origin, the name capped
         // so a long one can't push the status off the popup.

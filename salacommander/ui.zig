@@ -1283,7 +1283,7 @@ pub const Ui = struct {
         if (!std.mem.eql(usize, &pushed, &self.pushed_strip[i])) try b.setLayerScrollOffset(layer, 0, scroll);
         self.pushed_strip[i] = pushed;
 
-        try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = bg_tab_bar });
+        try b.clear(.{ .layer = layer, .row = 0, .rows = 1, .bg = bg_tab_bar });
         const lit = i == self.active;
         // Strip columns `[scroll, scroll + win.cols)` show at pane
         // columns `win.left` on.
@@ -1297,12 +1297,12 @@ pub const Ui = struct {
             const label = tabs_mod.labelFor(set.at(&self.panes[i], k).path);
             if (span.start < scroll) {
                 const cols = @min(span.end, view_end) - scroll;
-                try b.clearArea(.{ .layer = layer, .row = 0, .col = win.left, .rows = 1, .cols = cols, .bg = bg });
+                try b.clear(.{ .layer = layer, .row = 0, .col = win.left, .rows = 1, .cols = cols, .bg = bg });
                 try b.writeText("…", .{ .layer = layer, .row = 0, .col = win.left, .fg = fg, .bg = bg });
             } else {
                 const col = span.start - scroll + win.left;
                 const room = win.left + win.cols - col;
-                try b.clearArea(.{ .layer = layer, .row = 0, .col = col, .rows = 1, .cols = @min(span.end - span.start, room), .bg = bg });
+                try b.clear(.{ .layer = layer, .row = 0, .col = col, .rows = 1, .cols = @min(span.end - span.start, room), .bg = bg });
                 try b.writeText(label, .{ .layer = layer, .row = 0, .col = col + 1, .fg = fg, .bg = bg, .max_cols = room -| 1 });
             }
             if (k + 1 < l.spans.len and span.end >= scroll and span.end < view_end) {
@@ -2200,11 +2200,10 @@ pub const Ui = struct {
         const layer = self.drag_layer;
         try b.setLayerSize(layer, card_cols, 1);
         try b.setLayerCellPosition(layer, row, col);
-        try b.clearArea(.{ .layer = layer, .bg = bg_dialog });
+        try b.clear(.{ .layer = layer, .bg = bg_dialog });
         if (d.copy) try b.writeText("+", .{ .layer = layer, .row = 0, .col = 1, .fg = fg_marked, .bg = bg_dialog });
         try b.writeText(label, .{ .layer = layer, .row = 0, .col = 6, .fg = fg_dialog, .bg = bg_dialog, .max_cols = label_cols });
-        try b.drawIconOnStyled(layer, 0, 3, d.icon, .{
-            .scale = .natural,
+        try b.drawIcon(0, 3, d.icon, .{ .layer = layer, .scale = .natural,
             .h_align = .start,
             .v_align = .center,
             .max_h = self.cell.h,
@@ -2833,13 +2832,13 @@ pub const Ui = struct {
         defer b.deinit();
         try b.setLayerSize(layer, w, h);
         try b.setLayerCellPosition(layer, row0, col0);
-        try b.clearArea(.{ .layer = layer, .bg = bg_dialog });
+        try b.clear(.{ .layer = layer, .bg = bg_dialog });
 
         const title_bg = if (d.danger) bg_dialog_danger else bg_dialog_title;
         var title_buf: [256]u8 = undefined;
         const title = std.fmt.bufPrint(&title_buf, " {s} ", .{d.title}) catch d.title;
         const title_col = (w -| glyphwire.stringWidth(title)) / 2;
-        try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = title_bg });
+        try b.clear(.{ .layer = layer, .row = 0, .rows = 1, .bg = title_bg });
         try b.writeText(title, .{ .layer = layer, .row = 0, .col = title_col, .fg = fg_title_active, .bg = title_bg, .max_cols = w });
 
         var row: usize = 2;
@@ -2982,12 +2981,12 @@ pub const Ui = struct {
         self.dialog_pos = .{ .row = row0, .col = col0 };
         try b.setLayerSize(layer, w, h);
         try b.setLayerCellPosition(layer, row0, col0);
-        try b.clearArea(.{ .layer = layer, .bg = bg_dialog });
+        try b.clear(.{ .layer = layer, .bg = bg_dialog });
 
         const title_bg = if (danger) bg_dialog_danger else bg_dialog_title;
         var title_buf: [256]u8 = undefined;
         const shown = std.fmt.bufPrint(&title_buf, " {s} ", .{title}) catch title;
-        try b.clearArea(.{ .layer = layer, .row = 0, .rows = 1, .bg = title_bg });
+        try b.clear(.{ .layer = layer, .row = 0, .rows = 1, .bg = title_bg });
         try b.writeText(shown, .{ .layer = layer, .row = 0, .col = (w -| glyphwire.stringWidth(shown)) / 2, .fg = fg_title_active, .bg = title_bg, .max_cols = w });
         return .{ .w = w, .h = h };
     }
@@ -3015,7 +3014,7 @@ pub const Ui = struct {
         for (menu.entries, 0..) |entry, i| {
             const row = 2 + i;
             const bg = if (i == menu.focus) bg_button_focus else bg_dialog;
-            try b.clearArea(.{ .layer = layer, .row = row, .rows = 1, .col = 1, .cols = size.w -| 2, .bg = bg });
+            try b.clear(.{ .layer = layer, .row = row, .rows = 1, .col = 1, .cols = size.w -| 2, .bg = bg });
             if (self.menu_keymap.chordFor(entry)) |chord| {
                 var kbuf: [48]u8 = undefined;
                 try b.writeText(chord.format(&kbuf), .{ .layer = layer, .row = row, .col = 2, .fg = fg_marked, .bg = bg });
@@ -3356,8 +3355,7 @@ pub const Ui = struct {
         const y = self.listTop(i) + (row - p.list.top) * rh;
         try writeRow(b, self.pane_layers[i], p, row, y, w, cols, i == self.active);
         const icon = if (p.entryAt(row)) |e| lsentries.iconForEntry(e.*) else "file/folder";
-        try b.drawIconOnStyled(self.pane_layers[i], y, cols.icon_col, icon, .{
-            .scale = .natural,
+        try b.drawIcon(y, cols.icon_col, icon, .{ .layer = self.pane_layers[i], .scale = .natural,
             .h_align = .start,
             .v_align = if (rh > 1) .start else .center,
             .max_h = self.iconPx(p.view),
@@ -3379,7 +3377,7 @@ pub const Ui = struct {
 
         var b = self.client.batch();
         defer b.deinit();
-        try b.clearArea(.{ .layer = layer, .bg = bg_pane });
+        try b.clear(.{ .layer = layer, .bg = bg_pane });
 
         if (self.stripRows(i) > 0) {
             try self.writeStrip(&b, i);
@@ -3395,7 +3393,7 @@ pub const Ui = struct {
             const bg = if (active) bg_title_active else bg_title_inactive;
             const fg = if (active) fg_title_active else fg_title_inactive;
             const row = self.titleRow(i);
-            try b.clearArea(.{ .layer = layer, .row = row, .rows = 1, .bg = bg });
+            try b.clear(.{ .layer = layer, .row = row, .rows = 1, .bg = bg });
             if (self.pathEditFor(i)) |e| {
                 e.view_start = try writeField(&b, layer, &e.line, row, 1, w -| 2);
             } else {
@@ -3409,7 +3407,7 @@ pub const Ui = struct {
         // Size label is right-aligned in its column the way the sizes
         // under it are, so the arrow sits against the numbers.
         var head_buf: [32]u8 = undefined;
-        try b.clearArea(.{ .layer = layer, .row = self.headerRow(i), .rows = 1, .bg = bg_header });
+        try b.clear(.{ .layer = layer, .row = self.headerRow(i), .rows = 1, .bg = bg_header });
         try b.writeText(headerLabel(&head_buf, "Name", p.sort, .name), .{ .layer = layer, .row = self.headerRow(i), .col = cols.name_col, .fg = fg_header, .bg = bg_header });
         if (cols.size_col) |c| {
             const label = headerLabel(&head_buf, "Size", p.sort, .size);
@@ -3430,8 +3428,7 @@ pub const Ui = struct {
         const icon_px = self.iconPx(p.view);
         for (p.list.top..end) |row| {
             const icon = if (p.entryAt(row)) |e| lsentries.iconForEntry(e.*) else "file/folder";
-            try b.drawIconOnStyled(layer, self.listTop(i) + (row - p.list.top) * rh, cols.icon_col, icon, .{
-                .scale = .natural,
+            try b.drawIcon(self.listTop(i) + (row - p.list.top) * rh, cols.icon_col, icon, .{ .layer = layer, .scale = .natural,
                 .h_align = .start,
                 .v_align = if (rh > 1) .start else .center,
                 .max_h = icon_px,
@@ -3533,7 +3530,7 @@ pub const Ui = struct {
         const rh = p.view.rowHeight();
         const marked = p.isMarked(row);
         const bg = rowBg(p, row, active_pane);
-        try b.clearArea(.{ .layer = layer, .row = y, .rows = rh, .cols = w, .bg = bg });
+        try b.clear(.{ .layer = layer, .row = y, .rows = rh, .cols = w, .bg = bg });
 
         const entry = p.entryAt(row);
         const name = if (entry) |e| e.name else "..";
@@ -3582,7 +3579,7 @@ pub const Ui = struct {
     /// entries are listed and what they add up to (`Pane.totalBytes`,
     /// this directory only).
     fn writeFooter(b: *Batch, layer: glyphwire.LayerHandle, p: *const Pane, row: usize, w: usize) !void {
-        try b.clearArea(.{ .layer = layer, .row = row, .rows = 1, .bg = bg_footer });
+        try b.clear(.{ .layer = layer, .row = row, .rows = 1, .bg = bg_footer });
         var buf: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
         const marked = p.markedCount();
         const text: []const u8 = if (marked > 0) blk: {
@@ -3622,7 +3619,7 @@ pub const Ui = struct {
         const layer = self.bar_layer;
         var b = self.client.batch();
         defer b.deinit();
-        try b.clearArea(.{ .layer = layer, .bg = bg_bar });
+        try b.clear(.{ .layer = layer, .bg = bg_bar });
 
         if (!std.meta.eql(self.held, glyphwire.Mods{})) {
             try self.writeModifiedBar(&b);

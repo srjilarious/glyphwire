@@ -23,6 +23,8 @@ const colorToJson = Client.colorToJson;
 const TextOpts = Client.TextOpts;
 const Span = Client.Span;
 const ClearOpts = Client.ClearOpts;
+const LayerOpts = Client.LayerOpts;
+const DrawImageOpts = Client.DrawImageOpts;
 const SetBgOpts = Client.SetBgOpts;
 const SetFgOpts = Client.SetFgOpts;
 const SetUnderlineOpts = Client.SetUnderlineOpts;
@@ -75,8 +77,10 @@ pub fn Ops(comptime Self: type) type {
             try self.notify("write_text", textParams(null, wire_spans, opts));
         }
 
-        /// `clear` with every option (see `ClearOpts`) -- a notification.
-        pub fn clearArea(self: *Self, opts: ClearOpts) !void {
+        /// `clear(layer?, row?, col?, rows?, cols?, bg?)` -- a
+        /// notification. Resets a region (see `ClearOpts`; the default is
+        /// the whole surface) back to blank, or to a solid `bg`.
+        pub fn clear(self: *Self, opts: ClearOpts) !void {
             try self.notify("clear", clearParams(opts));
         }
 
@@ -106,17 +110,11 @@ pub fn Ops(comptime Self: type) type {
             try self.notify("set_underline", setUnderlineParams(opts));
         }
 
-        /// `set_property(layer, "cursor", {row, col})` -- a notification.
-        pub fn setCursor(self: *Self, row: usize, col: usize) !void {
-            try self.notify("set_property", .{ .property = "cursor", .row = row, .col = col });
-        }
-
-        /// `set_property(layer, "cursor", {row, col})` on a non-root layer --
-        /// see `setCursor` for the root-layer version. `write_text` is always
-        /// cursor-implicit (no `row`/`col` params of its own), so placing text
-        /// on a layer other than root goes through this first.
-        pub fn setCursorOn(self: *Self, layer: core.LayerHandle, row: usize, col: usize) !void {
-            try self.notify("set_property", .{ .layer = layer, .property = "cursor", .row = row, .col = col });
+        /// `set_property(layer?, "cursor", {row, col})` -- a notification.
+        /// `opts.layer` null is the surface. `write_text` with no `row` /
+        /// `col` writes at this cursor.
+        pub fn setCursor(self: *Self, row: usize, col: usize, opts: LayerOpts) !void {
+            try self.notify("set_property", .{ .layer = opts.layer, .property = "cursor", .row = row, .col = col });
         }
 
         /// `insert_cells(count)` -- a notification. ECMA-48's ICH: shifts
@@ -162,7 +160,7 @@ pub fn Ops(comptime Self: type) type {
 
         /// `tag_metadata(layer?, row, col, metadata_id)` -- a notification.
         /// Sets exactly one cell's metadata tag without touching its
-        /// background/text -- unlike `writeText`/`drawIconStyled`,
+        /// background/text -- unlike `writeText`/`drawIcon`,
         /// which tag as a side effect of drawing something. For a client that
         /// needs a cell tagged without changing what's drawn there, e.g.
         /// tagging the extra cells a `.natural`-scaled icon visually
@@ -176,22 +174,6 @@ pub fn Ops(comptime Self: type) type {
         /// can't know where the column landed.
         pub fn tagMetadata(self: *Self, layer: ?core.LayerHandle, row: usize, col: usize, metadata_id: core.MetadataHandle, focus: bool) !void {
             try self.notify("tag_metadata", .{ .layer = layer, .row = row, .col = col, .metadata_id = metadata_id, .focus = focus });
-        }
-
-        /// `clear(layer?, row?, col?, rows?, cols?)` -- a notification.
-        /// Resets cells in the given region of the root layer back to
-        /// blank/default style. `rows`/`cols` null means
-        /// "the rest of the layer from `row`/`col`", so `clear(0, 0, null,
-        /// null)` wipes the whole layer.
-        pub fn clear(self: *Self, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-            try self.clearOn(null, row, col, rows, cols);
-        }
-
-        /// `clear(layer?, ...)` -- the explicitly-targeted form of `clear`,
-        /// matching `drawImageOn`, for a TUI wiping one of its own layers.
-        /// Null = the root layer.
-        pub fn clearOn(self: *Self, layer: ?core.LayerHandle, row: usize, col: usize, rows: ?usize, cols: ?usize) !void {
-            try self.notify("clear", .{ .layer = layer, .row = row, .col = col, .rows = rows, .cols = cols });
         }
 
         // -- Images and icons --
@@ -210,90 +192,37 @@ pub fn Ops(comptime Self: type) type {
             try self.notify("destroy_image", .{ .handle = handle });
         }
 
-        /// `draw_image(handle, row?, col?, row_span, col_span, scale, src)` --
-        /// a notification. Places the image anchored at `(row, col)`
-        /// (defaulting to the layer's cursor when either is omitted, same as
-        /// `write_text`'s documented convention), clipped to the given span
-        /// rather than stretched to fill it — see decisions.md's Image
-        /// section. `scale` is the uniform factor the image is drawn at:
-        /// `1.0` is its natural pixel size (the original behavior); `< 1.0`
-        /// shrinks it (glyphwire-view passes `target_width_px / image_width_px`
-        /// for `--size fit-width`). `src` optionally restricts sampling to a
-        /// sub-rectangle of the image (sprite-sheet support) -- `.{}` draws
-        /// from the whole image, the original behavior. Aspect-ratio-aware
-        /// placement (choosing `row_span`/`col_span` to match the image's
-        /// *scaled* shape) is the caller's job; `getImageInfo` plus
-        /// `getCellMetrics` and `getSize` give it what it needs to compute
-        /// that.
-        pub fn drawImage(self: *Self, handle: core.ImageHandle, row: ?usize, col: ?usize, row_span: usize, col_span: usize, scale: f32, src: core.ImageSrcRect) !void {
-            try self.drawImageOn(null, handle, row, col, row_span, col_span, scale, src);
-        }
-
-        /// `draw_image(layer, ...)` -- the explicitly-targeted form of
-        /// `drawImage`, matching `drawIconOn`.
-        /// The wire message has always carried `layer?`; only the Zig helper
-        /// was missing it, so a TUI drawing a picture into one of its own
-        /// layers (gw-read's page layer) had no way to say which.
-        pub fn drawImageOn(
-            self: *Self,
-            layer: ?core.LayerHandle,
-            handle: core.ImageHandle,
-            row: ?usize,
-            col: ?usize,
-            row_span: usize,
-            col_span: usize,
-            scale: f32,
-            src: core.ImageSrcRect,
-        ) !void {
+        /// `draw_image(layer?, handle, row?, col?, row_span, col_span, scale,
+        /// src)` -- a notification. Places a loaded image; every placement
+        /// option is in `DrawImageOpts`.
+        pub fn drawImage(self: *Self, handle: core.ImageHandle, opts: DrawImageOpts) !void {
             try self.notify("draw_image", .{
-                .layer = layer,
+                .layer = opts.layer,
                 .handle = handle,
-                .row = row,
-                .col = col,
-                .row_span = row_span,
-                .col_span = col_span,
-                .scale = scale,
-                .src_x = src.x,
-                .src_y = src.y,
-                .src_w = src.w,
-                .src_h = src.h,
+                .row = opts.row,
+                .col = opts.col,
+                .row_span = opts.row_span,
+                .col_span = opts.col_span,
+                .scale = opts.scale,
+                .src_x = opts.src.x,
+                .src_y = opts.src.y,
+                .src_w = opts.src.w,
+                .src_h = opts.src.h,
             });
         }
 
-        /// `draw_icon(row?, col?, name)` -- a notification. Draws a bundled,
-        /// named icon (decisions.md's Icon section; the default set is the
-        /// `assets/icons/` tree, each icon named by its path there minus the
-        /// `.png`) into exactly one cell, anchored at the
-        /// layer's cursor when `row`/`col` is omitted -- unlike `drawImage`, no
-        /// span: an icon is scoped to a single cell for now.
-        pub fn drawIcon(self: *Self, row: ?usize, col: ?usize, name: []const u8) !void {
-            try self.notify("draw_icon", .{ .row = row, .col = col, .name = name });
-        }
-
-        /// `draw_icon(row?, col?, name, scale?, h_align?, v_align?, max_w?,
-        /// max_h?, metadata_id?)` -- like `drawIcon`, but lets the icon be
-        /// drawn at its own native pixel size (`opts.scale = .natural`,
-        /// optionally capped by `opts.max_w`/`opts.max_h`) or stretched to
-        /// exactly fill the cell (`.stretch`) instead of shrunk to fit the
-        /// anchor cell, aligned relative to the anchor cell per
-        /// `opts.h_align`/`opts.v_align`, and optionally tagged with
-        /// `opts.metadata_id`. A separate method rather than extra params on
-        /// `drawIcon` itself since Zig has no default parameter values.
-        pub fn drawIconStyled(self: *Self, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
+        /// `draw_icon(layer?, row?, col?, name, scale?, h_align?, v_align?,
+        /// max_w?, max_h?, metadata_id?)` -- a notification. Draws a
+        /// bundled, named icon (decisions.md's Icon section; the default set
+        /// is the `assets/icons/` tree, each icon named by its path there
+        /// minus the `.png`) anchored at one cell, at the layer's cursor when
+        /// `row`/`col` is omitted -- unlike `drawImage`, no span. `.{}` fits
+        /// it to the cell on the surface; `opts` picks the layer, draws it
+        /// at its native pixel size (`.natural`, optionally capped by
+        /// `max_w`/`max_h`) or stretched to fill the cell (`.stretch`),
+        /// aligns it within the cell, and tags it with `metadata_id`.
+        pub fn drawIcon(self: *Self, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
             try self.notify("draw_icon", iconParams(opts.layer, row, col, name, opts));
-        }
-
-        /// `draw_icon(layer, row?, col?, name)` on a non-root layer -- see
-        /// `drawIcon` for the root-layer version.
-        pub fn drawIconOn(self: *Self, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8) !void {
-            try self.notify("draw_icon", .{ .layer = layer, .row = row, .col = col, .name = name });
-        }
-
-        /// `draw_icon(layer, row?, col?, name, scale?, h_align?, v_align?,
-        /// max_w?, max_h?, metadata_id?)` on a non-root layer -- see
-        /// `drawIconStyled` for the root-layer version.
-        pub fn drawIconOnStyled(self: *Self, layer: core.LayerHandle, row: ?usize, col: ?usize, name: []const u8, opts: DrawIconOpts) !void {
-            try self.notify("draw_icon", iconParams(layer, row, col, name, opts));
         }
 
         // -- Layers and contexts --

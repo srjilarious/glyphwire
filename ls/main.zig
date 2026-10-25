@@ -157,15 +157,15 @@ pub fn main(init: std.process.Init) !void {
             // A blank separator row between blocks (only when there's more
             // than one).
             if (i > 0) {
-                const c = try client.getCursor();
-                try client.setCursor(c.row + 1, 0);
+                const c = try client.getCursor(.{});
+                try client.setCursor(c.row + 1, 0, .{});
             }
             if (listing.header) |h| {
-                const c = try client.getCursor();
-                try client.setCursor(c.row, 0);
+                const c = try client.getCursor(.{});
+                try client.setCursor(c.row, 0, .{});
                 try client.writeText(h, .{ .fg = header_color });
-                const c2 = try client.getCursor();
-                try client.setCursor(c2.row + 1, 0);
+                const c2 = try client.getCursor(.{});
+                try client.setCursor(c2.row + 1, 0, .{});
             }
             if (long_list) {
                 try writeLongTable(&client, listing.entries, large, raw_bytes, cfg, list_args);
@@ -569,11 +569,11 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
     // terminal `ls -l`. `set_property(cursor)` past the bottom row just
     // scrolls one line, same as any other output.
     {
-        const before = try client.getCursor();
-        try client.setCursor(before.row + 1, 0);
+        const before = try client.getCursor(.{});
+        try client.setCursor(before.row + 1, 0, .{});
     }
 
-    const start = try client.getCursor();
+    const start = try client.getCursor(.{});
 
     // Pass 1: one batch request creating every entry's metadata tag.
     // Each cell an entry's block touches (icon and name) shares one
@@ -621,7 +621,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
             const metadata_id = metas[index];
 
             if (max_icon_h > 0) {
-                try draw_batch.drawIconStyled(draw_row, base_col, iconForEntry(entry), .{
+                try draw_batch.drawIcon(draw_row, base_col, iconForEntry(entry), .{
                     .scale = .natural,
                     .h_align = .start,
                     .v_align = .center,
@@ -638,10 +638,10 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
                     try draw_batch.tagMetadata(null, draw_row, base_col + icon_col, metadata_id, false);
                 }
             } else {
-                try draw_batch.drawIconStyled(draw_row, base_col, iconForEntry(entry), .{ .metadata_id = metadata_id });
+                try draw_batch.drawIcon(draw_row, base_col, iconForEntry(entry), .{ .metadata_id = metadata_id });
             }
 
-            try draw_batch.setCursor(draw_row, base_col + icon_col_width);
+            try draw_batch.setCursor(draw_row, base_col + icon_col_width, .{});
             const raw_name = switch (entry.kind) {
                 .directory => std.fmt.bufPrint(&buf, "{s}/", .{entry.name}) catch entry.name,
                 .sym_link => if (entry.link_target) |tgt|
@@ -678,7 +678,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
         // blank row keeps this band's icons off the next band's text.
         // See this function's doc comment on why the local `draw_row`
         // clamp mirrors `set_property(cursor)`'s server-side scroll.
-        try draw_batch.setCursor(draw_row + grid.block_rows, 0);
+        try draw_batch.setCursor(draw_row + grid.block_rows, 0, .{});
         draw_row = @min(draw_row + grid.block_rows, layer.rows - 1);
     }
 
@@ -770,7 +770,7 @@ const id_name_col_max = 16;
 /// and is freed right after that call returns -- `tableSetRows` itself
 /// copies everything it needs into the outgoing JSON before returning.
 ///
-/// Anchored explicitly at the layer's current cursor (`client.getCursor()`,
+/// Anchored explicitly at the layer's current cursor (`client.getCursor(.{})`,
 /// read once up front and passed as `create_table`'s `row`/`col`) rather
 /// than relying on that call's own cursor-implicit defaulting (omitted
 /// `row`/`col` -- see dispatch.zig's `resolveAnchor`) -- functionally the
@@ -793,7 +793,7 @@ const id_name_col_max = 16;
 /// one newline is emitted to scroll a blank gap in before the prompt.
 fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: bool, raw_bytes: bool, cfg: lsconfig.LsConfig, list_args: []const []const u8) !void {
     const alloc = client.alloc;
-    const cur = try client.getCursor();
+    const cur = try client.getCursor(.{});
 
     // coreutils prints a `total` line above a `-l` listing (there, a
     // count of 512-byte disk blocks). No cross-platform block count is
@@ -808,7 +808,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
     const total_line = std.fmt.bufPrint(&total_line_buf, "total {s}", .{
         std.mem.trim(u8, lsfmt.formatSize(&total_num_buf, total_bytes, raw_bytes), " "),
     }) catch "total ?";
-    try client.setCursor(cur.row, cur.col);
+    try client.setCursor(cur.row, cur.col, .{});
     try client.writeText(total_line, .{ .fg = header_color });
     const table_row = cur.row + 1;
 
@@ -1034,7 +1034,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         // The whole table fits with at least one row to spare below it:
         // park the cursor on that row so glyphwire-shell's `+1` leaves one
         // blank line between the listing and the next prompt.
-        try client.setCursor(past_table - trailing_blank, 0);
+        try client.setCursor(past_table - trailing_blank, 0, .{});
     } else {
         // The table was taller than the window, so `Table.render` scrolled
         // the layer as it drew (terminal-style) and its footprint now fills
@@ -1042,7 +1042,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         // on the last row and emit one newline: that scrolls a blank line
         // in, and the shell's own `+1` then puts the prompt below it, the
         // same one-line gap the fits-in-window case leaves.
-        try client.setCursor(layer_bottom, 0);
+        try client.setCursor(layer_bottom, 0, .{});
         try client.writeText("\n", .{});
     }
 }

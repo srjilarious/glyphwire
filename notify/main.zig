@@ -105,7 +105,7 @@ const slide_frame_ms: u64 = 15;
 const hold_ms: u64 = 2000;
 
 fn run(io: std.Io, client: *glyphwire.Client, notify_type: NotifyType, message: []const u8) !void {
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     const grid_cols = snapshot.cols();
     snapshot.deinit();
 
@@ -143,13 +143,12 @@ fn run(io: std.Io, client: *glyphwire.Client, notify_type: NotifyType, message: 
     // `.natural` + `max_h` matches `glyphwire-ls`'s own icon treatment
     // (bigger than a shrunk-to-fit `.fit` icon would be, vertically
     // centered on its row). Its transparent pixels show the panel through.
-    try client.drawIconOnStyled(handle, text_row, icon_col, notify_type.iconName(), .{
-        .scale = .natural,
+    try client.drawIcon(text_row, icon_col, notify_type.iconName(), .{ .layer = handle, .scale = .natural,
         .h_align = .start,
         .v_align = .center,
         .max_h = max_icon_h,
     });
-    try client.setCursorOn(handle, text_row, text_col);
+    try client.setCursor(text_row, text_col, .{ .layer = handle });
     // `transparent_bg: true` leaves each cell's background exactly as it
     // is, so nothing paints over the panel -- see
     // `Client.TextOpts.transparent_bg`.

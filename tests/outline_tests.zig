@@ -385,7 +385,7 @@ pub fn outlineOverTheWirePaintsAndTogglesTest(io: std.Io, alloc: std.mem.Allocat
     try client.outlineSetNodes(null, outline, &wire_nodes);
 
     {
-        var snap = try client.getCells();
+        var snap = try client.getCells(.{});
         defer snap.deinit();
         // Row 0 is the file node's marker; row 1 the first (collapsed) hit.
         try testz.expectEqualStr("\u{25BE}", snap.cellAt(0, 0).grapheme);
@@ -474,7 +474,7 @@ pub fn outlineRunColoursSurviveTheWireTest(io: std.Io, alloc: std.mem.Allocator)
         } },
     });
 
-    var snap = try client.getCells();
+    var snap = try client.getCells(.{});
     defer snap.deinit();
     // Two blank marker cells, then the runs with their own colours.
     try testz.expectEqualStr("1", snap.cellAt(0, 2).grapheme);

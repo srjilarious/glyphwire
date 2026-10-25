@@ -368,7 +368,7 @@ pub const Chrome = struct {
     /// Clears the list, and says `Style.empty_text` on its first row.
     pub fn drawEmpty(self: *Chrome, b: *Batch) !void {
         const s = self.style;
-        try b.clearArea(.{ .layer = self.list_layer });
+        try b.clear(.{ .layer = self.list_layer });
         var buf: [96]u8 = undefined;
         const note = std.fmt.bufPrint(&buf, "  {s}", .{s.empty_text}) catch s.empty_text;
         try b.writeText(note, .{ .layer = self.list_layer, .row = 0, .col = 0, .fg = s.dim_fg, .max_cols = self.rect.cols });

@@ -59,14 +59,14 @@ pub fn clientWriteTextThenGetCellsRoundTripTest(io: std.Io, alloc: std.mem.Alloc
 
     try client.writeText("hi", .{ .fg = .{ .r = 0, .g = 255, .b = 255, .a = 255 }, .bg = .{ .r = 40, .g = 40, .b = 90, .a = 255 } });
 
-    const cursor = try client.getCursor();
+    const cursor = try client.getCursor(.{});
     try testz.expectEqual(cursor.row, 0);
     try testz.expectEqual(cursor.col, 2);
 
     const rev_after = try client.getRevision();
     try testz.expectEqual(rev_after, 1);
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
 
     try testz.expectEqual(snapshot.cols(), 10);
@@ -144,9 +144,9 @@ pub fn clientClearWipesTheWholeLayerByDefaultTest(io: std.Io, alloc: std.mem.All
     defer client.deinit();
 
     try client.writeText("hi", .{});
-    try client.clear(0, 0, null, null);
+    try client.clear(.{});
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
     try testz.expectEqualStr("", snapshot.cellAt(0, 0).grapheme);
 }
@@ -178,7 +178,7 @@ pub fn clientSetCursorThenWriteTextPositionsAtCursorTest(io: std.Io, alloc: std.
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     errdefer client.deinit();
 
-    try client.setCursor(1, 3);
+    try client.setCursor(1, 3, .{});
     try client.writeText("x", .{});
 
     // Explicit sequencing, not just eventual cleanup: the assertion below
@@ -220,9 +220,9 @@ pub fn clientBatchTypedAddersTargetNamedLayerTest(io: std.Io, alloc: std.mem.All
         try b.setLayerVisible(popup, false);
         try b.setLayerSize(popup, 6, 2);
         try b.setLayerCellPosition(popup, 1, 2);
-        try b.clearOn(popup, 0, 0, null, null);
+        try b.clear(.{ .layer = popup });
         try b.writeText("hi", .{ .layer = popup, .row = 0, .col = 0 });
-        try b.setCursorOn(popup, 1, 0);
+        try b.setCursor(1, 0, .{ .layer = popup });
         try b.writeText("x", .{ .layer = popup });
         try b.setLayerVisible(popup, true);
         var results = try b.send();
@@ -400,10 +400,10 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
 }
 
 /// `isMouseButtonDown`/`cursorCell` (above) are level state -- this proves
-/// the separate edge-event queue (`pollMouseButtonEvent`, mirroring
-/// `pollKeyEvent`) a click handler (glyphwire-shell's mouse-driven
-/// auto-cd) actually needs also gets populated, with both the press and
-/// the release queued as distinct events in order.
+/// the edge events on the queue (`next` -> `Event.mouse_button`) a click
+/// handler (glyphwire-shell's mouse-driven auto-cd) actually needs also
+/// get queued, with both the press and the release as distinct events in
+/// order.
 pub fn inputListenerQueuesMouseButtonEventsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
@@ -432,28 +432,19 @@ pub fn inputListenerQueuesMouseButtonEventsTest(_: std.Io, alloc: std.mem.Alloca
     try reporter.reportMouseButton("left", true, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0, 1);
     try reporter.reportMouseButton("left", false, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0, 1);
 
-    var press: ?glyphwire.client.MouseButtonEvent = null;
-    var attempts: usize = 0;
-    while (press == null and attempts < 100) : (attempts += 1) {
-        press = listener.pollMouseButtonEvent();
-        if (press == null) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
-    }
-    try testz.expectTrue(press != null);
-    defer alloc.free(press.?.button);
-    try testz.expectEqualStr(press.?.button, "left");
-    try testz.expectTrue(press.?.pressed);
-    try testz.expectEqual(press.?.cell.row, 2);
-    try testz.expectEqual(press.?.cell.col, 3);
+    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(2000), .clock = .awake } };
+    const press = (try listener.next(timeout)) orelse return error.TestUnexpectedResult;
+    defer press.deinit(alloc);
+    try testz.expectTrue(press == .mouse_button);
+    try testz.expectEqualStr(press.mouse_button.button, "left");
+    try testz.expectTrue(press.mouse_button.pressed);
+    try testz.expectEqual(press.mouse_button.cell.row, 2);
+    try testz.expectEqual(press.mouse_button.cell.col, 3);
 
-    var release: ?glyphwire.client.MouseButtonEvent = null;
-    attempts = 0;
-    while (release == null and attempts < 100) : (attempts += 1) {
-        release = listener.pollMouseButtonEvent();
-        if (release == null) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
-    }
-    try testz.expectTrue(release != null);
-    defer alloc.free(release.?.button);
-    try testz.expectTrue(!release.?.pressed);
+    const release = (try listener.next(timeout)) orelse return error.TestUnexpectedResult;
+    defer release.deinit(alloc);
+    try testz.expectTrue(release == .mouse_button);
+    try testz.expectTrue(!release.mouse_button.pressed);
 }
 
 /// The `text` stream: a `Client.reportText` on one connection reaches a
@@ -487,16 +478,11 @@ pub fn inputListenerQueuesTextEventsTest(_: std.Io, alloc: std.mem.Allocator) !v
     defer reporter.deinit();
     try reporter.reportText("a\u{3042}b"); // "a", HIRAGANA A, "b"
 
-    var ev: ?glyphwire.InputEvent = null;
-    var attempts: usize = 0;
-    while (ev == null and attempts < 100) : (attempts += 1) {
-        ev = listener.pollInputEvent();
-        if (ev == null) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
-    }
-    try testz.expectTrue(ev != null);
-    defer ev.?.deinit(alloc);
-    try testz.expectTrue(ev.? == .text);
-    try testz.expectEqualStr(ev.?.text.text, "a\u{3042}b");
+    const ev = (try listener.next(.{ .duration = .{ .raw = .fromMilliseconds(2000), .clock = .awake } })) orelse
+        return error.TestUnexpectedResult;
+    defer ev.deinit(alloc);
+    try testz.expectTrue(ev == .text);
+    try testz.expectEqualStr(ev.text.text, "a\u{3042}b");
 }
 
 /// `InputListener.next`: one ordered queue across streams, key events
@@ -604,7 +590,7 @@ pub fn clientSpeaksBothWireFormatsTest(io: std.Io, alloc: std.mem.Allocator) !vo
         var client = try glyphwire.Client.connectAs(io, alloc, socket_path, format);
         defer client.deinit();
 
-        try client.setCursor(row, 0);
+        try client.setCursor(row, 0, .{});
         try client.writeText(@tagName(format), .{});
 
         var b = client.batch();
@@ -621,7 +607,7 @@ pub fn clientSpeaksBothWireFormatsTest(io: std.Io, alloc: std.mem.Allocator) !vo
         const info = try client.getImageInfo(handle);
         try testz.expectEqual(info.width, 24);
 
-        var snapshot = try client.getCells();
+        var snapshot = try client.getCells(.{});
         defer snapshot.deinit();
         try testz.expectEqualStr(snapshot.cellAt(row, 0).grapheme, @tagName(format)[0..1]);
         try testz.expectEqualStr(snapshot.cellAt(row, @tagName(format).len).grapheme, "!");
@@ -660,9 +646,9 @@ pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocato
     try testz.expectEqual(info.width, 24);
     try testz.expectEqual(info.height, 12);
 
-    try client.drawImage(handle, 0, 0, 1, 2, 1.0, .{});
+    try client.drawImage(handle, .{ .row = 0, .col = 0, .row_span = 1, .col_span = 2 });
 
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
 
     const c00 = snapshot.cellAt(0, 0);
@@ -679,7 +665,7 @@ pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocato
     // afterward, rather than the raw bytes bleeding into the next frame's
     // header -- see wire.zig's `takeRaw` leaving any excess buffered.
     try client.writeText("z", .{});
-    const cursor = try client.getCursor();
+    const cursor = try client.getCursor(.{});
     try testz.expectEqual(cursor.col, 1);
 }
 
@@ -721,7 +707,7 @@ pub fn clientCreateUpdateDestroyRectRoundTripTest(io: std.Io, alloc: std.mem.All
     // Nothing above should have severed the connection -- a plain
     // notification still lands afterward.
     try client.writeText("ok", .{});
-    const cursor = try client.getCursor();
+    const cursor = try client.getCursor(.{});
     try testz.expectEqual(cursor.col, 2);
 }
 
@@ -746,19 +732,19 @@ pub fn clientSetDropTargetRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !v
     try client.setDropTarget(null, .{ .insert = .{ .row = 0, .col = 7, .rows = 1 } });
     // A request after it: the notification has been applied by the time
     // its answer comes back.
-    _ = try client.getCursor();
+    _ = try client.getCursor(.{});
     try testz.expectEqual(ctx.root.drop_target.?.insert.col, 7);
 
     try client.setDropTarget(null, .{ .cells = .{ .row = 1, .col = 2, .rows = 3, .cols = 4 } });
-    _ = try client.getCursor();
+    _ = try client.getCursor(.{});
     try testz.expectEqual(ctx.root.drop_target.?.cells.cols, 4);
 
     try client.setDropTarget(null, .layer);
-    _ = try client.getCursor();
+    _ = try client.getCursor(.{});
     try testz.expectTrue(ctx.root.drop_target.? == .layer);
 
     try client.setDropTarget(null, null);
-    _ = try client.getCursor();
+    _ = try client.getCursor(.{});
     try testz.expectTrue(ctx.root.drop_target == null);
 }
 
@@ -866,7 +852,7 @@ pub fn clientBatchCreatesUpdatesAndDestroysRectsTest(io: std.Io, alloc: std.mem.
     results2.deinit();
 
     // A request after the notification batch, so it has been applied.
-    _ = try client.getCursor();
+    _ = try client.getCursor(.{});
     try testz.expectEqual(ctx.root.rects.count(), 1);
     try testz.expectEqual(ctx.root.rects.get(a).?.x, 11);
     try testz.expectEqual(ctx.root.rects.get(a).?.w, 30);
@@ -895,7 +881,7 @@ pub fn clientBatchNotificationFormAppliesWithoutReplyTest(io: std.Io, alloc: std
         var b = client.batch();
         defer b.deinit();
         try b.writeText("one", .{});
-        try b.setCursor(2, 1);
+        try b.setCursor(2, 1, .{});
         try b.writeText("two", .{});
         var results = try b.send();
         results.deinit();
@@ -903,7 +889,7 @@ pub fn clientBatchNotificationFormAppliesWithoutReplyTest(io: std.Io, alloc: std
 
     // A following request on the same connection still round-trips, so
     // `send` didn't leave an unread response frame on the socket.
-    const cursor = try client.getCursor();
+    const cursor = try client.getCursor(.{});
     try testz.expectEqual(cursor.row, 2);
     try testz.expectEqual(cursor.col, 4);
     try testz.expectEqualStr("o", ctx.root.cell(0, 0).grapheme());
@@ -932,17 +918,17 @@ pub fn clientBatchClearThenRedrawInOneBatchTest(io: std.Io, alloc: std.mem.Alloc
     defer client.deinit();
 
     // Seed two rows outside the batch.
-    try client.setCursor(0, 0);
+    try client.setCursor(0, 0, .{});
     try client.writeText("stale-left", .{});
-    try client.setCursor(1, 0);
+    try client.setCursor(1, 0, .{});
     try client.writeText("keep-me", .{});
 
     {
         var b = client.batch();
         defer b.deinit();
         // Wipe just row 0, then redraw a shorter string over it.
-        try b.clear(0, 0, 1, null);
-        try b.setCursor(0, 0);
+        try b.clear(.{ .rows = 1 });
+        try b.setCursor(0, 0, .{});
         try b.writeText("new", .{});
         var results = try b.send();
         results.deinit();
@@ -950,7 +936,7 @@ pub fn clientBatchClearThenRedrawInOneBatchTest(io: std.Io, alloc: std.mem.Alloc
 
     // A round trip forces the server to have applied the notification-form
     // batch before the assertions read `ctx.root` directly.
-    _ = try client.getCursor();
+    _ = try client.getCursor(.{});
 
     // Row 0: cleared then partly rewritten; the old tail is gone.
     try testz.expectEqualStr(ctx.root.cell(0, 0).grapheme(), "n");
@@ -1082,7 +1068,7 @@ pub fn clientUpdateImageThenDestroyImageRoundTripTest(io: std.Io, alloc: std.mem
     // A plain framed request right after the raw payload proves the
     // decoder resumed normal parsing -- same check the load test makes.
     try client.destroyImage(handle);
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
     try testz.expectEqual(snapshot.rows(), 10);
 
@@ -1140,12 +1126,12 @@ pub fn clientWithoutATokenSeesNothingTest(io: std.Io, alloc: std.mem.Allocator) 
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     defer client.deinit();
 
-    try testz.expectError(client.getCells(), error.RemoteError);
+    try testz.expectError(client.getCells(.{}), error.RemoteError);
     try testz.expectEqualStr(glyphwire.client.lastRemoteError().name(), "ContextAccessDenied");
 
     const grant = try client.createContext(null, null, 0, false);
     try testz.expectEqualStr(&grant.token, &srv.session.contextToken(grant.context).?);
-    var snapshot = try client.getCells();
+    var snapshot = try client.getCells(.{});
     defer snapshot.deinit();
     // Its own fresh context, not the "secret" underneath.
     try testz.expectEqualStr(snapshot.cellAt(0, 0).grapheme, "");
