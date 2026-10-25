@@ -66,6 +66,7 @@ const filetype = @import("applib").filetype;
 const homepath = @import("applib").homepath;
 const syntax = @import("applib").syntax;
 const themes = @import("applib").theme;
+const fullscreen = @import("applib").fullscreen;
 pub const role = glyphwire.Color.role;
 const langconf = @import("langconf.zig");
 const actions = @import("actions.zig");
@@ -1260,37 +1261,29 @@ pub const Ui = struct {
         errdefer keymaps.deinit(alloc);
         try keymaps.apply(alloc, cfg_owned.?.keys);
 
-        // A dedicated context for the editor, shown immediately. From
-        // here on every layer/split call on `client` targets it, not the
-        // shell's context. The paired listener joins it too so its input
-        // subscriptions follow this context's visibility. No window
-        // scrollbar: zoe's root has no scrollback, and each pane draws
-        // its own bar -- the always-on right-edge one would just sit
-        // there permanently full.
-        const grant = try client.createContext(null, null, 0, false);
-        const context = grant.context;
-        errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context, &grant.token);
-        // What the context switcher, the shell's `jobs` and the window
-        // title call this one. `render` keeps it on the focused buffer's
-        // file from the first frame on (`syncTitle`).
-        try client.setContextTitle("zoe");
-        // `zoe.conf.lua`'s own theme for this context, or the window's.
-        // Either way the resolved copy is kept for what the host can't
-        // recolour: the popups' nine-patch frame, and whether `variable`
-        // gets a span at all.
-        const th: themes.Stored = if (own_theme) |t| blk: {
-            try client.setTheme(&t);
-            break :blk .init(t);
-        } else try client.getTheme();
+        // A dedicated context for the editor. Each pane draws its own
+        // scrollbar. `render` keeps the title on the focused buffer's file
+        // from the first frame on (`syncTitle`), and sets the caret per
+        // mode, so neither is settled here. The theme is `zoe.conf.lua`'s
+        // own for this context, or the window's; either way the resolved
+        // copy is kept for what the host can't recolour: the popups'
+        // nine-patch frame, and whether `variable` gets a span at all.
+        const opened = try fullscreen.open(client, listener, .{
+            .title = "zoe",
+            .caret = null,
+            .theme = own_theme,
+            .keep_theme = true,
+        });
+        errdefer opened.close(client);
+        const context = opened.grant.context;
+        const size = opened.size;
+        const metrics = opened.metrics;
+        const th: themes.Stored = opened.th.?;
         // `zoe.conf.lua`'s `divider_style` / `divider_chars` for the
         // tree|editor band and every `:split`. Sent only when set, so a
         // zoe without one draws whatever the host's `pane_divider_style`
         // is.
         if (!cfg_owned.?.divider_style.inherits()) try client.setDividerStyle(&cfg_owned.?.divider_style);
-
-        const size = try client.getSize();
-        const metrics = try client.getCellMetrics();
 
         // Content sizes are provisional: every `layout` notification
         // resizes them to match the panes they landed in.
@@ -1385,7 +1378,7 @@ pub const Ui = struct {
             .theme_picker = theme_picker,
             .popups = popups,
             .diags = diag.Store.init(alloc),
-            .shell = shellpanel.Panel.init(alloc, io, client, grant, shell_layers, environ),
+            .shell = shellpanel.Panel.init(alloc, io, client, opened.grant, shell_layers, environ),
             .pane_split = pane_split,
             .grp = first_group,
             .layout = try groups.Layout.init(alloc, first_group.id),

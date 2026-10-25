@@ -61,6 +61,7 @@ const ListCursor = listcursor.ListCursor;
 const keybind = @import("applib").keybind;
 const zjump = @import("applib").zjump;
 const homepath = @import("applib").homepath;
+const fullscreen = @import("applib").fullscreen;
 
 /// Rows the header block occupies: title, search field, hint line.
 const header_rows: usize = 3;
@@ -312,17 +313,13 @@ const Ui = struct {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
 
-        // A dedicated context: from here on every layer call on `client`
-        // targets this, not the shell's, and it composites over the
-        // shell the way `read`/`zoe`'s own contexts do. `destroy_context`
-        // restores the shell's context underneath on the way out.
-        const grant = try client.createContext(null, null, 0, false);
-        const context = grant.context;
-        errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context, &grant.token);
-        try client.setContextTitle("gw-hist");
-
-        const size = try client.getSize();
+        // A dedicated context, composited over the shell the way
+        // `read`/`zoe`'s own contexts are. No host caret: the search
+        // field draws its own (see `renderHeader`).
+        const opened = try fullscreen.open(client, listener, .{ .title = "gw-hist" });
+        errdefer opened.close(client);
+        const context = opened.grant.context;
+        const size = opened.size;
         const cols = size.cols;
         const rows = size.rows;
         const list_rows = @max(rows -| header_rows, 1);

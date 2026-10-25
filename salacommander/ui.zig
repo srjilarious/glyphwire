@@ -97,6 +97,7 @@ const Batch = glyphwire.Client.Batch;
 const lsfmt = @import("applib").format;
 const lsentries = @import("applib").entries;
 const gridlayout = @import("applib").gridlayout;
+const fullscreen = @import("applib").fullscreen;
 
 // Every colour is a theme role the host resolves against this context's
 // theme -- the window's, or `salacommander.conf.lua`'s `theme` -- so the
@@ -547,26 +548,22 @@ pub const Ui = struct {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
 
-        const grant = try client.createContext(null, null, 0, false);
-        const context = grant.context;
-        errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context, &grant.token);
-        try client.setContextTitle("salacommander");
         // Nothing here takes text at a host caret; the dialog's field
-        // draws its own.
-        try client.setCaretVisible(false);
-        // Kept for the one thing the host can't recolour: the F3 popup's
-        // nine-patch frame, picked by name.
-        const th: glyphwire.theme.Stored = if (opts.theme) |t| blk: {
-            try client.setTheme(&t);
-            break :blk .init(t);
-        } else try client.getTheme();
+        // draws its own. The theme is kept for the one thing the host
+        // can't recolour: the popups' nine-patch frame, picked by name.
+        const opened = try fullscreen.open(client, listener, .{
+            .title = "salacommander",
+            .theme = opts.theme,
+            .keep_theme = true,
+            .root_background = bg_pane,
+        });
+        errdefer opened.close(client);
+        const context = opened.grant.context;
+        const size = opened.size;
+        const metrics = opened.metrics;
+        // Kept in `self` before any style borrows its panel name.
+        const th = opened.th.?;
         self.th = th;
-        var popup_style = finder_style;
-        popup_style.frame_style = self.th.panelStyle();
-
-        const size = try client.getSize();
-        const metrics = try client.getCellMetrics();
 
         const left_layer = try client.createLayer(size.cols, size.rows, 0);
         const right_layer = try client.createLayer(size.cols, size.rows, 0);
@@ -583,15 +580,11 @@ pub const Ui = struct {
         // F3's popup, over the panes and the panel (it can't be opened
         // while the panel has the keyboard, but the panel stays drawn
         // underneath). Placed per frame by `Popup.render`.
-        var finder = try finderpopup.Popup.init(alloc, client, popup_style);
+        var finder = try finderpopup.Popup.init(alloc, client, fullscreen.panelFramed(finder_style, &self.th));
         errdefer finder.deinit();
-        var palette_init_style = palette_style;
-        palette_init_style.frame_style = self.th.panelStyle();
-        var palette = try palette_mod.Popup.init(alloc, client, palette_init_style);
+        var palette = try palette_mod.Popup.init(alloc, client, fullscreen.panelFramed(palette_style, &self.th));
         errdefer palette.deinit();
-        var history_init_style = history_style;
-        history_init_style.frame_style = self.th.panelStyle();
-        var history_popup = try palette_mod.Popup.init(alloc, client, history_init_style);
+        var history_popup = try palette_mod.Popup.init(alloc, client, fullscreen.panelFramed(history_style, &self.th));
         errdefer history_popup.deinit();
         // The drag card rides over the panes; sized and filled per drag.
         const drag_layer = try client.createLayer(10, 1, 0);
@@ -599,7 +592,6 @@ pub const Ui = struct {
         // included: a modal question belongs on top of a shell.
         const dialog_layer = try client.createLayer(10, 5, 0);
 
-        try client.setLayerBackground(glyphwire.root_layer_handle, bg_pane);
         for ([_]glyphwire.LayerHandle{ left_layer, right_layer }) |l| {
             try client.setLayerBackground(l, bg_pane);
             try client.setLayerScrollMode(l, .client);
@@ -655,7 +647,7 @@ pub const Ui = struct {
             .finder = finder,
             .palette = palette,
             .history_popup = history_popup,
-            .shell = shellpanel.Panel.init(alloc, io, client, grant, shell_layers, opts.environ),
+            .shell = shellpanel.Panel.init(alloc, io, client, opened.grant, shell_layers, opts.environ),
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .cfg = cfg,
@@ -857,15 +849,9 @@ pub const Ui = struct {
     /// a nine-patch picked by name and has to be swapped.
     fn themeChanged(self: *Ui) !void {
         self.th = try self.client.getTheme();
-        var style = finder_style;
-        style.frame_style = self.th.panelStyle();
-        try self.finder.setStyle(style);
-        var pstyle = palette_style;
-        pstyle.frame_style = self.th.panelStyle();
-        try self.palette.setStyle(pstyle);
-        var hstyle = history_style;
-        hstyle.frame_style = self.th.panelStyle();
-        try self.history_popup.setStyle(hstyle);
+        try self.finder.setStyle(fullscreen.panelFramed(finder_style, &self.th));
+        try self.palette.setStyle(fullscreen.panelFramed(palette_style, &self.th));
+        try self.history_popup.setStyle(fullscreen.panelFramed(history_style, &self.th));
         self.shell.setFrameStyle(self.th.panelStyle());
     }
 

@@ -42,6 +42,8 @@
 //!   `homepath`   `~` <-> `$HOME` (gw-shell, zoe), and a typed path
 //!                made absolute (gw-ls, gw-grep, gw-read, gwmd,
 //!                salacommander, zoe)
+//!   `fullscreen` opening a program's own context: title, caret, theme,
+//!                size (gwmd, gw-read, salacommander, zoe, gw-hist)
 //!   `cli`        exit with a message, connect client + listener
 //!                (gwmd, gw-read, gw-grep, gw-hist, gmux, salacommander,
 //!                zoe, glyphwire-probe)
@@ -107,6 +109,7 @@ pub const gridlayout = @import("gridlayout.zig");
 pub const icons = @import("icons.zig");
 pub const homepath = @import("homepath.zig");
 pub const cli = @import("cli.zig");
+pub const fullscreen = @import("fullscreen.zig");
 pub const splittree = @import("splittree.zig");
 pub const walk = @import("walk.zig");
 pub const listcursor = @import("listcursor");

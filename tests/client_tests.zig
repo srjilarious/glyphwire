@@ -5,6 +5,7 @@ const std = @import("std");
 const testz = @import("testz");
 const glyphwire = @import("glyphwire");
 const helpers = @import("session_helpers.zig");
+const fullscreen = @import("applib").fullscreen;
 
 /// Every `Client` and `Batch` method has to compile, including the ones no
 /// program calls yet: each one's params are checked against the server's
@@ -1148,4 +1149,57 @@ pub fn clientWithoutATokenSeesNothingTest(io: std.Io, alloc: std.mem.Allocator) 
     defer snapshot.deinit();
     // Its own fresh context, not the "secret" underneath.
     try testz.expectEqualStr(snapshot.cellAt(0, 0).grapheme, "");
+}
+
+/// `applib.fullscreen.open` (review C4): one call leaves a program in a
+/// context of its own, titled, caret off, root background set, with the
+/// window's size and a theme to keep. `close` takes it down again.
+pub fn fullscreenOpenSeatsAContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 12, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+
+    var client = try glyphwire.Client.connect(io, alloc, socket_path);
+    defer client.deinit();
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{"key"});
+    defer listener.deinit();
+
+    const bg = glyphwire.Color.role(.status_bg);
+    const opened = try fullscreen.open(&client, listener, .{
+        .title = "probe",
+        .keep_theme = true,
+        .root_background = bg,
+    });
+    try testz.expectEqual(opened.size.cols, 40);
+    try testz.expectEqual(opened.size.rows, 12);
+    try testz.expectTrue(opened.th != null);
+    // The root background goes out last, as a notification.
+    _ = try client.getSize();
+    {
+        srv.ctx_mutex.lockUncancelable(io);
+        defer srv.ctx_mutex.unlock(io);
+        const c = srv.session.contextPtr(opened.grant.context) orelse return error.TestUnexpectedResult;
+        try testz.expectEqualStr(c.title.items, "probe");
+        try testz.expectTrue(!c.caret_visible);
+        try testz.expectTrue(c.root.background != null and c.root.background.?.eql(bg));
+    }
+
+    opened.close(&client);
+    // `destroy_context` is a notification; any request after it on the
+    // same connection is answered only once it has been applied.
+    _ = try client.getSize();
+    srv.ctx_mutex.lockUncancelable(io);
+    defer srv.ctx_mutex.unlock(io);
+    try testz.expectTrue(srv.session.contextPtr(opened.grant.context) == null);
 }

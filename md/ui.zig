@@ -39,6 +39,7 @@ const std = @import("std");
 const glyphwire = @import("glyphwire");
 const homepath = @import("applib").homepath;
 const inotify = @import("applib").inotify;
+const fullscreen = @import("applib").fullscreen;
 const actions = @import("actions.zig");
 const zmd = @import("zmd");
 const layout_mod = @import("layout.zig");
@@ -201,24 +202,18 @@ pub const Ui = struct {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
 
-        // A dedicated context, shown immediately; no window scrollbar,
-        // since the page layer draws its own.
-        const grant = try client.createContext(null, null, 0, false);
-        const context = grant.context;
-        errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context, &grant.token);
-        try client.setContextTitle("gwmd");
-        // A reader: nothing takes typed text, so no caret.
-        try client.setCaretVisible(false);
-
-        const size = try client.getSize();
-        const metrics = try client.getCellMetrics();
+        // A dedicated context; the page layer draws its own scrollbar. A
+        // reader: nothing takes typed text, so no caret.
+        const opened = try fullscreen.open(client, listener, .{ .title = "gwmd", .root_background = bg_page });
+        errdefer opened.close(client);
+        const context = opened.grant.context;
+        const size = opened.size;
+        const metrics = opened.metrics;
 
         const page_layer = try client.createLayer(size.cols, size.rows, 0);
         // Created after the page, so it composites on top.
         const status_layer = try client.createLayer(size.cols, status_rows, 0);
 
-        try client.setLayerBackground(glyphwire.root_layer_handle, bg_page);
         try client.setLayerBackground(page_layer, bg_page);
         try client.setLayerBackground(status_layer, bg_status);
         try client.setLayerMouseSelect(page_layer, true);

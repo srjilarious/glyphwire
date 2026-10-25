@@ -43,6 +43,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const fullscreen = @import("applib").fullscreen;
 
 const archive_mod = @import("gw_yomi").archive;
 const cache_mod = @import("cache.zig");
@@ -489,22 +490,21 @@ pub const Ui = struct {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
 
-        // A dedicated context, shown immediately -- from here on every
-        // layer call on `client` targets it, not the shell's. No window
-        // scrollbar: the reader's root holds no scrollback, and the page
-        // layer draws its own bars when it has something to scroll.
-        const grant = try client.createContext(null, null, 0, false);
-        const context = grant.context;
-        errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context, &grant.token);
-        try client.setContextTitle("gw-read");
-        if (start.theme) |t| try client.setTheme(&t);
-        // Nothing here takes typed text, so there's nowhere for a caret
-        // to point.
-        try client.setCaretVisible(false);
-
-        const size = try client.getSize();
-        const metrics = try client.getCellMetrics();
+        // A dedicated context. The page layer draws its own bars when it
+        // has something to scroll, and nothing here takes typed text, so
+        // there's nowhere for a caret to point. The root's background is
+        // the letterbox around a fitted page: painted by the host under
+        // every cell, once, rather than a row of spaces per window row on
+        // every resize.
+        const opened = try fullscreen.open(client, listener, .{
+            .title = "gw-read",
+            .theme = start.theme,
+            .root_background = bg_page,
+        });
+        errdefer opened.close(client);
+        const context = opened.grant.context;
+        const size = opened.size;
+        const metrics = opened.metrics;
 
         // Provisional sizes: `applyLayout` resizes the page layer on the
         // first frame, and every resize after.
@@ -524,10 +524,6 @@ pub const Ui = struct {
         // building.
         const dict_build_layer = try client.createLayer(1, 1, 0);
 
-        // The letterbox around a fitted page: the root layer's background
-        // colour, painted by the host under every cell -- once, rather
-        // than a row of spaces per window row on every resize.
-        try client.setLayerBackground(glyphwire.root_layer_handle, bg_page);
         // The panels' fill, so a row only has to write its border and its
         // text; the cells between composite as `bg_dialog`.
         try client.setLayerBackground(dialog_layer, bg_dialog);
