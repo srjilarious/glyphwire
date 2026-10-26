@@ -564,6 +564,22 @@ pub fn configOnChdirDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(res.err, null);
     try testz.expectEqual(res.config.on.chdir.list, .metadata);
     try testz.expectEqualStr("gw-ls -lS", res.config.on.chdir.command);
+    try testz.expectTrue(res.config.on.chdir.carry_args);
+}
+
+pub fn configOnChdirCarryArgsOffTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "on { chdir = { carry_args = false } }");
+    defer res.deinit();
+
+    try testz.expectEqual(res.err, null);
+    try testz.expectTrue(!res.config.on.chdir.carry_args);
+    try testz.expectEqualStr("gw-ls -lS", res.config.on.chdir.command);
+}
+
+pub fn configOnChdirCarryArgsRejectsNonBoolTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var res = try config.load(alloc, "on { chdir = { carry_args = \"no\" } }");
+    defer res.deinit();
+    try testz.expectTrue(res.err != null);
 }
 
 pub fn configReadsOnChdirTableTest(_: std.Io, alloc: std.mem.Allocator) !void {

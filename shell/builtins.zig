@@ -290,6 +290,8 @@ pub fn chdir(self: *Prompt, target: []const u8) !void {
 /// `off` never, `always` for any change, `metadata` only when
 /// `chdir_method == .metadata` (a directory activated in gw-ls
 /// output). `submitLine` picks `chdir_pending_list` up and runs it.
+/// A gw-ls activation that carried its listing's flags runs that
+/// listing instead (`Prompt.chdir_carried_list`).
 pub fn queueChdirListing(self: *Prompt) void {
     const cfg = self.prompt_config orelse return;
     const oc = cfg.on.chdir;
@@ -298,8 +300,9 @@ pub fn queueChdirListing(self: *Prompt) void {
         .always => true,
         .metadata => self.chdir_method == .metadata,
     };
-    if (!fire or oc.command.len == 0) return;
-    self.chdir_pending_list = oc.command;
+    const listing = if (self.chdir_method == .metadata) self.chdir_carried_list orelse oc.command else oc.command;
+    if (!fire or listing.len == 0) return;
+    self.chdir_pending_list = listing;
 }
 
 /// Records the shell's current directory (post-`chdir`) in the `zj`

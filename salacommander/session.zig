@@ -14,9 +14,11 @@
 //!
 //! A directory gone since is a tab dropped, not an error; a side left
 //! with none opens where salacommander would have opened without a
-//! session. A missing or malformed file is no session at all. The
-//! command line's directories are loaded over the restored tabs as a
-//! new visit (`Ui.init`), so Back still reaches where the tab was.
+//! session. A missing or malformed file is no session at all. Each
+//! command-line directory, or with none the current directory on the
+//! side that last had the keyboard, is then shown in its side's tab
+//! already open there, else in a new tab after the restored shown one
+//! (`Restored.focusOrOpen`), so the restored tabs stay as they were.
 //!
 //! `parse` / `serialize` and `capture` are pure, so
 //! `tests/salacommander_tests.zig` round-trips them without a window.
@@ -25,6 +27,7 @@ const std = @import("std");
 const pane_mod = @import("pane.zig");
 const dirhistory = @import("dirhistory.zig");
 const tabs_mod = @import("tabs.zig");
+const homepath = @import("applib").homepath;
 
 const Pane = pane_mod.Pane;
 
@@ -164,6 +167,26 @@ pub const Restored = struct {
         self.shown.deinit();
         for (self.set.others.items) |*p| p.deinit();
         self.set.deinit(alloc);
+    }
+
+    /// Shows the tab already open on `dir`, or opens `dir` as a new tab
+    /// right after the shown one, as Ctrl+T would. What a launch does
+    /// with the directory it was started in or given, so restoring a
+    /// session never buries where the user asked to be. Tabs are matched
+    /// by `Pane.path`'s absolute form; a new tab takes `opts`, a found
+    /// one keeps its own view and history.
+    pub fn focusOrOpen(self: *Restored, alloc: std.mem.Allocator, io: std.Io, dir: []const u8, opts: pane_mod.Options) !void {
+        const abs = try homepath.absolute(io, alloc, dir);
+        defer alloc.free(abs);
+        for (0..self.set.count()) |k| {
+            if (std.mem.eql(u8, self.set.at(&self.shown, k).path, abs)) {
+                _ = self.set.switchTo(&self.shown, k);
+                return;
+            }
+        }
+        var p = try Pane.init(alloc, io, abs, opts);
+        errdefer p.deinit();
+        try self.set.open(alloc, &self.shown, p);
     }
 };
 

@@ -12,6 +12,7 @@ const lsfmt = @import("applib").format;
 const lsicons = @import("applib").icons;
 const lsentries = @import("applib").entries;
 const lsconfig = @import("ls_support").config;
+const listargs = @import("ls_support").listargs;
 
 const small_opts: gridlayout.Options = .{ .icon_cols = 2, .block_rows = 1 };
 
@@ -355,4 +356,40 @@ pub fn fileUriPercentEncodesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     const uri = try lsentries.fileUri(alloc, "/home/me/My Song #1 100%_ü.mp3");
     defer alloc.free(uri);
     try testz.expectEqualStr(uri, "file:///home/me/My%20Song%20%231%20100%25_%C3%BC.mp3");
+}
+
+// ─── listargs / list_args metadata ──────────────────────────────────────
+
+pub fn listArgsAlwaysNameTheIconSizeTest(_: std.Io, _: std.mem.Allocator) !void {
+    var buf: [listargs.max][]const u8 = undefined;
+    const plain = listargs.args(.{ .hidden = false, .long = false, .large = true, .raw_bytes = false }, &buf);
+    try testz.expectEqual(plain.len, 1);
+    try testz.expectEqualStr(plain[0], "-L");
+
+    const all = listargs.args(.{ .hidden = true, .long = true, .large = false, .raw_bytes = true }, &buf);
+    try testz.expectEqual(all.len, 4);
+    try testz.expectEqualStr(all[0], "-a");
+    try testz.expectEqualStr(all[1], "-l");
+    try testz.expectEqualStr(all[2], "-S");
+    try testz.expectEqualStr(all[3], "--bytes");
+}
+
+/// A directory carries `list_args`; a file never does, and null leaves
+/// the key out.
+pub fn entryMetadataCarriesListArgsOnDirectoriesTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const dir: lsentries.FileEntry = .{ .name = "src", .kind = .directory, .link_target = null, .abs_path = "/p/src" };
+    const file: lsentries.FileEntry = .{ .name = "a.txt", .kind = .file, .link_target = null, .abs_path = "/p/a.txt" };
+    const args = [_][]const u8{ "-a", "-S" };
+
+    const d = try lsentries.entryMetadataJson(alloc, dir, &args);
+    defer alloc.free(d);
+    try testz.expectEqualStr(d, "{\"kind\":\"directory\",\"path\":\"/p/src\",\"symlink\":false,\"list_args\":[\"-a\",\"-S\"]}");
+
+    const bare = try lsentries.entryMetadataJson(alloc, dir, null);
+    defer alloc.free(bare);
+    try testz.expectEqualStr(bare, "{\"kind\":\"directory\",\"path\":\"/p/src\",\"symlink\":false}");
+
+    const f = try lsentries.entryMetadataJson(alloc, file, &args);
+    defer alloc.free(f);
+    try testz.expectTrue(std.mem.indexOf(u8, f, "list_args") == null);
 }

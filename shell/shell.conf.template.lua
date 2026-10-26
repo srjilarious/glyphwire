@@ -149,12 +149,17 @@
 --                 typed `cd` / `zj`
 --
 -- `command` is a full command line, run as its own line right after the
--- change (so a glyphwire-aware lister still handshakes). The defaults:
+-- change (so a glyphwire-aware lister still handshakes). With
+-- `carry_args`, a directory picked in a gw-ls listing is listed with
+-- that listing's own flags instead (click a dir in `gw-ls -aS` output
+-- and you get `gw-ls -aS` there); `command` still covers a typed `cd`,
+-- Alt+Up and other programs' links. The defaults:
 --
 -- on{
 --   chdir = {
 --     list = "metadata",
 --     command = "gw-ls -lS",
+--     carry_args = true,
 --   },
 -- }
 

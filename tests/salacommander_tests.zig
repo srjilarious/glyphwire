@@ -2474,6 +2474,49 @@ pub fn sessionDropsTabsWhoseDirectoryIsGoneTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectTrue((try session.openSide(alloc, io, &.{ .tabs = &none })) == null);
 }
 
+pub fn sessionFocusOrOpenFindsOrAddsTabTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var s = try Scratch.init(io, alloc, "session-focus");
+    defer s.deinit();
+    try s.mkdir("a");
+    try s.mkdir("b");
+    try s.mkdir("c");
+    const a = try s.abs("a");
+    defer alloc.free(a);
+    const b = try s.abs("b");
+    defer alloc.free(b);
+    const c = try s.abs("c");
+    defer alloc.free(c);
+
+    // Restored as a | [b] | c, b shown.
+    var three = [_]session.Tab{ .{ .path = a }, .{ .path = b }, .{ .path = c } };
+    var r = (try session.openSide(alloc, io, &.{ .tabs = &three, .active = 1 })) orelse return error.TestUnexpectedResult;
+    defer r.deinit(alloc);
+
+    // A directory already open is shown, nothing added.
+    try r.focusOrOpen(alloc, io, a, .{});
+    try testz.expectEqual(r.set.count(), 3);
+    try testz.expectEqual(r.set.active, 0);
+    try testz.expectEqualStr(r.shown.path, a);
+
+    // The same directory spelled with a trailing `/.` still matches.
+    const c_dot = try std.fmt.allocPrint(alloc, "{s}/.", .{c});
+    defer alloc.free(c_dot);
+    try r.focusOrOpen(alloc, io, c_dot, .{});
+    try testz.expectEqual(r.set.count(), 3);
+    try testz.expectEqual(r.set.active, 2);
+
+    // One not open becomes a new tab right after the shown one, with
+    // the options given.
+    try r.focusOrOpen(alloc, io, a, .{});
+    try r.focusOrOpen(alloc, io, s.path, .{ .view = .large });
+    try testz.expectEqual(r.set.count(), 4);
+    try testz.expectEqual(r.set.active, 1);
+    try testz.expectEqualStr(r.shown.path, s.path);
+    try testz.expectTrue(r.shown.view == .large);
+    try testz.expectEqualStr(r.set.at(&r.shown, 0).path, a);
+    try testz.expectEqualStr(r.set.at(&r.shown, 2).path, b);
+}
+
 pub fn sessionParseRefusesOtherShapesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     for ([_][]const u8{
         "",

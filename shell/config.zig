@@ -215,14 +215,20 @@ pub const ZjConfig = struct {
 ///                  while browsing), not a typed `cd` / `zj` / `sh.chdir`.
 pub const ChdirListMode = enum { off, always, metadata };
 
-/// `on{ chdir = { list, command } }` -- what runs after the shell's
-/// working directory changes. `command` is a full command line, run
-/// through the normal dispatch path (so a glyphwire-aware lister still
-/// handshakes) once the line that triggered the change finishes. Owned
-/// by the enclosing `ShellConfig` (`prompt_arena`).
+/// `on{ chdir = { list, command, carry_args } }` -- what runs after the
+/// shell's working directory changes. `command` is a full command line,
+/// run through the normal dispatch path (so a glyphwire-aware lister
+/// still handshakes) once the line that triggered the change finishes.
+/// Owned by the enclosing `ShellConfig` (`prompt_arena`).
+///
+/// `carry_args`: a directory picked in gw-ls output lists with the flags
+/// that listing was drawn with (`gw-ls -aS` stays `-aS`), carried in the
+/// entry's metadata as `list_args`, instead of `command`. `command` still
+/// lists a typed `cd`, Alt+Up, and anything tagged by another program.
 pub const OnChdirConfig = struct {
     list: ChdirListMode = .metadata,
     command: []const u8 = "gw-ls -lS",
+    carry_args: bool = true,
 };
 
 /// The `on{ ... }` event-hook table. Only `chdir` today; its own struct
@@ -581,8 +587,8 @@ fn luaKeys(lua: *Lua) !i32 {
     return 0;
 }
 
-/// `on{ chdir = { list = "off"|"always"|"metadata", command = "..." } }`
-/// -- event hooks. Today only `chdir`: run `command` after the shell's
+/// `on{ chdir = { list = "off"|"always"|"metadata", command = "...",
+/// carry_args = true|false } }` -- event hooks. Today only `chdir`: run `command` after the shell's
 /// working directory changes, gated by `list` (see `ChdirListMode`). A
 /// missing key leaves the current value; an unknown `list` string raises.
 /// `command` goes in `prompt_arena`.
@@ -607,6 +613,13 @@ fn luaOn(lua: *Lua) !i32 {
         if (!lua.isNoneOrNil(-1)) {
             const s = lua.checkString(-1);
             cfg.on.chdir.command = try cfg.prompt_arena.allocator().dupe(u8, s);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(tbl, "carry_args");
+        if (!lua.isNoneOrNil(-1)) {
+            lua.checkType(-1, .boolean);
+            cfg.on.chdir.carry_args = lua.toBoolean(-1);
         }
         lua.pop(1);
     }

@@ -170,3 +170,32 @@ fn replaceOwned(alloc: std.mem.Allocator, haystack: []const u8, needle: []const 
     }
     return out.toOwnedSlice(alloc);
 }
+
+/// The listing line for a directory picked in gw-ls output that carried
+/// `list_args` (the flags its listing was drawn with -- see
+/// `ls/listargs.zig`): `gw-ls` and those flags, so the next listing looks
+/// like the one clicked in. Owned result.
+///
+/// Null when any argument isn't a plain flag (a `-`, then letters,
+/// digits and `-`). Any program can tag cells, and this line runs as
+/// typed, so nothing that could be a word of shell syntax gets through;
+/// the caller falls back to `on{ chdir = { command } }`.
+pub fn carriedListLine(alloc: std.mem.Allocator, args: []const []const u8) !?[]u8 {
+    for (args) |a| if (!isPlainFlag(a)) return null;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "gw-ls");
+    for (args) |a| {
+        try out.append(alloc, ' ');
+        try out.appendSlice(alloc, a);
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
+fn isPlainFlag(arg: []const u8) bool {
+    if (arg.len < 2 or arg[0] != '-') return false;
+    for (arg[1..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
+    }
+    return true;
+}

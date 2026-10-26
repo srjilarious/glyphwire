@@ -10,6 +10,7 @@ const gridlayout = @import("applib").gridlayout;
 const lsfmt = @import("applib").format;
 const lsicons = @import("applib").icons;
 const lsconfig = @import("ls_support").config;
+const listargs = @import("ls_support").listargs;
 const lsentries = @import("applib").entries;
 
 const EntryKind = lsentries.EntryKind;
@@ -143,6 +144,15 @@ pub fn main(init: std.process.Init) !void {
         // here rather than threaded through as three-way state, so
         // `writeGrid`/`writeLongTable` only ever see a plain `large: bool`.
         const large = large_flag or !small_flag;
+        // What a directory entry carries for the shell to list it the
+        // same way once picked. See `ls/listargs.zig`.
+        var args_buf: [listargs.max][]const u8 = undefined;
+        const list_args = listargs.args(.{
+            .hidden = show_hidden,
+            .long = long_list,
+            .large = large,
+            .raw_bytes = raw_bytes,
+        }, &args_buf);
         for (listings, 0..) |listing, i| {
             // A blank separator row between blocks (only when there's more
             // than one).
@@ -158,9 +168,9 @@ pub fn main(init: std.process.Init) !void {
                 try client.setCursor(c2.row + 1, 0);
             }
             if (long_list) {
-                try writeLongTable(&client, listing.entries, large, raw_bytes, cfg);
+                try writeLongTable(&client, listing.entries, large, raw_bytes, cfg, list_args);
             } else {
-                try writeGrid(&client, listing.entries, large, cfg);
+                try writeGrid(&client, listing.entries, large, cfg, list_args);
             }
         }
     } else |_| {
@@ -500,7 +510,7 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 /// other tools) doesn't have to share this process's cwd, and a listing
 /// that mixes directories (the multi-operand loose-files block) still
 /// tags each entry with its own real path.
-fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool, cfg: lsconfig.LsConfig) !void {
+fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool, cfg: lsconfig.LsConfig, list_args: []const []const u8) !void {
     if (entries.len == 0) return;
     const alloc = client.alloc;
     var buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
@@ -580,7 +590,7 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
         const slots = try alloc.alloc(glyphwire.Client.Batch.Slot, entries.len);
         defer alloc.free(slots);
         for (entries, 0..) |entry, i| {
-            const json = try entryMetadataJson(alloc, entry);
+            const json = try entryMetadataJson(alloc, entry, list_args);
             defer alloc.free(json);
             // The drag payload makes the entry Alt+draggable out of the
             // window, for as long as the listing stays in scrollback.
@@ -781,7 +791,7 @@ const id_name_col_max = 16;
 /// whole viewport (it scrolled the layer as it drew, terminal-style), so
 /// there's no spare on-screen row: the cursor lands on the last line and
 /// one newline is emitted to scroll a blank gap in before the prompt.
-fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: bool, raw_bytes: bool, cfg: lsconfig.LsConfig) !void {
+fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: bool, raw_bytes: bool, cfg: lsconfig.LsConfig, list_args: []const []const u8) !void {
     const alloc = client.alloc;
     const cur = try client.getCursor();
 
@@ -920,7 +930,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
         const slots = try alloc.alloc(glyphwire.Client.Batch.Slot, entries.len);
         defer alloc.free(slots);
         for (entries, 0..) |entry, i| {
-            const json = try entryMetadataJson(alloc, entry);
+            const json = try entryMetadataJson(alloc, entry, list_args);
             defer alloc.free(json);
             // The drag payload makes the entry Alt+draggable out of the
             // window, for as long as the listing stays in scrollback.

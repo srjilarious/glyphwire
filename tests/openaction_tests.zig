@@ -149,3 +149,32 @@ pub fn expandQuotesEmbeddedApostropheTest(_: std.Io, alloc: std.mem.Allocator) !
     defer alloc.free(out);
     try testz.expectEqualStr(out, "cd '/it'\\''s here'");
 }
+
+// ─── carriedListLine ───────────────────────────────────────────────────
+
+pub fn carriedListLineJoinsFlagsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = (try openaction.carriedListLine(alloc, &.{ "-a", "-S", "--bytes" })).?;
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "gw-ls -a -S --bytes");
+}
+
+pub fn carriedListLineWithNoFlagsIsBareTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    const out = (try openaction.carriedListLine(alloc, &.{})).?;
+    defer alloc.free(out);
+    try testz.expectEqualStr(out, "gw-ls");
+}
+
+/// Anything that isn't a plain flag refuses the whole line, so a tagged
+/// cell can't smuggle shell syntax into what runs.
+pub fn carriedListLineRefusesNonFlagsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    for ([_][]const []const u8{
+        &.{"/etc"},
+        &.{ "-a", "; rm -rf ~" },
+        &.{"-a;b"},
+        &.{"-"},
+        &.{"-a b"},
+        &.{"$(x)"},
+    }) |args| {
+        try testz.expectTrue((try openaction.carriedListLine(alloc, args)) == null);
+    }
+}

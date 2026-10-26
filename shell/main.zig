@@ -1584,6 +1584,12 @@ pub const Prompt = struct {
     /// cleared) by `submitLine`. Borrows `prompt_config`'s arena-owned
     /// string -- not freed here.
     chdir_pending_list: ?[]const u8 = null,
+    /// The listing a gw-ls directory activation carried (`gw-ls` plus
+    /// the flags of the listing it was picked from), which
+    /// `queueChdirListing` runs instead of `on{ chdir = { command } }`.
+    /// Set by `activateSelectionAt` only around its `submitLine`, and
+    /// owned and freed there.
+    chdir_carried_list: ?[]const u8 = null,
 
     /// Memoised output of the `prompt{ commands = { ... } }` vars for the
     /// current prompt. `writePromptPrefix` clears it (`resetCmdVars`) so
@@ -2595,8 +2601,15 @@ pub const Prompt = struct {
     /// The metadata blob glyphwire-ls tags every listed entry with (see
     /// `ls/main.zig`'s `entryMetadataJson`). `kind` and `path` are always
     /// present; `mimetype` only for a regular file; `line` only from
-    /// `gw-grep`, which tags each hit and context line with its own.
-    pub const MetaEntry = struct { kind: ?[]const u8 = null, path: ?[]const u8 = null, mimetype: ?[]const u8 = null, line: ?u64 = null };
+    /// `gw-grep`, which tags each hit and context line with its own;
+    /// `list_args` only on a gw-ls directory (see `chdir_carried_list`).
+    pub const MetaEntry = struct {
+        kind: ?[]const u8 = null,
+        path: ?[]const u8 = null,
+        mimetype: ?[]const u8 = null,
+        line: ?u64 = null,
+        list_args: ?[]const []const u8 = null,
+    };
 
     /// Parses the metadata at `(row, col)` in the view scrolled back by
     /// `view_offset`, or null if there's no tag there / it doesn't parse /
@@ -2650,6 +2663,19 @@ pub const Prompt = struct {
             .line = got.parsed.value.line,
         }}) catch return orelse return;
         defer alloc.free(line);
+
+        // A gw-ls directory lists with the flags its own listing had, in
+        // place of `on{ chdir = { command } }`, for this one submit.
+        const carry = if (self.prompt_config) |pc| pc.on.chdir.carry_args else false;
+        const carried: ?[]u8 = if (!carry or !std.mem.eql(u8, got.parsed.value.kind.?, "directory"))
+            null
+        else if (got.parsed.value.list_args) |args|
+            try openaction.carriedListLine(alloc, args)
+        else
+            null;
+        defer if (carried) |listing| alloc.free(listing);
+        self.chdir_carried_list = carried;
+        defer self.chdir_carried_list = null;
 
         try self.setLine(line);
         // Tell `queueChdirListing` this submit came from a gw-ls

@@ -23,8 +23,9 @@
 //! no text-mode fallback.
 //!
 //! `salacommander [LEFT [RIGHT]]` -- both sides reopen the tabs the last
-//! run left (`session.zig`), or with none the current directory; a
-//! directory given opens in that side's shown tab.
+//! run left (`session.zig`), or with none the current directory. A
+//! directory given, or with none the current directory on the side last
+//! active, is shown in the tab already open on it, else in a new tab.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");

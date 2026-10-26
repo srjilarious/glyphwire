@@ -345,7 +345,12 @@ pub fn entryKindName(kind: EntryKind) []const u8 {
 /// directory (device, fifo, socket), keeps reporting itself plainly as
 /// `"symlink"` with no mimetype and no default action, same as before this
 /// changed -- see `FileEntry.link_target_kind`.
-pub fn entryMetadataJson(alloc: std.mem.Allocator, entry: FileEntry) ![]u8 {
+///
+/// A directory (or a link to one) also carries `list_args` when given:
+/// the flags the listing was drawn with, so the shell can list the
+/// directory the same way once it's picked (`on{ chdir = { carry_args } }`).
+/// Null leaves the key out.
+pub fn entryMetadataJson(alloc: std.mem.Allocator, entry: FileEntry, list_args: ?[]const []const u8) ![]u8 {
     const effective_kind = entry.link_target_kind orelse entry.kind;
     const kind = entryKindName(effective_kind);
     const symlink = entry.kind == .sym_link;
@@ -356,6 +361,12 @@ pub fn entryMetadataJson(alloc: std.mem.Allocator, entry: FileEntry) ![]u8 {
             .mimetype = mimetypeForExtension(entry.name),
             .symlink = symlink,
         }, .{}),
+        .directory => std.json.Stringify.valueAlloc(alloc, .{
+            .kind = kind,
+            .path = entry.abs_path,
+            .symlink = symlink,
+            .list_args = list_args,
+        }, .{ .emit_null_optional_fields = false }),
         else => std.json.Stringify.valueAlloc(alloc, .{
             .kind = kind,
             .path = entry.abs_path,

@@ -527,17 +527,22 @@ pub const Ui = struct {
         if (opts.session) |s| for (s.sides[0..2], &sides) |*side, *out| {
             out.* = session_mod.openSide(alloc, io, side) catch null;
         };
-        // A directory on the command line is a new visit in the restored
-        // tab, so Back still goes where the tab was.
+        const active: usize = if (opts.left != null) 0 else if (opts.session) |s| @min(s.active, 1) else 0;
+        // A directory on the command line, or with none the current
+        // directory on the side that had the keyboard, is shown in the
+        // restored side's tab already open there or in a new one (see
+        // `Restored.focusOrOpen`). The other restored side is left as it
+        // was saved.
         const dirs = [2]?[]const u8{ opts.left, opts.right };
-        for (&sides, dirs) |*s, dir| {
+        var wanted = dirs;
+        if (opts.left == null and opts.right == null) wanted[active] = ".";
+        for (&sides, dirs, wanted) |*s, dir, want| {
             if (s.*) |*r| {
-                if (dir) |d| try r.shown.load(d);
+                if (want) |d| try r.focusOrOpen(alloc, io, d, pane_opts);
             } else {
                 s.* = .{ .shown = try Pane.init(alloc, io, dir orelse dirs[0] orelse ".", pane_opts) };
             }
         }
-        const active: usize = if (opts.left != null) 0 else if (opts.session) |s| @min(s.active, 1) else 0;
 
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);

@@ -168,7 +168,9 @@ A two-pane file manager in the Norton / Midnight Commander tradition.
   follows the active pane, and a key bar that shows what each F-key does
   under the held modifier. Every key is a rebindable action.
 - Quitting remembers every tab and its history; the next launch reopens
-  them (`restore_session = false` turns it off).
+  them (`restore_session = false` turns it off). The directory it's
+  started in, or given, is then shown in the tab already open on it, or
+  in a new tab.
 
 ## gwmd
 
@@ -191,7 +193,8 @@ bubble translation and Anki card mining.
 An `ls` replacement. An icon grid, or `-l` for a long listing in a
 server-side table that stays sortable by clicking a header after `gw-ls`
 has exited. On Wayland any entry, even from scrollback, can be Alt+dragged
-into another program.
+into another program. Clicking a directory in its output `cd`s there and
+lists it with the same flags (`gw-ls -aS` stays `-aS`).
 
 ## gw-grep
 
