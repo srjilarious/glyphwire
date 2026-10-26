@@ -1536,6 +1536,8 @@ pub const Layer = struct {
         self.alloc.free(self.buf);
         if (self.vt.alt_cells) |a| self.alloc.free(a);
         if (self.vt.tab_stops) |t| self.alloc.free(t);
+        self.vt.osc.deinit(self.alloc);
+        if (self.vt.clipboard_write) |c| self.alloc.free(c);
         var table_it = self.tables.valueIterator();
         while (table_it.next()) |t| t.deinit();
         self.tables.deinit();
@@ -2582,6 +2584,7 @@ pub const Layer = struct {
         // on the next call rather than drawing its tail as literal text.
         if (!self.pty_mode) {
             self.vt.esc_state = .ground;
+            vt.resetOsc(self);
             self.vt.csi_len = 0;
             self.vt.shift_out = false;
             self.vt.g0_line_drawing = false;
@@ -2725,6 +2728,16 @@ pub const Layer = struct {
         const s = self.vt.reply_buf[0..self.vt.reply_len];
         self.vt.reply_len = 0;
         return s;
+    }
+
+    /// Text an OSC 52 in the last `writeText` asked to put on the
+    /// clipboard, or null. The caller owns it (freed with this layer's
+    /// allocator). Drained by the dispatcher after each `write_text`,
+    /// which writes it to the session clipboard. See `vt.execOsc52`.
+    pub fn takeClipboard(self: *Layer) ?[]u8 {
+        const text = self.vt.clipboard_write orelse return null;
+        self.vt.clipboard_write = null;
+        return text;
     }
 
     /// Places one glyph of a `write_text` run: its footprint is its display
@@ -3359,6 +3372,7 @@ pub const Layer = struct {
                 // program that exited mid-escape can't bleed into what
                 // the next one draws. See `Layer.pty_mode`.
                 self.vt.esc_state = .ground;
+                vt.resetOsc(self);
                 self.vt.csi_len = 0;
                 self.vt.shift_out = false;
                 self.vt.g0_line_drawing = false;

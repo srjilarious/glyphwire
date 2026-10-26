@@ -2470,6 +2470,24 @@ pub fn setClipboardIsSharedAcrossContextsTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectEqualStr("from the background", parsed.value.result.text);
 }
 
+/// An OSC 52 inside `write_text` (a pty program's copy, Claude Code's
+/// among them) lands on the session clipboard.
+pub fn writeTextOsc52SetsTheSessionClipboardTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var d = try helpers.attachedConnection(&session, 7);
+
+    const result = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"\u001b]52;c;Y29waWVk\u0007"}}
+    );
+    try testz.expectTrue(result.response == null);
+    try testz.expectEqualStr("copied", session.clipboardText());
+    try testz.expectEqual(session.clipboard_serial, 1);
+}
+
 /// A connection can subscribe to the new `selection` and `clipboard`
 /// event streams.
 pub fn subscribeAcceptsSelectionAndClipboardTest(io: std.Io, alloc: std.mem.Allocator) !void {

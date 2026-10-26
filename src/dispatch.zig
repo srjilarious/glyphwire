@@ -1507,6 +1507,14 @@ pub const Dispatcher = struct {
                 .newline,
         });
 
+        // An OSC 52 clipboard write the text carried: onto the session
+        // clipboard, which glyphwire-host mirrors to the OS. A
+        // sessionless dispatcher has no clipboard, so it's dropped.
+        if (layer.takeClipboard()) |text| {
+            defer layer.alloc.free(text);
+            if (self.session) |session| try session.setClipboard(text);
+        }
+
         // A terminal query the text carried (`CSI 6n` / DA / DECRQM):
         // hand the reply bytes to `"terminal"` subscribers -- glyphwire-
         // shell writes them to the pty master. See `core.Layer.takeReply`.

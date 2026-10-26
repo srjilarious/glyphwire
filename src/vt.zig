@@ -130,6 +130,22 @@ pub const Vt = struct {
     /// glyphwire-shell writes it to the pty master.
     reply_buf: [96]u8 = undefined,
     reply_len: usize = 0,
+    /// The payload of the `ESC ] ...` (OSC) sequence being parsed, kept
+    /// only while it still reads as OSC 52 (`52;<selection>;<base64>`,
+    /// the clipboard write) -- every other OSC (the window title Claude
+    /// Code animates, hyperlinks, colour queries) is dropped unread, as
+    /// before. See `oscByte` / `endString`. Owned; freed when the
+    /// sequence ends, so a big copy doesn't pin its buffer.
+    osc: std.ArrayList(u8) = .empty,
+    /// True from `ESC ]` while `osc` still matches OSC 52 and fits under
+    /// `max_osc52_len`.
+    osc_collect: bool = false,
+    /// Text an OSC 52 asked to put on the clipboard, decoded, waiting for
+    /// the dispatcher to drain it after this `write_text`
+    /// (`Layer.takeClipboard`) into the session clipboard. Same shape as
+    /// `reply_buf`: the layer has no session to write to. Owned; a newer
+    /// write in the same chunk replaces it.
+    clipboard_write: ?[]u8 = null,
     /// The alternate screen (xterm `?1049` / `?47` / `?1047`): a
     /// lazily-allocated `width * height` cell array, row-major, with **no
     /// scrollback ring** -- a full-screen program's transient screen.
@@ -179,7 +195,10 @@ pub const Vt = struct {
 ///    `screen`/`tmux`-style (SO/SI over a G1 designated once) both compile
 ///    down to, and it's how ncurses draws panel borders when it isn't
 ///    using UTF-8 line-drawing glyphs directly.
-///  - **discards** every other `ESC [ ...` (CSI) final and every
+///  - **interprets** OSC 52 (`ESC ] 52 ; c ; <base64> BEL`), the
+///    clipboard write terminal programs like Claude Code and tmux copy
+///    with -- see `execOsc52`.
+///  - **discards** every other `ESC [ ...` (CSI) final and every other
 ///    `ESC ] ... ` / `ESC P|X|^|_ ... ` (OSC and other string-terminated)
 ///    sequence, same as the old stripper -- recognized well enough to
 ///    find the end, then dropped. So is `ESC` + any other intermediate
@@ -662,6 +681,7 @@ pub fn consumeControl(self: *Layer, byte: u8) !bool {
             return true;
         }
         if (self.vt.esc_state == .string and (byte == 0x18 or byte == 0x1a)) {
+            endString(self, false);
             self.vt.esc_state = .ground;
             return true;
         }
@@ -722,7 +742,11 @@ pub fn consumeInSequence(self: *Layer, cp: u21) bool {
     switch (self.vt.esc_state) {
         .ground => return false,
         .string => if (cp == 0x9c) {
+            endString(self, true);
             self.vt.esc_state = .ground;
+        } else {
+            // Not base64, so not an OSC 52 this layer acts on.
+            endString(self, false);
         },
         .esc, .csi, .charset_g0, .charset_g1, .esc_intermediate => {
             self.vt.esc_state = .ground;
@@ -745,7 +769,11 @@ fn stepEscape(self: *Layer, byte: u8) !void {
                 self.vt.esc_state = .csi;
                 self.vt.csi_len = 0;
             },
-            ']', 'P', 'X', '^', '_' => self.vt.esc_state = .string,
+            ']' => {
+                self.vt.esc_state = .string;
+                self.vt.osc_collect = true;
+            },
+            'P', 'X', '^', '_' => self.vt.esc_state = .string,
             '7' => { // DECSC -- save cursor
                 saveCursor(self);
                 self.vt.esc_state = .ground;
@@ -804,9 +832,17 @@ fn stepEscape(self: *Layer, byte: u8) !void {
             }
         },
         .string => switch (byte) {
-            0x07 => self.vt.esc_state = .ground, // BEL terminator
-            0x1b => self.vt.esc_state = .esc, // ESC of an `ESC \` (ST) terminator
-            else => {},
+            0x07 => { // BEL terminator
+                endString(self, true);
+                self.vt.esc_state = .ground;
+            },
+            0x1b => { // ESC of an `ESC \` (ST) terminator
+                // xterm ends the string at the ESC whatever follows it,
+                // so the OSC is complete here.
+                endString(self, true);
+                self.vt.esc_state = .esc;
+            },
+            else => oscByte(self, byte),
         },
         // `0` is the VT100 special graphics/line-drawing set; anything
         // else (`B` for US-ASCII, or any other 94-charset final) is
@@ -962,6 +998,86 @@ fn restoreCursor(self: *Layer) void {
     self.vt.shift_out = s.shift_out;
     self.vt.g0_line_drawing = s.g0_line_drawing;
     self.vt.g1_line_drawing = s.g1_line_drawing;
+}
+
+/// The longest OSC 52 payload (`52;<selection>;<base64>`) this parser
+/// keeps, about 3 MiB of copied text. Past it the sequence is dropped
+/// rather than grown without bound by whatever a program writes.
+pub const max_osc52_len = 4 * 1024 * 1024;
+
+const osc52_prefix = "52;";
+
+/// One payload byte of an `ESC P|X|^|_|] ...` string. Kept only while
+/// the string is an OSC that still reads as OSC 52; the moment it can't
+/// be one (`ESC ] 0 ;` title, a DCS, an oversized payload), collecting
+/// stops and the rest is skipped, as every string used to be.
+///
+/// A `pty_mode` layer keeps the machine armed between `write_text`
+/// calls (see `Layer.writeRuns`), so a copy split across chunks of the
+/// program's output is collected whole. Any other layer resets at the
+/// end of each call (`resetOsc`), the same as the rest of the machine.
+fn oscByte(self: *Layer, byte: u8) void {
+    if (!self.vt.osc_collect) return;
+    const len = self.vt.osc.items.len;
+    const fits = len < max_osc52_len;
+    const on_prefix = len >= osc52_prefix.len or byte == osc52_prefix[len];
+    if (!fits or !on_prefix) {
+        resetOsc(self);
+        return;
+    }
+    self.vt.osc.append(self.alloc, byte) catch resetOsc(self);
+}
+
+/// A string sequence ended: `act` (a BEL / ST terminator, not CAN/SUB
+/// or an abandoned sequence) runs a collected OSC 52.
+fn endString(self: *Layer, act: bool) void {
+    if (act and self.vt.osc_collect and self.vt.osc.items.len >= osc52_prefix.len) {
+        execOsc52(self, self.vt.osc.items[osc52_prefix.len..]);
+    }
+    resetOsc(self);
+}
+
+/// Drops any OSC collected so far, and its buffer.
+pub fn resetOsc(self: *Layer) void {
+    self.vt.osc_collect = false;
+    self.vt.osc.clearAndFree(self.alloc);
+}
+
+/// OSC 52's `<selection>;<data>` -- set the clipboard to `data`, base64.
+///
+/// glyphwire has one clipboard, the session's, so a write naming the
+/// clipboard (`c`), xterm's default selection (`s`) or none at all lands
+/// there; one naming only the primary selection or a cut buffer (`p`,
+/// `0`..`7`) is ignored rather than overwriting the clipboard the user
+/// didn't ask for. `?` asks the terminal to *report* the clipboard back
+/// on stdin, which would hand anything a program prints a way to read
+/// what the user copied, so it's never answered. An empty `data` (xterm:
+/// clear the selection) and bad base64 are ignored too.
+fn execOsc52(self: *Layer, payload: []const u8) void {
+    const semi = std.mem.indexOfScalar(u8, payload, ';') orelse return;
+    const selection = payload[0..semi];
+    const data = payload[semi + 1 ..];
+    const to_clipboard = selection.len == 0 or
+        std.mem.indexOfAny(u8, selection, "cs") != null;
+    if (!to_clipboard) return;
+    if (data.len == 0 or std.mem.eql(u8, data, "?")) return;
+
+    const text = decodeBase64(self.alloc, data) orelse return;
+    if (self.vt.clipboard_write) |old| self.alloc.free(old);
+    self.vt.clipboard_write = text;
+}
+
+/// `data` decoded from base64, padded or not, or null when it isn't
+/// valid. Caller owns the result.
+fn decodeBase64(alloc: std.mem.Allocator, data: []const u8) ?[]u8 {
+    const codec = if (data.len % 4 == 0) std.base64.standard.Decoder else std.base64.standard_no_pad.Decoder;
+    const size = codec.calcSizeForSlice(data) catch return null;
+    const out = alloc.alloc(u8, size) catch return null;
+    codec.decode(out, data) catch {
+        alloc.free(out);
+        return null;
+    };
+    return out;
 }
 
 /// Puts the VT modes a program can leave behind -- autowrap, insert

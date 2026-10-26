@@ -1988,6 +1988,83 @@ pub fn layerOscTitleWithNonAsciiDrawsNothingTest(io: std.Io, alloc: std.mem.Allo
     try testz.expectEqualStr("e", layer.cell(0, 4).grapheme());
 }
 
+/// `takeClipboard`'s text, or "" when there's none; frees it.
+fn takeClipboardText(layer: *glyphwire.Layer, buf: []u8) []const u8 {
+    const text = layer.takeClipboard() orelse return "";
+    defer layer.alloc.free(text);
+    const n = @min(text.len, buf.len);
+    @memcpy(buf[0..n], text[0..n]);
+    return buf[0..n];
+}
+
+pub fn layerOsc52QueuesAClipboardWriteTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+    var buf: [64]u8 = undefined;
+
+    // How Claude Code copies a selection: `c`, base64, BEL. Nothing of
+    // it reaches the grid.
+    try layer.writeText("a\x1b]52;c;aGVsbG8gd29ybGQ=\x07b", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("hello world", takeClipboardText(&layer, &buf));
+    try testz.expectEqualStr("b", layer.cell(0, 1).grapheme());
+    try testz.expectEqual(layer.cursor.col, 2);
+    try testz.expectTrue(layer.takeClipboard() == null);
+
+    // ST-terminated, no selection named, no padding.
+    try layer.writeText("\x1b]52;;Y29waWVk\x1b\\", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("copied", takeClipboardText(&layer, &buf));
+
+    // Split across two chunks of a program's output, as a pty read
+    // can cut it: collected whole.
+    try layer.writeText("\x1b]52;c;aGVsbG8g", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.takeClipboard() == null);
+    try layer.writeText("d29ybGQ=\x07", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("hello world", takeClipboardText(&layer, &buf));
+}
+
+pub fn layerOsc52IgnoresQueriesAndOtherSelectionsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+    layer.setProperty(.{ .pty_mode = true });
+
+    // A query would read the user's clipboard back to the program.
+    try layer.writeText("\x1b]52;c;?\x07", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.takeClipboard() == null);
+    // The primary selection only: not the clipboard's to overwrite.
+    try layer.writeText("\x1b]52;p;Y29waWVk\x07", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.takeClipboard() == null);
+    // Not base64.
+    try layer.writeText("\x1b]52;c;!!!!\x07", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.takeClipboard() == null);
+    // Cancelled by CAN before its terminator.
+    try layer.writeText("\x1b]52;c;Y29waWVk\x18", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.takeClipboard() == null);
+    // Another OSC, and a DCS that looks like one.
+    try layer.writeText("\x1b]0;52;c;Y29waWVk\x07\x1bP52;c;Y29waWVk\x1b\\", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.takeClipboard() == null);
+    try testz.expectEqual(layer.vt.esc_state, glyphwire.EscState.ground);
+}
+
+pub fn layerOsc52OnPlainLayerEndsWithTheCallTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
+    defer layer.deinit();
+    var buf: [64]u8 = undefined;
+
+    // A non-pty layer resets the machine after every call, so an
+    // unterminated OSC 52 never completes from a later write.
+    try layer.writeText("\x1b]52;c;aGVsbG8g", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try layer.writeText("d29ybGQ=\x07", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.takeClipboard() == null);
+
+    // A whole one in one call still works.
+    try layer.writeText("\x1b]52;c;Y29waWVk\x07", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectEqualStr("copied", takeClipboardText(&layer, &buf));
+}
+
 pub fn layerNonAsciiInsideCsiAbandonsItTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 80, 4, 0);
