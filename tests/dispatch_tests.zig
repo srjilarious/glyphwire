@@ -2405,19 +2405,21 @@ pub fn setAndClearHighlightReplaceTheIdSetTest(io: std.Io, alloc: std.mem.Alloca
     try testz.expectEqual(ctx.root.sel.highlighted_ids.items.len, 0);
 }
 
-/// `set_clipboard` stores the text on the context; `get_clipboard`
+/// `set_clipboard` stores the text on the session; `get_clipboard`
 /// returns it.
 pub fn setClipboardThenGetClipboardRoundTripTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
     defer ctx.deinit();
-    var d = dispatch.Dispatcher.init(&ctx);
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var d = try helpers.attachedConnection(&session, 7);
 
     try testz.expectTrue((try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"set_clipboard","params":{"text":"clip me"}}
     )).response == null);
-    try testz.expectEqualStr("clip me", ctx.clipboardText());
-    try testz.expectEqual(ctx.clipboard_serial, 1);
+    try testz.expectEqualStr("clip me", session.clipboardText());
+    try testz.expectEqual(session.clipboard_serial, 1);
 
     const Response = struct { jsonrpc: []const u8, id: u32, result: struct { text: []const u8 } };
     const body = (try d.handle(alloc,
@@ -2427,6 +2429,45 @@ pub fn setClipboardThenGetClipboardRoundTripTest(io: std.Io, alloc: std.mem.Allo
     const parsed = try std.json.parseFromSlice(Response, alloc, body, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     try testz.expectEqualStr("clip me", parsed.value.result.text);
+}
+
+/// One clipboard per session, whichever context a connection is on and
+/// whichever is on screen. Per-context buffers let glyphwire-host push a
+/// stale one to the OS on every focus change between gmux panes, and
+/// left a backgrounded program's `set_clipboard` stranded until its
+/// context came back.
+pub fn setClipboardIsSharedAcrossContextsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
+    defer ctx.deinit();
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
+    var shell = try helpers.attachedConnection(&session, 7);
+    var program = try helpers.attachedConnection(&session, 8);
+
+    // The program takes the screen with a context of its own, leaving
+    // the shell's backgrounded.
+    const created = try program.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_context","params":{}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+    try testz.expectTrue(session.focusedContextHandle() != glyphwire.root_context_handle);
+
+    _ = try shell.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"set_clipboard","params":{"text":"from the background"}}
+    );
+    try testz.expectEqualStr("from the background", session.clipboardText());
+    try testz.expectEqual(session.clipboard_serial, 1);
+
+    const Response = struct { jsonrpc: []const u8, id: u32, result: struct { text: []const u8 } };
+    const body = (try program.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"get_clipboard","params":{}}
+    )).response.?;
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(Response, alloc, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testz.expectEqualStr("from the background", parsed.value.result.text);
 }
 
 /// A connection can subscribe to the new `selection` and `clipboard`

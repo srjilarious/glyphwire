@@ -3314,22 +3314,25 @@ pub fn highlightSurvivesResizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
 }
 
 /// `setClipboard` replaces the buffer and bumps the serial each call;
-/// `clipboardText` reads it back.
-pub fn contextClipboardBufferRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
+/// `clipboardText` reads it back. Session-wide: one buffer whichever
+/// context is on screen.
+pub fn sessionClipboardBufferRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 10, 3, 0);
     defer ctx.deinit();
+    var session = try glyphwire.Session.init(alloc, &ctx);
+    defer session.deinit();
 
-    try testz.expectEqualStr("", ctx.clipboardText());
-    try testz.expectEqual(ctx.clipboard_serial, 0);
+    try testz.expectEqualStr("", session.clipboardText());
+    try testz.expectEqual(session.clipboard_serial, 0);
 
-    try ctx.setClipboard("hello");
-    try testz.expectEqualStr("hello", ctx.clipboardText());
-    try testz.expectEqual(ctx.clipboard_serial, 1);
+    try session.setClipboard("hello");
+    try testz.expectEqualStr("hello", session.clipboardText());
+    try testz.expectEqual(session.clipboard_serial, 1);
 
-    try ctx.setClipboard("world!");
-    try testz.expectEqualStr("world!", ctx.clipboardText());
-    try testz.expectEqual(ctx.clipboard_serial, 2);
+    try session.setClipboard("world!");
+    try testz.expectEqualStr("world!", session.clipboardText());
+    try testz.expectEqual(session.clipboard_serial, 2);
 }
 
 // ── Layer.render_gen (host static-batch invalidation) ────────────────

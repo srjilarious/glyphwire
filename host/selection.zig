@@ -21,7 +21,7 @@ pub const selection_highlight_color = host_eng.Color.from(80, 130, 220, 90);
 pub const Selection = struct {
     app: *App,
 
-    /// Last `ctx.clipboard_serial` this host pushed to the OS clipboard.
+    /// Last `session.clipboard_serial` this host pushed to the OS clipboard.
     /// `syncClipboardToOs` compares it each frame so a `set_clipboard`
     /// from a client (or the host's own selection copy) reaches the OS
     /// without diffing bytes every frame.
@@ -419,7 +419,7 @@ pub const Selection = struct {
     }
 
     /// Ctrl+Shift+V: read the OS clipboard (main thread) and broadcast it
-    /// as a `paste` notification. Also refreshes `ctx.clipboard` so a
+    /// as a `paste` notification. Also refreshes `session.clipboard` so a
     /// later `get_clipboard` sees it.
     fn pasteShortcut(self: *Selection) void {
         const server = self.app.server;
@@ -439,7 +439,7 @@ pub const Selection = struct {
         };
     }
 
-    /// Pushes `ctx.clipboard` to the OS clipboard when its serial has
+    /// Pushes `session.clipboard` to the OS clipboard when its serial has
     /// moved since the last push -- called once per frame on the main
     /// thread (SDL clipboard writes are main-thread-only).
     pub fn syncClipboardToOs(self: *Selection) void {

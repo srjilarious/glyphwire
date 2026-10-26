@@ -150,7 +150,7 @@ pub const App = struct {
     /// The platform window, kept so the OS clipboard can be read/written
     /// from the main thread (both backends' clipboard calls are
     /// main-thread-only, so the wire `set_clipboard` path can't touch it
-    /// directly -- it goes through `ctx.clipboard` +
+    /// directly -- it goes through `session.clipboard` +
     /// `Selection.syncClipboardToOs` instead).
     window: *Window,
     /// Set by `reapChild` once glyphwire-shell's process actually exits

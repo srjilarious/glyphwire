@@ -3,7 +3,7 @@
 
 //! A `Context`: one program's whole screen -- the root layer, the layers
 //! created on top of it, their split tree, the images, metadata and icons
-//! they reference, and its caret, pointer and clipboard state. The
+//! they reference, and its caret and pointer state. The
 //! `Session` (`session.zig`) owns every context and decides which one each
 //! pane shows. The split tree that lays a context's layers out lives here
 //! too, since only a `Context` walks it.
@@ -332,18 +332,6 @@ pub const Context = struct {
     /// Shared across every layer's `outlines` map, same reasoning as
     /// `next_table_handle`.
     next_outline_handle: OutlineHandle = 1,
-    /// Session clipboard buffer. The wire's `set_clipboard` /
-    /// `get_clipboard` read and write this directly; the headless case
-    /// (`server/main.zig`, tests) has nothing else behind it. glyphwire-
-    /// host treats it as the source of truth and mirrors it to the OS
-    /// clipboard whenever `clipboard_serial` changes (a `set_clipboard`
-    /// from a client, or its own selection copy) and refreshes it from
-    /// the OS on paste. See decisions.md's Selection & Clipboard section.
-    clipboard: std.ArrayList(u8) = .empty,
-    /// Bumped by every `setClipboard`; glyphwire-host compares it against
-    /// the serial it last pushed to the OS to know when to push again,
-    /// without diffing the bytes every frame.
-    clipboard_serial: u64 = 0,
     /// The drag a client asked to start with `start_drag`, waiting for
     /// glyphwire-host to pick it up (`takeDragRequest`) on its main
     /// thread, where the OS drag has to begin. A newer request replaces
@@ -477,7 +465,6 @@ pub const Context = struct {
         }
         self.metadata.deinit();
         if (self.drag_request) |*d| d.deinit(self.alloc);
-        self.clipboard.deinit(self.alloc);
         self.title.deinit(self.alloc);
     }
 
@@ -515,21 +502,6 @@ pub const Context = struct {
         }
         self.title.clearRetainingCapacity();
         try self.title.appendSlice(self.alloc, text[0..len]);
-    }
-
-    /// `set_clipboard`: replaces the clipboard buffer with `text` (copied
-    /// in) and bumps `clipboard_serial`.
-    pub fn setClipboard(self: *Context, text: []const u8) !void {
-        self.clipboard.clearRetainingCapacity();
-        try self.clipboard.appendSlice(self.alloc, text);
-        self.clipboard_serial +%= 1;
-    }
-
-    /// `get_clipboard`: the current clipboard buffer, borrowed (valid
-    /// until the next `setClipboard`). On glyphwire-host this is only as
-    /// fresh as the last host->OS / OS->host sync -- see `clipboard`.
-    pub fn clipboardText(self: *const Context) []const u8 {
-        return self.clipboard.items;
     }
 
     /// `create_metadata`: stores `json` verbatim (duped -- the caller's

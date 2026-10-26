@@ -1060,7 +1060,7 @@ pub fn selectionUnitAt(self: *Server, layer_handle: ?core.LayerHandle, p: core.S
 pub fn setClipboard(self: *Server, text: []const u8) !void {
     const session_lock = self.lockSession();
     defer session_lock.unlock();
-    try self.ctx.setClipboard(text);
+    try self.session.setClipboard(text);
 }
 
 /// Sends a `copy_request` notification to the `"clipboard"` subscriber
@@ -1091,17 +1091,17 @@ pub fn broadcastPaste(self: *Server, alloc: std.mem.Allocator, text: []const u8)
 }
 
 /// The current session clipboard serial (see
-/// `core.Context.clipboard_serial`) -- glyphwire-host polls this each
+/// `core.Session.clipboard_serial`) -- glyphwire-host polls this each
 /// frame to decide whether to push the buffer to the OS clipboard.
 pub fn clipboardSerial(self: *Server) u64 {
     const session_lock = self.lockSession();
     defer session_lock.unlock();
-    return self.ctx.clipboard_serial;
+    return self.session.clipboard_serial;
 }
 
 /// A copy of the current session clipboard buffer. Caller owns it.
 pub fn clipboardText(self: *Server, alloc: std.mem.Allocator) ![]u8 {
     const session_lock = self.lockSession();
     defer session_lock.unlock();
-    return alloc.dupe(u8, self.ctx.clipboardText());
+    return alloc.dupe(u8, self.session.clipboardText());
 }

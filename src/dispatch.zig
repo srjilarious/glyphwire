@@ -4035,11 +4035,13 @@ pub const Dispatcher = struct {
     fn handleSetClipboard(self: *Dispatcher, alloc: std.mem.Allocator, params_value: codec.Params) !void {
         const parsed = try codec.parseParams(protocol.ClipboardTextParams, alloc, params_value);
         defer parsed.deinit();
-        try self.ctx.setClipboard(parsed.value.text);
+        const session = self.session orelse return DispatchError.NoContextSession;
+        try session.setClipboard(parsed.value.text);
     }
 
     fn handleGetClipboard(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value) ![]u8 {
-        return try self.respond(alloc, id, protocol.ClipboardResult{ .text = self.ctx.clipboardText() });
+        const session = self.session orelse return DispatchError.NoContextSession;
+        return try self.respond(alloc, id, protocol.ClipboardResult{ .text = session.clipboardText() });
     }
 
     /// `get_errors`: returns this connection's buffered failed-notification

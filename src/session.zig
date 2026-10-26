@@ -455,6 +455,30 @@ pub const Session = struct {
     /// starts with a copy.
     theme: theme.Stored,
 
+    /// The session clipboard buffer. The wire's `set_clipboard` /
+    /// `get_clipboard` read and write this directly; the headless case
+    /// (`server/main.zig`, tests) has nothing else behind it. glyphwire-
+    /// host treats it as the source of truth and mirrors it to the OS
+    /// clipboard whenever `clipboard_serial` changes (a `set_clipboard`
+    /// from a client, or its own selection copy) and refreshes it from
+    /// the OS on paste.
+    ///
+    /// One per session, not one per context, for the same reason as
+    /// `mods`: the OS has one clipboard. It used to live on `Context`,
+    /// with glyphwire-host comparing the *focused* context's serial to
+    /// the one it last pushed. Every context counted on its own, so
+    /// moving focus to another gmux pane pushed that pane's stale buffer
+    /// to the OS (burying the real copy one entry down in the desktop's
+    /// clipboard history), a copy whose serial happened to match the
+    /// last push was never pushed at all, and a program in an unfocused
+    /// pane that called `set_clipboard` only reached the OS once someone
+    /// focused its pane.
+    clipboard: std.ArrayList(u8) = .empty,
+    /// Bumped by every `setClipboard`; glyphwire-host compares it against
+    /// the serial it last pushed to the OS to know when to push again,
+    /// without diffing the bytes every frame.
+    clipboard_serial: u64 = 0,
+
     /// Wraps an already-created root context as the root pane's base. The
     /// caller keeps ownership of `root`'s memory and stays responsible for
     /// `root.deinit()`; this session frees only the contexts it creates
@@ -503,6 +527,22 @@ pub const Session = struct {
         while (sit.next()) |sp| sp.deinit(self.alloc);
         self.pane_splits.deinit();
         self.input.deinit();
+        self.clipboard.deinit(self.alloc);
+    }
+
+    /// `set_clipboard`: replaces the clipboard buffer with `text` (copied
+    /// in) and bumps `clipboard_serial`.
+    pub fn setClipboard(self: *Session, text: []const u8) !void {
+        self.clipboard.clearRetainingCapacity();
+        try self.clipboard.appendSlice(self.alloc, text);
+        self.clipboard_serial +%= 1;
+    }
+
+    /// `get_clipboard`: the current clipboard buffer, borrowed (valid
+    /// until the next `setClipboard`). On glyphwire-host this is only as
+    /// fresh as the last host->OS / OS->host sync -- see `clipboard`.
+    pub fn clipboardText(self: *const Session) []const u8 {
+        return self.clipboard.items;
     }
 
     /// Replaces the window's theme, and with it the theme of every
