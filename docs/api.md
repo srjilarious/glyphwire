@@ -970,6 +970,18 @@ though its context is client-owned and the host leaves that drag to the
 client. Keyboard selection mode (Ctrl+Shift+Space) is still root-only:
 it starts at the root cursor and walks the root grid.
 
+**Across panes there is one selection.** A press in an unfocused pane
+focuses it before the drag is resolved, so the drag selects in the pane
+it started in. A root-grid drag works in that pane's own rows and
+columns, clamps to its edges when the pointer wanders over a divider or a
+neighbour, and auto-scrolls at the pane's top and bottom rows rather than
+the window's. Starting a host selection (a drag, a click, or keyboard
+mode) clears every other selection in the session, on any layer of any
+pane's context, broadcasting `selection` with `active: false` when there
+was one. Ctrl+Shift+C reads the visible context's selection first and
+then any other context's, so a selection left in a pane the keyboard has
+since moved away from still copies, and copying clears it wherever it is.
+
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
 | `set_selection` | notification | `layer?, anchor: {above, col}, active: {above, col}` | — | ✅ starts or replaces the layer's selection (root when `layer` omitted). Broadcasts `selection` |

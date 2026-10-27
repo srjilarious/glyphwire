@@ -1005,9 +1005,91 @@ pub fn clearSelection(self: *Server, alloc: std.mem.Allocator, layer_handle: ?co
         const layer = self.ctx.layerPtr(layer_handle) orelse return;
         layer.sel.clear();
     }
+    try broadcastSelectionCleared(self, alloc);
+}
+
+/// Clears every selection in the session except the one on `keep` (null
+/// = root) of the visible context: every other layer of it, and every
+/// layer of every other context, each gmux pane's included.
+///
+/// glyphwire-host keeps one selection on screen at a time. Each pane is
+/// its own context, so a drag in one pane used to leave the last pane's
+/// tint in place, and Ctrl+Shift+C (which read only the visible
+/// context) copied something other than what the user had just picked.
+/// Called when a host selection starts, before it is set.
+pub fn clearOtherSelections(self: *Server, alloc: std.mem.Allocator, keep: ?core.LayerHandle) !void {
+    const cleared = blk: {
+        const session_lock = self.lockSession();
+        defer session_lock.unlock();
+        break :blk clearSelectionsLocked(self, self.ctx.layerPtr(keep));
+    };
+    if (cleared) try broadcastSelectionCleared(self, alloc);
+}
+
+/// Clears every selection in the session, in every context. The copy
+/// shortcut's "done with it", which has to reach the selection wherever
+/// `anySelectionText` found it.
+pub fn clearAllSelections(self: *Server, alloc: std.mem.Allocator) !void {
+    const cleared = blk: {
+        const session_lock = self.lockSession();
+        defer session_lock.unlock();
+        break :blk clearSelectionsLocked(self, null);
+    };
+    if (cleared) try broadcastSelectionCleared(self, alloc);
+}
+
+/// The walk behind `clearOtherSelections` / `clearAllSelections`: clears
+/// every layer's selection in every context except `keep`'s. Returns
+/// whether anything was actually selected. Caller holds the session lock.
+fn clearSelectionsLocked(self: *Server, keep: ?*core.Layer) bool {
+    var cleared = false;
+    var ctx_it = self.session.contexts.valueIterator();
+    while (ctx_it.next()) |ctx_ptr| {
+        const ctx = ctx_ptr.*;
+        if (&ctx.root != keep and ctx.root.sel.range != null) {
+            ctx.root.sel.clear();
+            cleared = true;
+        }
+        var layer_it = ctx.layers.valueIterator();
+        while (layer_it.next()) |layer| {
+            if (layer == keep or layer.sel.range == null) continue;
+            layer.sel.clear();
+            cleared = true;
+        }
+    }
+    return cleared;
+}
+
+fn broadcastSelectionCleared(self: *Server, alloc: std.mem.Allocator) !void {
     const body = try rpc.selectionNotification(alloc, null);
     defer alloc.free(body);
     self.broadcast(null, .selection, body);
+}
+
+/// The selected text wherever in the session it is: the visible
+/// context's (`selectedLayer`) first, else the first other context that
+/// holds one. Null when nothing anywhere is selected. Caller owns the
+/// result.
+///
+/// The copy shortcut's read. A selection made in one gmux pane stays on
+/// screen after a keyboard focus move to another, and Ctrl+Shift+C
+/// copies what the user can see highlighted rather than nothing.
+pub fn anySelectionText(self: *Server, alloc: std.mem.Allocator) !?[]u8 {
+    if (try selectionText(self, alloc, selectedLayer(self))) |text| return text;
+
+    const session_lock = self.lockSession();
+    defer session_lock.unlock();
+    var ctx_it = self.session.contexts.valueIterator();
+    while (ctx_it.next()) |ctx_ptr| {
+        const ctx = ctx_ptr.*;
+        if (ctx == self.ctx) continue;
+        if (ctx.root.sel.range != null) return try ctx.root.sel.text(alloc);
+        var layer_it = ctx.layers.valueIterator();
+        while (layer_it.next()) |layer| {
+            if (layer.sel.range != null) return try layer.sel.text(alloc);
+        }
+    }
+    return null;
 }
 
 /// Which layer of the visible context currently holds a selection --

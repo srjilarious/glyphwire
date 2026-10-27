@@ -1739,3 +1739,55 @@ pub fn shellContextIsMadeOnTopFlaggedAndDroppedByTheHostTest(io: std.Io, alloc: 
     // Already gone: a no-op, not an error.
     try srv.destroyShellContext(alloc, handle);
 }
+
+/// One selection on screen across gmux panes: each pane is its own
+/// context, so a selection left in the last pane has to be cleared from
+/// *there* when a new one starts, and the copy shortcut has to find a
+/// selection in a pane that no longer has focus.
+pub fn selectionsAcrossPanesStayOneTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-pane-sel-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const made = try srv.session.createPane(0, 0);
+    const split = try srv.session.createPaneSplit(.row, true);
+    try srv.session.setPaneSplitChildren(split, &.{
+        .{ .target = .{ .pane = glyphwire.root_pane_handle }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .pane = made.pane }, .size = .{ .weight = 1 } },
+    });
+    try srv.session.setRootPaneSplit(split);
+    try srv.session.layoutPanes(null, null);
+
+    // Select "left" in the left (root) pane, then move focus right.
+    try ctx.root.writeText("left", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try srv.setSelection(alloc, null, .{ .above = 0, .col = 0 }, .{ .above = 0, .col = 4 });
+    try srv.session.focusPane(made.pane);
+    srv.ctx = srv.session.focusedContext();
+    try testz.expectTrue(srv.ctx != &ctx);
+
+    // Copy still finds it, though the visible context has none.
+    try testz.expectTrue(try srv.selectionText(alloc, null) == null);
+    const copied = (try srv.anySelectionText(alloc)).?;
+    defer alloc.free(copied);
+    try testz.expectEqualStr(copied, "left");
+
+    // A selection starting in the right pane takes the left one down.
+    try srv.ctx.root.writeText("right", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try srv.clearOtherSelections(alloc, null);
+    try testz.expectTrue(ctx.root.sel.range == null);
+    try srv.setSelection(alloc, null, .{ .above = 0, .col = 0 }, .{ .above = 0, .col = 5 });
+    const now = (try srv.anySelectionText(alloc)).?;
+    defer alloc.free(now);
+    try testz.expectEqualStr(now, "right");
+
+    // ...and clearing everything reaches the right pane's as well.
+    try srv.clearAllSelections(alloc);
+    try testz.expectTrue(srv.ctx.root.sel.range == null);
+    try testz.expectTrue(try srv.anySelectionText(alloc) == null);
+}

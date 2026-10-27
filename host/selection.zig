@@ -98,6 +98,35 @@ pub const Selection = struct {
         return server.ctx.root.view_scroll;
     }
 
+    /// Where a pixel falls on the focused pane's root grid, for a drag
+    /// over bare root.
+    const RootCell = struct {
+        /// In the pane's own frame, clamped into it.
+        cell: glyphwire.CellPos,
+        rows: usize,
+        view_scroll: usize,
+    };
+
+    /// `RootCell` for the pixel `(px, py)`, or null when no pane has
+    /// focus.
+    ///
+    /// In the pane's frame, not the window's: the root grid of a pane's
+    /// context numbers its rows and columns from the pane's top-left
+    /// corner. Using the window cell (as this once did) put a drag in
+    /// any gmux pane but the top-left one rows and columns away from the
+    /// pointer, so the tint and the copied text were someone else's;
+    /// only a zoomed pane, sitting at the window origin, came out right.
+    /// Clamped so a drag that wanders over a divider or a neighbour pins
+    /// to this pane's edge cell rather than leaving its grid.
+    fn rootCellAt(self: *Selection, px: f32, py: f32) ?RootCell {
+        const server = self.app.server;
+        const cell = server.focusedCellClamped(geometry.cellFromPixel(px, py)) orelse return null;
+        const session_lock = server.lockSession();
+        defer session_lock.unlock();
+        const root = &server.ctx.root;
+        return .{ .cell = cell, .rows = root.height, .view_scroll = root.view_scroll };
+    }
+
     /// A `create_layer` layer's placement and scroll position, snapshotted
     /// under the lock so the pixel maths below runs without holding it.
     const LayerHit = struct {
@@ -151,16 +180,16 @@ pub const Selection = struct {
     /// the current drag owns (`self.layer`).
     ///
     /// For root that is the scrollback-anchored form (`above =
-    /// view_scroll - row`, see `glyphwire.SelectionPoint`). A
+    /// view_scroll - row`, see `glyphwire.SelectionPoint`), with the row
+    /// counted in the focused pane (`rootCellAt`). A
     /// `create_layer` layer has no scrollback ring, so its `above` is
     /// simply the negated *content* row -- the viewport row plus the
     /// layer's own `scroll_off`, which is exactly the coordinate the
     /// renderer's selection-tint pass asks `LayerSelection.colRange` for.
     fn pointAtPixel(self: *Selection, px: f32, py: f32) glyphwire.SelectionPoint {
         const handle = self.layer orelse {
-            const cell = geometry.cellFromPixel(px, py);
-            const vs = self.rootViewScroll();
-            return .{ .above = @as(i64, @intCast(vs)) - @as(i64, @intCast(cell.row)), .col = cell.col };
+            const rc = self.rootCellAt(px, py) orelse return self.active;
+            return .{ .above = @as(i64, @intCast(rc.view_scroll)) - @as(i64, @intCast(rc.cell.row)), .col = rc.cell.col };
         };
         const hit = self.layerFor(handle) orelse return self.active;
         return pointInLayer(hit, px, py);
@@ -320,6 +349,9 @@ pub const Selection = struct {
         // grid, so it is always a root-layer selection -- a drag is the
         // only gesture that can land on a `create_layer` layer.
         self.layer = null;
+        server.clearOtherSelections(self.app.alloc, null) catch |err| {
+            std.log.err("glyphwire-host: clearOtherSelections (enter select mode) failed: {t}", .{err});
+        };
         server.setSelection(self.app.alloc, null, p, p) catch |err| {
             std.log.err("glyphwire-host: setSelection (enter select mode) failed: {t}", .{err});
         };
@@ -396,15 +428,19 @@ pub const Selection = struct {
         // own layers too (`set_selection` takes a handle), and the copy
         // shortcut has to find that one as well -- a reader that drives
         // its own drag over a text panel would otherwise copy nothing.
-        const target = server.selectedLayer();
-        const maybe_text = server.selectionText(self.app.alloc, target) catch |err| {
-            std.log.err("glyphwire-host: selectionText failed: {t}", .{err});
+        // Nor only the visible context: a selection made in one gmux pane
+        // is still on screen after the keyboard moves focus to another.
+        const maybe_text = server.anySelectionText(self.app.alloc) catch |err| {
+            std.log.err("glyphwire-host: anySelectionText failed: {t}", .{err});
             return;
         };
         if (maybe_text) |text| {
             defer self.app.alloc.free(text);
-            self.layer = target;
-            self.endMode(true);
+            self.mode = false;
+            self.layer = null;
+            server.clearAllSelections(self.app.alloc) catch |err| {
+                std.log.err("glyphwire-host: clearAllSelections (copy) failed: {t}", .{err});
+            };
             if (text.len > 0) {
                 server.setClipboard(text) catch |err| {
                     std.log.err("glyphwire-host: setClipboard (copy) failed: {t}", .{err});
@@ -471,10 +507,23 @@ pub const Selection = struct {
         if (!self.mouse_selecting) {
             if (skip_left or on_scrollbar) return false;
             if (m.pressed(.left)) {
+                // Click-to-focus first, so everything below -- which
+                // grid, whether the program wants the mouse -- is asked
+                // of the pane the press landed in. `reportMouseEvents`
+                // does this too, but only after this has run: a drag
+                // started in an unfocused pane was resolved against the
+                // pane being left, and then written into the new one
+                // once focus moved under it.
+                _ = server.focusPaneAt(self.app.alloc, cell) catch |err| {
+                    std.log.err("glyphwire-host: focusPaneAt (selection) failed: {t}", .{err});
+                };
                 // Which grid this drag is over, decided once at press
                 // time; null falls through to root, exactly as before.
                 const handle: ?glyphwire.LayerHandle =
                     if (self.layerAt(pos.x, pos.y)) |hit| hit.handle else null;
+                // Bare root outside the focused pane (a gap no pane
+                // claimed) has no grid to select on.
+                if (handle == null and server.focusedCell(cell) == null) return false;
                 // A client that owns the visible context (zoe,
                 // salacommander) draws its own panes and is listening for
                 // `mouse_button`, so a press into its content goes to the
@@ -493,6 +542,13 @@ pub const Selection = struct {
                 // anyway. See `core.Layer.mouse_report`.
                 const report = server.mouseReportOn(handle);
                 if (report and !eng.inputs.keyboard.shift()) return false;
+                // One selection on screen at a time: whatever another
+                // pane or layer had goes now. This layer's own is left
+                // for the release (a plain click clears it) or the drag
+                // (which replaces it).
+                server.clearOtherSelections(self.app.alloc, handle) catch |err| {
+                    std.log.err("glyphwire-host: clearOtherSelections failed: {t}", .{err});
+                };
                 self.over_report = report;
                 self.mouse_selecting = true;
                 self.mouse_moved = false;
@@ -532,15 +588,21 @@ pub const Selection = struct {
             // Root only: this drags the *scrollback ring* into view, which
             // a `create_layer` layer doesn't have. A drag off the edge of
             // a popup just pins to its last cell (`pointInLayer` clamps).
-            if (self.layer == null) {
-                if (pos.y < @as(f32, @floatFromInt(geometry.cell_h))) {
+            //
+            // The edges are the focused pane's top and bottom rows, not
+            // the window's: in a split, the window's edge rows can belong
+            // to another pane entirely, or be out of a drag's reach. The
+            // pointer being past an edge (over a pane above or below)
+            // clamps onto it, so that scrolls too.
+            if (self.layer == null) if (self.rootCellAt(pos.x, pos.y)) |rc| {
+                if (rc.cell.row == 0) {
                     server.reportScroll(self.app.alloc, null, 1) catch {};
                     edge_scrolled = true;
-                } else if (pos.y > @as(f32, @floatFromInt(@as(i32, @intCast(geometry.grid_rows -| 1)) * geometry.cell_h))) {
+                } else if (rc.cell.row + 1 >= rc.rows) {
                     server.reportScroll(self.app.alloc, null, -1) catch {};
                     edge_scrolled = true;
                 }
-            }
+            };
 
             const moved_cell = cell.row != self.mouse_last_cell.row or cell.col != self.mouse_last_cell.col;
             if (moved_cell or (self.mouse_moved and edge_scrolled)) {
