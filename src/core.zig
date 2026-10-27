@@ -2654,6 +2654,7 @@ pub const Layer = struct {
         const span = bot - top + 1;
         const n = @min(n_in, span);
         if (n == 0) return;
+        self.sel.noteRangeScrolled(top, bot, n, dir, self.width);
         switch (dir) {
             .up => {
                 var r = top;

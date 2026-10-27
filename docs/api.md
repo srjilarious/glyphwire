@@ -989,6 +989,17 @@ is on screen, not the primary buffer kept underneath. Switching screens
 either way drops the layer's selection, since the cells it named are no
 longer the ones shown.
 
+**A selection follows a region scroll.** Whenever live rows scroll inside
+a band (a line feed at a scroll region's margin, `SU`/`SD`, `IL`/`DL`,
+reverse index, anything on the alt screen, and `move_content`), a
+selection inside the band moves with its text. An end pushed past a
+margin is clipped to it (the band has no scrollback, so that text is
+gone), and a selection that scrolls out entirely is dropped. One that
+only partly overlaps the band, running on into rows that didn't move
+(vim's status line), is dropped too, since it can't follow both halves.
+These moves send no `selection` notification, the same as the primary
+screen's scrollback scroll.
+
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
 | `set_selection` | notification | `layer?, anchor: {above, col}, active: {above, col}` | — | ✅ starts or replaces the layer's selection (root when `layer` omitted). Broadcasts `selection` |

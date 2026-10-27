@@ -170,6 +170,59 @@ pub const LayerSelection = struct {
         }
     }
 
+    /// Keeps the selection pinned to its content when live rows
+    /// `[top, bot]` have just scrolled `n` rows inside that band
+    /// (`Layer.scrollRangeFill`: a scroll region, the alt screen, SU/SD,
+    /// IL/DL, `move_content`). This is how vim and less scroll, and
+    /// without it a selection stayed on the screen rows while the text
+    /// moved out from under it.
+    ///
+    /// A selection clear of the band is untouched. One inside it moves
+    /// with it; an end pushed past a margin is clipped to that margin
+    /// (its text is gone -- the band has no scrollback), and once the
+    /// whole selection has scrolled out it is dropped. One that only
+    /// partly overlaps the band (running on into a status line that
+    /// stayed put) can't follow both halves, so it is dropped too.
+    pub fn noteRangeScrolled(self: *LayerSelection, top: usize, bot: usize, n: usize, dir: core.Layer.ScrollDir, width: usize) void {
+        const s = self.range orelse return;
+        const o = s.ordered();
+        const start_row = -o.start.above;
+        const end_row = -o.end.above;
+        const t: i64 = @intCast(top);
+        const b: i64 = @intCast(bot);
+        if (end_row < t or start_row > b) return;
+        if (start_row < t or end_row > b) {
+            self.range = null;
+            return;
+        }
+
+        const shift: i64 = switch (dir) {
+            .up => -@as(i64, @intCast(n)),
+            .down => @intCast(n),
+        };
+        const new_start_row = start_row + shift;
+        const new_end_row = end_row + shift;
+        if (new_end_row < t or new_start_row > b) {
+            self.range = null;
+            return;
+        }
+        var start = o.start;
+        var end = o.end;
+        if (new_start_row < t) {
+            start = .{ .above = -t, .col = 0 };
+        } else {
+            start.above = -new_start_row;
+        }
+        if (new_end_row > b) {
+            end = .{ .above = -b, .col = width -| 1 };
+        } else {
+            end.above = -new_end_row;
+        }
+        // Keep which end is the anchor: a drag in progress moves `active`.
+        const anchor_is_start = s.anchor.above == o.start.above and s.anchor.col == o.start.col;
+        self.range = if (anchor_is_start) .{ .anchor = start, .active = end } else .{ .anchor = end, .active = start };
+    }
+
     /// Drops a selection with an end in scrollback (`Layer.clearHistory`).
     /// One entirely inside the live viewport survives.
     pub fn dropHistory(self: *LayerSelection) void {

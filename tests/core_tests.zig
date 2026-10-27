@@ -6297,3 +6297,59 @@ pub fn selectionReadsTheAltScreenTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try layer.writeText("\x1b[?1049h", glyphwire.default_style.fg, glyphwire.default_style.bg);
     try testz.expectTrue(layer.sel.range == null);
 }
+
+/// A selection follows its text through a region scroll (vim scrolling
+/// on the alt screen): moved with the band, clipped at a margin its end
+/// was pushed past, dropped once scrolled out or when it runs on past
+/// the band into rows that stayed put.
+pub fn selectionFollowsARegionScrollTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    const fg = glyphwire.default_style.fg;
+    const bg = glyphwire.default_style.bg;
+    var layer = try glyphwire.Layer.init(alloc, 10, 5, 4);
+    defer layer.deinit();
+    try layer.writeText("\x1b[?1049h\x1b[1;1Hzero\x1b[2;1Hone\x1b[3;1Htwo\x1b[4;1Hthree\x1b[5;1Hstatus", fg, bg);
+
+    // "one".."two" (rows 1-2); SU 1 brings them to rows 0-1.
+    layer.sel.set(.{ .above = -1, .col = 0 }, .{ .above = -2, .col = 2 });
+    try layer.writeText("\x1b[S", fg, bg);
+    {
+        const t = (try layer.sel.text(alloc)).?;
+        defer alloc.free(t);
+        try testz.expectEqualStr(t, "one\ntwo");
+    }
+    try testz.expectEqual(layer.sel.range.?.anchor.above, 0);
+    try testz.expectEqual(layer.sel.range.?.active.above, -1);
+
+    // One more: "one" scrolls off the top, the start clips to row 0's
+    // first column, and what is left is "two".
+    try layer.writeText("\x1b[S", fg, bg);
+    {
+        const t = (try layer.sel.text(alloc)).?;
+        defer alloc.free(t);
+        try testz.expectEqualStr(t, "two");
+    }
+
+    // And once it's all gone, so is the selection.
+    try layer.writeText("\x1b[S", fg, bg);
+    try testz.expectTrue(layer.sel.range == null);
+
+    // A region over rows 0-3, leaving the status line (row 4) alone.
+    try layer.writeText("\x1b[2J\x1b[1;1Ha\x1b[2;1Hb\x1b[3;1Hc\x1b[4;1Hd\x1b[5;1Hstatus\x1b[1;4r", fg, bg);
+
+    // Outside the band: untouched by its scroll.
+    layer.sel.set(.{ .above = -4, .col = 0 }, .{ .above = -4, .col = 5 });
+    try layer.writeText("\x1b[S", fg, bg);
+    try testz.expectEqual(layer.sel.range.?.anchor.above, -4);
+
+    // Down (SD) moves it the other way.
+    layer.sel.set(.{ .above = -1, .col = 0 }, .{ .above = -2, .col = 0 });
+    try layer.writeText("\x1b[T", fg, bg);
+    try testz.expectEqual(layer.sel.range.?.anchor.above, -2);
+    try testz.expectEqual(layer.sel.range.?.active.above, -3);
+
+    // Straddling the band and the status line: dropped.
+    layer.sel.set(.{ .above = -3, .col = 0 }, .{ .above = -4, .col = 5 });
+    try layer.writeText("\x1b[S", fg, bg);
+    try testz.expectTrue(layer.sel.range == null);
+}
