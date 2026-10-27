@@ -3437,7 +3437,19 @@ pub const Layer = struct {
     /// `SelectionPoint`), or null if that row isn't currently retained.
     /// `above <= 0` is a live viewport row (`-above`); `above >= 1` walks
     /// up into scrollback.
+    ///
+    /// On the alternate screen the live rows are `vt.alt_cells`, which
+    /// has no scrollback, exactly as `viewRow` draws it. Reading the
+    /// primary buffer here instead had a selection over vim or nano trim
+    /// its tint against, and copy, the shell output hidden underneath.
     pub fn rowForAbove(self: *const Layer, above: i64) ?[]const Cell {
+        if (self.vt.on_alt) {
+            if (above > 0) return null;
+            const alt_row: usize = @intCast(-above);
+            if (alt_row >= self.height) return null;
+            const start = alt_row * self.width;
+            return self.vt.alt_cells.?[start .. start + self.width];
+        }
         if (above > 0) {
             if (above - 1 >= @as(i64, @intCast(self.history_len))) return null;
             return self.scrollbackRow(@intCast(above - 1));

@@ -6262,3 +6262,38 @@ pub fn sgrStrikethroughOnAndOffTest(io: std.Io, alloc: std.mem.Allocator) !void 
     try testz.expectTrue(layer.cell(0, 2).style.strike);
     try testz.expectFalse(layer.cell(0, 3).style.strike);
 }
+
+/// A selection over a full-screen program (vim, nano) reads the alt
+/// screen it is drawn on, not the primary buffer hidden under it: the
+/// tint is trimmed against, and the copy taken from, what is on screen.
+/// Switching screens drops the selection, whose cells are then gone.
+pub fn selectionReadsTheAltScreenTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var layer = try glyphwire.Layer.init(alloc, 20, 3, 4);
+    defer layer.deinit();
+
+    try layer.writeText("a long primary line\r\n\r\nshell", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try layer.writeText("\x1b[?1049h  hi\r\n\r\nvim", glyphwire.default_style.fg, glyphwire.default_style.bg);
+
+    // Row 0 of the alt screen is two blanks then "hi"; the primary's row
+    // 0 was 19 characters long and row 1 empty.
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = -2, .col = 19 });
+    const r0 = layer.sel.colRange(0).?;
+    try testz.expectEqual(r0.start, 0);
+    try testz.expectEqual(r0.end, 4);
+    try testz.expectTrue(layer.sel.colRange(-1) == null);
+    const text = (try layer.sel.text(alloc)).?;
+    defer alloc.free(text);
+    try testz.expectEqualStr(text, "  hi\n\nvim");
+
+    // No scrollback above the alt screen.
+    try testz.expectTrue(layer.rowForAbove(1) == null);
+
+    try layer.writeText("\x1b[?1049l", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.sel.range == null);
+
+    // And entering it drops one made on the primary screen.
+    layer.sel.set(.{ .above = 0, .col = 0 }, .{ .above = 0, .col = 5 });
+    try layer.writeText("\x1b[?1049h", glyphwire.default_style.fg, glyphwire.default_style.bg);
+    try testz.expectTrue(layer.sel.range == null);
+}

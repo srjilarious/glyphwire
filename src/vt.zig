@@ -281,6 +281,9 @@ fn enterAltScreen(self: *Layer) !void {
     self.vt.scroll_top = 0;
     self.vt.scroll_bot = self.height - 1;
     self.vt.on_alt = true;
+    // A selection names cells of the screen being left; on the other
+    // one it would tint and copy whatever happens to sit there.
+    self.sel.clear();
     self.revision += 1;
     self.render_gen +%= 1;
 }
@@ -290,6 +293,7 @@ fn enterAltScreen(self: *Layer) !void {
 fn exitAltScreen(self: *Layer) void {
     if (!self.vt.on_alt) return;
     self.vt.on_alt = false;
+    self.sel.clear();
     self.cursor = self.clampCursor(self.vt.stashed_cursor);
     self.vt.scroll_top = 0;
     self.vt.scroll_bot = self.height - 1;

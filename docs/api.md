@@ -982,6 +982,13 @@ was one. Ctrl+Shift+C reads the visible context's selection first and
 then any other context's, so a selection left in a pane the keyboard has
 since moved away from still copies, and copying clears it wherever it is.
 
+**On the alternate screen** (`?1049` and friends, where vim, nano and
+less draw) a selection's points name rows of the alt screen, which has no
+scrollback: the tint, `get_selection_text` and Ctrl+Shift+C all read what
+is on screen, not the primary buffer kept underneath. Switching screens
+either way drops the layer's selection, since the cells it named are no
+longer the ones shown.
+
 | Message | Kind | Params | Result | Status |
 |---|---|---|---|---|
 | `set_selection` | notification | `layer?, anchor: {above, col}, active: {above, col}` | — | ✅ starts or replaces the layer's selection (root when `layer` omitted). Broadcasts `selection` |
