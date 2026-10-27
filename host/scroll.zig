@@ -6,6 +6,7 @@ const glyphwire = @import("glyphwire");
 
 const app_mod = @import("app.zig");
 const geometry = @import("geometry.zig");
+const config = @import("config.zig");
 const panes_mod = @import("panes.zig");
 
 const App = app_mod.App;
@@ -41,6 +42,10 @@ pub const Scroll = struct {
     /// time, so the thumb tracks the pointer without jumping.
     scrollbar_drag: bool = false,
     scrollbar_grab_dy: f32 = 0,
+
+    /// One wheel tick's distance, plain and with Alt (`host.conf.lua`'s
+    /// `wheel_lines` / `alt_wheel_lines`).
+    wheel: config.WheelConfig = .{},
 
     /// The pane scrollbar thumb currently being dragged, if any -- the
     /// per-layer counterpart of `scrollbar_drag`. `grab` is the pixel
@@ -285,9 +290,6 @@ pub const Scroll = struct {
         const wheel_y: f32 = if (shifted) 0 else wheel.y;
         const wheel_x: f32 = if (shifted) -wheel.y else wheel.x;
 
-        const delta: i64 = @intFromFloat(@round(wheel_y * geometry.scroll_rows_per_tick));
-        const delta_x: i64 = @intFromFloat(@round(wheel_x * geometry.scroll_rows_per_tick));
-
         // The wheel belongs to whatever is under the pointer, which with
         // panes is not necessarily what has focus -- pointing at a pane
         // and scrolling it shouldn't first require clicking it. Resolve the
@@ -311,10 +313,20 @@ pub const Scroll = struct {
                 // In the hovered pane's own frame, which is what its
                 // program's mouse coordinates are relative to.
                 .local = glyphwire.CellPos{ .row = cell.row - at.rect.row, .col = cell.col - at.rect.col },
+                // What a wheel step in pages is a page of: the layer
+                // under the pointer, else the whole pane.
+                .extent = if (pane) |p| p.viewport else panes_mod.Extent{ .rows = at.rect.rows, .cols = at.rect.cols },
             };
         };
         // In a divider band between panes there is nothing to scroll.
         const hit_target = target orelse return;
+
+        // Alt+wheel takes the long step (`alt_wheel_lines`), a page by
+        // default; a step in pages is measured on the pane under the
+        // pointer, down for the wheel and across for Shift+wheel.
+        const step = if (eng.inputs.keyboard.alt()) self.wheel.alt else self.wheel.plain;
+        const delta: i64 = @intFromFloat(@round(wheel_y * step.cells(hit_target.extent.rows)));
+        const delta_x: i64 = @intFromFloat(@round(wheel_x * step.cells(hit_target.extent.cols)));
 
         // A mouse-mode program under the pointer gets the wheel itself,
         // as xterm wheel buttons, rather than having its screen scrolled

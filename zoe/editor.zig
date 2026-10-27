@@ -33,6 +33,7 @@ const cmdhistory = @import("cmdhistory.zig");
 const actions = @import("actions.zig");
 const fold = @import("fold.zig");
 const substitute = @import("substitute.zig");
+const tabs = @import("tabs.zig");
 
 const Buffer = buffer.Buffer;
 const Pos = buffer.Pos;
@@ -180,6 +181,11 @@ pub const Outcome = union(enum) {
     buffer_close: struct { force: bool },
     /// `:enew` -- a new empty `[No Name]` tab beside this one.
     buffer_new,
+    /// `:tabcloseleft` / `:tabcloseright` / `:tabonly`, each with a `!`
+    /// form -- close the tabs on one side of this one, or all the others.
+    /// Only the UI sees the other buffers, so it does the E37 check: a
+    /// modified tab is left open unless `force`.
+    tabs_close: TabsClose,
     /// `:vsplit [path]` / `:split [path]` -- a new editor group beside
     /// (`vertical`) or under this one. `path` borrows `Editor.cmd_arg`
     /// like `edit` does; null moves the current buffer into the new
@@ -227,6 +233,8 @@ pub const Outcome = union(enum) {
     /// report where it is. The panel is `zoe/ui.zig`'s. Borrows
     /// `Editor.cmd_arg`.
     shell_position: ?[]const u8,
+
+    pub const TabsClose = struct { which: tabs.CloseSet, force: bool };
 };
 
 /// The closer auto-close types after opener `c`, or null when `c` opens
@@ -832,6 +840,9 @@ pub const Editor = struct {
             .nextTab,
             .prevTab,
             .closeTab,
+            .closeTabsLeft,
+            .closeTabsRight,
+            .closeOtherTabs,
             .newBuffer,
             .windowPrefix,
             .focusLeft,
@@ -3428,6 +3439,7 @@ pub const Editor = struct {
             return .{ .buffer_step = .{ .forward = false } };
         if (eq(u8, name, "ene") or eq(u8, name, "enew")) return .buffer_new;
         if (eq(u8, name, "bd!") or eq(u8, name, "bdelete!")) return .{ .buffer_close = .{ .force = true } };
+        if (tabCloseCommand(name)) |tc| return .{ .tabs_close = tc };
         if (eq(u8, name, "bd") or eq(u8, name, "bdelete")) {
             if (self.buf.dirty) {
                 self.setStatus("E37: No write since last change (add ! to override)", .{});
@@ -4214,6 +4226,24 @@ pub const Editor = struct {
 /// `:set noexpandtab`, but every option here takes `name=value`, so the
 /// spellings are the ones a config file would use. Null is "not a
 /// boolean", which the caller turns into E474.
+/// The bulk tab close a `:` command name asks for, if it is one:
+/// `:tabcloseleft` / `:tabcloseright` / `:tabonly` (vim's `:tabo` too),
+/// each forced by a trailing `!`.
+pub fn tabCloseCommand(name: []const u8) ?Outcome.TabsClose {
+    const force = std.mem.endsWith(u8, name, "!");
+    const bare = if (force) name[0 .. name.len - 1] else name;
+    const eq = std.mem.eql;
+    const which: tabs.CloseSet = if (eq(u8, bare, "tabcloseleft"))
+        .left
+    else if (eq(u8, bare, "tabcloseright"))
+        .right
+    else if (eq(u8, bare, "tabo") or eq(u8, bare, "tabonly"))
+        .others
+    else
+        return null;
+    return .{ .which = which, .force = force };
+}
+
 fn parseFlag(val: []const u8) ?bool {
     const yes = [_][]const u8{ "on", "true", "yes", "1" };
     const no = [_][]const u8{ "off", "false", "no", "0" };

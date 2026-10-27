@@ -1278,3 +1278,56 @@ pub fn dividerPresetNamesTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqualStr("═", hs.dividers.preset("double").?.glyphs.h);
     try testz.expectTrue(hs.dividers.preset("dotted") == null);
 }
+
+// ─── wheel step ───────────────────────────────────────────────────────
+
+/// A wheel step string is lines or pages, with an optional count; junk
+/// and non-positive counts are refused.
+pub fn parseWheelStepTest(_: std.Io, _: std.mem.Allocator) !void {
+    const parse = config.parseWheelStep;
+    try testz.expectEqual(parse("page").?.pages, 1);
+    try testz.expectEqual(parse("2 pages").?.pages, 2);
+    try testz.expectEqual(parse(" 0.5 Page ").?.pages, 0.5);
+    try testz.expectEqual(parse("1.5pages").?.pages, 1.5);
+    try testz.expectEqual(parse("8").?.lines, 8);
+    try testz.expectTrue(parse("") == null);
+    try testz.expectTrue(parse("lots") == null);
+    try testz.expectTrue(parse("0 pages") == null);
+    try testz.expectTrue(parse("-2") == null);
+    try testz.expectTrue(parse("2 paragraphs") == null);
+}
+
+/// A step in pages scales with the pane and never drops below a line.
+pub fn wheelStepCellsTest(_: std.Io, _: std.mem.Allocator) !void {
+    const lines: config.WheelStep = .{ .lines = 5 };
+    try testz.expectEqual(lines.cells(40), 5);
+    const pages: config.WheelStep = .{ .pages = 2 };
+    try testz.expectEqual(pages.cells(30), 60);
+    const half: config.WheelStep = .{ .pages = 0.5 };
+    try testz.expectEqual(half.cells(1), 1);
+}
+
+/// `wheel_lines` / `alt_wheel_lines` default to 3 lines and a page; a
+/// number is lines, a string can be pages, and a bad value keeps the
+/// default.
+pub fn wheelConfigTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parse = hs.config_load.parseSource;
+
+    const none = parse(arena, alloc, "config = {}").wheel;
+    try testz.expectEqual(none.plain.lines, 3);
+    try testz.expectEqual(none.alt.pages, 1);
+
+    const set = parse(arena, alloc, "config = { wheel_lines = 5, alt_wheel_lines = \"2 pages\" }").wheel;
+    try testz.expectEqual(set.plain.lines, 5);
+    try testz.expectEqual(set.alt.pages, 2);
+
+    const num = parse(arena, alloc, "config = { alt_wheel_lines = 32 }").wheel;
+    try testz.expectEqual(num.alt.lines, 32);
+
+    const bad = parse(arena, alloc, "config = { wheel_lines = -1, alt_wheel_lines = \"heaps\" }").wheel;
+    try testz.expectEqual(bad.plain.lines, 3);
+    try testz.expectEqual(bad.alt.pages, 1);
+}

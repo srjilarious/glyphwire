@@ -165,8 +165,42 @@ const Apply = struct {
         if (conf.uint(lua, usize, "scrollback_rows", .{ .max = config.scrollback_rows_max })) |v| cfg.grid.scrollback = v;
 
         if (readStringOrList(lua, arena, "default_program")) |v| cfg.default_program = v;
+
+        readWheelStep(lua, "wheel_lines", &cfg.wheel.plain);
+        readWheelStep(lua, "alt_wheel_lines", &cfg.wheel.alt);
     }
 };
+
+/// A wheel step: a number of lines, or a string in pages (`"page"`,
+/// `"2 pages"`; see `config.parseWheelStep`). Anything else warns and
+/// keeps `out`.
+fn readWheelStep(lua: *Lua, comptime name: [:0]const u8, out: *config.WheelStep) void {
+    switch (lua.getField(-1, name)) {
+        .number => {
+            const n = lua.toNumber(-1) catch 0;
+            lua.pop(1);
+            if (!(n > 0)) {
+                conf.warn(name ++ " {d} isn't a positive number of lines; keeping the default", .{n});
+                return;
+            }
+            out.* = .{ .lines = @floatCast(@min(n, config.wheel_lines_max)) };
+        },
+        .string => {
+            const v = lua.toString(-1) catch "";
+            defer lua.pop(1);
+            if (config.parseWheelStep(v)) |step| {
+                out.* = step;
+            } else {
+                conf.warn(name ++ " '{s}' isn't lines or pages (\"page\", \"2 pages\"); keeping the default", .{v});
+            }
+        },
+        .nil => lua.pop(1),
+        else => {
+            lua.pop(1);
+            conf.warn(name ++ " must be a number of lines or a page count; ignored", .{});
+        },
+    }
+}
 
 /// A colour key: a palette slot (`"bright_blue"`), a theme role
 /// (`"accent"`), or `#rrggbb`, kept as written so it follows the window

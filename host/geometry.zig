@@ -156,11 +156,6 @@ pub fn rightGutterPx(bar_enabled: bool, pane_tree: bool) i32 {
     return if (bar_enabled or pane_tree) scrollbar_width_px else 0;
 }
 
-/// How many grid rows one full wheel "tick" (`scroll().y` of magnitude
-/// 1) scrolls the view by -- picked to feel like a normal terminal
-/// scrollback, not tied to any particular OS's wheel step size.
-pub const scroll_rows_per_tick: f32 = 3.0;
-
 pub const ScrollbarGeom = struct {
     /// Left edge of the bar in window pixels.
     left: f32,

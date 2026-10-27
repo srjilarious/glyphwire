@@ -557,6 +557,7 @@ pub fn main(init: std.process.Init) !void {
     app.renderer.pane_divider = host_cfg.pane_divider;
     app.renderer.drop_target_opacity = host_cfg.drop_target_opacity;
     app.pane_focus.cfg = host_cfg.pane_focus;
+    app.scroll.wheel = host_cfg.wheel;
     try app.theme_switcher.setThemes(arena, shared_themes.customs);
 
     app.pane_procs = &pane_procs;

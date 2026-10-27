@@ -203,3 +203,21 @@ pub fn clipHead(path: []const u8, max_cols: usize) Clipped {
     }
     return .{ .ellipsis = true, .tail = path[i..] };
 }
+
+/// Which tabs a bulk close takes, relative to the shown one: those to
+/// its left, those to its right, or every tab but it (`:tabonly`). The
+/// shown tab is never in the set, so a bulk close can't empty a group.
+pub const CloseSet = enum {
+    left,
+    right,
+    others,
+
+    /// Whether tab `i` is closed by this set when tab `active` is shown.
+    pub fn takes(self: CloseSet, active: usize, i: usize) bool {
+        return switch (self) {
+            .left => i < active,
+            .right => i > active,
+            .others => i != active,
+        };
+    }
+};

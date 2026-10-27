@@ -2185,6 +2185,8 @@ pub fn renderStatus(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     var line: std.ArrayList(u8) = .empty;
     defer line.deinit(self.alloc);
     var fg = role(.status_fg);
+    // Set again below only when the plain form shows the filename.
+    self.status_path_cols = null;
 
     // A tree search takes the row ahead of everything else: it is the
     // only thing on screen that says what was typed, since the prefix
@@ -2246,8 +2248,14 @@ pub fn renderStatus(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         try line.appendSlice(self.alloc, self.buf.ed.status.items);
     } else {
         const pos = self.buf.ed.pos();
-        try line.print(self.alloc, " {s}  {s}{s}", .{
-            modeName(self.buf.ed.mode),
+        try line.print(self.alloc, " {s}  ", .{modeName(self.buf.ed.mode)});
+        // Where the filename landed, so a click on it can copy the path
+        // (`Ui.statusPathAt`). Only a real path is clickable.
+        if (self.buf.ed.path) |path| {
+            const start = glyphwire.stringWidth(line.items);
+            self.status_path_cols = .{ .start = start, .end = start + glyphwire.stringWidth(path) };
+        }
+        try line.print(self.alloc, "{s}{s}", .{
             self.buf.ed.path orelse "[No Name]",
             if (self.buf.ed.buf.dirty) " [+]" else "",
         });

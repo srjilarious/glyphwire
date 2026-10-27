@@ -34,6 +34,9 @@ const hit = @import("hit.zig");
 const App = app_mod.App;
 
 /// A layer's on-screen viewport rect, plus what it belongs to.
+/// A size in cells, rows by columns.
+pub const Extent = struct { rows: usize, cols: usize };
+
 pub const PaneHit = struct {
     /// The context the layer lives in -- needed because layer handles are
     /// per-context, so a bare handle is ambiguous once more than one pane
@@ -41,6 +44,9 @@ pub const PaneHit = struct {
     context: glyphwire.ContextHandle,
     layer: glyphwire.LayerHandle,
     rect: geometry.RectPx,
+    /// The layer's viewport in cells, which is what a wheel step in
+    /// pages is a page of.
+    viewport: Extent,
     /// True when the pane has viewport slack over a larger content grid
     /// (a file tree, an editor buffer) -- a wheel moves its `scroll_offset`.
     /// False when it only has a scrollback ring (a terminal pane) -- a
@@ -86,6 +92,7 @@ pub fn scrollablePaneAt(
             .context = ctx_handle,
             .layer = handle,
             .rect = rect,
+            .viewport = .{ .rows = layer.viewportRows(), .cols = layer.viewportCols() },
             .scrolls_viewport = slack,
             .sideways_only = slack and layer.maxScroll().row == 0,
         };

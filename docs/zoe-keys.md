@@ -48,6 +48,7 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 | `toggleShell` | Ctrl+\` | Shell panel (`gw-shell`) |
 | `nextTab` / `prevTab` | Ctrl+Tab / Ctrl+Shift+Tab | Walk the tab strip |
 | `closeTab` | Ctrl+F4, Ctrl+W x | Close the shown tab (`:bd`); refused on a modified buffer |
+| `closeTabsLeft` / `closeTabsRight` / `closeOtherTabs` | (unbound) | Close the tabs left of the shown one, right of it, or all but it (`:tabcloseleft`, `:tabcloseright`, `:tabonly`); modified tabs stay open and are counted on the statusline |
 | `newBuffer` | Ctrl+Shift+N | A new `[No Name]` scratch tab beside the shown one (`:enew`) |
 | `windowPrefix` | Ctrl+W | Then `v` / `s` split, `q` / `c` close the group, `x` close the tab, `w` (or Ctrl+W) next group, `z` zoom the group, `h` `j` `k` `l` / arrows focus, Shift+`H` `J` `K` `L` / Shift+arrows move the tab |
 | `focusLeft` `focusRight` `focusUp` `focusDown` | Ctrl+Left / Right / Up / Down, Ctrl+L / K / J | Focus the group (or tree) that way |
@@ -282,6 +283,7 @@ closes the list. Dotfiles are offered once the name starts with `.`.
 | `:e` `:e!` | Reload from disk (`!` discards changes) |
 | `:bn` `:bp` | Next / previous tab |
 | `:bd` `:bd!` | Close the tab |
+| `:tabcloseleft` `:tabcloseright` `:tabonly` (`:tabo`) | Close the tabs left / right of the shown one, or all the others; with `!` modified ones too |
 | `:enew` | New `[No Name]` scratch tab |
 | `:vs [path]` `:sp [path]` `:clo` | Split / close a group |
 | `:cd [dir]` `:pwd` | Working directory (in a workspace, `:cd` leaves the sidebar's folders alone) |
@@ -458,9 +460,9 @@ folder.
 Click to place the cursor and focus a group; drag to select (enters
 visual mode); double-click selects a word (vim's `iw` run: identifier,
 punctuation or blanks) and triple-click a line (`V`), and dragging on
-from either grows the selection a word or line at a time; wheel and scrollbar thumb scroll any group; the wheel
+from either grows the selection a word or line at a time; wheel and scrollbar thumb scroll any group (Alt+wheel by a page, or the host's `alt_wheel_lines`); the wheel
 (plain or Shift) over a tab strip scrolls it sideways, and a strip too wide for its group shows a `‹` / `›` at
-each end that scrolls it one tab per click; click a tab to switch, its `×` (or a middle click anywhere on it) to close; drag a tab
+each end that scrolls it one tab per click; click a tab to switch, its `×` (or a middle click anywhere on it) to close, a right click to copy its file's absolute path (a click on the statusline's filename copies the shown one's); drag a tab
 onto another group's strip (dropped in front of the tab under the pointer)
 or pane (added at the end) to move it there, or along its own strip to
 reorder it, with a bar marking the gap it would land in on a strip and a

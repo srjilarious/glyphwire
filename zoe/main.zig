@@ -321,6 +321,7 @@ pub fn main(init: std.process.Init) !void {
             .buffer_step,
             .buffer_close,
             .buffer_new,
+            .tabs_close,
             .split,
             .close_group,
             .zoom_group,

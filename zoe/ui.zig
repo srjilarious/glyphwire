@@ -924,6 +924,11 @@ pub const Ui = struct {
 
     tree_bounds: Bounds = .{},
     status_bounds: Bounds = .{},
+    /// The statusline columns `[start, end)` its filename was last drawn
+    /// in, or null when the row shows something else (a message, the
+    /// `:` line) or a `[No Name]` buffer. A left click there copies the
+    /// path.
+    status_path_cols: ?struct { start: usize, end: usize } = null,
 
     /// Session cell height in px, for natural-sizing tree icons to the
     /// row height. Re-read on every `resize`, which a font-size step
@@ -2544,6 +2549,9 @@ pub const Ui = struct {
             .nextTab => self.stepBuffer(true),
             .prevTab => self.stepBuffer(false),
             .closeTab => try self.closeBuffer(self.grp.active, false),
+            .closeTabsLeft => try self.closeTabs(.left, false),
+            .closeTabsRight => try self.closeTabs(.right, false),
+            .closeOtherTabs => try self.closeTabs(.others, false),
             .newBuffer => try self.newBuffer(),
             // vim's window prefix: the next key splits (`v`, `s`), closes
             // (`q`, `c`) or moves (`w`, a direction). See `windowCommand`.
@@ -3446,6 +3454,15 @@ pub const Ui = struct {
             self.dismissTabTip();
         }
         const middle = std.mem.eql(u8, ev.button, "middle");
+        // A right click on a tab copies its file's path; it does nothing
+        // anywhere else (there is no context menu).
+        if (std.mem.eql(u8, ev.button, "right")) {
+            if (!ev.pressed) return;
+            const g = self.groupAt(ev.cell) orelse return;
+            const h = tabAt(g, ev.cell) orelse return;
+            self.copySlotPath(g.buffers.items[h.index]);
+            return;
+        }
         if (!middle and !std.mem.eql(u8, ev.button, "left")) return;
 
         // While the finder is up it owns the pointer too: a result row
@@ -3495,6 +3512,10 @@ pub const Ui = struct {
             // it the keyboard first, so what follows acts on that group.
             if (self.groupAt(ev.cell)) |g| {
                 if (g != self.grp) self.focusGroup(g);
+            }
+            if (self.statusPathAt(ev.cell)) {
+                self.copySlotPath(self.buf);
+                return;
             }
             if (stripSpotAt(self.grp, ev.cell)) |spot| switch (spot) {
                 .back => return stepStrip(self.grp, false),
@@ -3962,6 +3983,7 @@ pub const Ui = struct {
             .buffer_step => |b| self.stepBuffer(b.forward),
             .buffer_close => |b| try self.closeBuffer(self.grp.active, b.force),
             .buffer_new => try self.newBuffer(),
+            .tabs_close => |tc| try self.closeTabs(tc.which, tc.force),
             .split => |sp| try self.splitGroup(if (sp.vertical) .vertical else .horizontal, .after, self.expandArg(sp.path, &home_buf)),
             .close_group => try self.closeGroup(),
             .zoom_group => try self.zoomToggle(),
@@ -5333,6 +5355,52 @@ pub const Ui = struct {
         else
             self.grp.active;
         self.setActive(target);
+    }
+
+    /// Whether `cell` is on the statusline's filename, as last drawn.
+    fn statusPathAt(self: *const Ui, cell: glyphwire.CellPos) bool {
+        const span = self.status_path_cols orelse return false;
+        const b = self.status_bounds;
+        if (b.cols == 0 or cell.row != b.row) return false;
+        if (cell.col < b.col) return false;
+        const col = cell.col - b.col;
+        return col >= span.start and col < span.end;
+    }
+
+    /// `slot`'s file as an absolute path to the system clipboard (a right
+    /// click on its tab, a click on the statusline's filename), the way
+    /// Ctrl+Shift+C copies a sidebar entry's. A `[No Name]` buffer has
+    /// nothing to copy.
+    fn copySlotPath(self: *Ui, slot: *Slot) void {
+        const p = slot.ed.path orelse return;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full = homepath.absoluteBuf(self.io, p, &buf) orelse p;
+        self.client.setClipboard(full) catch {};
+        self.buf.ed.setStatus(" Copied path {s}", .{full});
+        self.status_dirty = true;
+    }
+
+    /// The focused group's tabs in `which`, closed from the right so the
+    /// indices still to visit don't move. A modified one is skipped
+    /// unless `force`, and the skips are counted on the statusline with
+    /// the E37 that a single close gives. The shown tab is never in the
+    /// set, so the group (and `buf`) survive.
+    pub fn closeTabs(self: *Ui, which: tabs.CloseSet, force: bool) !void {
+        var kept: usize = 0;
+        var i = self.grp.buffers.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (!which.takes(self.grp.active, i)) continue;
+            if (self.grp.buffers.items[i].ed.buf.dirty and !force) {
+                kept += 1;
+                continue;
+            }
+            try self.closeBuffer(i, true);
+        }
+        if (kept > 0) {
+            self.buf.ed.setStatus("E37: {d} modified tab{s} left open (add ! to override)", .{ kept, if (kept == 1) "" else "s" });
+            self.status_dirty = true;
+        }
     }
 
     /// The line-comment marker for `path`'s language (Ctrl+/), from the

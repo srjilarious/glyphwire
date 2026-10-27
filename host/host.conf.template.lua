@@ -183,6 +183,17 @@
 --     -- Clamped to 0..100000.
 --     scrollback_rows = 1000,
 --
+--     ---- Mouse wheel ------------------------------------------------
+--
+--     -- How far one wheel tick scrolls whatever is under the pointer (an
+--     -- editor pane, a file list, a shell's scrollback): a number of
+--     -- lines, or a string in pages of the pane under the pointer
+--     -- ("page", "2 pages", "0.5 page"). `alt_wheel_lines` is the step
+--     -- with Alt held, for a long jump. Shift+wheel scrolls sideways by
+--     -- the same step, a page there being the pane's width.
+--     wheel_lines = 3,
+--     alt_wheel_lines = "page",
+--
 --     ---- Startup ----------------------------------------------------
 --
 --     -- What the window runs instead of the gw-shell prompt: a program

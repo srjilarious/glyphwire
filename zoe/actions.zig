@@ -59,6 +59,13 @@ pub const Action = enum {
     /// The focused group's shown tab, refused on a modified buffer the
     /// way `:bd` and the tab's `×` are. Ctrl+W x too.
     closeTab,
+    /// The focused group's tabs left of the shown one, right of it, or
+    /// all but it (`:tabcloseleft`, `:tabcloseright`, `:tabonly`).
+    /// Modified tabs are left open and counted on the statusline; the
+    /// `:` forms with `!` close those too. Unbound by default.
+    closeTabsLeft,
+    closeTabsRight,
+    closeOtherTabs,
     /// A new `[No Name]` scratch tab next to the shown one (`:enew`).
     newBuffer,
     /// vim's Ctrl+W: the next key splits, closes or moves between groups.
@@ -189,6 +196,8 @@ pub const Action = enum {
         return switch (self) {
             .prevTab => "Previous Tab",
             .newBuffer => "New Scratch Buffer",
+            .closeTabsLeft => "Close Tabs to the Left",
+            .closeTabsRight => "Close Tabs to the Right",
             .toggleHidden => "Toggle Hidden Files",
             .toggleShell => "Toggle Shell Panel",
             .toggleTree => "Toggle File Tree",

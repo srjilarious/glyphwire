@@ -274,7 +274,62 @@ pub const HostConfig = struct {
     /// prompt. Like a forwarded command, the window closes when it exits.
     /// `arena`-owned when set from `host.conf.lua`.
     default_program: []const [:0]const u8 = &.{},
+    /// How far one wheel tick scrolls: `wheel_lines` plain, and
+    /// `alt_wheel_lines` with Alt held, for a long jump without reaching
+    /// for the scrollbar.
+    wheel: WheelConfig = .{},
 };
+
+/// How far one wheel tick scrolls whatever is under the pointer: a layer,
+/// a pane's scrollback, or the arrow keys a full-screen program gets.
+pub const WheelConfig = struct {
+    plain: WheelStep = .{ .lines = 3 },
+    alt: WheelStep = .{ .pages = 1 },
+};
+
+/// One wheel tick's distance: a number of lines, or a fraction or
+/// multiple of the pane under the pointer, so `"page"` is one screenful
+/// whatever the pane's height. Sideways (Shift+wheel) the same step is
+/// taken in columns, and a page is the pane's width.
+pub const WheelStep = union(enum) {
+    lines: f32,
+    pages: f32,
+
+    /// The step in rows (or columns) for a pane `extent` cells across on
+    /// the scrolling axis. A page is never less than one line, so a
+    /// one-row pane still moves.
+    pub fn cells(self: WheelStep, extent: usize) f32 {
+        return switch (self) {
+            .lines => |n| n,
+            .pages => |n| @max(1, n * @as(f32, @floatFromInt(extent))),
+        };
+    }
+};
+
+pub const wheel_lines_max: f32 = 1000;
+pub const wheel_pages_max: f32 = 100;
+
+/// A `wheel_lines` / `alt_wheel_lines` string: `"page"`, `"pages"`, or a
+/// count before either (`"2 pages"`, `"0.5 page"`, `"1.5pages"`). A
+/// number in a string (`"8"`) is lines. Null for anything else, or a
+/// count that isn't positive.
+pub fn parseWheelStep(s: []const u8) ?WheelStep {
+    const t = std.mem.trim(u8, s, " \t");
+    const unit_at = std.mem.indexOfAny(u8, t, "pP") orelse t.len;
+    const count_str = std.mem.trimEnd(u8, t[0..unit_at], " \t");
+    const unit = t[unit_at..];
+    const count: f32 = if (count_str.len == 0)
+        1
+    else
+        std.fmt.parseFloat(f32, count_str) catch return null;
+    if (!(count > 0)) return null;
+    if (unit.len == 0) {
+        if (count_str.len == 0) return null;
+        return .{ .lines = @min(count, wheel_lines_max) };
+    }
+    if (!std.ascii.eqlIgnoreCase(unit, "page") and !std.ascii.eqlIgnoreCase(unit, "pages")) return null;
+    return .{ .pages = @min(count, wheel_pages_max) };
+}
 
 pub const drop_target_opacity_default: f32 = 0.25;
 /// Below this a wash stops reading as a highlight at all.

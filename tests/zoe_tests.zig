@@ -4939,6 +4939,45 @@ pub fn tabChordsCloseAndOpenTabsTest(_: std.Io, alloc: std.mem.Allocator) !void 
     try testz.expectTrue(actions.Action.newBuffer.inPalette());
 }
 
+/// A bulk close never takes the shown tab, so it can't empty a group.
+pub fn tabCloseSetSkipsTheShownTabTest(_: std.Io, _: std.mem.Allocator) !void {
+    const L = tabs.CloseSet.left;
+    const R = tabs.CloseSet.right;
+    const O = tabs.CloseSet.others;
+    try testz.expectTrue(L.takes(2, 0) and L.takes(2, 1));
+    try testz.expectFalse(L.takes(2, 2) or L.takes(2, 3));
+    try testz.expectTrue(R.takes(2, 3));
+    try testz.expectFalse(R.takes(2, 2) or R.takes(2, 1));
+    try testz.expectTrue(O.takes(2, 0) and O.takes(2, 3));
+    try testz.expectFalse(O.takes(2, 2));
+}
+
+/// `:tabcloseleft`, `:tabcloseright` and `:tabonly` (vim's `:tabo`), each
+/// with a forcing `!`, reach the UI as one outcome; dirtiness is the
+/// UI's to check, since only it sees the other tabs.
+pub fn tabCloseCommandsParseTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "abc", null);
+    defer ed.deinit();
+    const cases = [_]struct { cmd: []const u8, which: tabs.CloseSet, force: bool }{
+        .{ .cmd = "tabcloseleft", .which = .left, .force = false },
+        .{ .cmd = "tabcloseright!", .which = .right, .force = true },
+        .{ .cmd = "tabonly", .which = .others, .force = false },
+        .{ .cmd = "tabo!", .which = .others, .force = true },
+    };
+    for (cases) |c| switch (try ed.runCommandLine(c.cmd)) {
+        .tabs_close => |tc| {
+            try testz.expectEqual(tc.which, c.which);
+            try testz.expectEqual(tc.force, c.force);
+        },
+        else => try testz.fail(),
+    };
+    try testz.expectTrue(zoe.editor.tabCloseCommand("tabclose") == null);
+    try testz.expectEqualStr(excommands.forAction(.closeOtherTabs).?, "tabonly");
+    try testz.expectEqualStr(excommands.forAction(.closeTabsLeft).?, "tabcloseleft");
+    try testz.expectTrue(actions.Action.closeTabsRight.isUi());
+    try testz.expectTrue(actions.Action.closeOtherTabs.inPalette());
+}
+
 pub fn keysConfigRebindsAndUnbindsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var cfg = try parseConf(alloc,
         \\config = { keys = {
