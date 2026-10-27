@@ -7,6 +7,7 @@ const host_eng = @import("host_eng");
 
 const app_mod = @import("app.zig");
 const geometry = @import("geometry.zig");
+const scroll_mod = @import("scroll.zig");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
@@ -95,7 +96,17 @@ pub const Selection = struct {
         const server = self.app.server;
         const session_lock = server.lockSession();
         defer session_lock.unlock();
-        return server.ctx.root.view_scroll;
+        return shownViewScroll(&server.ctx.root);
+    }
+
+    /// The scrollback offset the root layer is actually *drawn* at: zero
+    /// while a full-screen program owns it, whatever `view_scroll` holds,
+    /// the same rule `render` applies (`scroll.rootOwned`). A selection
+    /// point built from the raw `view_scroll` there named rows the
+    /// renderer never shows, so once anything had nudged it (a drag's
+    /// edge auto-scroll in vim) no selection in that pane was visible.
+    fn shownViewScroll(root: *const glyphwire.Layer) usize {
+        return if (scroll_mod.rootOwned(root)) 0 else root.view_scroll;
     }
 
     /// Where a pixel falls on the focused pane's root grid, for a drag
@@ -104,7 +115,11 @@ pub const Selection = struct {
         /// In the pane's own frame, clamped into it.
         cell: glyphwire.CellPos,
         rows: usize,
+        /// `shownViewScroll`'s.
         view_scroll: usize,
+        /// A full-screen program owns the grid (`scroll.rootOwned`):
+        /// there is no scrollback view to drag into sight.
+        owned: bool,
     };
 
     /// `RootCell` for the pixel `(px, py)`, or null when no pane has
@@ -124,7 +139,7 @@ pub const Selection = struct {
         const session_lock = server.lockSession();
         defer session_lock.unlock();
         const root = &server.ctx.root;
-        return .{ .cell = cell, .rows = root.height, .view_scroll = root.view_scroll };
+        return .{ .cell = cell, .rows = root.height, .view_scroll = shownViewScroll(root), .owned = scroll_mod.rootOwned(root) };
     }
 
     /// A `create_layer` layer's placement and scroll position, snapshotted
@@ -334,7 +349,7 @@ pub const Selection = struct {
             const session_lock = server.lockSession();
             defer session_lock.unlock();
             const root = &server.ctx.root;
-            vs = root.view_scroll;
+            vs = shownViewScroll(root);
             crow = root.cursor.row;
             ccol = root.cursor.col;
         }
@@ -382,8 +397,9 @@ pub const Selection = struct {
             const root = &server.ctx.root;
             width = root.width;
             height = root.height;
-            hist = root.history_len;
-            vs = root.view_scroll;
+            // No scrollback to walk into while a program owns the screen.
+            hist = if (scroll_mod.rootOwned(root)) 0 else root.history_len;
+            vs = shownViewScroll(root);
         }
         if (width == 0 or height == 0) return;
 
@@ -594,7 +610,11 @@ pub const Selection = struct {
             // to another pane entirely, or be out of a drag's reach. The
             // pointer being past an edge (over a pane above or below)
             // clamps onto it, so that scrolls too.
-            if (self.layer == null) if (self.rootCellAt(pos.x, pos.y)) |rc| {
+            //
+            // Not while a full-screen program owns the pane: it has no
+            // scrollback view, and bumping `view_scroll` there anyway
+            // only threw every later selection off the rows on screen.
+            if (self.layer == null) if (self.rootCellAt(pos.x, pos.y)) |rc| if (!rc.owned) {
                 if (rc.cell.row == 0) {
                     server.reportScroll(self.app.alloc, null, 1) catch {};
                     edge_scrolled = true;
