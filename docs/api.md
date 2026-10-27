@@ -975,7 +975,10 @@ focuses it before the drag is resolved, so the drag selects in the pane
 it started in. A root-grid drag works in that pane's own rows and
 columns, clamps to its edges when the pointer wanders over a divider or a
 neighbour, and auto-scrolls at the pane's top and bottom rows rather than
-the window's. Starting a host selection (a drag, a click, or keyboard
+the window's. It doesn't auto-scroll at all while a full-screen program
+owns the pane (alt screen, a scroll region, or application cursor keys),
+which has no scrollback view, and it places its points against the view
+the pane is drawn at there, the live screen. Starting a host selection (a drag, a click, or keyboard
 mode) clears every other selection in the session, on any layer of any
 pane's context, broadcasting `selection` with `active: false` when there
 was one. Ctrl+Shift+C reads the visible context's selection first and
