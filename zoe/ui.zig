@@ -109,6 +109,8 @@ const Finder = finder_mod.Finder;
 const lineedit = @import("applib").lineedit;
 const treepane = @import("treepane.zig");
 const lspglue = @import("lspglue.zig");
+const timers_mod = @import("timers.zig");
+const popup_mod = @import("popup.zig");
 const completionui = @import("completionui.zig");
 const cmdline = @import("cmdline.zig");
 const render_ui = @import("render.zig");
@@ -419,6 +421,39 @@ pub const TreeClip = struct {
     path: []u8,
     cut: bool,
     is_dir: bool,
+};
+
+/// What owns the keyboard ahead of the bindings and the editor, in
+/// precedence order: the first one up takes every key (and the typed
+/// text that comes with it) and nothing below it runs. See
+/// `Ui.activeModal`.
+pub const Modal = enum {
+    /// `:themes`: the palette's popup over the theme list.
+    theme_picker,
+    /// `:extensions`.
+    ext_list,
+    /// Ctrl+Shift+P.
+    palette,
+    /// Ctrl+P.
+    finder,
+    /// Shift+Enter's two-letter labels.
+    jump,
+    /// A backup that no longer matches its file, asking r/d/s before the
+    /// buffer takes anything else.
+    recover,
+};
+
+/// The host reports a key before the text it types, in the same frame;
+/// when the key alone has done the work, the text is dropped.
+pub const SwallowText = enum {
+    none,
+    /// Ctrl+Space was taken as "complete here", and some layouts also
+    /// commit a " " for the chord. Only that space is dropped.
+    space,
+    /// A window command (`windowCommand`) or the backup question's answer
+    /// (`recoverKey`) took a printable key, which would otherwise reach
+    /// the editor (`v` entering visual mode).
+    any,
 };
 
 /// `d` / `D` in the sidebar: the yes/no on the statusline before anything
@@ -1027,26 +1062,23 @@ pub const Ui = struct {
     /// the ordinary case on a machine with only one toolchain.
     lsp_pool: ?lsp.Pool = null,
     diags: diag.Store,
+    /// Every deadline `run` wakes for with no input behind it: the
+    /// `didChange` debounce, a delayed completion request, the tab
+    /// tooltip, the disk check and the backup sync (`zoe/timers.zig`).
+    /// The disk check, under `file_watch = "poll"`, is the one that runs
+    /// with nothing else going on.
+    timers: timers_mod.Timers = .{},
     /// Whether a sign column is reserved in the gutter. Decided once at
     /// startup from "did any server actually start", and never changed
     /// after: a gutter that appears the first time a diagnostic arrives
     /// would reflow every line of the pane under the user's cursor.
     signs: bool = false,
-    /// A `didChange` waiting on the debounce, with the deadline it goes out
-    /// at. `run` shortens its wait to this, which is the only thing that
-    /// makes the loop time-bound at all -- see `lsp_change_debounce_ms`.
-    lsp_change_due: ?std.Io.Clock.Timestamp = null,
-    /// The hover popup, non-null while it is up. One float layer, placed
+    /// The single-layer floats: hover, completion, path menu, find
+    /// widget and tab tooltip (`zoe/popup.zig`).
+    popups: popup_mod.Popups,
+    /// The hover popup's content, non-null while it is up. Placed
     /// against the cursor like the finder is against the pane.
     hover: ?Hover = null,
-    hover_layer: glyphwire.LayerHandle,
-    /// The hover layer's `hover_panel_style` nine-patch, covering the whole
-    /// layer; its border lands in the popup's one-cell frame, which is left
-    /// transparent. Null when the host has no such style: the layer then
-    /// paints `bg_popup` and the popup has no border.
-    hover_panel_patch: ?glyphwire.NinePatchHandle,
-    hover_rect: Bounds = .{},
-    hover_dirty: bool = false,
     /// The newest outstanding `hover` / `definition` request id. A reply
     /// carrying anything else is stale -- the user asked again, or moved on
     /// -- and is dropped rather than popping a popup for a cursor position
@@ -1061,23 +1093,12 @@ pub const Ui = struct {
 
     /// The tab tooltip. `tab_tip_index` is the tab the pointer is resting
     /// on (only tabs with a file behind them count) in group
-    /// `tab_tip_group`, whether or not its tooltip is up yet; `tab_tip_due` is when it goes up, armed on the
-    /// move onto the tab. A keystroke or click takes it down and disarms
+    /// `tab_tip_group`, whether or not its tooltip is up yet; the
+    /// `.tab_tip` timer is when it goes up, armed on the move onto the tab. A keystroke or click takes it down and disarms
     /// it without forgetting the tab, so it stays down until the pointer
     /// moves onto another one.
-    tab_tip_layer: glyphwire.LayerHandle,
-    /// The layer's `hover_panel_style` nine-patch, as for the hover popup;
-    /// null draws it flat in `bg_popup`.
-    tab_tip_patch: ?glyphwire.NinePatchHandle,
     tab_tip_index: ?usize = null,
     tab_tip_group: ?*Group = null,
-    tab_tip_due: ?std.Io.Clock.Timestamp = null,
-    /// When the open files are next stat'ed for outside changes (see
-    /// `checkDisk`). Under `file_watch = "poll"` always armed, the one
-    /// timer that runs with nothing else going on; under `"inotify"`
-    /// armed `settle_ms` out when the watcher reports a change; under
-    /// `"off"` never.
-    disk_check_due: ?std.Io.Clock.Timestamp = null,
     /// `config.file_watch`, after any fallback (`startFileWatch`).
     file_watch: diskwatch.Mode = .poll,
     /// The inotify watcher, under `file_watch = .inotify` only.
@@ -1090,26 +1111,19 @@ pub const Ui = struct {
     /// buffer's file, which glyphwire-host shows in the window title.
     title_buf: [glyphwire.Context.max_title_len]u8 = undefined,
     title_len: usize = 0,
-    tab_tip_dirty: bool = false,
 
     /// The completion popup, non-null while it is up (insert mode only).
     /// See `zoe/complete.zig` for the model and `afterInsertEdit` for when
     /// it opens, narrows and closes.
     completion: ?complete.Menu = null,
-    completion_layer: glyphwire.LayerHandle,
-    completion_dirty: bool = false,
     /// The `:` line's filename popup (Tab on a path argument), non-null
     /// while it is up. See `zoe/pathmenu.zig`. A layer of its own rather
     /// than the completion popup's: it hangs over the statusline, not
     /// under a word in the buffer.
     path_menu: ?pathmenu.Menu = null,
-    path_menu_layer: glyphwire.LayerHandle,
-    path_menu_dirty: bool = false,
-    /// The find widget's layer, and where it was last drawn (window
-    /// cells) while it is showing -- what a click is tested against.
-    /// Redrawn with the statusline, which every input repaints.
-    find_bar_layer: glyphwire.LayerHandle,
-    find_bar_patch: ?glyphwire.NinePatchHandle,
+    /// Where the find widget was last drawn (window cells) while it is
+    /// showing -- what a click is tested against. Redrawn with the
+    /// statusline, which every input repaints.
     find_bar: ?FindBarPlace = null,
     /// The newest outstanding completion request, and where the word it is
     /// for starts -- a reply for a word the cursor has since left is
@@ -1117,20 +1131,13 @@ pub const Ui = struct {
     completion_request: ?i64 = null,
     completion_req_start: usize = 0,
     completion_req_line: usize = 0,
-    /// An identifier-driven request waiting on `complete_auto_delay_ms`, so
-    /// a burst of typing asks once, when it pauses, instead of per key.
-    completion_due: ?std.Io.Clock.Timestamp = null,
     /// The word start the last request came back empty for. Typing more of
     /// that word doesn't ask again: a server with nothing for `fo` has
     /// nothing for `foo` either (unless it said its list was incomplete).
     completion_empty_at: ?usize = null,
-    /// Ctrl+Space was just taken as "complete here". The host reports the
-    /// key before the text in the same frame, and some layouts also commit
-    /// a " " for the chord, which this drops.
-    swallow_space_text: bool = false,
-    /// A window command (`windowCommand`) just took a printable key; the
-    /// `text` the host sends for the same key is dropped.
-    swallow_window_text: bool = false,
+    /// The `text` the host sends after a key that was already taken
+    /// whole, to drop. Cleared by the next key either way.
+    swallow_text: SwallowText = .none,
     jumps: JumpList = .{},
     /// Shift+Enter's labels while they are up, and the group they are
     /// drawn over (`zoe/jumpglue.zig`).
@@ -1228,9 +1235,6 @@ pub const Ui = struct {
     /// Where unsaved-change backups go (`zoe/backup.zig`), owned. Null
     /// with `backups = false`, or nowhere to put them.
     backup_dir: ?[]u8 = null,
-    /// When the backups next catch up with the buffers, armed by the
-    /// first change after the last write (`armBackup`).
-    backup_due: ?std.Io.Clock.Timestamp = null,
     /// The last `syncBackups` couldn't write a backup. Kept so the error
     /// is reported once rather than on every retry.
     backup_failed: bool = false,
@@ -1381,49 +1385,22 @@ pub const Ui = struct {
         errdefer ext_list.deinit();
         var theme_picker = try palette_mod.Popup.init(alloc, client, themepicker.style(paletteStyle(&th)));
         errdefer theme_picker.deinit();
-        // The hover popup, floating like the finder's layers and placed
-        // against the cursor rather than the pane -- `hoverRect`.
-        const hover_layer = try client.createLayer(hover_max_cols, 1, 0);
-        try client.setLayerVisible(hover_layer, false);
-        try client.setLayerShadow(hover_layer, glyphwire.Shadow.dialog);
-        const hover_panel_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(hover_layer, 0, 0, 1, hover_max_cols, th.panelStyle()) catch |err| blk: {
-            std.log.warn("zoe: no '{s}' nine-patch for the hover popup ({t}); drawing it flat", .{ th.panelStyle(), err });
-            break :blk null;
+        // The single-layer floats, in stacking order (`zoe/popup.zig`).
+        const popups: popup_mod.Popups = .{
+            // Placed against the cursor rather than the pane: `hoverRect`.
+            .hover = try .init(client, .{ .what = "hover popup", .look = .panel, .rows = 1, .cols = hover_max_cols }, th.panelStyle()),
+            // Under the word being completed: `completionRect`.
+            .completion = try .init(client, .{ .what = "completion popup", .look = .flat, .rows = 1, .cols = complete_max_cols }, th.panelStyle()),
+            // The `:` line's filename popup, styled the same way.
+            .path_menu = try .init(client, .{ .what = "path menu", .look = .flat, .rows = 1, .cols = complete_max_cols }, th.panelStyle()),
+            // The Ctrl+F / Ctrl+H find widget, over the buffer's top-right
+            // corner (`zoe/findbar.zig`).
+            .find_bar = try .init(client, .{ .what = "find widget", .look = .panel, .rows = 2, .cols = findbar.fixed_cols + findbar.max_field_cols }, th.panelStyle()),
+            // Last so it sits over everything: it hangs from the tab strip
+            // over the top of the buffer and, for a long path, over the
+            // file tree.
+            .tab_tip = try .init(client, .{ .what = "tab tooltip", .look = .panel, .rows = tabs.tip_rows, .cols = tab_tip_initial_cols }, th.panelStyle()),
         };
-        if (hover_panel_patch == null) try client.setLayerBackground(hover_layer, role(.popup_bg));
-        // The completion popup: one more float, placed under the word being
-        // completed (`completionRect`).
-        const completion_layer = try client.createLayer(complete_max_cols, 1, 0);
-        try client.setLayerVisible(completion_layer, false);
-        try client.setLayerBackground(completion_layer, role(.popup_bg));
-        try client.setLayerShadow(completion_layer, glyphwire.Shadow.dialog);
-        // The `:` line's filename popup, styled the same way.
-        const path_menu_layer = try client.createLayer(complete_max_cols, 1, 0);
-        try client.setLayerVisible(path_menu_layer, false);
-        try client.setLayerBackground(path_menu_layer, role(.popup_bg));
-        try client.setLayerShadow(path_menu_layer, glyphwire.Shadow.dialog);
-        // The Ctrl+F / Ctrl+H find widget, over the buffer's top-right
-        // corner (`zoe/findbar.zig`).
-        // On the hover popup's panel, flat where the theme has none.
-        const find_bar_layer = try client.createLayer(findbar.fixed_cols + findbar.max_field_cols, 2, 0);
-        try client.setLayerVisible(find_bar_layer, false);
-        try client.setLayerShadow(find_bar_layer, glyphwire.Shadow.dialog);
-        const find_bar_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(find_bar_layer, 0, 0, 2, findbar.fixed_cols + findbar.max_field_cols, th.panelStyle()) catch |err| blk: {
-            std.log.warn("zoe: no '{s}' nine-patch for the find widget ({t}); drawing it flat", .{ th.panelStyle(), err });
-            break :blk null;
-        };
-        if (find_bar_patch == null) try client.setLayerBackground(find_bar_layer, role(.popup_bg));
-        // The tab tooltip, last so it sits over everything: it hangs from
-        // the tab strip over the top of the buffer and, for a long path,
-        // over the file tree.
-        const tab_tip_layer = try client.createLayer(tab_tip_initial_cols, tabs.tip_rows, 0);
-        try client.setLayerVisible(tab_tip_layer, false);
-        try client.setLayerShadow(tab_tip_layer, glyphwire.Shadow.dialog);
-        const tab_tip_patch: ?glyphwire.NinePatchHandle = client.createNinePatch(tab_tip_layer, 0, 0, tabs.tip_rows, tab_tip_initial_cols, th.panelStyle()) catch |err| blk: {
-            std.log.warn("zoe: no '{s}' nine-patch for the tab tooltip ({t}); drawing it flat", .{ th.panelStyle(), err });
-            break :blk null;
-        };
-        if (tab_tip_patch == null) try client.setLayerBackground(tab_tip_layer, role(.popup_bg));
 
         // The tree|editor split stays user-resizable, as do the splits
         // between editor groups. The column splits are not: what they
@@ -1454,14 +1431,7 @@ pub const Ui = struct {
             .palette = palette,
             .ext_list = ext_list,
             .theme_picker = theme_picker,
-            .hover_layer = hover_layer,
-            .hover_panel_patch = hover_panel_patch,
-            .completion_layer = completion_layer,
-            .path_menu_layer = path_menu_layer,
-            .find_bar_layer = find_bar_layer,
-            .find_bar_patch = find_bar_patch,
-            .tab_tip_layer = tab_tip_layer,
-            .tab_tip_patch = tab_tip_patch,
+            .popups = popups,
             .diags = diag.Store.init(alloc),
             .shell = shellpanel.Panel.init(alloc, io, client, grant, shell_layers, environ),
             .pane_split = pane_split,
@@ -2605,7 +2575,7 @@ pub const Ui = struct {
             // typed. The space the chord also types is swallowed.
             .complete => {
                 if (!in_buffer or self.buf.ed.mode != .insert) return false;
-                self.swallow_space_text = true;
+                self.swallow_text = .space;
                 self.closeCompletion();
                 self.completion_empty_at = null;
                 self.requestCompletion(null, true);
@@ -2777,10 +2747,7 @@ pub const Ui = struct {
             // And whatever `zoe <file>` in the shell panel asked for, which
             // wakes this the same way.
             self.drainRemote();
-            if (self.anyGroupDirty() or self.tree_dirty != .none or
-                self.status_dirty or self.finder.dirty or self.palette.dirty or self.ext_list.dirty or self.theme_picker.dirty or self.hover_dirty or self.completion_dirty or
-                self.path_menu_dirty or self.tree_edit_dirty or self.tab_tip_dirty or self.tree_scroll_pending != null)
-                try self.render();
+            if (self.anyDirty()) try self.render();
             if (self.quit) break;
             // After the frame, not before: entering insert mode's frame
             // is what places the host's bar on the buffer layer's cursor,
@@ -2819,7 +2786,7 @@ pub const Ui = struct {
             self.armLspChange();
             self.armDiskCheck();
             self.armBackup();
-            const timeout: std.Io.Timeout = if (self.nextLspDeadline()) |due|
+            const timeout: std.Io.Timeout = if (self.nextDeadline()) |due|
                 .{ .deadline = due }
             else
                 .none;
@@ -2843,26 +2810,30 @@ pub const Ui = struct {
             }
             // A wake with nothing queued, or the deadline passing: either way
             // this is where the debounced change goes out.
-            if (self.lspChangeDue()) self.lspFlushChange();
+            if (self.timers.due(self.io, .lsp_change)) self.lspFlushChange();
             // The popup closes if its reason went away in that batch (insert
             // mode left, a click moved the cursor), before a delayed request
             // gets the chance to reopen it.
             self.syncCompletion();
-            if (self.completionDue()) self.requestCompletion(null, false);
-            if (self.tabTipDue()) self.showTabTip();
-            if (self.diskCheckDue()) {
+            if (self.timers.due(self.io, .completion)) self.requestCompletion(null, false);
+            if (self.timers.due(self.io, .tab_tip)) self.showTabTip();
+            // Disarmed as it fires, so the next turn arms the next one.
+            if (self.timers.take(self.io, .disk_check)) {
                 self.checkDisk();
                 try self.checkTreeDisk();
             }
-            if (self.backupDue()) {
-                self.backup_due = null;
-                _ = self.syncBackups();
-            }
+            if (self.timers.take(self.io, .backup)) _ = self.syncBackups();
             // After the events, before the frame they produced: a mode
             // change in that batch retimes the host's key repeat before
             // the user can hold anything down in the new mode.
             self.syncKeyRepeat();
         }
+    }
+
+    /// The soonest thing `run` has to wake for with no input: an armed
+    /// timer, or an outstanding language-server request's timeout.
+    pub fn nextDeadline(self: *Ui) ?std.Io.Clock.Timestamp {
+        return timers_mod.earlier(self.timers.next(), self.lspRequestDeadline());
     }
 
     pub fn handleEvent(self: *Ui, ev: glyphwire.Event) !void {
@@ -3014,6 +2985,30 @@ pub const Ui = struct {
         return .{ .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
     }
 
+    /// The modal that has the keyboard, if any (see `Modal` for the
+    /// order).
+    pub fn activeModal(self: *Ui) ?Modal {
+        if (self.theme_picker.isOpen()) return .theme_picker;
+        if (self.ext_list.isOpen()) return .ext_list;
+        if (self.palette.isOpen()) return .palette;
+        if (self.finder.isOpen()) return .finder;
+        if (self.jump != null) return .jump;
+        if (self.recoverPending()) return .recover;
+        return null;
+    }
+
+    /// Whether `text` belongs to the key just taken (`swallow_text`),
+    /// clearing the mark either way.
+    fn swallowed(self: *Ui, text: []const u8) bool {
+        const s = self.swallow_text;
+        self.swallow_text = .none;
+        return switch (s) {
+            .none => false,
+            .space => std.mem.eql(u8, text, " "),
+            .any => true,
+        };
+    }
+
     pub fn handleInput(self: *Ui, ev: glyphwire.InputEvent) !void {
         // A keystroke on the `:` line, or a normal-mode key that turns
         // out to do nothing, leaves the buffer pane exactly as it was.
@@ -3044,36 +3039,17 @@ pub const Ui = struct {
                     return;
                 }
 
-                // The Ctrl+P and Ctrl+Shift+P popups (and the extension
-                // list) are modal: while one is open it is the only
-                // thing reading keys, so nothing below here runs.
-                if (self.theme_picker.isOpen()) {
-                    try self.themePickerKey(k);
-                    return;
-                }
-                if (self.ext_list.isOpen()) {
-                    try self.extListKey(k);
-                    return;
-                }
-                if (self.palette.isOpen()) {
-                    try self.paletteKey(k);
-                    return;
-                }
-                if (self.finder.isOpen()) {
-                    try self.finderKey(k);
-                    return;
-                }
-                // The jump labels too, Shift+Enter's.
-                if (self.jump != null) {
-                    self.jumpKey(k);
-                    return;
-                }
-                // A backup that no longer matches its file is answered
-                // before the buffer takes anything else.
-                if (self.recoverPending() and !isModifierKey(k.key)) {
-                    try self.recoverKey(k);
-                    return;
-                }
+                // A modal is the only thing reading keys while it is up,
+                // so nothing below here runs. The backup question lets a
+                // bare modifier by: it is on the way to the answer.
+                if (self.activeModal()) |m| switch (m) {
+                    .theme_picker => return self.themePickerKey(k),
+                    .ext_list => return self.extListKey(k),
+                    .palette => return self.paletteKey(k),
+                    .finder => return self.finderKey(k),
+                    .jump => return self.jumpKey(k),
+                    .recover => if (!isModifierKey(k.key)) return self.recoverKey(k),
+                };
 
                 // The key after Ctrl+W. A modifier pressed on the way to
                 // it (letting go of Ctrl, reaching for Shift) is not it.
@@ -3084,10 +3060,7 @@ pub const Ui = struct {
                     // With or without Ctrl still held: Ctrl+W Ctrl+W is
                     // vim's cycle, the same as Ctrl+W w.
                     if (try self.windowCommand(k)) {
-                        // A printable key also arrives as `text` straight
-                        // after this, which would otherwise reach the
-                        // editor (`v` entering visual mode).
-                        if (!k.ctrl() and k.key.len == 1) self.swallow_window_text = true;
+                        if (!k.ctrl() and k.key.len == 1) self.swallow_text = .any;
                         return;
                     }
                 }
@@ -3110,7 +3083,7 @@ pub const Ui = struct {
                     _ = self.closeHover();
                     if (std.mem.eql(u8, k.key, "escape")) return;
                 }
-                self.swallow_space_text = false;
+                self.swallow_text = .none;
                 // The completion popup reads its keys before the bindings
                 // below: with it up, Ctrl+N / Ctrl+P move through it
                 // rather than toggling the sidebar or opening the finder.
@@ -3172,34 +3145,16 @@ pub const Ui = struct {
                 // Typed text is the shell's while its panel has focus -- it
                 // has a line editor of its own.
                 if (self.shell.isFocused()) return;
-                if (self.theme_picker.isOpen()) {
-                    try self.themePickerText(t.text);
-                    return;
-                }
-                if (self.ext_list.isOpen()) return;
-                if (self.palette.isOpen()) {
-                    try self.palette.text(t.text);
-                    return;
-                }
-                if (self.finder.isOpen()) {
-                    try self.finder.text(t.text);
-                    return;
-                }
-                if (self.jump != null) {
-                    self.jumpText(t.text);
-                    return;
-                }
-                if (self.swallow_space_text) {
-                    self.swallow_space_text = false;
-                    if (std.mem.eql(u8, t.text, " ")) return;
-                }
-                if (self.swallow_window_text) {
-                    self.swallow_window_text = false;
-                    return;
-                }
+                if (self.swallowed(t.text)) return;
                 // Typing with no key behind it (an input method) doesn't
-                // answer the backup question either.
-                if (self.recoverPending()) return;
+                // answer the backup question.
+                if (self.activeModal()) |m| switch (m) {
+                    .theme_picker => return self.themePickerText(t.text),
+                    .ext_list, .recover => return,
+                    .palette => return self.palette.text(t.text),
+                    .finder => return self.finder.text(t.text),
+                    .jump => return self.jumpText(t.text),
+                };
                 self.buf.ed.status.clearRetainingCapacity();
                 if (self.focus == .tree) {
                     try self.treeText(t.text);
@@ -3213,25 +3168,15 @@ pub const Ui = struct {
             },
             .paste => |t| {
                 if (self.shell.isFocused()) return;
-                if (self.theme_picker.isOpen()) {
-                    try self.themePickerText(t.text);
-                    return;
-                }
-                if (self.ext_list.isOpen()) return;
-                if (self.palette.isOpen()) {
-                    try self.palette.text(t.text);
-                    return;
-                }
-                if (self.finder.isOpen()) {
-                    try self.finder.text(t.text);
-                    return;
-                }
-                // Not a label typed: the jump ends, and the paste with it.
-                if (self.jump != null) {
-                    self.cancelJump();
-                    return;
-                }
-                if (self.recoverPending()) return;
+                if (self.activeModal()) |m| switch (m) {
+                    .theme_picker => return self.themePickerText(t.text),
+                    .ext_list, .recover => return,
+                    .palette => return self.palette.text(t.text),
+                    .finder => return self.finder.text(t.text),
+                    // Not a label typed: the jump ends, and the paste
+                    // with it.
+                    .jump => return self.cancelJump(),
+                };
                 self.buf.ed.status.clearRetainingCapacity();
                 // A paste is not typing: it neither narrows nor opens the
                 // popup.
@@ -3432,11 +3377,7 @@ pub const Ui = struct {
         self.status_dirty = true;
     }
 
-    // ── Tree pane input ─────────────────────────────────────────────────
-
-    // ── Tree pane search ────────────────────────────────────────────────
-
-    // ── Sidebar create / rename ─────────────────────────────────────────
+    // ── Mouse ───────────────────────────────────────────────────────────
 
     /// A left-button press or release. In the buffer pane a press moves
     /// the caret and arms a drag (which turns into a visual selection the
@@ -3471,22 +3412,27 @@ pub const Ui = struct {
         // moves its cursor behind it is a trap. The release that follows
         // lands here with the popup already closed and nothing dragging,
         // so it does nothing.
-        if (self.theme_picker.isOpen()) {
-            if (ev.pressed) try self.themePickerOutcome(self.theme_picker.click(ev.cell));
-            return;
-        }
-        if (self.ext_list.isOpen()) {
-            if (ev.pressed and self.ext_list.click(ev.cell) == .accept) try self.acceptExtList();
-            return;
-        }
-        if (self.palette.isOpen()) {
-            if (ev.pressed and self.palette.click(ev.cell) == .accept) try self.acceptPalette();
-            return;
-        }
-        if (self.finder.isOpen()) {
-            if (ev.pressed and self.finder.click(ev.cell) == .accept) try self.acceptFinder();
-            return;
-        }
+        // The jump labels and the backup question don't take the
+        // pointer; the list popups do.
+        if (self.activeModal()) |m| switch (m) {
+            .theme_picker => {
+                if (ev.pressed) try self.themePickerOutcome(self.theme_picker.click(ev.cell));
+                return;
+            },
+            .ext_list => {
+                if (ev.pressed and self.ext_list.click(ev.cell) == .accept) try self.acceptExtList();
+                return;
+            },
+            .palette => {
+                if (ev.pressed and self.palette.click(ev.cell) == .accept) try self.acceptPalette();
+                return;
+            },
+            .finder => {
+                if (ev.pressed and self.finder.click(ev.cell) == .accept) try self.acceptFinder();
+                return;
+            },
+            .jump, .recover => {},
+        };
 
         // A middle click on a tab closes it, the browser way, with the
         // same E37 refusal as its `×`. Anywhere else it does nothing.
@@ -3783,10 +3729,10 @@ pub const Ui = struct {
         const was_shown = self.tab_tip_shown;
         self.tab_tip_index = over;
         self.tab_tip_group = over_group;
-        self.tab_tip_due = null;
+        self.timers.disarm(.tab_tip);
         if (was_shown) {
             self.tab_tip_shown = false;
-            self.tab_tip_dirty = true;
+            self.popups.tab_tip.dirty = true;
         }
         if (over == null) return;
         const delay = self.tabTipDelayMs();
@@ -3794,10 +3740,7 @@ pub const Ui = struct {
             self.showTabTip();
             return;
         }
-        self.tab_tip_due = std.Io.Clock.Timestamp.fromNow(self.io, .{
-            .raw = .fromMilliseconds(delay),
-            .clock = .awake,
-        });
+        self.timers.armIn(self.io, .tab_tip, delay);
     }
 
     pub fn tabTipDelayMs(self: *const Ui) i64 {
@@ -3805,26 +3748,21 @@ pub const Ui = struct {
         return @intFromFloat(ms);
     }
 
-    pub fn tabTipDue(self: *Ui) bool {
-        const due = self.tab_tip_due orelse return false;
-        return due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() >= 0;
-    }
-
     pub fn showTabTip(self: *Ui) void {
-        self.tab_tip_due = null;
+        self.timers.disarm(.tab_tip);
         if (self.tab_tip_index == null) return;
         self.tab_tip_shown = true;
-        self.tab_tip_dirty = true;
+        self.popups.tab_tip.dirty = true;
     }
 
     /// Takes the tooltip down (or stops it going up) for a key or click. The
     /// hovered tab is kept, so it doesn't come straight back on the next
     /// pointer move within the same tab.
     pub fn dismissTabTip(self: *Ui) void {
-        self.tab_tip_due = null;
+        self.timers.disarm(.tab_tip);
         if (!self.tab_tip_shown) return;
         self.tab_tip_shown = false;
-        self.tab_tip_dirty = true;
+        self.popups.tab_tip.dirty = true;
     }
 
     /// The buffer line whose fold-column cell `cell` is, or null when
@@ -3922,9 +3860,7 @@ pub const Ui = struct {
         self.status_dirty = true;
     }
 
-    // ── `:` line filename completion ────────────────────────────────────
-
-    // ── Command line (cmdline.zig) ──────────────────────────────────────
+    // ── Command line, filename popup and history (cmdline.zig) ──────────
     pub const cmdlineKey = cmdline.cmdlineKey;
     pub const completePath = cmdline.completePath;
     pub const acceptPathPick = cmdline.acceptPathPick;
@@ -3938,8 +3874,6 @@ pub const Ui = struct {
     pub const loadHistory = cmdline.loadHistory;
     pub const flushHistories = cmdline.flushHistories;
     pub const flushHistory = cmdline.flushHistory;
-
-    // ── Command-line history ────────────────────────────────────────────
 
     // ── Editor outcomes ─────────────────────────────────────────────────
 
@@ -4611,16 +4545,14 @@ pub const Ui = struct {
         const open = self.focus == .buffer and ed.mode == .find;
         const fits = if (open) findbar.layout(b.cols, ed.find_show_replace) else null;
         const l = (if (fits) |x| (if (b.rows >= x.rows) x else null) else null) orelse {
-            if (self.find_bar != null) try batch.setLayerVisible(self.find_bar_layer, false);
+            if (self.find_bar != null) try self.popups.find_bar.hide(batch);
             self.find_bar = null;
             return;
         };
         const place: FindBarPlace = .{ .row = b.row, .col = b.col + b.cols - l.cols - 1, .layout = l };
-        try batch.setLayerSize(self.find_bar_layer, l.cols, l.rows);
-        try batch.setLayerCellPosition(self.find_bar_layer, place.row, place.col);
-        if (self.find_bar_patch) |np| try batch.updateNinePatch(self.find_bar_layer, np, .{ .rows = l.rows, .cols = l.cols });
-        try findbar.render(batch, self.find_bar_layer, l, ed);
-        try batch.setLayerVisible(self.find_bar_layer, true);
+        try self.popups.find_bar.place(batch, .{ .row = place.row, .col = place.col, .rows = l.rows, .cols = l.cols });
+        try findbar.render(batch, self.popups.find_bar.layer, l, ed);
+        try self.popups.find_bar.show(batch);
         self.find_bar = place;
     }
 
@@ -4893,7 +4825,7 @@ pub const Ui = struct {
         return null;
     }
 
-    // ── Buffers ─────────────────────────────────────────────────────────
+    // ── Opening files ───────────────────────────────────────────────────
 
     /// Opens `path` in a new tab, or switches to it when it is already
     /// open -- both `:e` and Enter on a file in the tree land here. The
@@ -5019,6 +4951,8 @@ pub const Ui = struct {
         return null;
     }
 
+    // ── Disk watching and reload ────────────────────────────────────────
+
     /// A bare `:e` -- re-reads the current buffer from disk, in place.
     /// The tab stays where it is and keeps its position in the strip;
     /// only the text and the cursor reset. `:e <path>` is the other
@@ -5085,7 +5019,7 @@ pub const Ui = struct {
     /// the watcher's flag set: it stops waking the loop until this turn
     /// comes round again after the check (see `Watcher.takeChanged`).
     pub fn armDiskCheck(self: *Ui) void {
-        if (self.disk_check_due != null) return;
+        if (self.timers.armed(.disk_check)) return;
         const ms: i64 = switch (self.file_watch) {
             .off => return,
             .poll => diskwatch.poll_ms,
@@ -5100,10 +5034,7 @@ pub const Ui = struct {
                 break :blk diskwatch.settle_ms;
             },
         };
-        self.disk_check_due = std.Io.Clock.Timestamp.fromNow(self.io, .{
-            .raw = .fromMilliseconds(ms),
-            .clock = .awake,
-        });
+        self.timers.armIn(self.io, .disk_check, ms);
     }
 
     /// Points the inotify watches at the directories the disk check
@@ -5126,15 +5057,6 @@ pub const Ui = struct {
             if (e.is_dir and e.expanded) w.want(e.path) catch {};
         }
         w.sweep() catch {};
-    }
-
-    /// Whether the disk check has come due. Disarms it, so the next loop
-    /// turn arms the next one.
-    pub fn diskCheckDue(self: *Ui) bool {
-        const due = self.disk_check_due orelse return false;
-        if (due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() < 0) return false;
-        self.disk_check_due = null;
-        return true;
     }
 
     /// Stats every open buffer's file and follows the ones that changed
@@ -5237,6 +5159,8 @@ pub const Ui = struct {
             self.status_dirty = true;
         }
     }
+
+    // ── Buffers and tabs ────────────────────────────────────────────────
 
     /// Whether `:q` / `:wq` has to be refused because some *other* tab
     /// holds unsaved changes, reporting the first one it finds. An
@@ -5403,6 +5327,8 @@ pub const Ui = struct {
         }
     }
 
+    // ── Per-language settings ───────────────────────────────────────────
+
     /// The line-comment marker for `path`'s language (Ctrl+/), from the
     /// config's languages or the built-in ones.
     pub fn lineCommentFor(self: *const Ui, path: ?[]const u8) ?[]const u8 {
@@ -5419,6 +5345,8 @@ pub const Ui = struct {
         const lang = syntax.languageFor(langs, p) orelse return false;
         return std.mem.eql(u8, lang, "python");
     }
+
+    // ── Saving ──────────────────────────────────────────────────────────
 
     pub fn save(self: *Ui, target: ?[]const u8) void {
         const dest = target orelse self.buf.ed.path orelse {
@@ -5465,9 +5393,7 @@ pub const Ui = struct {
     // owns the processes and the protocol, `zoe/diag.zig` owns what they
     // said, and everything here is the editor's half -- when to tell them
     // about a buffer, what to do with an answer, and how a diagnostic gets
-    // onto the screen.
-
-    // ── Language servers (lspglue.zig) ─────────────────────────────────
+    // onto the screen. The editor's half is `zoe/lspglue.zig`.
     pub const startLsp = lspglue.startLsp;
     pub const lspGrammarFor = lspglue.lspGrammarFor;
     pub const lspDidOpen = lspglue.lspDidOpen;
@@ -5475,9 +5401,7 @@ pub const Ui = struct {
     pub const lspDidSave = lspglue.lspDidSave;
     pub const armLspChange = lspglue.armLspChange;
     pub const lspFlushChange = lspglue.lspFlushChange;
-    pub const nextLspDeadline = lspglue.nextLspDeadline;
-    pub const earlier = lspglue.earlier;
-    pub const lspChangeDue = lspglue.lspChangeDue;
+    pub const lspRequestDeadline = lspglue.lspRequestDeadline;
     pub const slotAbs = lspglue.slotAbs;
     pub const invalidateAbs = lspglue.invalidateAbs;
     pub const drainLsp = lspglue.drainLsp;
@@ -5501,14 +5425,8 @@ pub const Ui = struct {
     pub const dropBackup = backupglue.dropBackup;
     pub const syncBackups = backupglue.syncBackups;
     pub const armBackup = backupglue.armBackup;
-    pub const backupDue = backupglue.backupDue;
     pub const hotExitReady = backupglue.hotExitReady;
 
-    // ── Jump labels (jumpglue.zig) ─────────────────────────────────────
-    pub const startJump = jumpglue.startJump;
-    pub const cancelJump = jumpglue.cancelJump;
-    pub const jumpKey = jumpglue.jumpKey;
-    pub const jumpText = jumpglue.jumpText;
     pub const discardBackups = backupglue.discardBackups;
     pub const restoreBackup = backupglue.restoreBackup;
     pub const recoverPending = backupglue.recoverPending;
@@ -5516,6 +5434,13 @@ pub const Ui = struct {
     pub const restoreUntitled = backupglue.restoreUntitled;
     pub const recoverAll = backupglue.recoverAll;
 
+    // ── Jump labels (jumpglue.zig) ─────────────────────────────────────
+    pub const startJump = jumpglue.startJump;
+    pub const cancelJump = jumpglue.cancelJump;
+    pub const jumpKey = jumpglue.jumpKey;
+    pub const jumpText = jumpglue.jumpText;
+
+    // ── Window title ────────────────────────────────────────────────────
     /// Names this context `zoe <file>` after the focused buffer (`~` for
     /// `$HOME`), or `zoe <cwd>` for a buffer with no file yet. Only sends
     /// when it changed, so the per-frame call is a string compare.
@@ -5535,8 +5460,6 @@ pub const Ui = struct {
         self.title_len = title.len;
     }
 
-    // ── Completion ──────────────────────────────────────────────────────
-
     // ── Completion (completionui.zig) ───────────────────────────────────
     pub const requestCompletion = completionui.requestCompletion;
     pub const applyCompletion = completionui.applyCompletion;
@@ -5545,7 +5468,6 @@ pub const Ui = struct {
     pub const isCompletionTrigger = completionui.isCompletionTrigger;
     pub const afterInsertEdit = completionui.afterInsertEdit;
     pub const armCompletion = completionui.armCompletion;
-    pub const completionDue = completionui.completionDue;
     pub const syncCompletion = completionui.syncCompletion;
     pub const acceptCompletion = completionui.acceptCompletion;
     pub const completionKey = completionui.completionKey;
@@ -5754,15 +5676,8 @@ pub const Ui = struct {
         _ = self.closeHover();
         self.closeCompletion();
         self.dismissTabTip();
-        if (frame_changed) {
-            self.hover_panel_patch = try self.swapPanelPatch(self.hover_layer, self.hover_panel_patch, 1, hover_max_cols);
-            self.tab_tip_patch = try self.swapPanelPatch(self.tab_tip_layer, self.tab_tip_patch, tabs.tip_rows, tab_tip_initial_cols);
-            self.find_bar_patch = try self.swapPanelPatch(self.find_bar_layer, self.find_bar_patch, 2, findbar.fixed_cols + findbar.max_field_cols);
-            self.shell.setFrameStyle(self.th.panelStyle());
-        }
-        try c.setLayerBackground(self.hover_layer, if (self.hover_panel_patch == null) role(.popup_bg) else null);
-        try c.setLayerBackground(self.tab_tip_layer, if (self.tab_tip_patch == null) role(.popup_bg) else null);
-        try c.setLayerBackground(self.find_bar_layer, if (self.find_bar_patch == null) role(.popup_bg) else null);
+        try self.popups.applyTheme(c, self.th.panelStyle(), frame_changed);
+        if (frame_changed) self.shell.setFrameStyle(self.th.panelStyle());
         try self.finder.setStyle(finderStyle(&self.th));
         try self.palette.setStyle(paletteStyle(&self.th));
         try self.ext_list.setStyle(extListStyle(&self.th));
@@ -5770,24 +5685,6 @@ pub const Ui = struct {
 
         self.tree_dirty = .full;
         self.status_dirty = true;
-    }
-
-    /// Replaces a popup layer's panel nine-patch with the current theme's
-    /// `panel_style`, sized like `init` sizes it (the popup's own render
-    /// resizes it to fit). Null when the host has no such style, which
-    /// draws the popup flat.
-    pub fn swapPanelPatch(
-        self: *Ui,
-        layer: glyphwire.LayerHandle,
-        old: ?glyphwire.NinePatchHandle,
-        rows: usize,
-        cols: usize,
-    ) !?glyphwire.NinePatchHandle {
-        if (old) |p| try self.client.destroyNinePatch(layer, p);
-        return self.client.createNinePatch(layer, 0, 0, rows, cols, self.th.panelStyle()) catch |err| blk: {
-            std.log.warn("zoe: no '{s}' nine-patch for a popup ({t}); drawing it flat", .{ self.th.panelStyle(), err });
-            break :blk null;
-        };
     }
 
     /// Records where the cursor is, before something moves it somewhere
@@ -5833,11 +5730,10 @@ pub const Ui = struct {
         };
     }
 
-    // ── Render ──────────────────────────────────────────────────────────
-
     // ── Render (render.zig) ─────────────────────────────────────────────
     pub const render = render_ui.render;
     pub const anyGroupDirty = render_ui.anyGroupDirty;
+    pub const anyDirty = render_ui.anyDirty;
     pub const renderGroup = render_ui.renderGroup;
     pub const markTreeDirty = render_ui.markTreeDirty;
     pub const writeAt = render_ui.writeAt;

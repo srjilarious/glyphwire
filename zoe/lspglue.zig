@@ -135,11 +135,8 @@ pub fn armLspChange(self: *Ui) void {
     if (self.lsp_pool == null) return;
     if (!self.buf.lsp_opened) return;
     if (self.buf.ed.buf.edits == self.buf.lsp_sent_edits) return;
-    if (self.lsp_change_due != null) return;
-    self.lsp_change_due = std.Io.Clock.Timestamp.fromNow(self.io, .{
-        .raw = .fromMilliseconds(lsp_change_debounce_ms),
-        .clock = .awake,
-    });
+    if (self.timers.armed(.lsp_change)) return;
+    self.timers.armIn(self.io, .lsp_change, lsp_change_debounce_ms);
 }
 
 /// Sends the active buffer's whole text as a `didChange` and disarms the
@@ -147,7 +144,7 @@ pub fn armLspChange(self: *Ui) void {
 /// incremental form needs a second consumer of `Buffer.pending_edits`,
 /// which the highlighter currently drains alone.
 pub fn lspFlushChange(self: *Ui) void {
-    self.lsp_change_due = null;
+    self.timers.disarm(.lsp_change);
     const pool = if (self.lsp_pool) |*p| p else return;
     if (!self.buf.lsp_opened) return;
     if (self.buf.ed.buf.edits == self.buf.lsp_sent_edits) return;
@@ -169,30 +166,16 @@ pub fn lspFlushChange(self: *Ui) void {
 /// The earliest of the `didChange` debounce, the completion and tab
 /// tooltip delays, and the oldest outstanding request's timeout, or null
 /// for none -- the loop's whole notion of time.
-pub fn nextLspDeadline(self: *Ui) ?std.Io.Clock.Timestamp {
-    var best = earlier(earlier(earlier(earlier(self.lsp_change_due, self.completion_due), self.tab_tip_due), self.disk_check_due), self.backup_due);
-    const pool = if (self.lsp_pool) |*p| p else return best;
-    if (pool.nextDeadlineMs()) |req_ms| {
-        best = earlier(best, .{
-            .raw = .fromNanoseconds(@as(i96, req_ms) * std.time.ns_per_ms),
-            .clock = .awake,
-        });
-    }
-    return best;
-}
-
-pub fn earlier(a: ?std.Io.Clock.Timestamp, b: ?std.Io.Clock.Timestamp) ?std.Io.Clock.Timestamp {
-    const x = a orelse return b;
-    const y = b orelse return a;
-    return if (x.raw.nanoseconds <= y.raw.nanoseconds) x else y;
-}
-
-/// Whether the debounce has come due, checked after every wait.
-pub fn lspChangeDue(self: *Ui) bool {
-    const due = self.lsp_change_due orelse return false;
-    // Through `.raw`, the clock-free timestamp: the deadline is kept as a
-    // `Clock.Timestamp` because that is what `Io.Timeout` takes.
-    return due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() >= 0;
+/// When the oldest outstanding language-server request times out, as a
+/// deadline on the awake clock; `Ui.nextDeadline` folds it in with the
+/// timers.
+pub fn lspRequestDeadline(self: *Ui) ?std.Io.Clock.Timestamp {
+    const pool = if (self.lsp_pool) |*p| p else return null;
+    const req_ms = pool.nextDeadlineMs() orelse return null;
+    return .{
+        .raw = .fromNanoseconds(@as(i96, req_ms) * std.time.ns_per_ms),
+        .clock = .awake,
+    };
 }
 
 /// `slot`'s absolute path, resolved once and cached on the slot (see
@@ -420,7 +403,7 @@ pub fn applyHover(self: *Ui, request_id: i64, text: ?[]const u8) void {
     };
     if (self.hover) |*h| h.deinit();
     self.hover = .{ .doc = doc, .spans = spans };
-    self.hover_dirty = true;
+    self.popups.hover.dirty = true;
 }
 
 /// Colours every fenced block in a hover with the grammar its fence

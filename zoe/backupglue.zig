@@ -173,24 +173,14 @@ pub fn syncBackups(self: *Ui) bool {
 /// drifted from its backup. Already running, it is left to run out --
 /// see `backup.delay_ms` for why this is no debounce.
 pub fn armBackup(self: *Ui) void {
-    if (self.backup_dir == null or self.backup_due != null) return;
+    if (self.backup_dir == null or self.timers.armed(.backup)) return;
     for (self.group_list.items) |g| {
         for (g.buffers.items) |slot| {
             if (!behind(slot)) continue;
-            const now = std.Io.Clock.awake.now(self.io);
-            self.backup_due = .{
-                .raw = now.addDuration(.fromMilliseconds(backup.delay_ms)),
-                .clock = .awake,
-            };
+            self.timers.armIn(self.io, .backup, backup.delay_ms);
             return;
         }
     }
-}
-
-/// Whether the armed sync has come due, checked after every wait.
-pub fn backupDue(self: *Ui) bool {
-    const due = self.backup_due orelse return false;
-    return due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() >= 0;
 }
 
 /// Whether `:q` (and `:wq`, `:wsopen`) may leave modified buffers
@@ -290,7 +280,7 @@ pub fn recoverKey(self: *Ui, k: glyphwire.KeyEvent) !void {
     self.status_dirty = true;
     // The same key comes again as `text`, which must not reach the
     // editor once the question is gone.
-    if (!k.ctrl() and k.key.len == 1) self.swallow_window_text = true;
+    if (!k.ctrl() and k.key.len == 1) self.swallow_text = .any;
     const answer: u8 = if (k.ctrl() or k.alt() or k.key.len != 1) 0 else k.key[0];
     switch (answer) {
         'r' => {

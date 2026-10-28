@@ -7296,3 +7296,43 @@ pub fn themePickerConfigThemesTakeOverByNameTest(_: std.Io, alloc: std.mem.Alloc
     try pl.refilter();
     try testz.expectEqual(pl.matchCount(), 2);
 }
+
+// ─── timers / popups ──────────────────────────────────────────────────
+
+fn atMs(ms: i64) std.Io.Clock.Timestamp {
+    return .{ .raw = .fromNanoseconds(@as(i96, ms) * std.time.ns_per_ms), .clock = .awake };
+}
+
+/// The loop waits for the soonest armed deadline; a timer is due at or
+/// after its deadline, and only while armed.
+pub fn timersFoldToTheSoonestDeadlineTest(_: std.Io, _: std.mem.Allocator) !void {
+    const T = zoe.timers;
+    var t: T.Timers = .{};
+    try testz.expectTrue(t.next() == null);
+    t.at.set(.backup, atMs(500));
+    t.at.set(.tab_tip, atMs(200));
+    t.at.set(.disk_check, atMs(900));
+    try testz.expectEqual(t.next().?.raw.nanoseconds, atMs(200).raw.nanoseconds);
+    try testz.expectFalse(t.isDue(.tab_tip, atMs(199).raw));
+    try testz.expectTrue(t.isDue(.tab_tip, atMs(200).raw));
+    try testz.expectFalse(t.isDue(.completion, atMs(10_000).raw));
+    t.disarm(.tab_tip);
+    try testz.expectFalse(t.armed(.tab_tip));
+    try testz.expectEqual(t.next().?.raw.nanoseconds, atMs(500).raw.nanoseconds);
+    try testz.expectTrue(T.earlier(null, atMs(3)).?.raw.nanoseconds == atMs(3).raw.nanoseconds);
+    try testz.expectTrue(T.earlier(atMs(2), atMs(3)).?.raw.nanoseconds == atMs(2).raw.nanoseconds);
+}
+
+/// `Popups.anyDirty` and `clearDirty` cover every popup in the set.
+pub fn popupsDirtyCoversEveryPopupTest(_: std.Io, _: std.mem.Allocator) !void {
+    const P = zoe.popup;
+    const one: P.Popup = .{ .layer = 1, .look = .flat, .init_rows = 1, .init_cols = 1, .what = "x" };
+    var set: P.Popups = .{ .hover = one, .completion = one, .path_menu = one, .find_bar = one, .tab_tip = one };
+    try testz.expectFalse(set.anyDirty());
+    inline for (@typeInfo(P.Popups).@"struct".field_names) |name| {
+        @field(set, name).dirty = true;
+        try testz.expectTrue(set.anyDirty());
+        set.clearDirty();
+        try testz.expectFalse(set.anyDirty());
+    }
+}

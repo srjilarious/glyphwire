@@ -24,7 +24,7 @@ const role = ui.role;
 /// explicit Ctrl+Space; `explicit` is the last, which is the only one
 /// that says so on the statusline when nothing can answer.
 pub fn requestCompletion(self: *Ui, trigger: ?[]const u8, explicit: bool) void {
-    self.completion_due = null;
+    self.timers.disarm(.completion);
     const pool = if (self.lsp_pool) |*p| p else {
         if (explicit) {
             self.buf.ed.setStatus("LSP: not enabled", .{});
@@ -140,14 +140,14 @@ pub fn refilterCompletion(self: *Ui) void {
         self.closeCompletion();
         return;
     }
-    self.completion_dirty = true;
+    self.popups.completion.dirty = true;
 }
 
 pub fn closeCompletion(self: *Ui) void {
     if (self.completion) |*m| {
         m.deinit();
         self.completion = null;
-        self.completion_dirty = true;
+        self.popups.completion.dirty = true;
     }
 }
 
@@ -215,16 +215,8 @@ pub fn afterInsertEdit(self: *Ui, typed: ?[]const u8) void {
 }
 
 pub fn armCompletion(self: *Ui) void {
-    if (self.completion_due != null) return;
-    self.completion_due = std.Io.Clock.Timestamp.fromNow(self.io, .{
-        .raw = .fromMilliseconds(complete_auto_delay_ms),
-        .clock = .awake,
-    });
-}
-
-pub fn completionDue(self: *Ui) bool {
-    const due = self.completion_due orelse return false;
-    return due.raw.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds() >= 0;
+    if (self.timers.armed(.completion)) return;
+    self.timers.armIn(self.io, .completion, complete_auto_delay_ms);
 }
 
 /// Closes the popup when what it was for has gone: insert mode left, the
@@ -235,7 +227,7 @@ pub fn syncCompletion(self: *Ui) void {
     const in_insert = self.buf.ed.mode == .insert and self.focus == .buffer and
         !self.finder.isOpen() and !self.palette.isOpen() and !self.shell.isFocused();
     if (!in_insert) {
-        self.completion_due = null;
+        self.timers.disarm(.completion);
         self.completion_request = null;
         self.completion_empty_at = null;
         self.closeCompletion();
@@ -309,7 +301,7 @@ pub fn completionKey(self: *Ui, k: glyphwire.KeyEvent) !bool {
         }
         return false;
     }
-    self.completion_dirty = true;
+    self.popups.completion.dirty = true;
     return true;
 }
 
@@ -319,13 +311,13 @@ pub fn completionKey(self: *Ui, k: glyphwire.KeyEvent) !bool {
 /// finishing sits directly above the text that would finish it.
 pub fn renderCompletion(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     const m = if (self.completion) |*x| x else {
-        try batch.setLayerVisible(self.completion_layer, false);
+        try self.popups.completion.hide(batch);
         return;
     };
     const b = self.grp.buffer_bounds;
     const rows = @min(@min(m.count(), complete_max_rows), b.rows);
     if (rows == 0 or b.cols < complete_kind_cols + 8) {
-        try batch.setLayerVisible(self.completion_layer, false);
+        try self.popups.completion.hide(batch);
         return;
     }
     m.list.follow(rows);
@@ -360,8 +352,7 @@ pub fn renderCompletion(self: *Ui, batch: *glyphwire.client.Client.Batch) !void 
     const want_col = label_col -| (1 + complete_kind_cols);
     const col = @max(b.col, @min(want_col, b.col + (b.cols -| cols)));
 
-    try batch.setLayerSize(self.completion_layer, cols, rows);
-    try batch.setLayerCellPosition(self.completion_layer, row, col);
+    try self.popups.completion.place(batch, .{ .row = row, .col = col, .rows = rows, .cols = cols });
 
     var kind_buf: [complete_kind_cols]u8 = undefined;
     for (0..rows) |r| {
@@ -389,7 +380,7 @@ pub fn renderCompletion(self: *Ui, batch: *glyphwire.client.Client.Batch) !void 
             n += 1;
         }
         try batch.writeSpans(runs[0..n], .{
-            .layer = self.completion_layer,
+            .layer = self.popups.completion.layer,
             .row = r,
             .col = 0,
             .fg = role(.popup_label),
@@ -399,5 +390,5 @@ pub fn renderCompletion(self: *Ui, batch: *glyphwire.client.Client.Batch) !void 
             .selectable = false,
         });
     }
-    try batch.setLayerVisible(self.completion_layer, true);
+    try self.popups.completion.show(batch);
 }

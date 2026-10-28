@@ -31,12 +31,12 @@ pub fn cmdlineKey(self: *Ui, k: glyphwire.KeyEvent) !bool {
         const rows = self.pathMenuRows();
         if ((eq(u8, key, "tab") and !k.mods.shift) or eq(u8, key, "down")) {
             m.move(1, rows);
-            self.path_menu_dirty = true;
+            self.popups.path_menu.dirty = true;
             return true;
         }
         if ((eq(u8, key, "tab") and k.mods.shift) or eq(u8, key, "up")) {
             m.move(-1, rows);
-            self.path_menu_dirty = true;
+            self.popups.path_menu.dirty = true;
             return true;
         }
         // Enter takes the pick into the line; it never runs the
@@ -91,7 +91,7 @@ pub fn completePath(self: *Ui) !void {
     }
     self.closePathMenu();
     self.path_menu = pathmenu.Menu.init(self.alloc, matches, t.seg_start);
-    self.path_menu_dirty = true;
+    self.popups.path_menu.dirty = true;
 }
 
 /// Enter in the popup: the pick replaces the segment. A directory
@@ -125,14 +125,14 @@ pub fn syncPathMenu(self: *Ui) !void {
     }
     self.closePathMenu();
     self.path_menu = pathmenu.Menu.init(self.alloc, matches, t.seg_start);
-    self.path_menu_dirty = true;
+    self.popups.path_menu.dirty = true;
 }
 
 pub fn closePathMenu(self: *Ui) void {
     if (self.path_menu) |*m| {
         m.deinit();
         self.path_menu = null;
-        self.path_menu_dirty = true;
+        self.popups.path_menu.dirty = true;
     }
 }
 
@@ -169,13 +169,13 @@ pub fn pathMenuRows(self: *const Ui) usize {
 /// lined up over the segment they would replace.
 pub fn renderPathMenu(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     const m = if (self.path_menu) |*x| x else {
-        try batch.setLayerVisible(self.path_menu_layer, false);
+        try self.popups.path_menu.hide(batch);
         return;
     };
     const sb = self.status_bounds;
     const rows = self.pathMenuRows();
     if (rows == 0 or sb.cols < 8) {
-        try batch.setLayerVisible(self.path_menu_layer, false);
+        try self.popups.path_menu.hide(batch);
         return;
     }
     m.list.follow(rows);
@@ -191,8 +191,7 @@ pub fn renderPathMenu(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     // line's segment start (itself one past the `:`).
     const seg_col = sb.col + 1 + lineedit.displayCol(self.buf.ed.cmdline.text(), m.seg_start);
     const col = @max(sb.col, @min(seg_col -| 1, sb.col + (sb.cols - cols)));
-    try batch.setLayerSize(self.path_menu_layer, cols, rows);
-    try batch.setLayerCellPosition(self.path_menu_layer, sb.row - rows, col);
+    try self.popups.path_menu.place(batch, .{ .row = sb.row - rows, .col = col, .rows = rows, .cols = cols });
 
     for (0..rows) |r| {
         const it = m.visible(r) orelse break;
@@ -202,7 +201,7 @@ pub fn renderPathMenu(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
             .{ .text = it.name, .fg = role(if (it.is_dir) .popup_kind else .popup_label) },
             .{ .text = if (it.is_dir) "/" else "", .fg = role(.popup_kind) },
         }, .{
-            .layer = self.path_menu_layer,
+            .layer = self.popups.path_menu.layer,
             .row = r,
             .col = 0,
             .fg = role(.popup_label),
@@ -212,7 +211,7 @@ pub fn renderPathMenu(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
             .selectable = false,
         });
     }
-    try batch.setLayerVisible(self.path_menu_layer, true);
+    try self.popups.path_menu.show(batch);
 }
 
 /// Reads `zoe_history` and `zoe_search_history` from the config

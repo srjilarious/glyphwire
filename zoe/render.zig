@@ -104,16 +104,16 @@ pub fn render(self: *Ui) !void {
         const w = self.winSize();
         try self.theme_picker.render(&batch, .{ .cols = w.cols, .rows = w.rows });
     }
-    if (self.hover_dirty) try self.renderHover(&batch);
+    if (self.popups.hover.dirty) try self.renderHover(&batch);
     // Placed against the word being typed, so it follows a buffer
     // repaint (a scroll, a wrap) as well as its own changes.
-    if (self.completion_dirty or (self.completion != null and focused_buffer_dirty))
+    if (self.popups.completion.dirty or (self.completion != null and focused_buffer_dirty))
         try self.renderCompletion(&batch);
-    if (self.path_menu_dirty) try self.renderPathMenu(&batch);
+    if (self.popups.path_menu.dirty) try self.renderPathMenu(&batch);
     // With the statusline, which every input repaints, and with the
     // buffer, whose pane it is placed against.
     if (self.status_dirty or focused_buffer_dirty) try self.renderFindBar(&batch);
-    if (self.tab_tip_dirty) try self.renderTabTip(&batch);
+    if (self.popups.tab_tip.dirty) try self.renderTabTip(&batch);
     self.prof.addNet(.paint, t_build, nested_before);
 
     if (self.prof.enabled()) {
@@ -133,10 +133,18 @@ pub fn render(self: *Ui) !void {
     self.tree_dirty = .none;
     self.tree_edit_dirty = false;
     self.status_dirty = false;
-    self.hover_dirty = false;
-    self.completion_dirty = false;
-    self.path_menu_dirty = false;
-    self.tab_tip_dirty = false;
+    self.popups.clearDirty();
+}
+
+/// Whether `render` has anything to draw: a group, the fixed panes
+/// (tree, statusline, the sidebar's name field), a list popup or a
+/// single-layer one. A new popup in `Popups` is covered without an edit
+/// here.
+pub fn anyDirty(self: *const Ui) bool {
+    return self.anyGroupDirty() or self.tree_dirty != .none or self.status_dirty or
+        self.tree_edit_dirty or self.tree_scroll_pending != null or
+        self.finder.dirty or self.palette.dirty or self.ext_list.dirty or self.theme_picker.dirty or
+        self.popups.anyDirty();
 }
 
 pub fn anyGroupDirty(self: *const Ui) bool {
@@ -170,7 +178,7 @@ pub fn renderGroup(self: *Ui, batch: *glyphwire.client.Client.Batch, g: *Group) 
         try self.renderTabs(batch);
         // The strip was laid out or scrolled again, and the tooltip
         // hangs from its tab.
-        if (self.tab_tip_shown and self.tab_tip_group == g) self.tab_tip_dirty = true;
+        if (self.tab_tip_shown and self.tab_tip_group == g) self.popups.tab_tip.dirty = true;
     }
     g.buffer_dirty = false;
     g.tabs_dirty = false;
@@ -956,16 +964,13 @@ pub fn renderHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     try wrapHover(self.alloc, &h.doc, wrap_cols, &rows);
 
     const r = self.hoverRect(rows.items.len + 2);
-    self.hover_rect = r;
     if (r.cols < 4 or r.rows < 3) return self.hideHover(batch);
     if (h.scroll >= rows.items.len) h.scroll = rows.items.len -| 1;
 
-    try batch.setLayerSize(self.hover_layer, r.cols, r.rows);
-    try batch.setLayerCellPosition(self.hover_layer, r.row, r.col);
-    if (self.hover_panel_patch) |np| try batch.updateNinePatch(self.hover_layer, np, .{ .rows = r.rows, .cols = r.cols });
+    try self.popups.hover.place(batch, .{ .row = r.row, .col = r.col, .rows = r.rows, .cols = r.cols });
     // A resize keeps whatever the old cells held, so the frame ring
     // (which is otherwise never written) is blanked every time.
-    try batch.clearArea(.{ .layer = self.hover_layer });
+    try batch.clearArea(.{ .layer = self.popups.hover.layer });
 
     // A rule's run: `cols` wide, so it crosses the frame cells and
     // meets the nine-patch's border at both edges.
@@ -984,7 +989,7 @@ pub fn renderHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
 
         if (kind == .rule) {
             try batch.writeText(hline.items, .{
-                .layer = self.hover_layer,
+                .layer = self.popups.hover.layer,
                 .row = row,
                 .col = 0,
                 .fg = role(.popup_border),
@@ -1009,7 +1014,7 @@ pub fn renderHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         // right margin included, so a code band runs edge to edge
         // whatever the text length.
         try batch.writeSpans(runs.items, .{
-            .layer = self.hover_layer,
+            .layer = self.popups.hover.layer,
             .row = row,
             .col = 1,
             .fg = role(.popup_fg),
@@ -1018,11 +1023,11 @@ pub fn renderHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
             .pad = true,
         });
     }
-    try batch.setLayerVisible(self.hover_layer, true);
+    try self.popups.hover.show(batch);
 }
 
 pub fn hideHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
-    try batch.setLayerVisible(self.hover_layer, false);
+    try self.popups.hover.hide(batch);
 }
 
 /// Draws the tab tooltip, or hides its layer: the hovered buffer's
@@ -1032,13 +1037,13 @@ pub fn hideHover(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
 pub fn renderTabTip(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     const hide = !self.tab_tip_shown or self.tab_tip_index == null;
     const index = self.tab_tip_index orelse 0;
-    const g = self.tab_tip_group orelse return batch.setLayerVisible(self.tab_tip_layer, false);
+    const g = self.tab_tip_group orelse return self.popups.tab_tip.hide(batch);
     // The buffer list or the strip may have changed under a tooltip
     // that is still up.
     if (hide or index >= g.buffers.items.len or index >= g.tab_spans.items.len)
-        return batch.setLayerVisible(self.tab_tip_layer, false);
+        return self.popups.tab_tip.hide(batch);
     const slot = g.buffers.items[index];
-    const abs = self.slotAbs(slot) orelse return batch.setLayerVisible(self.tab_tip_layer, false);
+    const abs = self.slotAbs(slot) orelse return self.popups.tab_tip.hide(batch);
 
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = homepath.collapseHome(abs, self.environ.get("HOME"), &home_buf);
@@ -1052,15 +1057,13 @@ pub fn renderTabTip(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         .area_cols = self.status_bounds.cols,
     };
     const r = tabs.tipRect(g.tab_spans.items[index], glyphwire.stringWidth(path), area) orelse
-        return batch.setLayerVisible(self.tab_tip_layer, false);
+        return self.popups.tab_tip.hide(batch);
     const clipped = tabs.clipHead(path, r.cols - tabs.tip_chrome_cols);
 
-    try batch.setLayerSize(self.tab_tip_layer, r.cols, tabs.tip_rows);
-    try batch.setLayerCellPosition(self.tab_tip_layer, r.row, r.col);
-    if (self.tab_tip_patch) |np| try batch.updateNinePatch(self.tab_tip_layer, np, .{ .rows = tabs.tip_rows, .cols = r.cols });
+    try self.popups.tab_tip.place(batch, .{ .row = r.row, .col = r.col, .rows = tabs.tip_rows, .cols = r.cols });
     // A resize keeps whatever the old cells held, so the corner cells
     // (which are otherwise never written) are blanked every time.
-    try batch.clearArea(.{ .layer = self.tab_tip_layer });
+    try batch.clearArea(.{ .layer = self.popups.tab_tip.layer });
     // Transparent, so the panel is the text's background. Between the
     // two corner cells, and padded so a shorter path than last time
     // leaves nothing behind.
@@ -1069,14 +1072,14 @@ pub fn renderTabTip(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         .{ .text = clipped.tail },
     };
     try batch.writeSpans(&spans, .{
-        .layer = self.tab_tip_layer,
+        .layer = self.popups.tab_tip.layer,
         .row = 0,
         .col = 1,
         .fg = role(.popup_fg),
         .max_cols = r.cols - tabs.tip_chrome_cols,
         .pad = true,
     });
-    try batch.setLayerVisible(self.tab_tip_layer, true);
+    try self.popups.tab_tip.show(batch);
 }
 
 /// Closes the popup. Returns whether there was one, so a key can be
@@ -1085,7 +1088,7 @@ pub fn closeHover(self: *Ui) bool {
     if (self.hover) |*h| {
         h.deinit();
         self.hover = null;
-        self.hover_dirty = true;
+        self.popups.hover.dirty = true;
         return true;
     }
     return false;
