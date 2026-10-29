@@ -490,7 +490,7 @@ pub fn drawChain(
 /// The whole redraw plus a trailing "put the caret back on the input
 /// line" go out as one `batch` frame, so the host never renders a
 /// frame with the caret stranded out on the right where the chain is
-/// drawn -- the "cursor blip to the right" this used to cause.
+/// drawn (a "cursor blip to the right").
 pub fn drawRightChain(self: *Prompt) !void {
     const rt0: ?std.Io.Timestamp = if (self.profiler.enabled) self.profiler.nowTs() else null;
     defer if (rt0) |s| self.profiler.record(.right_chain, self.profiler.elapsedNs(s));

@@ -586,20 +586,7 @@ pub fn renderDividers(self: *Renderer, eng: *Engine) void {
     }
 }
 
-/// One visible layer's own scrollbars, drawn inside its viewport
-/// bounds -- distinct from `renderScrollbar`, which is the window's
-/// bar for the root layer's scrollback. Opt-in per axis
-/// (`core.PropertyName.scrollbars`) and skipped entirely on an axis
-/// with nothing to scroll, so this is a no-op for every session that
-/// isn't running a TUI. Called from `drawOneContext` straight after
-/// the layer's batches (under `ctx_mutex`), so it composites in layer
-/// order: gw-read's page bars used to show through the OCR dialog
-/// floating over them when this was a final pass over everything.
-/// Draws `text` along window row `row` from window column `col`, one
-/// codepoint per cell boundary (the grid's own East Asian Width rules,
-/// as `drawPreedit` does), stopping before it would pass `max_cols`.
-/// Returns the columns used. For host-drawn chrome text; call between
-/// `begin`/`end`.
+/// The focused pane's highlight: its rect and this frame's colour.
 const FocusHighlight = struct {
     rect: glyphwire.CellRect,
     color: host_eng.Color,
@@ -636,6 +623,11 @@ pub fn syncDividerCells(self: *Renderer, glyphs: *const dividers.Glyphs) void {
     self.divider_cells_gen = gen;
 }
 
+/// Draws `text` along window row `row` from window column `col`, one
+/// codepoint per cell boundary (the grid's own East Asian Width rules,
+/// as `drawPreedit` does), stopping before it would pass `max_cols`.
+/// Returns the columns used. For host-drawn chrome text; call between
+/// `begin`/`end`.
 pub fn drawCellText(eng: *Engine, text: []const u8, col: usize, row: usize, max_cols: usize, color: host_eng.Color) usize {
     const y = @as(i32, @intCast(row)) * geometry.cell_h;
     var used: usize = 0;
@@ -653,6 +645,15 @@ pub fn drawCellText(eng: *Engine, text: []const u8, col: usize, row: usize, max_
     return used;
 }
 
+/// One visible layer's own scrollbars, drawn inside its viewport
+/// bounds -- distinct from `renderScrollbar`, which is the window's
+/// bar for the root layer's scrollback. Opt-in per axis
+/// (`core.PropertyName.scrollbars`) and skipped entirely on an axis
+/// with nothing to scroll, so this is a no-op for every session that
+/// isn't running a TUI. Called from `drawOneContext` straight after
+/// the layer's batches (under `ctx_mutex`), so it composites in layer
+/// order: as a final pass over everything, gw-read's page bars would
+/// show through the OCR dialog floating over them.
 pub fn drawLayerScrollbars(eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin) void {
     const state = layer.scrollbarState();
     if (!state.vertical and !state.horizontal) return;

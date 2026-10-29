@@ -117,23 +117,6 @@ pub const Connection = struct {
     }
 };
 
-/// A Unix-domain socket server serving one `Session` (its contexts and
-/// panes) to any number of concurrently connected clients, each on its
-/// own thread. Each connection's frames go through its own `Dispatcher`
-/// under `ctx_mutex`; whatever a frame produces for other clients (input,
-/// layout, selection, pane and context changes, ...) is fanned out to the
-/// connections subscribed to it -- see dispatch.zig's `Subscriptions` /
-/// `Broadcast` and `broadcastIn`'s delivery rules.
-///
-/// Meant to be embedded, not just run standalone: whatever process owns
-/// `ctx` can bind a `Server` alongside it and read/write `ctx` directly
-/// (see `reportKey`/`reportMouseButton`/`reportMouseMove`, and `ctx`/
-/// `ctx_mutex` below) while still serving other, separate client processes
-/// over the socket the normal way -- glyphwire-host does exactly this: it
-/// owns the `Context` and renders it directly, but glyphwire-shell (a
-/// separate process, no engine dependency) still only ever sees it through
-/// this wire protocol. `server/main.zig` is the headless case: a `Server`
-/// with no in-process owner at all, just serving connections.
 /// Whether `Server.lockSession` checks how `ctx_mutex` is taken: in the
 /// builds with runtime safety, where a hung test is worth turning into a
 /// failed assertion.
@@ -156,6 +139,23 @@ pub fn leaveBelowSession() void {
     if (track_locks) below_session -= 1;
 }
 
+/// A Unix-domain socket server serving one `Session` (its contexts and
+/// panes) to any number of concurrently connected clients, each on its
+/// own thread. Each connection's frames go through its own `Dispatcher`
+/// under `ctx_mutex`; whatever a frame produces for other clients (input,
+/// layout, selection, pane and context changes, ...) is fanned out to the
+/// connections subscribed to it -- see dispatch.zig's `Subscriptions` /
+/// `Broadcast` and `broadcastIn`'s delivery rules.
+///
+/// Meant to be embedded, not just run standalone: whatever process owns
+/// `ctx` can bind a `Server` alongside it and read/write `ctx` directly
+/// (see `reportKey`/`reportMouseButton`/`reportMouseMove`, and `ctx`/
+/// `ctx_mutex` below) while still serving other, separate client processes
+/// over the socket the normal way -- glyphwire-host does exactly this: it
+/// owns the `Context` and renders it directly, but glyphwire-shell (a
+/// separate process, no engine dependency) still only ever sees it through
+/// this wire protocol. `server/main.zig` is the headless case: a `Server`
+/// with no in-process owner at all, just serving connections.
 pub const Server = struct {
     io: std.Io,
     /// Every context the server holds, and which one is visible (see
@@ -169,12 +169,11 @@ pub const Server = struct {
     /// stack). Re-pointed under `ctx_mutex` on every visibility or focus
     /// change.
     ///
-    /// Before panes this also meant "the only thing on screen", and most
-    /// of the host still wants exactly this one (the caret, selection, the
-    /// in-process `report*` methods -- all of which follow focus). What
-    /// changed is that it is no longer the *whole* window: the renderer
-    /// composites every mapped pane's context, which it reaches through
-    /// `session.panes`, not through here. Dispatch does not go through
+    /// Most of the host wants exactly this one (the caret, selection, the
+    /// in-process `report*` methods -- all of which follow focus), but it
+    /// is not the *whole* window: the renderer composites every mapped
+    /// pane's context, which it reaches through `session.panes`, not
+    /// through here. Dispatch does not go through
     /// this either -- a connection acts on its own `Dispatcher.ctx`, which
     /// may be in another pane or backgrounded within its own.
     ctx: *core.Context,
@@ -732,7 +731,8 @@ pub const Server = struct {
 
     /// Sends `body` to the window-manager connection only. The targeted
     /// counterpart of `broadcast`, for the two events that are addressed
-    /// rather than fanned out (`window_key` / `window_text`): a window
+    /// rather than fanned out (`window_key_down` / `window_key_up` /
+    /// `window_text`): a window
     /// command has exactly one recipient by definition.
     pub fn deliverToManager(self: *Server, event: dispatch.PushEvent, body: []const u8) void {
         self.registry_mutex.lockUncancelable(self.io);

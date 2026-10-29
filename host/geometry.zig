@@ -248,8 +248,7 @@ pub const PaneScrollbars = struct {
 /// Everything inside a context is context-relative (see
 /// `core.Context.origin_row`), so this is the single place the pane offset
 /// enters the renderer. For a session with one pane it is exactly
-/// `content_pad_px, 0` -- the values that used to be hard-coded at every
-/// composite site.
+/// `content_pad_px, 0`.
 pub const Origin = struct { x: i32 = content_pad_px, y: i32 = 0 };
 
 pub fn contextOrigin(ctx: *const glyphwire.Context) Origin {

@@ -763,7 +763,7 @@ pub fn reportMouseMove(self: *Server, alloc: std.mem.Allocator, px: core.PxPos, 
 /// what resizes each pane's contexts (and, through them, every
 /// base-size-tracking layer). With no pane tree installed the root
 /// pane simply takes the whole window, which is the single-program
-/// case and behaves exactly as it did before panes existed.
+/// case.
 ///
 /// For the process that owns this `Server` and captures its own window
 /// events (glyphwire-host), same in-process path as `reportKey`. A

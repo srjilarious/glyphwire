@@ -224,9 +224,8 @@ pub const Pane = struct {
     /// no tree at all.
     mapped: bool = false,
     /// This pane's own context visibility history, bottom (index 0,
-    /// always `base`) to top (what is on screen here). The per-pane
-    /// counterpart of what used to be one session-wide stack: a
-    /// full-screen program in this pane pushes onto *this* stack, so its
+    /// always `base`) to top (what is on screen here). Per pane rather
+    /// than session-wide: a full-screen program in this pane pushes onto *this* stack, so its
     /// context covers this pane and nothing else.
     stack: std.ArrayList(ContextHandle) = .empty,
     /// The context created together with the pane. Never destroyed while
@@ -389,8 +388,7 @@ pub const Session = struct {
     /// events `routeKey` itself sees.
     ///
     /// Tracked *here* rather than read off the focused context's input
-    /// down-set, which is what this used to do and which broke the moment
-    /// focus moved. `Context.input` is per *context*, `Server.ctx` follows
+    /// down-set, which breaks the moment focus moves. `Context.input` is per *context*, `Server.ctx` follows
     /// the focused pane, and glyphwire-host edge-detects each modifier
     /// (`input.KeyInput.reportModifier`) -- so a modifier still held across
     /// a focus change is never re-reported, and the pane just focused has
@@ -447,14 +445,14 @@ pub const Session = struct {
     /// the OS on paste.
     ///
     /// One per session, not one per context, for the same reason as
-    /// `mods`: the OS has one clipboard. It used to live on `Context`,
-    /// with glyphwire-host comparing the *focused* context's serial to
-    /// the one it last pushed. Every context counted on its own, so
-    /// moving focus to another gmux pane pushed that pane's stale buffer
-    /// to the OS (burying the real copy one entry down in the desktop's
-    /// clipboard history), a copy whose serial happened to match the
-    /// last push was never pushed at all, and a program in an unfocused
-    /// pane that called `set_clipboard` only reached the OS once someone
+    /// `mods`: the OS has one clipboard. On `Context`, with glyphwire-host
+    /// comparing the *focused* context's serial to the one it last
+    /// pushed, every context would count on its own, so moving focus to
+    /// another gmux pane would push that pane's stale buffer to the OS
+    /// (burying the real copy one entry down in the desktop's clipboard
+    /// history), a copy whose serial happened to match the last push
+    /// would never be pushed at all, and a program in an unfocused pane
+    /// that called `set_clipboard` would only reach the OS once someone
     /// focused its pane.
     clipboard: std.ArrayList(u8) = .empty,
     /// Bumped by every `setClipboard`; glyphwire-host compares it against
@@ -630,9 +628,7 @@ pub const Session = struct {
     }
 
     /// The context raw input belongs to: what's on screen in the focused
-    /// pane. Never null. This is what used to be `visibleContext` when
-    /// "visible" and "focused" were the same thing because there was only
-    /// ever one pane.
+    /// pane. Never null.
     pub fn focusedContext(self: *Session) *Context {
         return self.contexts.get(self.focusedContextHandle()).?;
     }

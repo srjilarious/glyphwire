@@ -24,12 +24,12 @@ pub fn next(row: usize, col: usize) usize {
 /// where the server's cursor ended up: one blank row below the end of
 /// whatever the command left behind.
 ///
-/// The gap is uniform. It used to fall out of an unconditional `row + 1`,
-/// which gave a blank row after output that ended in a newline but none
-/// after output that didn't (a "command not found" report, say), and --
-/// since a full-screen program that draws in its own context leaves the
-/// cursor exactly where `submitLine` put it -- a blank row after zoe only
-/// by coincidence.
+/// The gap is uniform. An unconditional `row + 1` would give a blank row
+/// after output that ended in a newline but none after output that
+/// didn't (a "command not found" report, say), and -- since a
+/// full-screen program that draws in its own context leaves the cursor
+/// exactly where `submitLine` put it -- a blank row after zoe only by
+/// coincidence.
 pub fn afterCommand(row: usize, col: usize) usize {
     return next(row, col) + 1;
 }

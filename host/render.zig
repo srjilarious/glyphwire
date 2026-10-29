@@ -713,9 +713,8 @@ pub const Renderer = struct {
     /// could have changed: the wrapping sum of every live context's
     /// `image_gen`, plus how many contexts there are.
     ///
-    /// Watching only the *root* context (which is what this used to do)
-    /// misses every image lifecycle event in a pane -- an `update_image`
-    /// in a non-root context would leave the old texture on screen
+    /// Watching only the *root* context would miss every image lifecycle
+    /// event in a pane -- an `update_image` in a non-root context would leave the old texture on screen
     /// forever, and a `destroy_image` there would never free it. The
     /// context count is in the sum because destroying a context whose
     /// `image_gen` is still 0 -- one that loaded pages and never replaced
@@ -828,8 +827,8 @@ pub const Renderer = struct {
 
         // Reap batches whose layer -- or whose whole context -- no longer
         // exists. Keying by context means a visibility change in one pane
-        // no longer invalidates anything in another, so this is a reap
-        // rather than the blanket cache drop it used to be.
+        // invalidates nothing in another, so this is a reap rather than a
+        // blanket cache drop.
         const vgen = server.visibleContextGen();
         const pgen = server.paneLayoutGen();
         if (vgen != self.last_visible_gen or pgen != self.last_pane_layout_gen) {

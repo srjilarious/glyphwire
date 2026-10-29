@@ -352,11 +352,11 @@ pub const KeyInput = struct {
         // Nor while a switcher has the keyboard.
         if (self.app.modalOpen() or self.app.modalConsumed()) return;
         // The host never moves the caret itself on an arrow key: whoever
-        // has the screen positions it. There used to be a local Left/Right
-        // "preview" nudge here to hide the round trip, but the host can't
-        // know where the shell's line ends -- holding Right walked the
-        // caret past the end of the input until the shell's next redraw,
-        // and Left walked it into the prompt text. The round trip is a
+        // has the screen positions it. A local Left/Right "preview" nudge
+        // to hide the round trip can't work: the host doesn't know where
+        // the shell's line ends, so holding Right would walk the caret past
+        // the end of the input until the shell's next redraw, and Left
+        // into the prompt text. The round trip is a
         // local socket, so there was no latency worth hiding.
         const kb = &eng.inputs.keyboard;
 

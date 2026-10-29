@@ -1215,11 +1215,11 @@ pub const ClickCounter = struct {
 /// Authoritative input state for a session: which keys/mouse buttons are
 /// currently down. Lives on `Session`, not on any one `Context`: there is
 /// one keyboard and one mouse, and a release has to clear the same set
-/// its press went into even when focus moved in between. It used to be
-/// per-context, and a press that launched a full-screen program (Enter on
-/// `gwmd README.md`) had its release land in the *new* context's set --
-/// the shell's set still had the key down when focus came back, so the
-/// next press there was dropped as a redundant press-while-down. Same
+/// its press went into even when focus moved in between. Per context, a
+/// press that launched a full-screen program (Enter on
+/// `gwmd README.md`) would have its release land in the *new* context's
+/// set -- the shell's set would still have the key down when focus came
+/// back, so the next press there would be dropped as a redundant press-while-down. Same
 /// reasoning as `Session.mods`. The pointer position, which *is*
 /// per-context (it's in that context's cell frame), is `PointerState`.
 ///

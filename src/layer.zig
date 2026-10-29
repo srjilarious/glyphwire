@@ -1652,8 +1652,8 @@ pub const Layer = struct {
     ///
     /// The wrap is a line feed (`lineFeed`), so on the alt screen or
     /// inside a scroll region it scrolls the region at its bottom margin
-    /// like any other; it used to just step the row, which on the alt
-    /// screen's last row overwrote that row in place. With autowrap off
+    /// like any other; just stepping the row would overwrite the alt
+    /// screen's last row in place. With autowrap off
     /// (DECAWM, `?7l`) there is no wrap: the glyph lands on the last
     /// column(s) and the cursor stays there.
     pub fn putAtCursor(self: *Layer, bytes: []const u8, w: u2, fg: Color, bg: ?Background, metadata_id: ?MetadataHandle, scale: TextScale, deco: Decoration) void {
@@ -1836,9 +1836,9 @@ pub const Layer = struct {
     /// Row span is resolved one row at a time, scrolling the viewport as
     /// needed exactly like `putAtCursor` does for text -- an image whose
     /// `row_span` reaches past the bottom shouldn't just lose its lower
-    /// rows the way clamping `row_end` to `self.height` used to (it read
-    /// as an image "clipping" to whatever viewport happened to be current
-    /// when it was drawn, instead of interleaving into the flowing output
+    /// rows, as clamping `row_end` to `self.height` would (it reads as an
+    /// image "clipping" to whatever viewport happened to be current when
+    /// it was drawn, instead of interleaving into the flowing output
     /// the way multi-line text does). Only the column span still clips at
     /// `self.width` -- columns never scroll.
     ///

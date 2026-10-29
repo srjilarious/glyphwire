@@ -426,11 +426,9 @@ pub const SgrPen = struct {
     /// this replaces.
     ///
     /// `:` sub-parameter separators are accepted where `;` is, *and* which
-    /// separator preceded each parameter is remembered (`colon`). That
-    /// distinction used to be discardable, when the colon forms only ever
-    /// appeared in `38`/`48` colours where either spelling means the same
-    /// thing. It stopped being discardable with underline styles: `4:3` is
-    /// a curly underline, while `4;3` is an underline *and* an italic, and
+    /// separator preceded each parameter is remembered (`colon`). For the
+    /// `38`/`48` colours either spelling means the same thing, but not for
+    /// underline styles: `4:3` is a curly underline, while `4;3` is an underline *and* an italic, and
     /// collapsing the two would turn every `ESC [ 4;3 m` into a squiggle.
     pub fn applySgr(self: *SgrPen, params: []const u8) void {
         // At most a handful of numeric params in any real SGR sequence;
@@ -1014,7 +1012,7 @@ const osc52_prefix = "52;";
 /// One payload byte of an `ESC P|X|^|_|] ...` string. Kept only while
 /// the string is an OSC that still reads as OSC 52; the moment it can't
 /// be one (`ESC ] 0 ;` title, a DCS, an oversized payload), collecting
-/// stops and the rest is skipped, as every string used to be.
+/// stops and the rest is skipped.
 ///
 /// A `pty_mode` layer keeps the machine armed between `write_text`
 /// calls (see `Layer.writeRuns`), so a copy split across chunks of the
@@ -1305,11 +1303,10 @@ fn csiParam(params: []const u8, index: usize, default_val: usize) usize {
 /// never scrolls** (the vertical relative moves stop at the scroll
 /// region's margins too -- `cursorUp`/`cursorDown`) -- a real terminal only scrolls on a line feed /
 /// `IND` / `RI` / an explicit scroll command, never on a cursor
-/// address. (This used to route downward/absolute-row moves through
-/// `resolveRow`, which scrolls; harmless for Phase A's colour+
-/// progress-bar output, but a full-screen program that positions to
-/// its last row -- `less`'s status line -- would scroll the whole
-/// primary layer one row per keypress.)
+/// address. (Routing downward/absolute-row moves through `resolveRow`,
+/// which scrolls, would make a full-screen program that positions to
+/// its last row -- `less`'s status line -- scroll the whole primary
+/// layer one row per keypress.)
 ///
 /// Any move also ends a pending wrap (`pendingCol`): a relative move
 /// starts from the last column, not from one past it.
@@ -1377,8 +1374,8 @@ fn csiEraseLine(self: *Layer, mode: usize) void {
 ///
 /// 3 erases the *scrollback*, not the screen (`clearHistory`) --
 /// xterm's extension, and how `clear` and Claude Code drop a stale
-/// transcript before redrawing (`2J 3J H`). It used to be read as 2,
-/// which left every earlier copy of the redrawn screen in history.
+/// transcript before redrawing (`2J 3J H`). Reading it as 2 would leave
+/// every earlier copy of the redrawn screen in history.
 fn csiEraseDisplay(self: *Layer, mode: usize) void {
     const col = pendingCol(self);
     const bg = self.eraseBg();
