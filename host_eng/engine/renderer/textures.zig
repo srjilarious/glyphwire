@@ -1,19 +1,10 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: MPL-2.0
 
-const std = @import("std");
-const stbi = @import("zstbi");
-const gl = @import("zopengl").bindings;
 const common = @import("../common.zig");
-const utils = @import("../utils.zig");
-const shaders = @import("./shaders.zig");
 
-const Shader = shaders.Shader;
 const Vec2U = common.Vec2U;
-const Vec2I = common.Vec2I;
-const Color8 = common.Color8;
 const RectF = common.RectF;
-const RectI = common.RectI;
 
 pub const TextureImage = struct {
     // GL Texture ID once loaded.
@@ -36,27 +27,3 @@ pub const Texture = struct {
         };
     }
 };
-
-// A sprite pack file.
-pub const SpackFile = struct { frames: []SpackFrame };
-
-// A sprite frame as stored in an atlas json file.
-pub const SpackFrame = struct {
-    name: []u8,
-    sizePx: Vec2U,
-    pos: RectI,
-};
-
-pub fn blit(dest: []u8, destSize: Vec2U, src: []const u8, srcSize: Vec2U, offsetIntoBuffer: Vec2U) void {
-    var srcIdx: usize = 0;
-    const lineLen: usize = srcSize.x * 4;
-    const destLineLen: usize = destSize.x * 4;
-    var destIdx: usize = (offsetIntoBuffer.y * destSize.x + offsetIntoBuffer.x) * 4;
-
-    // Copy each line of the source image into the dest.
-    while (srcIdx < src.len) {
-        @memcpy(dest[destIdx .. destIdx + lineLen], src[srcIdx .. srcIdx + lineLen]);
-        srcIdx += lineLen;
-        destIdx += destLineLen;
-    }
-}

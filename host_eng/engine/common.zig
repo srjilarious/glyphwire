@@ -1,28 +1,12 @@
 // Copyright (c) 2026 Jeff DeWall
 // SPDX-License-Identifier: MPL-2.0
 
-const std = @import("std");
 
 /// An integer 2d vector structure
 pub const Vec2I = struct {
     x: i32,
     y: i32,
 
-    /// Convert to a Vec2F
-    pub fn asVec2F(self: *const Vec2I) Vec2F {
-        return .{
-            .x = @floatFromInt(self.x),
-            .y = @floatFromInt(self.y),
-        };
-    }
-
-    /// Convert to a Vec2U
-    pub fn asVec2U(self: *const Vec2I) Vec2U {
-        return .{
-            .x = @intCast(self.x),
-            .y = @intCast(self.y),
-        };
-    }
 };
 
 /// An unsigned int 2d vector
@@ -51,13 +35,6 @@ pub const Vec2F = struct {
             .y = @intFromFloat(self.y),
         };
     }
-};
-
-/// A float 3d vector
-pub const Vec3F = struct {
-    x: f32,
-    y: f32,
-    z: f32,
 };
 
 /// A floating point rectangle structure stored as left, top, right, bottom.
@@ -120,73 +97,6 @@ pub const RectF = struct {
         };
     }
 
-    /// Shrinks the rectangle from all sides by the given amount. This is
-    /// useful for drawing outlines where you want the outline to be
-    /// inside the rectangle.
-    pub fn shrinkFrom(self: *const RectF, amount: f32) RectF {
-        return .{
-            .l = self.l + amount,
-            .r = self.r - amount,
-            .t = self.t + amount,
-            .b = self.b - amount,
-        };
-    }
-
-    /// Ensures that the rectangle is at least w wide and h tall, expanding the
-    /// right and bottom edges as necessary.
-    pub fn ensureSize(self: *RectF, w: i32, h: i32) void {
-        const wF = @as(f32, @floatFromInt(w));
-        const hF = @as(f32, @floatFromInt(h));
-        self.r = self.l + wF;
-        self.b = self.t + hF;
-    }
-
-    /// Converts the width and height of the rectangle to a Vec2U
-    pub fn size2U(self: *const RectF) Vec2U {
-        const w: usize = @intFromFloat(self.width());
-        const h: usize = @intFromFloat(self.height());
-        return .{ .x = w, .y = h };
-    }
-
-    /// Converts the left and top coordinates of the rectangle to a Vec2I
-    pub fn pos2I(self: *const RectF) Vec2I {
-        const x: i32 = @intFromFloat(self.l);
-        const y: i32 = @intFromFloat(self.t);
-        return .{ .x = x, .y = y };
-    }
-
-    /// Converts the left and top coordinates of the rectangle to a Vec2F
-    pub fn pos2F(self: *const RectF) Vec2F {
-        return .{ .x = self.l, .y = self.t };
-    }
-
-    /// Returns the center point of the rectangle as a Vec2F
-    pub fn centerF(self: *const RectF) Vec2F {
-        return .{
-            .x = (self.l + self.r) * 0.5,
-            .y = (self.t + self.b) * 0.5,
-        };
-    }
-
-    /// Sets the position of the rectangle to (x, y) while keeping the width
-    /// and height the same.
-    pub fn setPos(self: *RectF, x: f32, y: f32) void {
-        const w = self.width();
-        const h = self.height();
-        self.l = x;
-        self.t = y;
-        self.r = x + w;
-        self.b = y + h;
-    }
-
-    /// Checks if this rectangle intersects with another rectangle. Returns
-    /// true if they intersect and false otherwise.
-    pub fn intersects(self: *const RectF, other: *const RectF) bool {
-        return self.l < other.r and
-            self.r > other.l and
-            self.t < other.b and
-            self.b > other.t;
-    }
 };
 
 /// An integer rectangle structure stored as left, top, right, bottom. This is

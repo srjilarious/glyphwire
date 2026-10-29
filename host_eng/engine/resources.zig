@@ -8,7 +8,6 @@
 const std = @import("std");
 const stbi = @import("zstbi");
 const gl = @import("zopengl").bindings;
-const common = @import("./common.zig");
 const utils = @import("./utils.zig");
 const shaders = @import("./renderer/shaders.zig");
 const textures = @import("./renderer/textures.zig");
@@ -18,13 +17,7 @@ const TextureImage = textures.TextureImage;
 const Texture = textures.Texture;
 const Shader = shaders.Shader;
 const FontAtlas = font_atlas_mod.FontAtlas;
-const SpackFile = textures.SpackFile;
 
-const Vec2U = common.Vec2U;
-const Vec2I = common.Vec2I;
-const Color8 = common.Color8;
-const RectF = common.RectF;
-const RectI = common.RectI;
 
 /// A pool of refcounted, generation-tracked assets of type `T`, keyed by a
 /// user-supplied `u32` id. Multiple generations of the same id may coexist:
@@ -474,138 +467,12 @@ pub const ResourceManager = struct {
     // Atlas loading
     // -----------------------------------------------------------------------
 
-    /// Like `loadAtlas` but stores the resource under `name` instead of the
-    /// base name of `base_path`. Use this when the manifest asset id should
-    /// differ from the file name on disk (e.g. id="main_sprites", path="pac-tiles").
-    /// After loading, `acquireTexture(name)` returns a handle to the full atlas
-    /// image; individual frames remain accessible by their frame names.
-    pub fn loadAtlasNamed(self: *Self, name: []const u8, base_path: []const u8) !usize {
-        // Read and validate the JSON before touching the base texture: if the
-        // atlas fails to load, the previous texture (if any, from an earlier
-        // load of this same name) must be left untouched and still valid.
-        const jsonName = try utils.addExtension(self.alloc, base_path, ".json");
-        defer self.alloc.free(jsonName);
-
-        const io = std.Io.Threaded.global_single_threaded.io();
-        const file_contents = try std.Io.Dir.cwd().readFileAlloc(io, jsonName, self.alloc, .unlimited);
-        defer self.alloc.free(file_contents);
-
-        const parsed = try std.json.parseFromSlice(SpackFile, self.alloc, file_contents, .{});
-        defer parsed.deinit();
-
-        const spack = parsed.value;
-
-        // Reject frame names that collide with a texture/frame owned by a
-        // different atlas (or a plain loaded texture). Frames already owned
-        // by this same atlas from a prior load are an expected reload, not a
-        // collision.
-        const prev_frames: ?[]const []const u8 = if (self.atlas_manifests.get(name)) |pm| pm.items else null;
-        for (spack.frames) |frame| {
-            if (self.atlas.contains(frame.name) and !ownedByFrameList(prev_frames, frame.name)) {
-                std.log.err("AssetManifest: atlas '{s}' frame '{s}' collides with an existing texture owned elsewhere", .{ name, frame.name });
-                return error.AtlasFrameNameCollision;
-            }
-        }
-
-        const imageName = try utils.addExtension(self.alloc, base_path, ".png");
-        defer self.alloc.free(imageName);
-        _ = try self.loadTexture(name, imageName);
-
-        const texImageManaged = self.textures.get(utils.baseNameFromPath(name)) orelse return error.NoTextureWithThatName;
-        const texImage = texImageManaged.get() orelse return error.NoTextureWithThatName;
-        const sz: Vec2I = texImage.val.size.asVec2I();
-
-        var new_manifest: std.ArrayListUnmanaged([]const u8) = .empty;
-        errdefer {
-            for (new_manifest.items) |n| self.alloc.free(n);
-            new_manifest.deinit(self.alloc);
-        }
-
-        var num: usize = 0;
-        for (spack.frames) |frame| {
-            const managed = try self.getOrCreateAtlasTexture(frame.name);
-            try managed.add(.{
-                .texture = texImage.val.texture,
-                .size = frame.sizePx,
-                .src = RectF.fromCoords(
-                    frame.pos.l,
-                    frame.pos.t,
-                    frame.pos.width(),
-                    frame.pos.height(),
-                    sz.x,
-                    sz.y,
-                ),
-            });
-
-            const name_owned = try self.alloc.dupe(u8, frame.name);
-            errdefer self.alloc.free(name_owned);
-            try new_manifest.append(self.alloc, name_owned);
-
-            num += 1;
-        }
-
-        // Remove atlas entries for frames absent from the new JSON.
-        if (self.atlas_manifests.getPtr(name)) |old_manifest| {
-            outer: for (old_manifest.items) |old_name| {
-                for (new_manifest.items) |new_name| {
-                    if (std.mem.eql(u8, old_name, new_name)) continue :outer;
-                }
-                if (self.atlas.fetchRemove(old_name)) |kv| {
-                    kv.value.deinit();
-                    self.alloc.destroy(kv.value);
-                    self.alloc.free(kv.key);
-                }
-            }
-            for (old_manifest.items) |n| self.alloc.free(n);
-            old_manifest.deinit(self.alloc);
-            old_manifest.* = new_manifest;
-        } else {
-            const key_owned = try self.alloc.dupe(u8, name);
-            errdefer self.alloc.free(key_owned);
-            try self.atlas_manifests.put(key_owned, new_manifest);
-        }
-
-        return num;
-    }
-
     fn ownedByFrameList(frames: ?[]const []const u8, frame_name: []const u8) bool {
         const list = frames orelse return false;
         for (list) |n| {
             if (std.mem.eql(u8, n, frame_name)) return true;
         }
         return false;
-    }
-
-    /// Loads a texture atlas from a base name. This looks for a .png and
-    /// .json file with the given base name, and loads the texture and
-    /// subtextures specified in the json file. The json file should be in the
-    /// format of a `SpackFile`, which is the format used by our internal
-    /// `TexturePacker` tool.
-    ///
-    /// The subtextures are stored in the atlas with their names from the json
-    /// file, so they can be accessed with `getTexture` using those names.
-    pub fn loadAtlas(self: *Self, baseName: []const u8) !usize {
-        return self.loadAtlasNamed(baseName, baseName);
-    }
-
-    /// Adds a named subtexture from a region of an existing managed texture.
-    /// Coordinates are in UV space: (0,0) is top-left, (1,1) is bottom-right.
-    pub fn addSubTexture(
-        self: *Self,
-        tex: *ManagedTexture,
-        name: []const u8,
-        coords: RectF,
-    ) !*ManagedTexture {
-        const current = tex.get() orelse return error.NoTextureInPool;
-        const managed = try self.getOrCreateAtlasTexture(name);
-        try managed.add(current.val.sub(coords));
-        return managed;
-    }
-
-    /// Returns the `ManagedTexture` for `name`. Use `acquire` on the result
-    /// to get a refcounted handle, or `get` to peek at the latest value.
-    pub fn getTexture(self: *Self, name: []const u8) !*ManagedTexture {
-        return self.atlas.get(name) orelse return error.NoTextureWithThatName;
     }
 
     /// Evicts a texture loaded under `name`, deleting its GL texture and
@@ -655,28 +522,9 @@ pub const ResourceManager = struct {
         return managed.acquire() orelse return error.NoTextureWithThatName;
     }
 
-    /// Acquires a refcounted handle to a shader by name. See `acquireTexture`
-    /// for lifecycle notes.
-    pub fn acquireShader(self: *Self, name: []const u8) !*ShaderHandle {
-        const managed = self.shaders.get(name) orelse return error.NoShaderWithThatName;
-        return managed.acquire() orelse return error.NoShaderWithThatName;
-    }
-
     // -----------------------------------------------------------------------
     // Font loading
     // -----------------------------------------------------------------------
-
-    /// Loads a TTF font from disk and registers it under `name`. A second
-    /// call with the same name marks the prior generation dirty and adds a
-    /// fresh one (auto-reload semantics matching other load* methods).
-    pub fn loadFontFromTtfFile(
-        self: *Self,
-        name: []const u8,
-        fontPath: []const u8,
-        fontSize: f32,
-    ) !void {
-        return self.loadFontFromTtfFileIndexed(name, fontPath, 0, fontSize);
-    }
 
     /// Like `loadFontFromTtfFile`, but `faceIndex` selects a face inside a
     /// TrueType/OpenType collection (`.ttc`). Use 0 for a plain font file.
@@ -690,25 +538,6 @@ pub const ResourceManager = struct {
         const fa = try FontAtlas.initFromTtfFileIndexed(fontPath, faceIndex, fontSize, self.alloc);
         const managed = try self.getOrCreateFont(name);
         try managed.add(fa);
-    }
-
-    /// Loads a TTF font embedded at comptime into the binary and registers
-    /// it under `name`.
-    pub fn loadFontFromTtfEmbedded(
-        self: *Self,
-        name: []const u8,
-        comptime fontPath: []const u8,
-        fontSize: f32,
-    ) !void {
-        const fa = try FontAtlas.initFromTtfEmbedded(fontPath, fontSize, self.alloc);
-        const managed = try self.getOrCreateFont(name);
-        try managed.add(fa);
-    }
-
-    /// Acquires a refcounted handle to a font atlas by name.
-    pub fn acquireFontAtlas(self: *Self, name: []const u8) !*FontAtlasHandle {
-        const managed = self.fonts.get(name) orelse return error.NoFontWithThatName;
-        return managed.acquire() orelse return error.NoFontWithThatName;
     }
 
     /// Appends a fallback face to an already-loaded TTF font. Codepoints the

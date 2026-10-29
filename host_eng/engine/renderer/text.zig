@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
 const std = @import("std");
-const gl = @import("zopengl").bindings;
 const zmath = @import("zmath");
 
 const common = @import("../common.zig");
@@ -15,7 +14,6 @@ const C = @import("./constants.zig");
 const Vec2I = common.Vec2I;
 const RectF = common.RectF;
 const Color = common.Color;
-const Shader = shaders.Shader;
 const ResourceManager = resources.ResourceManager;
 
 /// The glyph batch: the same position/texcoord layout as
@@ -29,7 +27,6 @@ pub const FontFace = font_atlas.FontFace;
 pub const Character = font_atlas.Character;
 pub const stb_tt = font_atlas.stb_tt;
 pub const FontMetrics = font_atlas.FontMetrics;
-pub const measureFontFile = font_atlas.measureFontFile;
 pub const measureFontFileIndexed = font_atlas.measureFontFileIndexed;
 pub const findFaceIndexByName = font_atlas.findFaceIndexByName;
 

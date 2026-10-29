@@ -2,14 +2,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 const std = @import("std");
-const stbi = @import("zstbi");
 const gl = @import("zopengl").bindings;
-const zmath = @import("zmath");
-const common = @import("../common.zig");
 
-const Vec2I = common.Vec2I;
-const RectF = common.RectF;
-const Color = common.Color;
 
 pub const ShaderCode = [*c]const u8;
 pub const ShaderCodePtr = [*c]const ShaderCode;
@@ -48,24 +42,6 @@ pub const TexPixelShader: ShaderCode =
     \\
     \\void main() {
     \\    fragColor = texture(tex, Texcoord) * tint;
-    \\}
-;
-
-/// A 3d vertex shader for arbitrary world-space quads (walls, floors,
-/// ceilings), used by Quad3DBatchQueue. Multiplies a true 3d position by
-/// the projectionMatrix (expected to be a full view*projection matrix)
-/// and passes through the texture coord.
-pub const Quad3DVertexShader: ShaderCode =
-    \\#version 300 es
-    \\in vec3 coord3d;
-    \\in vec2 texcoord;
-    \\out vec2 Texcoord; // Pass texture coordinate to fragment shader
-    \\
-    \\uniform mat4 projectionMatrix;
-    \\
-    \\void main() {
-    \\    gl_Position = projectionMatrix * vec4(coord3d, 1.0);
-    \\    Texcoord = texcoord; // Pass texture coordinate to fragment shader
     \\}
 ;
 
@@ -146,18 +122,6 @@ pub const TextColorPixelShader_Web: ShaderCode =
     \\ }
 ;
 
-/// A vertex shader that maps the pixel position to the screen position
-pub const PixBuffVertexShader: ShaderCode =
-    \\#version 300 es
-    \\in vec2 a_pos;
-    \\out vec2 Texcoord; // Pass texture coordinate to fragment shader
-    \\ 
-    \\void main() {
-    \\    gl_Position = vec4(a_pos, 0.0, 1.0);
-    \\    Texcoord = vec2(a_pos.x+1.0, 1.0-a_pos.y)*0.5; // Pass texture coordinate to fragment shader
-    \\}
-;
-
 /// The name for our color shader
 pub const ColorShader = "color_shader";
 
@@ -166,12 +130,6 @@ pub const TextureShader = "texture_shader";
 
 /// Our tinted text/font shader (per-draw fg color).
 pub const TextColorShader = "text_color_shader";
-
-/// Our pixel buffer shader that maps directly to the screen pixels.
-pub const PixelBuffShader = "pixel_buffer_shader";
-
-/// The name for our 3d quad shader used by Quad3DBatchQueue.
-pub const Quad3DShader = "quad3d_shader";
 
 /// Stores the opengl IDs for the shader program, and vertex/fragment shaders.
 pub const Shader = struct {
