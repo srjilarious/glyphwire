@@ -1,9 +1,9 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # glyphwire
 
-![Version Badge](https://img.shields.io/badge/Version-0.36.4-brightgreen)
+![Version Badge](https://img.shields.io/badge/Version-0.36.5-brightgreen)
 ![Zig Version Badge](https://img.shields.io/badge/Zig%20Version-0.17.0-%23f7a41d?logo=zig)
-![Protocol Badge](https://img.shields.io/badge/Protocol-0.14.0-blueviolet)
+![Protocol Badge](https://img.shields.io/badge/Protocol-0.14.1-blueviolet)
 [![License](https://img.shields.io/badge/License-MPL--2.0%20%7C%20GPL--3.0%20%7C%20CC--BY--4.0-blue)](#license)
 
 A 2D-grid terminal replacement. Programs talk to the display over a local
@@ -29,7 +29,7 @@ splits and panes back.
 
 ## The protocol
 
-The wire protocol is at **version 0.14.0**, a pre-1.0 draft.
+The wire protocol is at **version 0.14.1**, a pre-1.0 draft.
 [`docs/protocol.md`](docs/protocol.md) is the normative specification
 (CC-BY-4.0), enough to write a client or a host in any language without
 reading the Zig. [`docs/api.md`](docs/api.md) is the annotated message
@@ -153,7 +153,7 @@ Each program also has its own run step (`zig build zoe`, `zig build gwmd`,
 
 Every program answers `--version` (or `-V`) with its own version, the
 glyphwire release and the `git describe` it was built from, e.g. `zoe
-0.26.1 (glyphwire 0.36.4, 1b122a9)`. Each program's number is a line in
+0.26.1 (glyphwire 0.36.5, 1b122a9)`. Each program's number is a line in
 `program_versions` at the top of `build.zig`, bumped when that program
 changes in a release, and the release's own number is `build.zig.zon`'s
 `version`. The numbers quoted in this README, the website and the spec's

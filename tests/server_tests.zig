@@ -1791,3 +1791,121 @@ pub fn selectionsAcrossPanesStayOneTest(io: std.Io, alloc: std.mem.Allocator) !v
     try testz.expectTrue(srv.ctx.root.sel.range == null);
     try testz.expectTrue(try srv.anySelectionText(alloc) == null);
 }
+
+// ─── A client that stops reading (review A2) ────────────────────────────
+
+/// Connects to `addr`, subscribes to `events` (a JSON array body) and
+/// waits for the ack, leaving the connection's read side to the caller.
+fn connectSubscribed(io: std.Io, alloc: std.mem.Allocator, addr: std.Io.net.UnixAddress, comptime events: []const u8, decoder: *wire.FrameDecoder) !std.Io.net.Stream {
+    var stream = try connectAttached(io, addr);
+    errdefer stream.close(io);
+    var buf: [256]u8 = undefined;
+    var w = stream.writer(io, &buf);
+    try wire.writeFrame(&w.interface, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"subscribe\",\"params\":{\"events\":" ++ events ++ "}}");
+    try w.interface.flush();
+    alloc.free(try readOneFrame(io, alloc, &stream, decoder));
+    return stream;
+}
+
+/// How many connections the server still has registered.
+fn connectionCount(srv: *glyphwire.server.Server) usize {
+    srv.registry_mutex.lockUncancelable(srv.io);
+    defer srv.registry_mutex.unlock(srv.io);
+    return srv.connections.items.len;
+}
+
+/// A client that subscribed and then never reads again must not hold up
+/// anyone else: far more input than its socket buffer holds is reported,
+/// the in-process report calls all return, and a client that is reading
+/// still gets every key. Before the outbound queue, the first report past
+/// the stuck client's buffer blocked forever, and with it the host's input
+/// thread.
+pub fn aClientThatStopsReadingHoldsNoOneUpTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 200, 100, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-stuck-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+
+    const t_stuck = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer t_stuck.join();
+    var stuck_dec: wire.FrameDecoder = .{};
+    defer stuck_dec.deinit(alloc);
+    var stuck = try connectSubscribed(io, alloc, addr, "[\"key\",\"mouse_move\"]", &stuck_dec);
+    defer stuck.close(io);
+
+    const t_reader = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer t_reader.join();
+    var reader_dec: wire.FrameDecoder = .{};
+    defer reader_dec.deinit(alloc);
+    var reader = try connectSubscribed(io, alloc, addr, "[\"key\"]", &reader_dec);
+    defer reader.close(io);
+
+    // Pointer moves, each to a new cell so each is pushed: these merge in
+    // the stuck client's queue rather than piling up.
+    for (0..20_000) |i| {
+        const cell: glyphwire.CellPos = .{ .row = (i / 200) % 100, .col = i % 200 };
+        try srv.reportMouseMove(alloc, .{ .x = @floatFromInt(cell.col * 8), .y = @floatFromInt(cell.row * 16) }, cell);
+    }
+    // Keys can't merge: well past a socket buffer's worth, still well
+    // under the queue's bound.
+    const presses = 3000;
+    for (0..presses) |_| {
+        try srv.reportKey(alloc, "a", true);
+        try srv.reportKey(alloc, "a", false);
+    }
+    try srv.reportKey(alloc, "z", true);
+
+    var downs: usize = 0;
+    while (true) {
+        const body = try readOneFrame(io, alloc, &reader, &reader_dec);
+        defer alloc.free(body);
+        if (std.mem.indexOf(u8, body, "\"key\":\"z\"") != null) break;
+        if (std.mem.indexOf(u8, body, "key_down") != null) downs += 1;
+    }
+    try testz.expectEqual(downs, presses);
+    // Still connected: slow is not the same as stuck past the bound.
+    try testz.expectEqual(connectionCount(&srv), 2);
+}
+
+/// A client whose backlog passes `max_queued_bytes` with input that can't
+/// be dropped is disconnected, rather than holding that memory forever.
+pub fn aClientPastTheQueueBoundIsDisconnectedTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-queue-bound-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    srv.max_queued_bytes = 16 * 1024;
+    const addr = try std.Io.net.UnixAddress.init(socket_path);
+
+    const t_stuck = try std.Thread.spawn(.{}, acceptOnce, .{ &srv, alloc });
+    defer t_stuck.join();
+    var stuck_dec: wire.FrameDecoder = .{};
+    defer stuck_dec.deinit(alloc);
+    var stuck = try connectSubscribed(io, alloc, addr, "[\"key\"]", &stuck_dec);
+    defer stuck.close(io);
+    try testz.expectEqual(connectionCount(&srv), 1);
+
+    // Enough to fill the socket buffer and then the 16 KiB queue.
+    var i: usize = 0;
+    while (i < 50_000 and connectionCount(&srv) == 1) : (i += 1) {
+        try srv.reportKey(alloc, "a", true);
+        try srv.reportKey(alloc, "a", false);
+    }
+
+    var waited: usize = 0;
+    while (connectionCount(&srv) != 0 and waited < 200) : (waited += 1) {
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    try testz.expectEqual(connectionCount(&srv), 0);
+}

@@ -14,14 +14,24 @@ const host_api = @import("host_api.zig");
 
 pub const ConnStream = conn_stream.ConnStream;
 
+/// `Server.max_queued_bytes`'s default: 8 MiB per connection.
+pub const default_max_queued_bytes: usize = 8 * 1024 * 1024;
+
 /// Tracks one accepted connection long enough for *other* connections'
 /// dispatch to push a notification to it -- see `Server.broadcastIn`.
 /// Lives on the stack frame of whichever call is serving it (`acceptOne`
 /// or a `serveForever`-spawned thread), registered in `Server.connections`
 /// for exactly that lifetime.
 ///
-/// Locking, field by field: `stream` is written under `write_mutex`;
-/// `route` and `focus_sent` are read and written under
+/// Nothing writes to `stream` but the connection's writer thread
+/// (`writerLoop`): `send` and `sendNative` only queue, so a sender never
+/// blocks on a peer that has stopped reading -- not the host's input
+/// thread, and not another client's dispatch holding `registry_mutex`.
+/// See `out` for the limits.
+///
+/// Locking, field by field: the outbound queue (`out`, `out_bytes`,
+/// `out_state`) is guarded by `out_mutex`; `route` and `focus_sent` are
+/// read and written under
 /// `Server.registry_mutex` (the connection's own thread may read `route`
 /// without it, being its only writer); `format` is written once, by the
 /// connection's own thread, before anything can read it (see `format`).
@@ -38,10 +48,21 @@ pub const Connection = struct {
     /// `Context.removeConnectionOwnership` so any layer this connection
     /// solely owned is culled.
     id: core.ConnId,
-    /// Guards writes to `stream`: this connection's own thread writes
-    /// responses to its own requests, but another connection's dispatch
-    /// may concurrently push a subscribed notification to it too.
-    write_mutex: std.Io.Mutex = .init,
+    /// Bodies waiting for the writer thread, oldest first: this
+    /// connection's own responses and everything pushed to it, in the
+    /// order they were sent. Bounded by `Server.max_queued_bytes`: past
+    /// that a `mouse_move` replaces or drops, and anything else
+    /// disconnects the client (`enqueue`).
+    out: std.ArrayList(Outgoing) = .empty,
+    /// The bytes in `out`, for the bound.
+    out_bytes: usize = 0,
+    out_state: OutState = .open,
+    out_mutex: std.Io.Mutex = .init,
+    /// Signalled when `out` gains an entry or `out_state` leaves `.open`.
+    out_cond: std.Io.Condition = .init,
+    /// `Server.max_queued_bytes` when the connection was accepted.
+    max_queued_bytes: usize,
+    writer: ?std.Thread = null,
     /// What the fan-out reads to decide whether this connection gets a
     /// push. Guarded by `registry_mutex`, the lock every fan-out already
     /// holds while it walks `connections`.
@@ -95,23 +116,166 @@ pub const Connection = struct {
         }
     };
 
-    /// Sends a server-pushed message. `msgpack_body` is always
+    pub const OutState = enum {
+        open,
+        /// The connection is closing normally: the writer sends what is
+        /// queued, then stops. Nothing more is accepted.
+        stopping,
+        /// The peer fell too far behind or a write failed: the queue is
+        /// dropped and the stream shut down. Nothing more is accepted.
+        dead,
+    };
+
+    const Outgoing = struct {
+        body: []u8,
+        kind: Kind,
+
+        const Kind = enum {
+            /// Already in the connection's format: a response.
+            native,
+            /// MessagePack, converted by the writer for a JSON connection.
+            push,
+            /// A `push` that a newer `mouse_move` may replace: only where
+            /// the pointer is now matters.
+            mouse_move,
+        };
+    };
+
+    /// Queues a server-pushed message. `msgpack_body` is always
     /// MessagePack -- the `rpc.zig` builders make one body for every
-    /// subscriber -- and is converted here for a JSON connection.
+    /// subscriber -- and the writer converts it for a JSON connection.
     pub fn send(self: *Connection, io: std.Io, msgpack_body: []const u8) !void {
-        if (self.format == .msgpack) return self.sendNative(io, msgpack_body);
-        const body = try codec.msgpackToJson(self.alloc, msgpack_body);
-        defer self.alloc.free(body);
-        try self.sendNative(io, body);
+        try self.enqueue(io, msgpack_body, .push);
     }
 
-    /// Sends a body already in this connection's format -- a response its
+    /// `send` for a `mouse_move`, which replaces one still waiting in the
+    /// queue rather than adding to it.
+    pub fn sendMouseMove(self: *Connection, io: std.Io, msgpack_body: []const u8) !void {
+        try self.enqueue(io, msgpack_body, .mouse_move);
+    }
+
+    /// Queues a body already in this connection's format -- a response its
     /// own `Dispatcher` encoded.
     fn sendNative(self: *Connection, io: std.Io, body: []const u8) !void {
-        self.write_mutex.lockUncancelable(io);
-        defer self.write_mutex.unlock(io);
+        try self.enqueue(io, body, .native);
+    }
 
-        const framed = try wire.framedAllocAs(self.alloc, self.format, body);
+    /// Adds a copy of `body` to the queue and wakes the writer. Never
+    /// blocks on the peer. A connection that is closing drops it. Past
+    /// `max_queued_bytes` a `mouse_move` is dropped, and anything else
+    /// means the peer has stopped reading: the connection is cut off
+    /// (`out_state = .dead`, the stream shut down so its reader returns)
+    /// rather than left to grow without bound or to hold anyone up.
+    fn enqueue(self: *Connection, io: std.Io, body: []const u8, kind: Outgoing.Kind) !void {
+        self.out_mutex.lockUncancelable(io);
+        defer self.out_mutex.unlock(io);
+        if (self.out_state != .open) return;
+
+        if (kind == .mouse_move and self.out.items.len > 0) {
+            const last = &self.out.items[self.out.items.len - 1];
+            if (last.kind == .mouse_move) {
+                const copy = try self.alloc.dupe(u8, body);
+                self.out_bytes = self.out_bytes - last.body.len + copy.len;
+                self.alloc.free(last.body);
+                last.body = copy;
+                return;
+            }
+        }
+
+        if (self.out.items.len > 0 and self.out_bytes + body.len > self.max_queued_bytes) {
+            if (kind == .mouse_move) return;
+            std.log.warn("glyphwire: connection {d} stopped reading ({d} bytes queued); disconnecting it", .{ self.id, self.out_bytes });
+            self.cutOffLocked(io);
+            return;
+        }
+
+        const copy = try self.alloc.dupe(u8, body);
+        errdefer self.alloc.free(copy);
+        try self.out.append(self.alloc, .{ .body = copy, .kind = kind });
+        self.out_bytes += copy.len;
+        self.out_cond.signal(io);
+    }
+
+    /// Drops the queue, marks the connection dead and shuts its stream
+    /// down, which ends the reader's `read` (and any write the writer is
+    /// blocked in). Caller holds `out_mutex`.
+    fn cutOffLocked(self: *Connection, io: std.Io) void {
+        self.out_state = .dead;
+        self.freeQueueLocked();
+        self.stream.shutdown(io);
+        self.out_cond.broadcast(io);
+    }
+
+    fn freeQueueLocked(self: *Connection) void {
+        for (self.out.items) |item| self.alloc.free(item.body);
+        self.out.clearRetainingCapacity();
+        self.out_bytes = 0;
+    }
+
+    /// Starts the writer thread. Paired with `stopWriter`.
+    fn startWriter(self: *Connection, io: std.Io) !void {
+        self.writer = try std.Thread.spawn(.{}, writerLoop, .{ self, io });
+    }
+
+    /// Stops accepting bodies, lets the writer send what is already
+    /// queued, and waits for it. The connection must already be out of
+    /// `Server.connections`, so nothing can be queued behind this.
+    fn stopWriter(self: *Connection, io: std.Io) void {
+        {
+            self.out_mutex.lockUncancelable(io);
+            defer self.out_mutex.unlock(io);
+            if (self.out_state == .open) self.out_state = .stopping;
+            self.out_cond.broadcast(io);
+        }
+        if (self.writer) |t| t.join();
+        self.writer = null;
+        self.out_mutex.lockUncancelable(io);
+        defer self.out_mutex.unlock(io);
+        self.freeQueueLocked();
+        self.out.deinit(self.alloc);
+    }
+
+    /// The writer thread: takes everything queued at once and writes it
+    /// outside `out_mutex`, so senders keep queueing (and `mouse_move`
+    /// keeps replacing) while a slow peer drains. Ends once the connection
+    /// is closing and the queue is empty, or on the first failed write.
+    fn writerLoop(self: *Connection, io: std.Io) void {
+        var batch: std.ArrayList(Outgoing) = .empty;
+        defer batch.deinit(self.alloc);
+        while (true) {
+            {
+                self.out_mutex.lockUncancelable(io);
+                defer self.out_mutex.unlock(io);
+                while (self.out.items.len == 0 and self.out_state == .open) {
+                    self.out_cond.waitUncancelable(io, &self.out_mutex);
+                }
+                if (self.out.items.len == 0) return;
+                std.mem.swap(std.ArrayList(Outgoing), &batch, &self.out);
+                self.out_bytes = 0;
+            }
+            for (batch.items, 0..) |item, i| {
+                self.writeOne(io, item) catch |err| {
+                    std.log.warn("glyphwire: write to connection {d} failed: {t}", .{ self.id, err });
+                    for (batch.items[i..]) |rest| self.alloc.free(rest.body);
+                    batch.clearRetainingCapacity();
+                    self.out_mutex.lockUncancelable(io);
+                    defer self.out_mutex.unlock(io);
+                    if (self.out_state != .dead) self.cutOffLocked(io);
+                    return;
+                };
+                self.alloc.free(item.body);
+            }
+            batch.clearRetainingCapacity();
+        }
+    }
+
+    fn writeOne(self: *Connection, io: std.Io, item: Outgoing) !void {
+        const json: ?[]u8 = if (item.kind != .native and self.format == .json)
+            try codec.msgpackToJson(self.alloc, item.body)
+        else
+            null;
+        defer if (json) |j| self.alloc.free(j);
+        const framed = try wire.framedAllocAs(self.alloc, self.format, json orelse item.body);
         defer self.alloc.free(framed);
         try self.stream.writeAll(io, framed);
     }
@@ -202,6 +366,12 @@ pub const Server = struct {
     /// iterated (read-only) by `broadcastToOthers`.
     registry_mutex: std.Io.Mutex = .init,
     connections: std.ArrayList(*Connection) = .empty,
+    /// How many bytes may wait to be written to one connection before a
+    /// further push (other than a `mouse_move`) disconnects it. Far more
+    /// than any client that is reading falls behind by; a client stopped
+    /// in a debugger, or wedged, reaches it and is let go rather than
+    /// holding memory forever. Read when a connection is accepted.
+    max_queued_bytes: usize = default_max_queued_bytes,
     /// Guards `connection_threads`. Separate from `registry_mutex`: that
     /// one is held for the duration of a `broadcast` fan-out, and `deinit`
     /// joining threads while holding the same lock a thread needs to reach
@@ -370,7 +540,16 @@ pub const Server = struct {
         var stream = stream_in;
         defer stream.close(self.io);
 
-        var conn: Connection = .{ .stream = stream, .alloc = alloc, .id = self.next_conn_id.fetchAdd(1, .monotonic) };
+        var conn: Connection = .{
+            .stream = stream,
+            .alloc = alloc,
+            .id = self.next_conn_id.fetchAdd(1, .monotonic),
+            .max_queued_bytes = self.max_queued_bytes,
+        };
+        // Deferred in this order so they run as: leave the registry (no
+        // one can queue to it after), flush and stop the writer, close.
+        try conn.startWriter(self.io);
+        defer conn.stopWriter(self.io);
         try self.registerConnection(alloc, &conn);
         defer self.unregisterConnection(alloc, &conn);
 
@@ -723,7 +902,8 @@ pub const Server = struct {
                 .fan_out, .addressed => {},
                 .window_manager => unreachable,
             }
-            other.send(self.io, body) catch |err| {
+            const sent = if (event == .mouse_move) other.sendMouseMove(self.io, body) else other.send(self.io, body);
+            sent catch |err| {
                 std.log.err("glyphwire broadcast to a connection failed: {t}", .{err});
             };
         }

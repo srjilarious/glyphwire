@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.14.0 — pre-1.0 draft.**
+**Version 0.14.1 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 
@@ -268,6 +268,14 @@ a notification with an `id` bolted on.
   connection — **SHOULD** issue any request and await its response. The
   reference client uses `get_property{property:"revision"}` for this on
   close.
+- Everything a host sends one connection (responses and notifications)
+  arrives in the order the host produced it.
+- A client that stops reading **MUST NOT** delay the host or any other
+  client. A host **MAY** coalesce queued `mouse_move` notifications to a
+  slow connection, keeping only the latest, and **MAY** disconnect a
+  connection whose unread backlog of anything else grows past a bound of
+  its choosing. The reference host allows 8 MiB. A client **SHOULD** read
+  continuously, even while busy, on any connection it has subscribed.
 
 ### 3.3 The `layer?` convention
 

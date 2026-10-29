@@ -45,6 +45,16 @@ pub const ConnStream = union(enum) {
         }
     }
 
+    /// Ends the stream in both directions without closing it: a `read`
+    /// blocked on it returns end of stream and a blocked `writeAll` fails.
+    /// For a server cutting off a peer from another thread.
+    pub fn shutdown(self: *ConnStream, io: std.Io) void {
+        switch (self.*) {
+            .net => |s| s.shutdown(io, .both) catch {},
+            .channel => |ch| ch.closePeer(),
+        }
+    }
+
     pub fn close(self: *ConnStream, io: std.Io) void {
         switch (self.*) {
             .net => |s| s.close(io),
