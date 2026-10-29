@@ -373,7 +373,7 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
     const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread2.join();
 
-    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "mouse_button" });
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{ .key, .mouse_button });
     defer listener.deinit();
     try testz.expectTrue(!listener.isKeyDown("a"));
 
@@ -424,7 +424,7 @@ pub fn inputListenerQueuesMouseButtonEventsTest(_: std.Io, alloc: std.mem.Alloca
     const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread2.join();
 
-    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{"mouse_button"});
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{.mouse_button});
     defer listener.deinit();
 
     var reporter = try helpers.connectReporter(io, alloc, socket_path);
@@ -471,7 +471,7 @@ pub fn inputListenerQueuesTextEventsTest(_: std.Io, alloc: std.mem.Allocator) !v
     const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread2.join();
 
-    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{"text"});
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{.text});
     defer listener.deinit();
 
     var reporter = try helpers.connectReporter(io, alloc, socket_path);
@@ -508,7 +508,7 @@ pub fn inputListenerNextKeepsOrderAndEventTimeModsTest(_: std.Io, alloc: std.mem
     const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
     defer thread2.join();
 
-    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "resize" });
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{ .key, .text, .resize });
     defer listener.deinit();
 
     var reporter = try helpers.connectReporter(io, alloc, socket_path);
@@ -1158,7 +1158,7 @@ pub fn fullscreenOpenSeatsAContextTest(io: std.Io, alloc: std.mem.Allocator) !vo
 
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     defer client.deinit();
-    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{"key"});
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{.key});
     defer listener.deinit();
 
     const bg = glyphwire.Color.role(.status_bg);

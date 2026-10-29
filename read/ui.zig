@@ -866,7 +866,7 @@ pub const Ui = struct {
             .mouse_move => |m| try self.handleMouseMove(m),
             // `defer ev.deinit` above frees the button string.
             .mouse_button => |m| try self.handleMouseButton(m),
-            else => if (ev.asInput()) |input| try self.handleInput(input),
+            else => if (ev.isInput()) try self.handleInput(ev),
         }
     }
 
@@ -1784,8 +1784,8 @@ pub const Ui = struct {
             if (gi != lk.entry) {
                 // Collapsed: term, other spellings, reading and frequency on
                 // one 1x row -- enough to tell whether it is the word you
-                // meant. This is the point of the whole change: an entry
-                // ranked fourth used to be invisible behind `]`.
+                // meant. Otherwise an entry ranked fourth would be
+                // invisible behind `]`.
                 for (try mokuro.wrap(a, try collapsedEntryLine(a, lk, g), inner_max)) |r| {
                     try lines.append(a, .{ .text = r });
                 }
@@ -2450,7 +2450,7 @@ pub const Ui = struct {
 
     // ── Input ───────────────────────────────────────────────────────────
 
-    fn handleInput(self: *Ui, ev: glyphwire.InputEvent) !void {
+    fn handleInput(self: *Ui, ev: glyphwire.Event) !void {
         switch (ev) {
             // Every physical keystroke is a press *and* a release; acting
             // on both would turn two pages per tap. The one exception is

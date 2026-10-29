@@ -160,13 +160,13 @@ pub fn main(init: std.process.Init) !void {
     // say what's in the book and leave, the same shape zoe's headless
     // fallback has.
     var conn = cli.connect(io, alloc, init.environ_map, &.{
-        "key",
-        "text",
-        "resize",
-        "scroll_offset",
-        "mouse_button",
-        "mouse_move",
-        "context",
+        .key,
+        .text,
+        .resize,
+        .scroll,
+        .mouse_button,
+        .mouse_move,
+        .context,
     }) catch return list(alloc, io, book, conf.ocr);
     defer conn.deinit();
 

@@ -724,7 +724,7 @@ const AuthClient = struct {
         errdefer client.deinit();
         try client.attachContext(grant.context, &grant.token);
         const seat: glyphwire.Seat = .{ .context = grant.context, .token = grant.token };
-        const listener = try glyphwire.InputListener.connectAt(io, alloc, sock, &.{ "text", "key" }, seat);
+        const listener = try glyphwire.InputListener.connectAt(io, alloc, sock, &.{ .text, .key }, seat);
         return .{ .io = io, .alloc = alloc, .client = client, .listener = listener };
     }
 
@@ -752,10 +752,11 @@ const AuthClient = struct {
             const any_ev = (try self.listener.next(.{ .duration = .{ .raw = .fromMilliseconds(60_000), .clock = .awake } })) orelse continue;
             // Only typing matters to a password prompt; the rest is
             // dropped as it arrives.
-            const ev = any_ev.asInput() orelse {
+            if (!any_ev.isInput()) {
                 any_ev.deinit(self.alloc);
                 continue;
-            };
+            }
+            const ev = any_ev;
             defer ev.deinit(self.alloc);
             switch (ev) {
                 .text => |t| {

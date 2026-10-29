@@ -312,7 +312,7 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
         }
 
         const any_ev = (listener.next(.{ .duration = .{ .raw = .fromMilliseconds(120), .clock = .awake } }) catch null) orelse continue;
-        const input_ev = any_ev.asInput() orelse {
+        if (!any_ev.isInput()) {
             defer any_ev.deinit(alloc);
             switch (any_ev) {
                 // Terminal resize -> SIGWINCH the child (via the kernel
@@ -323,9 +323,8 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
                 // describe a grid that just moved out from under it,
                 // and this loop is the only place those events are
                 // read while a child holds the foreground. Dropping
-                // them here (what used to happen) left the shell
-                // laying out the next prompt against the pre-resize
-                // grid -- the prompt landing mid-screen on top of
+                // them here would leave the shell laying out the next
+                // prompt against the pre-resize grid -- the prompt landing mid-screen on top of
                 // retained output, unusable until a ctrl+l. Applied by
                 // `adoptPendingResize` once the child is reaped; not
                 // here, since `handleResize` would redraw a prompt
@@ -357,7 +356,8 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
                 else => {},
             }
             continue;
-        };
+        }
+        const input_ev = any_ev;
 
         if (is_aware) {
             switch (input_ev) {
@@ -383,9 +383,11 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
                     pty.signalGroup(std.posix.SIG.HUP);
                     return .exited;
                 },
-                // A window manager's own commands (see `InputEvent.window_key`).
+                // A window manager's own commands (see `Event.window_key`).
                 // Never delivered here: this program is not one.
                 .window_key, .window_text => {},
+                // Not input (`Event.isInput`): filtered out before this.
+                else => {},
             }
             continue;
         }
@@ -424,7 +426,7 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
                 return .exited;
             },
             // A window manager's own commands (see
-            // `InputEvent.window_key`). Never delivered here.
+            // `Event.window_key`). Never delivered here.
             .window_key => |kev| {
                 alloc.free(kev.key);
                 continue;
@@ -434,6 +436,8 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
                 continue;
             },
             .key => |kev| kev,
+            // Not input (`Event.isInput`): filtered out before this.
+            else => continue,
         };
         defer alloc.free(ev.key);
         if (!ev.pressed) continue;

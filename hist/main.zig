@@ -99,10 +99,10 @@ pub fn main(init: std.process.Init) !void {
     const dirs = loadDirs(arena, io, init.environ_map) catch &.{};
 
     var conn = cli.connectOrFail(io, alloc, init.environ_map, "gw-hist", &.{
-        "key",
-        "text",
-        "resize",
-        "scroll_offset",
+        .key,
+        .text,
+        .resize,
+        .scroll,
     });
     defer conn.deinit();
 

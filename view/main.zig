@@ -138,13 +138,13 @@ pub fn main(init: std.process.Init) !void {
     // there.
     if (args.hasOption("interactive")) {
         const listener = glyphwire.InputListener.connectFromEnv(io, alloc, init.environ_map, &.{
-            "key",
-            "text",
-            "resize",
-            "scroll_offset",
-            "mouse_button",
-            "mouse_move",
-            "context",
+            .key,
+            .text,
+            .resize,
+            .scroll,
+            .mouse_button,
+            .mouse_move,
+            .context,
         }) catch {
             return fallback(io, "gw-view: couldn't subscribe to input\n");
         };

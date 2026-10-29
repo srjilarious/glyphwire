@@ -409,21 +409,21 @@ fn runUi(
     // notifications. `layout` and `scroll_offset` are what the split tree
     // and the tree pane's scrollbars report back on.
     var conn = cli.connect(io, alloc, environ, &.{
-        "key",
-        "text",
-        "clipboard",
-        "resize",
-        "scroll",
-        "layout",
-        "mouse_button",
-        "mouse_move",
-        "context",
+        .key,
+        .text,
+        .clipboard,
+        .resize,
+        .scroll,
+        .layout,
+        .mouse_button,
+        .mouse_move,
+        .context,
         // The window gaining or losing the keyboard: zoe paints its own
         // cursor, so it has to be told to hollow it out (see `syncCaret`).
-        "focus",
+        .focus,
         // The window theme changed under a zoe that follows it: the
         // popups' nine-patch frame and the capture table catch up.
-        "theme",
+        .theme,
     }) catch |err| {
         if (err == error.NoSession) try write(io, "zoe: Requires a glyphwire host with GLYPHWIRE_SOCK set.\n");
         return false;

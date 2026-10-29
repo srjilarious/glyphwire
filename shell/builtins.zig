@@ -448,7 +448,7 @@ pub fn waitOutRemote(self: *Prompt, listener: *glyphwire.InputListener, session:
         const any_ev = (listener.next(.{
             .duration = .{ .raw = .fromMilliseconds(200), .clock = .awake },
         }) catch null) orelse continue;
-        const ev = any_ev.asInput() orelse {
+        if (!any_ev.isInput()) {
             defer any_ev.deinit(alloc);
             switch (any_ev) {
                 .remote_exit => |rev| if (rev.session == session) return .{
@@ -458,7 +458,8 @@ pub fn waitOutRemote(self: *Prompt, listener: *glyphwire.InputListener, session:
                 else => self.noteOffPromptEvent(any_ev),
             }
             continue;
-        };
+        }
+        const ev = any_ev;
 
         switch (ev) {
             .key => |kev| {
@@ -481,9 +482,11 @@ pub fn waitOutRemote(self: *Prompt, listener: *glyphwire.InputListener, session:
                 return .{ .status = 1, .started = true };
             },
             // A window manager's own commands (see
-            // `InputEvent.window_key`). Never delivered here.
+            // `Event.window_key`). Never delivered here.
             .window_key => |kev| alloc.free(kev.key),
             .window_text => |tev| alloc.free(tev.text),
+            // Not input (`Event.isInput`): filtered out before this.
+            else => {},
         }
     }
 }

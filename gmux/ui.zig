@@ -302,7 +302,7 @@ pub const Ui = struct {
                     self.redraw();
                 },
                 .theme => self.restyle(),
-                else => if (ev.asInput()) |input| try self.handleInput(input),
+                else => if (ev.isInput()) try self.handleInput(ev),
             }
         }
     }
@@ -314,13 +314,15 @@ pub const Ui = struct {
     /// there is no prefix state to track here and no possibility of a
     /// command leaking through to a program -- the failure mode that
     /// defined the previous design.
-    fn handleInput(self: *Ui, ev: glyphwire.InputEvent) !void {
+    fn handleInput(self: *Ui, ev: glyphwire.Event) !void {
         switch (ev) {
             .window_key => |k| if (k.pressed) self.command(self.keyAction(k)),
             .window_text => |t| self.command(self.textAction(t.text)),
             .shutdown => self.quit = true,
             // Raw input is the overlay's, taken in `run` before this.
             .key, .text, .paste, .copy_request => {},
+            // Not input (`Event.isInput`): `run` handles these itself.
+            else => {},
         }
     }
 

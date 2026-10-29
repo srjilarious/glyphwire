@@ -500,7 +500,7 @@ pub fn outlineUnknownHandleAndBadNodeAreReportedTest(io: std.Io, alloc: std.mem.
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     defer client.deinit();
 
-    try client.subscribe(&.{"error"});
+    try client.subscribe(&.{.@"error"});
     const outline = try client.createOutline(null, 0, 0, null, .{});
     try client.outlineSetNodes(null, outline, &wire_nodes);
 

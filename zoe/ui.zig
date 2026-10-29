@@ -524,7 +524,7 @@ pub const TreeFind = struct {
 /// What zoe's command line named, once `main` has looked at it on disk.
 /// The distinction is the whole reason it looks: `zoe build.zig` opens a
 /// buffer, but `zoe src/` is a place to work -- there is nothing to read
-/// out of a directory, and treating it as a file used to leave you in an
+/// out of a directory, and treating it as a file would leave you in an
 /// empty buffer named after it that `:w` would then refuse.
 pub const FileTarget = struct {
     path: []const u8,
@@ -3011,7 +3011,7 @@ pub const Ui = struct {
                 }
                 if (!self.shell.isFocused()) try self.handleMouseButton(m);
             },
-            else => if (ev.asInput()) |input| try self.handleInput(input),
+            else => if (ev.isInput()) try self.handleInput(ev),
         }
     }
 
@@ -3043,7 +3043,7 @@ pub const Ui = struct {
         };
     }
 
-    pub fn handleInput(self: *Ui, ev: glyphwire.InputEvent) !void {
+    pub fn handleInput(self: *Ui, ev: glyphwire.Event) !void {
         // A keystroke on the `:` line, or a normal-mode key that turns
         // out to do nothing, leaves the buffer pane exactly as it was.
         // Snapshot the parts of the editor the buffer pane draws from so
@@ -3272,9 +3272,12 @@ pub const Ui = struct {
             // that spawned it exits; nothing persistent to flush here that
             // isn't already the user's explicit `:w`.
             .shutdown => {},
-            // A window manager's own commands (see `InputEvent.window_key`).
+            // A window manager's own commands (see `Event.window_key`).
             // Never delivered here: this program is not one.
             .window_key, .window_text => {},
+            // Not input (`Event.isInput`): the run loop handles these
+            // itself and never passes them here.
+            else => {},
         }
 
         // Any keystroke can change the status row -- the mode word, the

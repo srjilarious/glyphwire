@@ -53,7 +53,6 @@ pub const MouseButtonEvent = client.MouseButtonEvent;
 pub const MouseMoveEvent = client.MouseMoveEvent;
 pub const TextEvent = client.TextEvent;
 pub const KeyEvent = client.KeyEvent;
-pub const InputEvent = client.InputEvent;
 pub const Event = client.Event;
 pub const PxPos = client.PxPos;
 pub const CellPos = client.CellPos;

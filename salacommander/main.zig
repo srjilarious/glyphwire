@@ -114,29 +114,28 @@ pub fn main(init: std.process.Init) !void {
     const own_theme = themeconf.programTheme(theme_arena.allocator(), alloc, io, init.environ_map, cfg.theme);
 
     var conn = cli.connectOrFail(io, alloc, init.environ_map, "salacommander", &.{
-        "key",
-        "text",
-        "paste",
-        "resize",
+        .key,
+        .text,
+        // Pasted text, and Ctrl+Shift+C with no host selection --
+        // answered with the active pane's paths. See
+        // `Ui.copySelectionPaths`.
+        .clipboard,
+        .resize,
         // The pane split re-laid-out: a window resize, or the band
-        // between the panes dragged.
-        "layout",
-        "scroll_offset",
-        "mouse_button",
+        // between the panes dragged. Also a drag of the shell panel's top
+        // edge (`layer_resize`).
+        .layout,
+        .scroll,
+        .mouse_button,
         // Dragging files from one pane onto a folder or the other pane.
-        "mouse_move",
-        "context",
+        .mouse_move,
+        .context,
         // The window theme changed and this follows it: the F3 popup's
         // frame is the one thing the host can't recolour itself.
-        "theme",
-        // A drag of the shell panel's top edge.
-        "layer_resize",
-        // Ctrl+Shift+C with no host selection -- answered with the active
-        // pane's paths. See `Ui.copySelectionPaths`.
-        "copy_request",
+        .theme,
         // Losing the window drops the held modifiers the key bar shows:
         // their releases go wherever the keyboard went.
-        "focus",
+        .focus,
     });
     defer conn.deinit();
 

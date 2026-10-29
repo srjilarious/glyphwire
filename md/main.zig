@@ -92,12 +92,12 @@ pub fn main(init: std.process.Init) !void {
     if (args.hasOption("dump")) return dump(alloc, io, path, dump_width, max_width);
 
     var conn = cli.connect(io, alloc, init.environ_map, &.{
-        "key",
-        "resize",
-        "scroll_offset",
-        "mouse_button",
-        "mouse_move",
-        "context",
+        .key,
+        .resize,
+        .scroll,
+        .mouse_button,
+        .mouse_move,
+        .context,
     }) catch return dump(alloc, io, path, dump_width, max_width);
     defer conn.deinit();
 

@@ -105,23 +105,26 @@ fn run(init: std.process.Init) !void {
     // they're visible at all. Unlike the prototype this replaced, the
     // tables would actually survive that exit now -- this wait is purely
     // so a person running the demo interactively gets to look at them.
-    const listener = glyphwire.InputListener.connectFromEnv(init.io, alloc, init.environ_map, &.{"key"}) catch return;
+    const listener = glyphwire.InputListener.connectFromEnv(init.io, alloc, init.environ_map, &.{.key}) catch return;
     defer listener.deinit();
     while (true) {
         const any_ev = (try listener.next(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) orelse continue;
-        const input_ev = any_ev.asInput() orelse {
+        if (!any_ev.isInput()) {
             any_ev.deinit(alloc);
             continue;
-        };
+        }
+        const input_ev = any_ev;
         defer input_ev.deinit(alloc);
         switch (input_ev) {
             .key => |k| if (k.pressed) return,
             .text, .paste => {},
             .copy_request => {},
             .shutdown => return,
-            // A window manager's own commands (see `InputEvent.window_key`).
+            // A window manager's own commands (see `Event.window_key`).
             // Never delivered here: this program is not one.
             .window_key, .window_text => {},
+            // Not input (`Event.isInput`): filtered out before this.
+            else => {},
         }
     }
 }

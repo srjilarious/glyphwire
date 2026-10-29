@@ -44,17 +44,17 @@ pub const ConnectError = error{
     SubscribeFailed,
 };
 
-/// Connects a client and a listener subscribed to `events`, both from
+/// Connects a client and a listener subscribed to `streams`, both from
 /// `GLYPHWIRE_SOCK`. On failure nothing is left open.
 pub fn connect(
     io: std.Io,
     alloc: std.mem.Allocator,
     environ: *const std.process.Environ.Map,
-    events: []const []const u8,
+    streams: []const glyphwire.dispatch.Stream,
 ) ConnectError!Connection {
     var client = glyphwire.Client.connectFromEnv(io, alloc, environ) catch return error.NoSession;
     errdefer client.deinit();
-    const listener = glyphwire.InputListener.connectFromEnv(io, alloc, environ, events) catch
+    const listener = glyphwire.InputListener.connectFromEnv(io, alloc, environ, streams) catch
         return error.SubscribeFailed;
     return .{ .client = client, .listener = listener };
 }
@@ -65,9 +65,9 @@ pub fn connectOrFail(
     alloc: std.mem.Allocator,
     environ: *const std.process.Environ.Map,
     prog: []const u8,
-    events: []const []const u8,
+    streams: []const glyphwire.dispatch.Stream,
 ) Connection {
-    return connect(io, alloc, environ, events) catch |err| switch (err) {
+    return connect(io, alloc, environ, streams) catch |err| switch (err) {
         error.NoSession => fail(io, "{s}: needs a glyphwire session (GLYPHWIRE_SOCK not set)\n", .{prog}),
         error.SubscribeFailed => fail(io, "{s}: couldn't subscribe to input\n", .{prog}),
     };

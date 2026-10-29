@@ -39,17 +39,17 @@ pub fn main(init: std.process.Init) !void {
     // session gates raw input on focus, so a program's keystrokes still
     // never arrive here. `resize` and `theme` follow the overlay too.
     var conn = cli.connectOrFail(io, alloc, init.environ_map, "gmux", &.{
-        "window_keys",
-        "panes",
-        "shutdown",
-        "key",
-        "text",
-        "paste",
-        "mouse_button",
-        "mouse_move",
-        "scroll",
-        "resize",
-        "theme",
+        .window_keys,
+        .panes,
+        .shutdown,
+        .key,
+        .text,
+        .clipboard,
+        .mouse_button,
+        .mouse_move,
+        .scroll,
+        .resize,
+        .theme,
     });
     defer conn.deinit();
 

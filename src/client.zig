@@ -9,6 +9,7 @@ const protocol = @import("protocol.zig");
 const codec = @import("codec.zig");
 const msgpack = @import("msgpack.zig");
 const client_ops = @import("client_ops.zig");
+const dispatch = @import("dispatch.zig");
 
 pub const PxPos = core.PxPos;
 pub const CellPos = core.CellPos;
@@ -795,13 +796,14 @@ pub const Client = struct {
         try self.notify("report_mouse_move", .{ .px = px, .cell = cell });
     }
 
-    /// `subscribe(events)` -- a request; per decisions.md's Input model,
+    /// `subscribe(streams)` -- a request; per decisions.md's Input model,
     /// synchronous so the caller has a clear point after which it's
-    /// guaranteed to start receiving notifications for `events` (e.g.
-    /// `"key"`, `"mouse_button"`) on this connection. See `InputListener`
+    /// guaranteed to start receiving notifications for `streams` (e.g.
+    /// `.key`, `.mouse_button`) on this connection. See `InputListener`
     /// for a ready-made subscribed connection with a background reader.
-    pub fn subscribe(self: *Client, events: []const []const u8) !void {
-        var parsed = try self.request(protocol.SubscribeResult, "subscribe", .{ .events = events });
+    pub fn subscribe(self: *Client, streams: []const dispatch.Stream) !void {
+        var names: [@typeInfo(dispatch.Stream).@"enum".field_names.len][]const u8 = undefined;
+        var parsed = try self.request(protocol.SubscribeResult, "subscribe", .{ .events = streamNames(streams, &names) });
         defer parsed.deinit();
     }
 
@@ -2630,61 +2632,6 @@ pub const KeyEvent = struct {
 /// moved -- the only correct source for a non-US layout, an AltGr combo
 /// or CJK IME composition.
 pub const TextEvent = struct { text: []const u8 };
-/// A key or text event, in the one order they arrived off the wire.
-/// `key` and `text` share a timeline -- the host sends `key_down enter`
-/// and the `text` for what preceded it on the same connection -- so a
-/// line editor has to consume them from a single ordered queue
-/// (`InputListener.next` / `pollNext`, with `Event.asInput`), not two, or "type then Enter"
-/// races. Each variant owns its string, freed like the standalone
-/// events above.
-pub const InputEvent = union(enum) {
-    key: KeyEvent,
-    text: TextEvent,
-    /// One `paste` notification: committed clipboard text to insert
-    /// (`text` owned, freed like `text`). Kept on the same ordered queue
-    /// as `key`/`text` so it lands in the line at the caret position it
-    /// was pasted at. Distinct from `text` so a consumer can treat it
-    /// differently -- glyphwire-shell inserts it literally, newlines and
-    /// all, without submitting.
-    paste: TextEvent,
-    /// One `copy_request` notification: the user pressed the copy
-    /// shortcut with nothing selected. No payload -- the consumer answers
-    /// by calling `Client.setClipboard` with whatever it wants copied
-    /// (glyphwire-shell: the current prompt line).
-    copy_request,
-    /// One `shutdown` notification: the host window is closing. No owned
-    /// memory. glyphwire-shell treats it like a typed `exit` -- flush
-    /// persistent state, then return from its prompt loop.
-    shutdown: ShutdownEvent,
-    /// One `window_key_down` / `window_key_up`: a named key that followed
-    /// this connection's registered window prefix, so it is a window
-    /// command rather than input for any program. Only a window manager
-    /// ever receives these, and a window manager receives *nothing else* --
-    /// it is never in the focused pane, so no program's keystrokes reach it
-    /// at all. `key` owned, freed like `key`.
-    ///
-    /// A separate variant from `key` on purpose: a manager must never be
-    /// able to confuse a command for its own with input meant for a pane,
-    /// and the type system is a better place to enforce that than a comment.
-    window_key: KeyEvent,
-    /// One `window_text`: committed text that followed the window prefix.
-    /// How most prefix commands arrive, since a plain printable key with no
-    /// modifiers is delivered as text. `text` owned.
-    window_text: TextEvent,
-
-    /// Frees the owned string for whichever variant this is.
-    pub fn deinit(self: InputEvent, alloc: std.mem.Allocator) void {
-        switch (self) {
-            .key => |k| alloc.free(k.key),
-            .text => |t| alloc.free(t.text),
-            .paste => |t| alloc.free(t.text),
-            .copy_request => {},
-            .shutdown => {},
-            .window_key => |k| alloc.free(k.key),
-            .window_text => |t| alloc.free(t.text),
-        }
-    }
-};
 pub const MouseButtonEvent = struct {
     button: []const u8,
     pressed: bool,
@@ -2701,7 +2648,7 @@ pub const MouseButtonEvent = struct {
     /// `protocol.MouseButtonParams.clicks`). A release carries its press's.
     clicks: u8 = 1,
 
-    /// Frees the owned `.button` string, like `InputEvent.deinit`. Every
+    /// Frees the owned `.button` string, like `Event.deinit`. Every
     /// drained event owns its own copy (the listener dupes it per
     /// notification), so a consumer that pops without freeing leaks one
     /// string per press *and* release.
@@ -2720,7 +2667,7 @@ pub const ResizeEvent = struct { cols: usize, rows: usize };
 /// One `shutdown` notification: the host window is closing. `grace_ms` is
 /// roughly how long the host waits for this process to exit before it
 /// tears down anyway. No owned memory. Delivered on the same ordered
-/// queue as key/text (`InputEvent.shutdown`) so a consumer sees it in
+/// queue as key/text (`Event.shutdown`) so a consumer sees it in
 /// line with the input it has already queued.
 pub const ShutdownEvent = struct { grace_ms: u32 };
 
@@ -2771,7 +2718,7 @@ pub const LayerResizeEvent = struct {
     cols: usize = 0,
 };
 
-/// One pane's bounds from a `layout` notification.
+/// One layer's bounds from a `layout` notification.
 pub const LayoutBounds = struct {
     layer: core.LayerHandle,
     row: usize,
@@ -2874,18 +2821,49 @@ pub const ContextEvent = struct { context: core.ContextHandle, cols: usize, rows
 /// (`InputListener.next`). `deinit` frees whatever the variant owns; a
 /// variant with nothing owned makes it a no-op, so a consumer can always
 /// `defer ev.deinit(alloc)` without caring which kind it got.
+///
+/// `key` and `text` share a timeline -- the host sends `key_down enter`
+/// and the `text` for what preceded it on the same connection -- so a
+/// line editor consumes them from this one ordered queue, not two, or
+/// "type then Enter" races. `isInput` picks out the kinds a line editor
+/// handles.
 pub const Event = union(enum) {
     key: KeyEvent,
     text: TextEvent,
+    /// One `paste` notification: committed clipboard text to insert
+    /// (`text` owned, freed like `text`). Kept on the same ordered queue
+    /// as `key`/`text` so it lands in the line at the caret position it
+    /// was pasted at. Distinct from `text` so a consumer can treat it
+    /// differently -- glyphwire-shell inserts it literally, newlines and
+    /// all, without submitting.
     paste: TextEvent,
+    /// One `copy_request` notification: the user pressed the copy
+    /// shortcut with nothing selected. No payload -- the consumer answers
+    /// by calling `Client.setClipboard` with whatever it wants copied
+    /// (glyphwire-shell: the current prompt line).
     copy_request,
+    /// One `shutdown` notification: the host window is closing. No owned
+    /// memory. glyphwire-shell treats it like a typed `exit` -- flush
+    /// persistent state, then return from its prompt loop.
     shutdown: ShutdownEvent,
-    /// The host's window gained or lost the keyboard. Not an
-    /// `InputEvent`: it is a fact about the window, like `resize`, and a
-    /// client reads it off the full `Event` queue rather than out of its
-    /// key handling.
+    /// The host's window gained or lost the keyboard. Not input (see
+    /// `isInput`): it is a fact about the window, like `resize`, and a
+    /// client handles it apart from its key handling.
     focus: FocusEvent,
+    /// One `window_key_down` / `window_key_up`: a named key that followed
+    /// this connection's registered window prefix, so it is a window
+    /// command rather than input for any program. Only a window manager
+    /// ever receives these, and a window manager receives *nothing else* --
+    /// it is never in the focused pane, so no program's keystrokes reach it
+    /// at all. `key` owned, freed like `key`.
+    ///
+    /// A separate variant from `key` on purpose: a manager must never be
+    /// able to confuse a command for its own with input meant for a pane,
+    /// and the type system is a better place to enforce that than a comment.
     window_key: KeyEvent,
+    /// One `window_text`: committed text that followed the window prefix.
+    /// How most prefix commands arrive, since a plain printable key with no
+    /// modifiers is delivered as text. `text` owned.
     window_text: TextEvent,
     mouse_button: MouseButtonEvent,
     mouse_move: MouseMoveEvent,
@@ -2918,24 +2896,27 @@ pub const Event = union(enum) {
         }
     }
 
-    /// The same event as the narrower `InputEvent`, for the older
-    /// key/text-only queue API; null for every non-input kind. Ownership
-    /// moves with it.
-    pub fn asInput(self: Event) ?InputEvent {
+    /// Whether this is input a line editor handles: keys, typed and
+    /// pasted text, the copy shortcut, the window's shutdown, and a window
+    /// manager's own keys. The rest are facts about the window or the
+    /// session (size, focus, scroll, layout, ...).
+    pub fn isInput(self: Event) bool {
         return switch (self) {
-            .key => |k| .{ .key = k },
-            .text => |t| .{ .text = t },
-            .paste => |t| .{ .paste = t },
-            .copy_request => .copy_request,
-            .shutdown => |s| .{ .shutdown = s },
-            .window_key => |k| .{ .window_key = k },
-            .window_text => |t| .{ .window_text = t },
-            else => null,
+            .key, .text, .paste, .copy_request, .shutdown, .window_key, .window_text => true,
+            else => false,
         };
     }
 };
 
-/// A dedicated, subscribed connection: sends `subscribe(events)` once,
+/// The wire names of `streams`, for `subscribe`'s `events`, written into
+/// `buf` (one slot per `Stream`, so any list without repeats fits).
+fn streamNames(streams: []const dispatch.Stream, buf: *[@typeInfo(dispatch.Stream).@"enum".field_names.len][]const u8) []const []const u8 {
+    std.debug.assert(streams.len <= buf.len);
+    for (streams, 0..) |stream, i| buf[i] = @tagName(stream);
+    return buf[0..streams.len];
+}
+
+/// A dedicated, subscribed connection: sends `subscribe(streams)` once,
 /// then a background thread continuously reads pushed notifications and
 /// appends each one to a **single arrival-ordered queue** of `Event`s,
 /// while keeping mutex-guarded live caches (`isKeyDown`, `cursorCell`,
@@ -3003,7 +2984,7 @@ pub const InputListener = struct {
     /// isn't tracking a gesture any more.
     const max_queued_mouse_moves = 512;
 
-    /// Connects, subscribes to `events`, and waits for the subscribe ack
+    /// Connects, subscribes to `streams`, and waits for the subscribe ack
     /// before spawning the background reader -- so by the time this
     /// returns, the subscription is guaranteed to be in effect and the
     /// only frames the reader thread will ever see on this connection are
@@ -3013,9 +2994,9 @@ pub const InputListener = struct {
         io: std.Io,
         alloc: std.mem.Allocator,
         socket_path: []const u8,
-        events: []const []const u8,
+        streams: []const dispatch.Stream,
     ) !*InputListener {
-        return connectAt(io, alloc, socket_path, events, .fromProcess());
+        return connectAt(io, alloc, socket_path, streams, .fromProcess());
     }
 
     /// `connect`, but for a listener whose seat isn't the process's own
@@ -3030,7 +3011,7 @@ pub const InputListener = struct {
         io: std.Io,
         alloc: std.mem.Allocator,
         socket_path: []const u8,
-        events: []const []const u8,
+        streams: []const dispatch.Stream,
         seat: Seat,
     ) !*InputListener {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
@@ -3048,7 +3029,7 @@ pub const InputListener = struct {
         };
         errdefer self.state.deinit();
 
-        try self.sendSubscribeAndWaitForAck(events, seat);
+        try self.sendSubscribeAndWaitForAck(streams, seat);
 
         // Joined by deinit, unlike most background threads in this
         // codebase: `state`/`mutex` must outlive the last access this
@@ -3064,11 +3045,11 @@ pub const InputListener = struct {
         io: std.Io,
         alloc: std.mem.Allocator,
         environ_map: *const std.process.Environ.Map,
-        events: []const []const u8,
+        streams: []const dispatch.Stream,
     ) !*InputListener {
         const socket_path = environ_map.get("GLYPHWIRE_SOCK") orelse return error.NoSession;
         notePaneFromEnviron(environ_map);
-        return connect(io, alloc, socket_path, events);
+        return connect(io, alloc, socket_path, streams);
     }
 
     /// Shuts the connection down (unblocking the reader thread's current
@@ -3302,10 +3283,11 @@ pub const InputListener = struct {
     /// could receive keystrokes meant for another program. Folding the two
     /// into one message makes that window impossible rather than merely
     /// small.
-    fn sendSubscribeAndWaitForAck(self: *InputListener, events: []const []const u8, seat: Seat) !void {
+    fn sendSubscribeAndWaitForAck(self: *InputListener, streams: []const dispatch.Stream, seat: Seat) !void {
         const token: ?[]const u8 = if (seat.token) |*t| t else null;
+        var names: [@typeInfo(dispatch.Stream).@"enum".field_names.len][]const u8 = undefined;
         const params: protocol.SubscribeParams = .{
-            .events = events,
+            .events = streamNames(streams, &names),
             .context = seat.context,
             .pane = if (seat.context == null) seat.pane else null,
             .token = token,
@@ -3369,161 +3351,181 @@ pub const InputListener = struct {
         defer parsed.deinit();
         const method = parsed.value.method;
         const params = parsed.value.params;
-        const eql = std.mem.eql;
 
-        if (eql(u8, method, "key_down") or eql(u8, method, "key_up") or
-            eql(u8, method, "window_key_down") or eql(u8, method, "window_key_up"))
-        {
-            const p = try self.parseParams(protocol.KeyParams, params);
-            defer p.deinit();
-            const window = eql(u8, method[0..@min(method.len, 7)], "window_");
-            const pressed = std.mem.endsWith(u8, method, "_down");
-            const owned_key = try self.alloc.dupe(u8, p.value.key);
-            errdefer self.alloc.free(owned_key);
-            const ev: KeyEvent = .{ .key = owned_key, .pressed = pressed, .mods = p.value.mods };
-            if (window) {
-                // Deliberately *not* folded into `state`'s down-set: this
-                // key never reached any program, so reporting it as held
-                // would make a manager's own modifier checks disagree with
-                // the keyboard.
-                try self.enqueue(.{ .window_key = ev });
-            } else {
+        // Every event the server can push is listed, so a new one fails to
+        // compile here until the client decodes it or says why it doesn't.
+        // A method this build doesn't know (a newer host's) is skipped.
+        const event = dispatch.PushEvent.fromMethod(method) orelse return;
+        switch (event) {
+            .key, .window_key_down, .window_key_up => {
+                const p = try self.parseParams(protocol.KeyParams, params);
+                defer p.deinit();
+                const window = event != .key;
+                const pressed = std.mem.endsWith(u8, method, "_down");
+                const owned_key = try self.alloc.dupe(u8, p.value.key);
+                errdefer self.alloc.free(owned_key);
+                const ev: KeyEvent = .{ .key = owned_key, .pressed = pressed, .mods = p.value.mods };
+                if (window) {
+                    // Deliberately *not* folded into `state`'s down-set: this
+                    // key never reached any program, so reporting it as held
+                    // would make a manager's own modifier checks disagree with
+                    // the keyboard.
+                    try self.enqueue(.{ .window_key = ev });
+                } else {
+                    {
+                        self.mutex.lockUncancelable(self.io);
+                        defer self.mutex.unlock(self.io);
+                        _ = try self.state.setKey(p.value.key, pressed);
+                    }
+                    try self.enqueue(.{ .key = ev });
+                }
+            },
+            .text, .window_text, .paste => {
+                const text = if (event == .paste) blk: {
+                    const p = try self.parseParams(protocol.ClipboardTextParams, params);
+                    defer p.deinit();
+                    break :blk try self.alloc.dupe(u8, p.value.text);
+                } else blk: {
+                    const p = try self.parseParams(protocol.TextParams, params);
+                    defer p.deinit();
+                    break :blk try self.alloc.dupe(u8, p.value.text);
+                };
+                errdefer self.alloc.free(text);
+                const ev: TextEvent = .{ .text = text };
+                try self.enqueue(switch (event) {
+                    .text => .{ .text = ev },
+                    .paste => .{ .paste = ev },
+                    else => .{ .window_text = ev },
+                });
+            },
+            .mouse_button => {
+                const p = try self.parseParams(protocol.MouseButtonParams, params);
+                defer p.deinit();
+                const owned_button = try self.alloc.dupe(u8, p.value.button);
+                errdefer self.alloc.free(owned_button);
                 {
                     self.mutex.lockUncancelable(self.io);
                     defer self.mutex.unlock(self.io);
-                    _ = try self.state.setKey(p.value.key, pressed);
+                    self.pointer.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
+                    self.pointer.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
+                    _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
                 }
-                try self.enqueue(.{ .key = ev });
-            }
-        } else if (eql(u8, method, "text") or eql(u8, method, "window_text") or eql(u8, method, "paste")) {
-            const text = if (eql(u8, method, "paste")) blk: {
-                const p = try self.parseParams(protocol.ClipboardTextParams, params);
+                try self.enqueue(.{ .mouse_button = .{
+                    .button = owned_button,
+                    .pressed = p.value.pressed,
+                    .px = p.value.px,
+                    .cell = p.value.cell,
+                    .view_offset = p.value.view_offset,
+                    .mods = p.value.mods,
+                    .clicks = p.value.clicks,
+                } });
+            },
+            .mouse_move => {
+                const p = try self.parseParams(protocol.MouseMoveParams, params);
                 defer p.deinit();
-                break :blk try self.alloc.dupe(u8, p.value.text);
-            } else blk: {
-                const p = try self.parseParams(protocol.TextParams, params);
+                {
+                    self.mutex.lockUncancelable(self.io);
+                    defer self.mutex.unlock(self.io);
+                    self.pointer.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
+                    self.pointer.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
+                }
+                try self.enqueue(.{ .mouse_move = .{ .px = p.value.px, .cell = p.value.cell, .mods = p.value.mods } });
+            },
+            .terminal_reply => {
+                const p = try self.parseParams(protocol.TerminalReplyParams, params);
                 defer p.deinit();
-                break :blk try self.alloc.dupe(u8, p.value.text);
-            };
-            errdefer self.alloc.free(text);
-            const ev: TextEvent = .{ .text = text };
-            try self.enqueue(if (eql(u8, method, "text"))
-                .{ .text = ev }
-            else if (eql(u8, method, "paste"))
-                .{ .paste = ev }
-            else
-                .{ .window_text = ev });
-        } else if (eql(u8, method, "mouse_button")) {
-            const p = try self.parseParams(protocol.MouseButtonParams, params);
-            defer p.deinit();
-            const owned_button = try self.alloc.dupe(u8, p.value.button);
-            errdefer self.alloc.free(owned_button);
-            {
-                self.mutex.lockUncancelable(self.io);
-                defer self.mutex.unlock(self.io);
-                self.pointer.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
-                self.pointer.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
-                _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
-            }
-            try self.enqueue(.{ .mouse_button = .{
-                .button = owned_button,
-                .pressed = p.value.pressed,
-                .px = p.value.px,
-                .cell = p.value.cell,
-                .view_offset = p.value.view_offset,
-                .mods = p.value.mods,
-                .clicks = p.value.clicks,
-            } });
-        } else if (eql(u8, method, "mouse_move")) {
-            const p = try self.parseParams(protocol.MouseMoveParams, params);
-            defer p.deinit();
-            {
-                self.mutex.lockUncancelable(self.io);
-                defer self.mutex.unlock(self.io);
-                self.pointer.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
-                self.pointer.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
-            }
-            try self.enqueue(.{ .mouse_move = .{ .px = p.value.px, .cell = p.value.cell, .mods = p.value.mods } });
-        } else if (eql(u8, method, "terminal_reply")) {
-            const p = try self.parseParams(protocol.TerminalReplyParams, params);
-            defer p.deinit();
-            const owned = try self.alloc.dupe(u8, p.value.bytes);
-            errdefer self.alloc.free(owned);
-            try self.enqueue(.{ .terminal_reply = owned });
-        } else if (eql(u8, method, "scroll")) {
-            const p = try self.parseParams(protocol.ScrollParams, params);
-            defer p.deinit();
-            try self.enqueue(.{ .scroll = .{ .layer = p.value.layer, .offset = p.value.offset, .max = p.value.max } });
-        } else if (eql(u8, method, "scroll_offset")) {
-            const p = try self.parseParams(protocol.ScrollOffsetParams, params);
-            defer p.deinit();
-            try self.enqueue(.{ .scroll_offset = .{
-                .layer = p.value.layer,
-                .row = p.value.row,
-                .col = p.value.col,
-                .max_row = p.value.max_row,
-                .max_col = p.value.max_col,
-            } });
-        } else if (eql(u8, method, "layout")) {
-            const p = try self.parseParams(protocol.LayoutParams, params);
-            defer p.deinit();
-            // The parsed slice lives in `p`'s arena, so it's copied out
-            // before that's freed -- the event outlives this frame.
-            const owned = try self.alloc.alloc(LayoutBounds, p.value.layers.len);
-            errdefer self.alloc.free(owned);
-            for (p.value.layers, 0..) |b, i| {
-                owned[i] = .{ .layer = b.layer, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
-            }
-            try self.enqueue(.{ .layout = .{ .layers = owned } });
-        } else if (eql(u8, method, "layer_resize")) {
-            const p = try self.parseParams(protocol.LayerResizeParams, params);
-            defer p.deinit();
-            try self.enqueue(.{ .layer_resize = .{ .context = p.value.context, .layer = p.value.layer, .rows = p.value.rows, .cols = p.value.cols } });
-        } else if (eql(u8, method, "pane_layout")) {
-            const p = try self.parseParams(protocol.PaneLayoutParams, params);
-            defer p.deinit();
-            const owned = try self.alloc.alloc(PaneBounds, p.value.panes.len);
-            errdefer self.alloc.free(owned);
-            for (p.value.panes, 0..) |b, i| {
-                owned[i] = .{ .pane = b.pane, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
-            }
-            try self.enqueue(.{ .pane_layout = .{ .panes = owned } });
-        } else if (eql(u8, method, "pane_exit")) {
-            const p = try self.parseParams(protocol.PaneExitParams, params);
-            defer p.deinit();
-            try self.enqueue(.{ .pane_exit = .{ .pane = p.value.pane, .status = p.value.status } });
-        } else if (eql(u8, method, "pane_focus")) {
-            const p = try self.parseParams(protocol.PaneFocusParams, params);
-            defer p.deinit();
-            try self.enqueue(.{ .pane_focus = .{ .pane = p.value.pane } });
-        } else if (eql(u8, method, "remote_exit")) {
-            const p = try self.parseParams(protocol.RemoteExitParams, params);
-            defer p.deinit();
-            try self.enqueue(.{ .remote_exit = .{
-                .session = p.value.session,
-                .status = p.value.status,
-                .started = p.value.started,
-            } });
-        } else if (eql(u8, method, "resize")) {
-            const p = try self.parseParams(protocol.ResizeParams, params);
-            defer p.deinit();
-            try self.enqueue(.{ .resize = .{ .cols = p.value.cols, .rows = p.value.rows } });
-        } else if (eql(u8, method, "shutdown")) {
-            const p = try self.parseParams(protocol.ShutdownParams, params);
-            defer p.deinit();
-            try self.enqueue(.{ .shutdown = .{ .grace_ms = p.value.grace_ms } });
-        } else if (eql(u8, method, "focus")) {
-            const p = try self.parseParams(protocol.FocusParams, params);
-            defer p.deinit();
-            try self.enqueue(.{ .focus = .{ .focused = p.value.focused } });
-        } else if (eql(u8, method, "context")) {
-            const p = try self.parseParams(protocol.ContextParams, params);
-            defer p.deinit();
-            try self.enqueue(.{ .context = .{ .context = p.value.context, .cols = p.value.cols, .rows = p.value.rows } });
-        } else if (eql(u8, method, "copy_request")) {
-            try self.enqueue(.copy_request);
-        } else if (eql(u8, method, "theme")) {
-            try self.enqueue(.theme);
+                const owned = try self.alloc.dupe(u8, p.value.bytes);
+                errdefer self.alloc.free(owned);
+                try self.enqueue(.{ .terminal_reply = owned });
+            },
+            .scroll => {
+                const p = try self.parseParams(protocol.ScrollParams, params);
+                defer p.deinit();
+                try self.enqueue(.{ .scroll = .{ .layer = p.value.layer, .offset = p.value.offset, .max = p.value.max } });
+            },
+            .scroll_offset => {
+                const p = try self.parseParams(protocol.ScrollOffsetParams, params);
+                defer p.deinit();
+                try self.enqueue(.{ .scroll_offset = .{
+                    .layer = p.value.layer,
+                    .row = p.value.row,
+                    .col = p.value.col,
+                    .max_row = p.value.max_row,
+                    .max_col = p.value.max_col,
+                } });
+            },
+            .layout => {
+                const p = try self.parseParams(protocol.LayoutParams, params);
+                defer p.deinit();
+                // The parsed slice lives in `p`'s arena, so it's copied out
+                // before that's freed -- the event outlives this frame.
+                const owned = try self.alloc.alloc(LayoutBounds, p.value.layers.len);
+                errdefer self.alloc.free(owned);
+                for (p.value.layers, 0..) |b, i| {
+                    owned[i] = .{ .layer = b.layer, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
+                }
+                try self.enqueue(.{ .layout = .{ .layers = owned } });
+            },
+            .layer_resize => {
+                const p = try self.parseParams(protocol.LayerResizeParams, params);
+                defer p.deinit();
+                try self.enqueue(.{ .layer_resize = .{ .context = p.value.context, .layer = p.value.layer, .rows = p.value.rows, .cols = p.value.cols } });
+            },
+            .pane_layout => {
+                const p = try self.parseParams(protocol.PaneLayoutParams, params);
+                defer p.deinit();
+                const owned = try self.alloc.alloc(PaneBounds, p.value.panes.len);
+                errdefer self.alloc.free(owned);
+                for (p.value.panes, 0..) |b, i| {
+                    owned[i] = .{ .pane = b.pane, .row = b.row, .col = b.col, .cols = b.cols, .rows = b.rows };
+                }
+                try self.enqueue(.{ .pane_layout = .{ .panes = owned } });
+            },
+            .pane_exit => {
+                const p = try self.parseParams(protocol.PaneExitParams, params);
+                defer p.deinit();
+                try self.enqueue(.{ .pane_exit = .{ .pane = p.value.pane, .status = p.value.status } });
+            },
+            .pane_focus => {
+                const p = try self.parseParams(protocol.PaneFocusParams, params);
+                defer p.deinit();
+                try self.enqueue(.{ .pane_focus = .{ .pane = p.value.pane } });
+            },
+            .remote_exit => {
+                const p = try self.parseParams(protocol.RemoteExitParams, params);
+                defer p.deinit();
+                try self.enqueue(.{ .remote_exit = .{
+                    .session = p.value.session,
+                    .status = p.value.status,
+                    .started = p.value.started,
+                } });
+            },
+            .resize => {
+                const p = try self.parseParams(protocol.ResizeParams, params);
+                defer p.deinit();
+                try self.enqueue(.{ .resize = .{ .cols = p.value.cols, .rows = p.value.rows } });
+            },
+            .shutdown => {
+                const p = try self.parseParams(protocol.ShutdownParams, params);
+                defer p.deinit();
+                try self.enqueue(.{ .shutdown = .{ .grace_ms = p.value.grace_ms } });
+            },
+            .focus => {
+                const p = try self.parseParams(protocol.FocusParams, params);
+                defer p.deinit();
+                try self.enqueue(.{ .focus = .{ .focused = p.value.focused } });
+            },
+            .context => {
+                const p = try self.parseParams(protocol.ContextParams, params);
+                defer p.deinit();
+                try self.enqueue(.{ .context = .{ .context = p.value.context, .cols = p.value.cols, .rows = p.value.rows } });
+            },
+            .copy_request => try self.enqueue(.copy_request),
+            .theme => try self.enqueue(.theme),
+            // Not surfaced as an `Event`: no client acts on another
+            // connection's selection, and one that wants the current state
+            // asks for it.
+            .selection => {},
         }
     }
 

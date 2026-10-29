@@ -659,7 +659,7 @@ fn runPrompt(
     // subscribe to always -- nothing broadcasts it in a session with no
     // remote panes. `focus` is only forwarded to a pty child that turned
     // on `?1004`.
-    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ "key", "text", "mouse_button", "mouse_move", "scroll", "resize", "shutdown", "clipboard", "terminal", "remote", "context", "focus" }) catch |err| {
+    const listener = glyphwire.InputListener.connect(io, alloc, socket_path, &.{ .key, .text, .mouse_button, .mouse_move, .scroll, .resize, .shutdown, .clipboard, .terminal, .remote, .context, .focus }) catch |err| {
         std.log.err("prompt: failed to subscribe: {t}", .{err});
         return;
     };
@@ -844,7 +844,7 @@ fn promptEventLoop(prompt: *Prompt, io: std.Io, alloc: std.mem.Allocator, listen
             _ = promptIdleTick(prompt);
             continue;
         };
-        const input_ev = any_ev.asInput() orelse {
+        if (!any_ev.isInput()) {
             defer any_ev.deinit(alloc);
             try handleSessionEvent(prompt, any_ev);
             // A steady stream of pointer events must not starve the idle
@@ -854,7 +854,8 @@ fn promptEventLoop(prompt: *Prompt, io: std.Io, alloc: std.mem.Allocator, listen
                 _ = promptIdleTick(prompt);
             }
             continue;
-        };
+        }
+        const input_ev = any_ev;
         // Someone else's keystroke: embedded and blurred, the host has
         // the keyboard and this event is only here because input is
         // delivered per context. Dropped, not queued -- what was typed
@@ -919,11 +920,10 @@ fn handleSessionEvent(prompt: *Prompt, any_ev: glyphwire.Event) !void {
 /// resolved through their OS keyboard layout / dead keys / IME -- is taken
 /// from the same queue as key events so "type then Enter" can't reorder.
 /// Text only edits the live line, so it's held back while browsing
-/// scrollback, matching how the printable-key path used to gate on
-/// `browse_pos`. The physical key event that accompanies each keystroke in
-/// real host use is a separate `.key` event and just falls through
-/// `handlePromptKey` doing nothing.
-fn takeKeyEvent(prompt: *Prompt, alloc: std.mem.Allocator, input_ev: glyphwire.InputEvent) !?glyphwire.KeyEvent {
+/// scrollback (`browse_pos`), as printable keys are. The physical key
+/// event that accompanies each keystroke in real host use is a separate
+/// `.key` event and just falls through `handlePromptKey` doing nothing.
+fn takeKeyEvent(prompt: *Prompt, alloc: std.mem.Allocator, input_ev: glyphwire.Event) !?glyphwire.KeyEvent {
     switch (input_ev) {
         .text => |tev| {
             defer alloc.free(tev.text);
@@ -987,7 +987,7 @@ fn takeKeyEvent(prompt: *Prompt, alloc: std.mem.Allocator, input_ev: glyphwire.I
             prompt.should_exit = true;
             return null;
         },
-        // A window manager's own commands (see `InputEvent.window_key`).
+        // A window manager's own commands (see `Event.window_key`).
         // Never delivered here: this program is not one.
         .window_key => |kev| {
             alloc.free(kev.key);
@@ -998,6 +998,8 @@ fn takeKeyEvent(prompt: *Prompt, alloc: std.mem.Allocator, input_ev: glyphwire.I
             return null;
         },
         .key => |kev| return kev,
+        // Not input (`Event.isInput`): filtered out before this.
+        else => return null,
     }
 }
 
@@ -3717,13 +3719,13 @@ pub const Prompt = struct {
     /// is recorded the way the prompt loop would (`noteOffPromptEvent`),
     /// and the rest is dropped. A click made while a command ran is not
     /// owed to the prompt that comes back.
-    pub fn nextInput(self: *Prompt, listener: *glyphwire.InputListener, timeout: ?std.Io.Timeout) ?glyphwire.InputEvent {
+    pub fn nextInput(self: *Prompt, listener: *glyphwire.InputListener, timeout: ?std.Io.Timeout) ?glyphwire.Event {
         while (true) {
             const ev = if (timeout) |t|
                 (listener.next(t) catch null) orelse return null
             else
                 listener.pollNext() orelse return null;
-            if (ev.asInput()) |iev| return iev;
+            if (ev.isInput()) return ev;
             defer ev.deinit(self.client.alloc);
             self.noteOffPromptEvent(ev);
             if (timeout != null) return null;
@@ -3777,7 +3779,7 @@ pub const Prompt = struct {
                 self.should_exit = true;
                 return true;
             },
-            // A window manager's own commands (see `InputEvent.window_key`).
+            // A window manager's own commands (see `Event.window_key`).
             // Never delivered here: this program is not one.
             .window_key, .window_text => return false,
             .key => |kev| {
@@ -3806,6 +3808,8 @@ pub const Prompt = struct {
                 }
                 return false;
             },
+            // Not input (`Event.isInput`): filtered out before this.
+            else => return false,
         }
     }
 
@@ -3830,10 +3834,12 @@ pub const Prompt = struct {
                 self.should_exit = true;
                 hit = true;
             },
-            // A window manager's own commands (see `InputEvent.window_key`).
+            // A window manager's own commands (see `Event.window_key`).
             // Never delivered here: this program is not one.
             .window_key => |kev| self.client.alloc.free(kev.key),
             .window_text => |tev| self.client.alloc.free(tev.text),
+            // Not input (`Event.isInput`): `nextInput` never returns one.
+            else => {},
         };
         return hit;
     }
@@ -4320,9 +4326,11 @@ fn hookPollInterrupt(ctx: *anyopaque) bool {
             self.should_exit = true;
             hit = true;
         },
-        // A window manager's own commands (see `InputEvent.window_key`).
+        // A window manager's own commands (see `Event.window_key`).
         // Never delivered here: this program is not one.
         .window_key, .window_text => {},
+        // Not input (`Event.isInput`): filtered out before this.
+        else => {},
     };
     return hit;
 }
