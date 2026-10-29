@@ -8,8 +8,8 @@
 //! `App.needsRedraw` compares a full fingerprint of everything the
 //! renderer composites -- this module covers the shared grid model, the
 //! part that is pure and worth unit-testing on its own; the host-local
-//! rest (framebuffer size, cell size, caret, IME preedit) is folded in by
-//! `App.needsRedraw` directly since it needs the engine handle.
+//! rest (framebuffer size, cell size, caret, and `App.host_gen` for the
+//! overlays) is folded in by `App.needsRedraw` directly.
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
@@ -80,6 +80,9 @@ pub fn contextSig(ctx: *const glyphwire.Context) ContextSig {
     topo = mix(topo, if (ctx.caret_shape) |shape| @as(u64, @intFromEnum(shape)) + 1 else 0);
     // So does `set_divider_style`: it restyles the split bands only.
     topo = mix(topo, ctx.divider_style_gen);
+    // And a theme change, the window's or the context's own: every
+    // colour moves, but no layer's `render_gen` does.
+    topo = mix(topo, ctx.theme_gen);
     sig.topo = topo;
 
     sig.root_view = ctx.root.view_scroll;
@@ -101,9 +104,11 @@ pub fn hashContextSig(sig: ContextSig) u64 {
 /// to the editor you're typing in. The program got the event and redrew,
 /// but the window didn't repaint until something changed in the focused
 /// pane. Summed rather than mixed in order because the pane table's
-/// iteration order isn't stable. Caller holds `ctx_mutex`.
+/// iteration order isn't stable. The focused pane is in it too: a focus
+/// move, from a click or a client's `focus_pane`, relights the dividers
+/// without touching a cell. Caller holds `ctx_mutex`.
 pub fn panesSig(session: *glyphwire.Session) u64 {
-    var sum: u64 = session.pane_layout_gen.load(.monotonic);
+    var sum: u64 = mix(session.pane_layout_gen.load(.monotonic), session.focused_pane.load(.monotonic));
     var it = session.panes.iterator();
     while (it.next()) |e| {
         if (!e.value_ptr.mapped) continue;

@@ -527,24 +527,24 @@ pub fn paneFocusPulseMixTest(_: std.Io, _: std.mem.Allocator) !void {
 /// and only while there is a pane divider to colour.
 pub fn paneFocusClockTest(_: std.Io, _: std.mem.Allocator) !void {
     var pf: hs.pane_focus.PaneFocus = .{};
-    pf.tick(1, true, 0);
-    pf.tick(1, true, 1000);
+    _ = pf.tick(1, true, 0);
+    _ = pf.tick(1, true, 1000);
     try testz.expectEqual(pf.elapsed_ms, 1000);
     // Wraps at a whole period, two legs.
-    pf.tick(1, true, 5500);
+    _ = pf.tick(1, true, 5500);
     try testz.expectEqual(pf.elapsed_ms, 500);
-    pf.tick(2, true, 16);
+    _ = pf.tick(2, true, 16);
     try testz.expectEqual(pf.elapsed_ms, 0);
 
     try testz.expectEqual(pf.idleTimeoutMs(true).?, hs.pane_focus.pulse_frame_ms);
     try testz.expectTrue(pf.idleTimeoutMs(false) == null);
-    pf.tick(2, false, 16);
+    _ = pf.tick(2, false, 16);
     try testz.expectEqual(pf.elapsed_ms, 0);
     try testz.expectTrue(pf.idleTimeoutMs(true) == null);
 
     var solid: hs.pane_focus.PaneFocus = .{ .cfg = .{ .mode = .solid } };
-    solid.tick(1, true, 0);
-    solid.tick(1, true, 1000);
+    _ = solid.tick(1, true, 0);
+    _ = solid.tick(1, true, 1000);
     try testz.expectEqual(solid.elapsed_ms, 0);
     try testz.expectTrue(solid.idleTimeoutMs(true) == null);
 
@@ -554,8 +554,19 @@ pub fn paneFocusClockTest(_: std.Io, _: std.mem.Allocator) !void {
     // Solid is the highlight colour itself; a pulse at its start too.
     const strong = th.roleColor(.pane_focus);
     try testz.expectEqual(solid.color(&th).?.b, strong.b);
-    pf.tick(2, true, 0);
+    _ = pf.tick(2, true, 0);
     try testz.expectEqual(pf.color(&th).?.b, strong.b);
+
+    // `tick` reports a change only when the highlight looks different:
+    // a focus move, a pulse step, not a steady solid colour.
+    var watched: hs.pane_focus.PaneFocus = .{};
+    try testz.expectTrue(watched.tick(1, true, 0));
+    try testz.expectFalse(watched.tick(1, true, 0));
+    try testz.expectTrue(watched.tick(1, true, 750));
+    try testz.expectTrue(watched.tick(3, true, 0));
+    var steady: hs.pane_focus.PaneFocus = .{ .cfg = .{ .mode = .solid } };
+    _ = steady.tick(1, true, 0);
+    try testz.expectFalse(steady.tick(1, true, 1000));
 }
 
 /// The cells that border a pane are its one-cell ring, corners included;
@@ -955,6 +966,18 @@ pub fn contextSigMovesOnScrollViewTest(_: std.Io, alloc: std.mem.Allocator) !voi
     _ = ctx.root.scrollView(null, 1);
     const scrolled = redraw.contextSig(&ctx);
     try testz.expectFalse(std.meta.eql(at_tail, scrolled));
+}
+
+/// A theme change (the window's, which the context follows, or its own
+/// `set_theme`) recolours everything without writing a cell.
+pub fn contextSigMovesOnThemeChangeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ctx = try glyphwire.Context.init(alloc, 40, 20, 0);
+    defer ctx.deinit();
+
+    const before = redraw.contextSig(&ctx);
+    ctx.setOwnTheme(glyphwire.theme.initDefault());
+    const after = redraw.contextSig(&ctx);
+    try testz.expectFalse(std.meta.eql(before, after));
 }
 
 // ─── config.effectiveCursorShape ──────────────────────────────────────

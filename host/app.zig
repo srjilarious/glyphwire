@@ -31,13 +31,18 @@ const CursorConfig = config.CursorConfig;
 const CursorShape = config.CursorShape;
 
 /// Everything `App.needsRedraw` compares one drawn frame to the next: the
-/// pure `Context` fingerprint (`redraw.zig`) plus the host-local state
-/// that also decides what ends up on screen. A plain value type, compared
-/// with `std.meta.eql`.
+/// pure `Context` and pane fingerprints (`redraw.zig`), the window and
+/// cell size, the caret, and `host_gen` for every host-drawn overlay. A
+/// plain value type, compared with `std.meta.eql`.
+///
+/// An overlay the host draws on its own (switchers, the divider ghost,
+/// the IME preedit, the focus highlight) doesn't get a field here: it
+/// calls `App.invalidate` when it changes, so a new overlay can't be
+/// forgotten in the fingerprint.
 const RedrawSig = struct {
     ctx: redraw_mod.ContextSig,
-    /// Every mapped pane's on-screen context and the pane layout
-    /// (`redraw.panesSig`). `ctx` is only the focused one, and a change in
+    /// Every mapped pane's on-screen context, the pane layout and which
+    /// pane has focus (`redraw.panesSig`). `ctx` is only the focused one, and a change in
     /// any other pane -- a wheel scroll there, a program redrawing on its
     /// own -- has to repaint too.
     panes: u64,
@@ -59,30 +64,9 @@ const RedrawSig = struct {
     caret_row: usize,
     caret_col: usize,
     caret_shape: CursorShape,
-    /// FNV hash of the IME preedit string (empty when no composition is
-    /// active) -- the overlay is drawn straight from engine keyboard
-    /// state, which never touches `render_gen`.
-    preedit_hash: u64,
-    /// While a `--screenshot` capture is still pending every frame must
-    /// draw, so the readback in `render` actually happens.
-    screenshot_pending: bool,
-    /// The divider drag ghost's position, so it repaints as it's dragged
-    /// (the layout it previews doesn't move until the drag ends, so
-    /// nothing else in the sig changes mid-drag). All zero when idle.
-    divider_preview_x: f32,
-    divider_preview_y: f32,
-    divider_preview_on: bool,
-    /// The context switcher's change-counter -- opening, closing and
-    /// moving the selection repaint an overlay no cell knows about.
-    switcher_gen: u64,
-    /// The theme switcher's, the same way. Its previews change the
-    /// window theme too, which this also covers.
-    theme_switcher_gen: u64,
-    /// The focused pane and its highlight's colour this frame: a focus
-    /// move recolours dividers no cell knows about, and a pulse moves
-    /// the colour on its own clock. Packed RGB; 0 with no highlight.
-    pane_focus: glyphwire.PaneHandle,
-    pane_focus_rgb: u32,
+    /// `App.host_gen`: bumped by `App.invalidate` whenever a host-drawn
+    /// overlay changes.
+    host_gen: u64,
 };
 
 pub const EngOptions: host_eng.EngineOptions = .{
@@ -183,6 +167,9 @@ pub const App = struct {
     /// The last drawn frame's redraw fingerprint (see `needsRedraw`).
     /// Null until the first frame, which always draws.
     redraw_prev: ?RedrawSig = null,
+    /// Change counter for everything the host draws over the grid on its
+    /// own; see `invalidate`.
+    host_gen: u64 = 0,
 
     /// Frame-timing profiler + HUD toggle. Inert (every call an
     /// early-return) unless `host.conf.lua`'s `profile` is set. See
@@ -414,7 +401,9 @@ pub const App = struct {
         self.caret.reconcilePin();
 
         self.caret.tickBlink(deltaTimeMs);
-        self.pane_focus.tick(self.server.session.focused_pane.load(.monotonic), self.caret.window_focused, deltaTimeMs);
+        if (self.pane_focus.tick(self.server.session.focused_pane.load(.monotonic), self.caret.window_focused, deltaTimeMs))
+            self.invalidate();
+        self.preedit.noticeChange(eng);
         // Last, so the OS text-input area follows wherever every path
         // above left the caret. Drives the IME candidate window's
         // placement.
@@ -474,6 +463,13 @@ pub const App = struct {
     /// `ctx_mutex`-held pass over the layers (`redraw.contextSig`) plus a
     /// few host-local reads. Always true on the first frame and while a
     /// `--screenshot` capture is still pending.
+    /// Asks for the next frame to be drawn: an overlay the host draws
+    /// itself changed in a way no grid or pane fingerprint can see. Main
+    /// thread only, like every overlay that calls it.
+    pub fn invalidate(self: *App) void {
+        self.host_gen +%= 1;
+    }
+
     pub fn needsRedraw(self: *App, eng: *Engine) bool {
         const t0: ?std.Io.Timestamp = if (self.profiler.active()) self.profiler.now() else null;
         defer if (t0) |s| self.profiler.recordSince(.redraw_check, s);
@@ -567,7 +563,6 @@ pub const App = struct {
         var caret_row: usize = 0;
         var caret_col: usize = 0;
         var caret_shape: CursorShape = self.caret.shapeFor(null);
-        var focus_rgb: u32 = 0;
         {
             const session_lock = server.lockSession();
             defer session_lock.unlock();
@@ -577,8 +572,6 @@ pub const App = struct {
             if (self.profiler.active()) server.session.profile = self.profiler.snapshot();
             ctx_sig = redraw_mod.contextSig(server.ctx);
             panes_sig = redraw_mod.panesSig(&server.session);
-            if (self.pane_focus.color(&server.session.theme.theme)) |c|
-                focus_rgb = (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
             // The shape actually drawn, not the configured one: a client
             // `set_caret_shape`, or the window losing focus, changes the
             // caret without touching a cell.
@@ -606,15 +599,7 @@ pub const App = struct {
             .caret_row = caret_row,
             .caret_col = caret_col,
             .caret_shape = caret_shape,
-            .preedit_hash = std.hash.Fnv1a_64.hash(self.preedit.text(eng)),
-            .screenshot_pending = self.screenshot.path != null and !self.screenshot.done,
-            .divider_preview_x = if (self.panes.preview) |p| p.x else 0,
-            .divider_preview_y = if (self.panes.preview) |p| p.y else 0,
-            .divider_preview_on = self.panes.preview != null,
-            .switcher_gen = self.switcher.gen,
-            .theme_switcher_gen = self.theme_switcher.gen,
-            .pane_focus = server.session.focused_pane.load(.monotonic),
-            .pane_focus_rgb = focus_rgb,
+            .host_gen = self.host_gen,
         };
     }
 

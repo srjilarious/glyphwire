@@ -35,6 +35,11 @@ pub const Preedit = struct {
     /// caret that hasn't moved doesn't re-issue the call every frame.
     last_area: ?Area = null,
 
+    /// Hash of the composition and its IME caret as last seen by
+    /// `noticeChange`. The overlay is drawn straight from the engine's
+    /// keyboard state, which no grid fingerprint covers.
+    seen_hash: u64 = 0,
+
     const Area = struct { x: i32, y: i32, w: i32, h: i32 };
 
     /// The composition in progress, or an empty slice when there is none.
@@ -51,6 +56,20 @@ pub const Preedit = struct {
     pub fn cursorByte(self: *const Preedit, eng: *Engine) ?usize {
         _ = self;
         return eng.inputs.keyboard.preeditCursorByte();
+    }
+
+    /// Asks for a repaint (`App.invalidate`) when the composition or the
+    /// IME's caret within it changed since the last call. Called every
+    /// frame from `App.update`, after the event poll that delivers them.
+    pub fn noticeChange(self: *Preedit, eng: *Engine) void {
+        var h = std.hash.Fnv1a_64.init();
+        h.update(self.text(eng));
+        const cursor: u64 = if (self.cursorByte(eng)) |b| b + 1 else 0;
+        h.update(std.mem.asBytes(&cursor));
+        const hash = h.final();
+        if (hash == self.seen_hash) return;
+        self.seen_hash = hash;
+        self.app.invalidate();
     }
 
     /// Points the OS text-input area at the caret cell so the IME's

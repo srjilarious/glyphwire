@@ -166,8 +166,18 @@ pub const Panes = struct {
     drag: ?Drag = null,
 
     /// While `drag` is set, the previewed band position in pixels --
-    /// `render.zig` draws a ghost divider here. Null otherwise.
+    /// `render.zig` draws a ghost divider here. Null otherwise. Set it
+    /// through `setPreview`, which asks for the repaint.
     preview: ?geometry.RectPx = null,
+
+    /// Moves (or, with null, removes) the ghost divider. The layout it
+    /// previews doesn't change until the drag ends, so nothing else would
+    /// repaint for it.
+    fn setPreview(self: *Panes, rect: ?geometry.RectPx) void {
+        if (std.meta.eql(self.preview, rect)) return;
+        self.preview = rect;
+        self.app.invalidate();
+    }
 
     pub const Drag = struct {
         level: Band.Level,
@@ -404,7 +414,7 @@ pub const Panes = struct {
                     .grab_px = if (sideways) pos.x else pos.y,
                     .base = base,
                 };
-                self.preview = base;
+                self.setPreview(base);
                 return true;
             };
             self.drag = .{
@@ -415,7 +425,7 @@ pub const Panes = struct {
                 .grab_px = if (band.axis == .row) pos.x else pos.y,
                 .base = geometry.cellRectPx(band.rect),
             };
-            self.preview = geometry.cellRectPx(band.rect);
+            self.setPreview(geometry.cellRectPx(band.rect));
             return true;
         }
 
@@ -429,7 +439,7 @@ pub const Panes = struct {
         if (!eng.inputs.mouse.down(.left)) {
             // Drag ended: apply the whole move once, then re-lay-out once.
             self.drag = null;
-            self.preview = null;
+            self.setPreview(null);
             if (travelled != 0) self.applyDrag(drag, travelled);
             return true;
         }
@@ -444,7 +454,7 @@ pub const Panes = struct {
         } else {
             ghost.y += shift_px;
         }
-        self.preview = ghost;
+        self.setPreview(ghost);
         return true;
     }
 

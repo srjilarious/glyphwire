@@ -47,8 +47,6 @@ pub const ThemeSwitcher = struct {
     /// one `theme.lua` failed to resolve).
     original: theme.Stored = undefined,
     original_index: ?usize = null,
-    /// Bumped on every visible change, for the redraw fingerprint.
-    gen: u64 = 0,
     /// As `Switcher.consumed`: this frame's presses are the dialog's.
     consumed: bool = false,
     row_buf: [max_rows]modal_list.Row = undefined,
@@ -116,14 +114,14 @@ pub const ThemeSwitcher = struct {
         }
         self.selected = self.original_index orelse 0;
         self.open = true;
-        self.gen +%= 1;
+        self.app.invalidate();
     }
 
     /// Moves to row `index` and previews its theme on the window.
     fn select(self: *ThemeSwitcher, index: usize) void {
         if (index == self.selected) return;
         self.selected = index;
-        self.gen +%= 1;
+        self.app.invalidate();
         const t = theme.resolve(self.names[index], self.customs) orelse return;
         self.apply(t);
     }
@@ -143,7 +141,7 @@ pub const ThemeSwitcher = struct {
 
     fn close(self: *ThemeSwitcher) void {
         self.open = false;
-        self.gen +%= 1;
+        self.app.invalidate();
     }
 
     fn apply(self: *ThemeSwitcher, t: theme.Theme) void {

@@ -51,9 +51,6 @@ pub const Switcher = struct {
     /// which is always row `len`.
     len: usize = 0,
     selected: usize = 0,
-    /// Bumped on every visible change, so the redraw fingerprint notices
-    /// a selection move that touches no cell.
-    gen: u64 = 0,
     /// Whether this frame's key presses and typed text belong to the
     /// switcher: set by `handleKeys` for every frame it was open *at any
     /// point*, so the chord that opens it and the Enter that closes it are
@@ -125,7 +122,7 @@ pub const Switcher = struct {
         if (!self.snapshot()) return;
         self.open = true;
         self.selected = if (self.len > 1) 1 else 0;
-        self.gen +%= 1;
+        self.app.invalidate();
     }
 
     /// Re-reads the pane's stack, keeping the selection on the same
@@ -149,7 +146,7 @@ pub const Switcher = struct {
                 }
             } else self.selected = @min(self.selected, self.len);
         }
-        if (self.len != before_len) self.gen +%= 1;
+        if (self.len != before_len) self.app.invalidate();
     }
 
     /// Copies `pane`'s stack, top first, with each context's title (or a
@@ -203,7 +200,7 @@ pub const Switcher = struct {
 
     fn move(self: *Switcher, delta: isize) void {
         self.selected = listcursor.wrap(self.selected, self.rowCount(), delta);
-        self.gen +%= 1;
+        self.app.invalidate();
     }
 
     fn commit(self: *Switcher, index: usize) void {
@@ -220,7 +217,7 @@ pub const Switcher = struct {
 
     fn close(self: *Switcher) void {
         self.open = false;
-        self.gen +%= 1;
+        self.app.invalidate();
     }
 
     /// What to draw while open: the pane's stack, top first, the top

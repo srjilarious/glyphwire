@@ -47,9 +47,9 @@ pub const pulse_ms_default: f64 = 1500;
 pub const pulse_ms_min: f64 = 100;
 pub const pulse_ms_max: f64 = 60_000;
 
-/// How often a pulse redraws. The colour only changes a channel step at
-/// a time, and `FrameSig` skips a frame whose colour didn't move, so
-/// this bounds the work rather than setting it.
+/// How often a pulse redraws. `tick` only reports a change once the
+/// colour has moved by a whole step, so this bounds the work rather than
+/// setting it.
 pub const pulse_frame_ms: f64 = 33;
 
 /// The highlight's state: its config and the pulse's clock.
@@ -67,16 +67,28 @@ pub const PaneFocus = struct {
     window_focused: bool = true,
 
     /// Advances the pulse by `delta_ms`, restarting it if focus moved to
-    /// another pane or the window lost the keyboard.
-    pub fn tick(self: *PaneFocus, focused: glyphwire.PaneHandle, window_focused: bool, delta_ms: f64) void {
+    /// another pane or the window lost the keyboard. Returns whether the
+    /// highlight looks different afterwards, so the host knows to redraw
+    /// (`App.invalidate`).
+    pub fn tick(self: *PaneFocus, focused: glyphwire.PaneHandle, window_focused: bool, delta_ms: f64) bool {
+        const before = self.step();
+        const moved = self.pane != focused;
         self.window_focused = window_focused;
-        if (self.pane != focused or !window_focused) {
+        if (moved or !window_focused) {
             self.pane = focused;
             self.elapsed_ms = 0;
-            return;
+        } else if (self.cfg.mode == .pulse) {
+            self.elapsed_ms = @mod(self.elapsed_ms + delta_ms, self.cfg.pulse_ms * 2);
         }
-        if (self.cfg.mode != .pulse) return;
-        self.elapsed_ms = @mod(self.elapsed_ms + delta_ms, self.cfg.pulse_ms * 2);
+        return moved or self.step() != before;
+    }
+
+    /// How far into its pulse the highlight is, in 1/255 steps of the
+    /// mix: no colour channel can move between two ticks that agree on
+    /// this. Always 0 when not pulsing.
+    fn step(self: *const PaneFocus) u8 {
+        if (self.cfg.mode != .pulse) return 0;
+        return @intFromFloat(@round(pulseMix(self.elapsed_ms, self.cfg.pulse_ms) * 255));
     }
 
     /// The highlight's colour this frame against `th`, or null for
