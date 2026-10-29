@@ -5980,3 +5980,37 @@ pub fn tableCellNeedsExactlyOneOfDisplayAndSpansTest(io: std.Io, alloc: std.mem.
         try testz.expectError(d.handle(alloc, msg), dispatch.DispatchError.InvalidSpans);
     }
 }
+
+// ─── The spec covers the catalog ────────────────────────────────────────
+
+/// Whether `` `name` `` appears in `doc`.
+fn specMentions(doc: []const u8, name: []const u8) bool {
+    var buf: [128]u8 = undefined;
+    const quoted = std.fmt.bufPrint(&buf, "`{s}`", .{name}) catch return false;
+    return std.mem.indexOf(u8, doc, quoted) != null;
+}
+
+/// Every method the dispatcher accepts and every event it pushes is
+/// named in `docs/protocol.md`. `activate_at` once shipped documented only
+/// in `docs/api.md`; this keeps the two lists from drifting again.
+pub fn protocolSpecCoversEveryMessageTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    const doc = try std.Io.Dir.cwd().readFileAlloc(io, "docs/protocol.md", alloc, .unlimited);
+    defer alloc.free(doc);
+
+    var missing: usize = 0;
+    for (dispatch.Dispatcher.methodNames()) |name| {
+        if (specMentions(doc, name)) continue;
+        std.log.err("docs/protocol.md doesn't mention method `{s}`", .{name});
+        missing += 1;
+    }
+    for (std.meta.fieldNames(dispatch.PushEvent)) |name| {
+        // An event that covers a pair goes out as `<name>_down` /
+        // `<name>_up` (see `PushEvent`).
+        var buf: [128]u8 = undefined;
+        const down = std.fmt.bufPrint(&buf, "{s}_down", .{name}) catch unreachable;
+        if (specMentions(doc, name) or specMentions(doc, down)) continue;
+        std.log.err("docs/protocol.md doesn't mention event `{s}`", .{name});
+        missing += 1;
+    }
+    try testz.expectEqual(missing, 0);
+}

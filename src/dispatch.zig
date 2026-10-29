@@ -450,6 +450,15 @@ pub const PushEvent = enum {
 
     pub const Route = struct { stream: Stream, delivery: Delivery };
 
+    /// The event a pushed notification's wire `method` is, or null for a
+    /// method this build doesn't know (a newer host's). The inverse of
+    /// the naming rule above: `key_down` and `key_up` are both `key`.
+    pub fn fromMethod(method: []const u8) ?PushEvent {
+        if (std.mem.eql(u8, method, "key_down") or std.mem.eql(u8, method, "key_up")) return .key;
+        if (std.mem.eql(u8, method, "key")) return null;
+        return std.meta.stringToEnum(PushEvent, method);
+    }
+
     pub fn route(self: PushEvent) Route {
         return switch (self) {
             .key => .{ .stream = .key, .delivery = .focus_gated },
@@ -1107,6 +1116,13 @@ pub const Dispatcher = struct {
 
     fn needsManager(run: CatalogFn) CatalogEntry {
         return .{ .run = run, .access = .manager };
+    }
+
+    /// Every method name the catalog accepts. For the test that holds
+    /// `docs/protocol.md` to the catalog, so a message can't ship without
+    /// a spec entry.
+    pub fn methodNames() []const []const u8 {
+        return catalog.keys();
     }
 
     /// Method name -> handler and who may send it. A compile-time
@@ -1768,7 +1784,10 @@ pub const Dispatcher = struct {
         const p = parsed.value;
 
         const layer_handle = try self.ctx.createLayer(p.width, p.height, p.scrollback_rows);
-        if (self.conn_id) |cid| self.ctx.addLayerOwner(layer_handle, cid) catch {};
+        // A layer its creator doesn't own can't be destroyed by anyone and
+        // would leak, so a failed ownership record undoes the create.
+        errdefer self.ctx.destroyLayer(layer_handle) catch {};
+        if (self.conn_id) |cid| try self.ctx.addLayerOwner(layer_handle, cid);
         return try self.respond(alloc, id, protocol.CreateLayerResult{ .handle = layer_handle });
     }
 
@@ -1846,11 +1865,18 @@ pub const Dispatcher = struct {
             error.UnknownPane => return DispatchError.UnknownPane,
             else => |e| return e,
         };
-        if (self.conn_id) |cid| session.addContextOwner(new_handle, cid) catch {};
+        // Until the switch below, a failure undoes the create: a context
+        // its creator isn't a member of answers every later message with
+        // `ContextAccessDenied` and is never culled on disconnect.
+        {
+            errdefer session.destroyContext(new_handle) catch {};
+            if (self.conn_id) |cid| try session.addContextOwner(new_handle, cid);
+            const new_ctx = session.contextPtr(new_handle).?;
+            new_ctx.window_scrollbar = p.window_scrollbar;
+            if (p.title) |t| try new_ctx.setTitle(t);
+        }
         self.active_ctx = new_handle;
         self.ctx = session.contextPtr(new_handle).?;
-        self.ctx.window_scrollbar = p.window_scrollbar;
-        if (p.title) |t| try self.ctx.setTitle(t);
 
         var result = try self.contextBroadcast(alloc);
         result.response = try self.respond(alloc, id, protocol.CreateContextResult{

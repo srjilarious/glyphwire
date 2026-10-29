@@ -1412,6 +1412,25 @@ an outline **SHOULD** read it rather than recomputing the layout.
 
 Every outline message is batchable.
 
+#### 6.11.1 Activating a cell
+
+| Method | Kind | Params | Result |
+|---|---|---|---|
+| `activate_at` | request | `layer?`, `row`, `col`, `view_offset?` = 0 | `{action, offset, row?}` |
+
+The keyboard form of clicking a table header or an outline marker: the
+host resolves the **screen** cell `(row, col)`, with the layer scrolled
+back `view_offset` rows (the coordinates `toggle_highlight` takes), and
+acts on what is there. A sortable table header cycles its sort and
+repaints in place (`action: "sorted"`). Otherwise an outline node picked
+there toggles (`"toggled"`), with the same reflow, view follow and
+`scroll` notification as `outline_set_collapsed`. Nothing to act on is
+`"none"`, so the client can fall back to an action of its own.
+
+`offset` is the layer's view offset afterwards. For `"toggled"`, `row`
+is the toggled node's screen row at that offset, absent when it ended up
+off screen.
+
 ### 6.12 Selection and clipboard
 
 | Method | Kind | Params | Result |
