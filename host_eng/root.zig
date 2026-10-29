@@ -235,6 +235,15 @@ pub fn EngineType(comptime engOpts: EngineOptions) type {
                 }
             }
 
+            // By default SDL swallows the press that activates the window
+            // (Wayland, X11, Windows and macOS alike), so clicking a pane
+            // from another window only raised it and a second click was
+            // needed to focus that pane. Let it through: the activating
+            // click is an ordinary click, pane focus and all.
+            if (!sdl.SDL_SetHint(sdl.SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1")) {
+                std.log.warn("SDL_SetHint(MOUSE_FOCUS_CLICKTHROUGH) failed: {s}", .{sdl.SDL_GetError()});
+            }
+
             if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO | sdl.SDL_INIT_EVENTS)) return platform_mod.sdlError(error.SdlInitFailed);
             errdefer sdl.SDL_Quit();
 
