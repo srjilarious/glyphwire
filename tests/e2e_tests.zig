@@ -488,12 +488,12 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     const hinted_slash = snapshot.cellAt(0, text_col + 6);
     try testz.expectEqualStr("c", hinted_c.grapheme);
     try testz.expectEqualStr("/", hinted_slash.grapheme);
-    try testz.expectEqual(hinted_c.fg.r, 120);
-    try testz.expectEqual(hinted_c.fg.g, 120);
-    try testz.expectEqual(hinted_c.fg.b, 120);
-    try testz.expectEqual(hinted_slash.fg.r, 120);
-    try testz.expectEqual(hinted_slash.fg.g, 120);
-    try testz.expectEqual(hinted_slash.fg.b, 120);
+    try testz.expectEqual(hinted_c.fg.r, suggestionFg().r);
+    try testz.expectEqual(hinted_c.fg.g, suggestionFg().g);
+    try testz.expectEqual(hinted_c.fg.b, suggestionFg().b);
+    try testz.expectEqual(hinted_slash.fg.r, suggestionFg().r);
+    try testz.expectEqual(hinted_slash.fg.g, suggestionFg().g);
+    try testz.expectEqual(hinted_slash.fg.b, suggestionFg().b);
 
     const cur = try reporter.getCursor(.{});
     try testz.expectEqual(cur.row, @as(usize, 0));
@@ -509,8 +509,8 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     const left_slash = left_snapshot.cellAt(0, text_col + 6);
     try testz.expectEqualStr("c", left_c.grapheme);
     try testz.expectEqualStr("/", left_slash.grapheme);
-    try testz.expectEqual(left_c.fg.r, 120);
-    try testz.expectEqual(left_slash.fg.r, 120);
+    try testz.expectEqual(left_c.fg.r, suggestionFg().r);
+    try testz.expectEqual(left_slash.fg.r, suggestionFg().r);
 
     try reporter.reportKey("right", true);
     try reporter.reportKey("right", false);
@@ -522,8 +522,8 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     const right_slash = right_snapshot.cellAt(0, text_col + 6);
     try testz.expectEqualStr("c", right_c.grapheme);
     try testz.expectEqualStr("/", right_slash.grapheme);
-    try testz.expectEqual(right_c.fg.r, 120);
-    try testz.expectEqual(right_slash.fg.r, 120);
+    try testz.expectEqual(right_c.fg.r, suggestionFg().r);
+    try testz.expectEqual(right_slash.fg.r, suggestionFg().r);
 
     try reporter.reportKey("right", true);
     try reporter.reportKey("right", false);
@@ -600,9 +600,9 @@ pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: st
     // Row 2 ("demo") isn't selected yet, so it's dimmed like the ghost hint.
     const demo_row = opened.cellAt(2, 2);
     try testz.expectEqualStr("d", demo_row.grapheme);
-    try testz.expectEqual(demo_row.fg.r, 120);
-    try testz.expectEqual(demo_row.fg.g, 120);
-    try testz.expectEqual(demo_row.fg.b, 120);
+    try testz.expectEqual(demo_row.fg.r, suggestionFg().r);
+    try testz.expectEqual(demo_row.fg.g, suggestionFg().g);
+    try testz.expectEqual(demo_row.fg.b, suggestionFg().b);
 
     try reporter.reportKey("down", true);
     try reporter.reportKey("down", false);
@@ -1129,18 +1129,20 @@ pub fn shellRunsATwoStagePipelineTest(_: std.Io, alloc: std.mem.Allocator) !void
     const arrow_col = cwd_len + 1;
     try waitForCell(&reporter, 0, arrow_col, ">");
 
-    try typeText(&reporter, "echo hello | tr a-z A-Z");
+    const cmd = "echo hello | tr a-z A-Z";
+    const out_row = 1 + wrapRows(arrow_col, cmd);
+    try typeText(&reporter, cmd);
     try reporter.reportKey("enter", true);
     try reporter.reportKey("enter", false);
 
     // Wait for the last "O" of "HELLO" so the whole word is proven across.
-    try waitForCell(&reporter, 1, 4, "O");
+    try waitForCell(&reporter, out_row, 4, "O");
 
     var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     for ("HELLO", 0..) |expected_ch, i| {
         var expected_buf: [1]u8 = .{expected_ch};
-        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(1, i).grapheme);
+        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(out_row, i).grapheme);
     }
 }
 
@@ -1436,6 +1438,7 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
 
     var cmd_buf: [128]u8 = undefined;
     const cmd = try std.fmt.bufPrint(&cmd_buf, "gw-ls ~/{s}", .{dir_name});
+    const extra = wrapRows(arrow_col, cmd);
     try typeText(&reporter, cmd);
     try reporter.reportKey("enter", true);
     try reporter.reportKey("enter", false);
@@ -1449,13 +1452,13 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     // and the *next prompt* shows up on row 1 instead -- so waiting
     // specifically for "marker.txt"'s first letter here fails (times out)
     // rather than false-passing on an empty listing.
-    try waitForCell(&reporter, 2, 4, "m");
+    try waitForCell(&reporter, 2 + extra, 4, "m");
 
     var snapshot = try reporter.getCells(.{});
     defer snapshot.deinit();
     for ("marker.txt", 0..) |expected_ch, i| {
         var expected_buf: [1]u8 = .{expected_ch};
-        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(2, 4 + i).grapheme);
+        try testz.expectEqualStr(&expected_buf, snapshot.cellAt(2 + extra, 4 + i).grapheme);
     }
 
     // glyphwire-ls handshakes by writing only `handshake_marker` to its
@@ -1466,7 +1469,7 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     // as the literal text "glyphwire-handshake-v1". Scan the first few
     // rows to prove none did.
     var row: usize = 0;
-    while (row < 4) : (row += 1) {
+    while (row < 4 + extra) : (row += 1) {
         var col: usize = 0;
         var line_buf: [80]u8 = undefined;
         var line_len: usize = 0;
@@ -1588,6 +1591,9 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
 
     var cmd_buf: [128]u8 = undefined;
     const cmd = try std.fmt.bufPrint(&cmd_buf, "gw-ls {s}", .{dir_path});
+    // Everything below is laid out relative to the prompt; a long
+    // checkout path wraps the echoed command and moves it all down.
+    const extra = wrapRows(arrow_col, cmd);
     try typeText(&reporter, cmd);
     try reporter.reportKey("enter", true);
     try reporter.reportKey("enter", false);
@@ -1595,12 +1601,12 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     // "target"'s row/col per lsClientWritesEntriesOverRealSocketTest's
     // formula (default 12x12 cell metrics, one entry -> row 2 after
     // `writeGrid`'s blank leading row, name at icon_col_width == 4).
-    try waitForCell(&reporter, 2, 4, "t");
+    try waitForCell(&reporter, 2 + extra, 4, "t");
     // The next prompt: entry_row (2) + 3 (writeGrid's post-entry advance,
     // block_rows at 12px cells) == row 5, left blank by
     // `promptrow.afterCommand`, so the prompt is on row 6. Same cwd
     // (nothing's cd'd yet) so the same arrow_col.
-    try waitForCell(&reporter, 6, arrow_col, ">");
+    try waitForCell(&reporter, 6 + extra, arrow_col, ">");
 
     // Ctrl+Up breaks into scrollback browse mode, a one-row step off the
     // prompt line (row 6 -> row 5). Gate the modifier release on the
@@ -1609,7 +1615,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     try reporter.reportKey("left_control", true);
     try reporter.reportKey("up", true);
     try reporter.reportKey("up", false);
-    try waitForCursorRow(&reporter, 5);
+    try waitForCursorRow(&reporter, 5 + extra);
     try reporter.reportKey("left_control", false);
 
     // Three more plain Up presses walk the browse cursor from row 5 up to
@@ -1619,7 +1625,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
         try reporter.reportKey("up", true);
         try reporter.reportKey("up", false);
     }
-    try waitForCursorRow(&reporter, 2);
+    try waitForCursorRow(&reporter, 2 + extra);
 
     // Up only ever changes the browse cursor's *row* -- its column starts
     // (and, until Left/Right move it, stays) wherever the real cursor was
@@ -1645,6 +1651,11 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     // itself before running browseEnter's synthesized "cd ..." line
     // (prompt row 6, + 1 == 7), which `promptrow.afterCommand` keeps as
     // the blank gap before the prompt.
+    // The synthesized `cd` line is echoed like a typed one, and a long
+    // path wraps it too.
+    const cd_line = try std.fmt.allocPrint(alloc, "cd '{s}/target'", .{dir_path});
+    defer alloc.free(cd_line);
+    const prompt_row = 8 + extra + wrapRows(arrow_col, cd_line);
     var found = false;
     var attempts: usize = 0;
     while (attempts < 1000 and !found) : (attempts += 1) {
@@ -1654,7 +1665,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
         while (col + 6 <= snapshot.cols()) : (col += 1) {
             var matched = true;
             for ("target", 0..) |expected_ch, i| {
-                if (snapshot.cellAt(8, col + i).grapheme.len != 1 or snapshot.cellAt(8, col + i).grapheme[0] != expected_ch) {
+                if (snapshot.cellAt(prompt_row, col + i).grapheme.len != 1 or snapshot.cellAt(prompt_row, col + i).grapheme[0] != expected_ch) {
                     matched = false;
                     break;
                 }
@@ -1666,6 +1677,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
         }
         if (!found) std.Io.sleep(reporter.io, .fromMilliseconds(10), .awake) catch {};
     }
+    if (!found) dumpGrid(&reporter, prompt_row, 0, "target");
     try testz.expectTrue(found);
 }
 
@@ -1740,17 +1752,20 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
 
     var cmd_buf: [128]u8 = undefined;
     const cmd = try std.fmt.bufPrint(&cmd_buf, "gw-ls {s}", .{dir_path});
+    // Everything below is laid out relative to the prompt; a long
+    // checkout path wraps the echoed command and moves it all down.
+    const extra = wrapRows(arrow_col, cmd);
     try typeText(&reporter, cmd);
     try reporter.reportKey("enter", true);
     try reporter.reportKey("enter", false);
 
-    try waitForCell(&reporter, 2, 4, "t");
-    try waitForCell(&reporter, 6, arrow_col, ">");
+    try waitForCell(&reporter, 2 + extra, 4, "t");
+    try waitForCell(&reporter, 6 + extra, arrow_col, ">");
 
     try reporter.reportKey("left_control", true);
     try reporter.reportKey("up", true);
     try reporter.reportKey("up", false);
-    try waitForCursorRow(&reporter, 5);
+    try waitForCursorRow(&reporter, 5 + extra);
     try reporter.reportKey("left_control", false);
 
     var row_presses: usize = 0;
@@ -1758,7 +1773,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
         try reporter.reportKey("up", true);
         try reporter.reportKey("up", false);
     }
-    try waitForCursorRow(&reporter, 2);
+    try waitForCursorRow(&reporter, 2 + extra);
 
     const line_start_col = cwd_len + 3;
     const icon_col_width = 4;
@@ -1777,7 +1792,7 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
     // (`link_path`, matching `Prompt.chdir`'s logical `$PWD` -- see
     // `shellCdDotDotAfterSymlinkStaysPhysicallyInSyncTest`), which only
     // ever appears there if a real `cd` ran.
-    try waitForTextInRows(&reporter, alloc, 12, link_path);
+    try waitForTextInRows(&reporter, alloc, 12 + extra, link_path);
 }
 
 /// Polls `get_cells` until some cell in `[0, row_limit)` starts a run of
@@ -2156,6 +2171,21 @@ pub fn lsMultipleOperandsGroupsLooseFilesThenDirsTest(_: std.Io, alloc: std.mem.
 /// process-spawn hop -- intermittent, not a logic bug, but a real one (it
 /// read as a hang until bisected with a standalone repro outside testz's
 /// output capturing).
+/// Rows the echoed command line takes past the prompt's first row. With
+/// a long checkout path, `{cwd} > {command}` wraps at these tests' 80
+/// columns, and everything the command prints lands that much lower.
+fn wrapRows(arrow_col: usize, command: []const u8) usize {
+    const text_col = arrow_col + 2;
+    return (text_col + command.len - 1) / 80;
+}
+
+/// The dimmed colour of the shell's completion hint and of an unselected
+/// picker row: the default theme's `suggestion` role, which the sandboxed
+/// shell (no theme config) draws with.
+fn suggestionFg() glyphwire.Color {
+    return glyphwire.theme.initDefault().roleColor(.suggestion);
+}
+
 fn waitForCell(client: *glyphwire.Client, row: usize, col: usize, expected: []const u8) !void {
     var attempts: usize = 0;
     while (attempts < 1000) : (attempts += 1) {
@@ -2164,7 +2194,29 @@ fn waitForCell(client: *glyphwire.Client, row: usize, col: usize, expected: []co
         if (std.mem.eql(u8, snapshot.cellAt(row, col).grapheme, expected)) return;
         std.Io.sleep(client.io, .fromMilliseconds(10), .awake) catch {};
     }
+    dumpGrid(client, row, col, expected);
     return error.TimedOutWaitingForCell;
+}
+
+/// Logs the grid a timed-out wait gave up on, so a failure says what was
+/// on screen instead of only that the expected cell never appeared.
+fn dumpGrid(client: *glyphwire.Client, row: usize, col: usize, expected: []const u8) void {
+    var snapshot = client.getCells(.{}) catch return;
+    defer snapshot.deinit();
+    std.log.err("waited for \"{s}\" at row {d}, col {d}; the grid holds:", .{ expected, row, col });
+    var line: [512]u8 = undefined;
+    for (0..snapshot.rows()) |r| {
+        var len: usize = 0;
+        for (0..snapshot.cols()) |c| {
+            const g = snapshot.cellAt(r, c).grapheme;
+            const cell = if (g.len == 0) " " else g;
+            if (len + cell.len > line.len) break;
+            @memcpy(line[len..][0..cell.len], cell);
+            len += cell.len;
+        }
+        const text = std.mem.trimEnd(u8, line[0..len], " ");
+        if (text.len > 0) std.log.err("{d:>3}| {s}", .{ r, text });
+    }
 }
 
 /// The context switcher's "new shell" path, minus the host window: a
@@ -2204,6 +2256,15 @@ pub fn shellWithContextFlagDrawsOnThatContextNotTheVisibleOneTest(_: std.Io, all
 
     var handle_buf: [16]u8 = undefined;
     const handle_arg = try std.fmt.bufPrint(&handle_buf, "{d}", .{shell_ctx});
+    // What the host hands a shell it starts on a context: the context and
+    // its token, which `--context` checks it was seated with.
+    const shell_token = blk: {
+        const session_lock = srv.lockSession();
+        defer session_lock.unlock();
+        break :blk srv.session.contextToken(shell_ctx).?;
+    };
+    try shell_env.put("GLYPHWIRE_CTX", handle_arg);
+    try shell_env.put("GLYPHWIRE_TOKEN", &shell_token);
     var shell_child = try spawnChecked(io, .{
         .argv = &.{ shell_path, "--context", handle_arg },
         .environ_map = &shell_env,
@@ -2212,13 +2273,18 @@ pub fn shellWithContextFlagDrawsOnThatContextNotTheVisibleOneTest(_: std.Io, all
 
     var reporter = try helpers.connectReporter(io, alloc, socket_path);
     defer reporter.deinit();
-    try reporter.attachContext(shell_ctx);
+    try reporter.attachContext(shell_ctx, &shell_token);
 
     const arrow_col = cwd_len + 1;
     try waitForCell(&reporter, 0, arrow_col, ">");
 
     // Nothing reached the base context, which is still the one on screen.
-    try reporter.attachContext(glyphwire.root_context_handle);
+    const root_token = blk: {
+        const session_lock = srv.lockSession();
+        defer session_lock.unlock();
+        break :blk srv.session.contextToken(glyphwire.root_context_handle).?;
+    };
+    try reporter.attachContext(glyphwire.root_context_handle, &root_token);
     var base = try reporter.getCells(.{});
     defer base.deinit();
     try testz.expectFalse(std.mem.eql(u8, base.cellAt(0, arrow_col).grapheme, ">"));
