@@ -33,7 +33,7 @@ const Engine = app_mod.Engine;
 /// Keys while open are `modal_list.readAction`'s: Up/Down move (held,
 /// they keep moving), Enter switches, a row's label (1..9, then letters)
 /// switches straight to that row, Escape closes; plus `n`
-/// for a new shell. Drawn by `Renderer.drawListDialog` from `view`, like
+/// for a new shell. Drawn by `overlays.drawListDialog` from `view`, like
 /// the theme switcher. It opens with the *second* program selected, so
 /// the chord then Enter flips between the two most recent programs.
 pub const Switcher = struct {

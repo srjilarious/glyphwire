@@ -9,38 +9,16 @@ const app_mod = @import("app.zig");
 const config = @import("config.zig");
 const geometry = @import("geometry.zig");
 const dividers = @import("dividers.zig");
-const pane_focus = @import("pane_focus.zig");
 const shadow_mod = @import("shadow.zig");
 const scroll = @import("scroll.zig");
 const selection = @import("selection.zig");
-const preedit_mod = @import("preedit.zig");
 const emoji = @import("emoji.zig");
-const modal_list = @import("modal_list.zig");
+const overlays = @import("overlays.zig");
+const capture = @import("capture.zig");
 
 const App = app_mod.App;
 const Engine = app_mod.Engine;
 const CursorShape = config.CursorShape;
-
-// Width in px of the `.line` caret, and thickness in px of the
-// `.underline` bar and the `.box` outline.
-const cursor_width = 2;
-const cursor_underline_px = 2;
-const cursor_box_line_px = 2;
-
-/// IME composition overlay: a dark plate behind the in-progress text so
-/// the grid content it covers doesn't show through, and an underline
-/// marking it as uncommitted -- the convention every terminal and text
-/// field uses for preedit. See `drawPreedit`.
-const preedit_bg = host_eng.Color.from(40, 44, 60, 255);
-const preedit_fg = host_eng.Color.from(235, 235, 240, 255);
-const preedit_underline_px = 2;
-
-// Profiler HUD overlay (Ctrl+Alt+Shift+P). A translucent plate top-right
-// with one text line per timed phase / counter -- see `drawProfilerHud`.
-const hud_bg = host_eng.Color.from(12, 14, 20, 232);
-const hud_head = host_eng.Color.from(255, 220, 120, 255);
-const hud_fg = host_eng.Color.from(210, 215, 225, 255);
-
 
 // ── Static quad batches ───────────────────────────────────────────────
 //
@@ -54,7 +32,7 @@ const hud_fg = host_eng.Color.from(210, 215, 225, 255);
 // image handle (`images`) and one per non-atlas icon handle
 // (`icon_fallback`). The caret is deliberately *not* batched -- it blinks
 // on its own clock and is a single immediate-mode draw only while shown
-// (see `drawRootCaret`).
+// (see `overlays.drawRootCaret`).
 
 /// Shape batch: colour fills, no texture. `ColorShader`.
 const ShapeBatch = host_eng.renderer.StaticQuadBatch(.{ .posDim = 2, .colorDim = 4 });
@@ -406,25 +384,11 @@ pub const DeferredScaledGlyph = struct {
     }
 };
 
-// The divider band between two split children is the context theme's
-// `divider` role, and the band between two whole *panes* -- one program's
-// surface against another's -- the window theme's brighter `pane_divider`:
-// the seam between programs is the more significant boundary and should
-// read that way.
-
-/// The ghost band shown while a divider is being dragged, before the
-/// drag ends and the layout actually moves (see `panes.Panes`).
-const divider_preview_color = host_eng.Color.from(120, 120, 140, 255);
-
-/// A pane scrollbar's track and thumb. The track is nearly transparent --
-/// it sits over content rather than in a reserved gutter, so it should
-/// register as a hint until the thumb is grabbed.
-const pane_track_color = host_eng.Color.from(40, 40, 46, 140);
-const pane_thumb_color = host_eng.Color.from(120, 120, 130, 220);
-
 /// All of the host's drawing: per-layer static quad batches, the icon
-/// atlas, image / icon cells, the caret, the scrollbar, and the
-/// `--screenshot` readback. Owns the GPU-texture caches and the batch
+/// atlas, image / icon cells, and the frame order. The immediate overlays
+/// drawn over the batches (caret, preedit, dividers, scrollbars, the list
+/// dialog, the HUD) are in `overlays.zig`, and the `--screenshot`
+/// readback in `capture.zig`. Owns the GPU-texture caches and the batch
 /// cache; every method assumes it runs on the main (render) thread.
 pub const Renderer = struct {
     app: *App,
@@ -711,7 +675,7 @@ pub const Renderer = struct {
     /// that has focus, and asking the focused context for another
     /// context's handle either misses or -- worse -- hits a different
     /// image that happens to share the number.
-    fn textureForImage(self: *Renderer, eng: *Engine, context: glyphwire.ContextHandle, handle: glyphwire.ImageHandle) ?*host_eng.Texture {
+    pub fn textureForImage(self: *Renderer, eng: *Engine, context: glyphwire.ContextHandle, handle: glyphwire.ImageHandle) ?*host_eng.Texture {
         const key: ImageKey = .{ .context = context, .handle = handle };
         const cached = self.image_textures.get(key) orelse blk: {
             const entry = self.imageEntryIn(context, handle) orelse return null;
@@ -820,7 +784,7 @@ pub const Renderer = struct {
     /// image 1. Now that the cache key carries the context, the lookup
     /// can be precise -- and a context that has gone away correctly
     /// reports "gone" instead of matching a stranger.
-    fn imageEntryIn(self: *Renderer, context: glyphwire.ContextHandle, handle: glyphwire.ImageHandle) ?glyphwire.ImageEntry {
+    pub fn imageEntryIn(self: *Renderer, context: glyphwire.ContextHandle, handle: glyphwire.ImageHandle) ?glyphwire.ImageEntry {
         const ctx = self.app.server.session.contexts.get(context) orelse return null;
         return ctx.imageEntry(handle);
     }
@@ -1015,10 +979,10 @@ pub const Renderer = struct {
         lb.built_theme_gen = ctx.theme_gen;
     }
 
-    fn rebuildLayer(
-        self: *Renderer,
+    /// What one `rebuildLayer` pass reads, handed to each of its parts:
+    /// the layer, the batches being built, and where and how it lands.
+    const LayerBuild = struct {
         eng: *Engine,
-        fa: ?*host_eng.renderer.FontAtlas,
         lb: *LayerBatches,
         layer: *const glyphwire.Layer,
         /// What every `Color` reference in the layer resolves against.
@@ -1027,6 +991,30 @@ pub const Renderer = struct {
         origin_y: i32,
         view_offset: usize,
         /// `Layer.opacity`, folded into every colour this build emits.
+        alpha: f32,
+        /// The layer's *viewport* -- the window of its content grid that is
+        /// actually drawn (see `core.PropertyName.viewport`). For every
+        /// layer without one this is the whole grid at offset zero.
+        vp_cols: usize,
+        vp_rows: usize,
+        off: glyphwire.CellPos,
+        has_icon_atlas: bool,
+    };
+
+    /// Rebuilds every batch of one layer, back to front: the drop shadow
+    /// and background, then each cell (background, decorations, glyph),
+    /// the deferred overflow (natural-size icons, scaled text), the
+    /// selection tint, nine-patches, overlay rects and the drop target.
+    fn rebuildLayer(
+        self: *Renderer,
+        eng: *Engine,
+        fa: ?*host_eng.renderer.FontAtlas,
+        lb: *LayerBatches,
+        layer: *const glyphwire.Layer,
+        th: *const glyphwire.theme.Stored,
+        origin_x: i32,
+        origin_y: i32,
+        view_offset: usize,
         alpha: f32,
     ) void {
         // Per-texture batch lists are rebuilt from scratch (a layer rarely
@@ -1063,222 +1051,45 @@ pub const Renderer = struct {
         const fa_tex: ?*const host_eng.Texture = if (fa) |f| &f.texture else null;
         if (fa_tex) |t| lb.text.beginBuild(t);
 
-        // Phase 1: pack every glyph this layer shows into the atlas, then
-        // upload once. A grow re-normalizes every glyph UV, so bump
-        // `text_epoch` -- `syncBatches`'s loop then rebuilds the rest.
-        // The layer's *viewport* -- the window of its content grid that is
-        // actually drawn (see `core.PropertyName.viewport`). For every
-        // layer without one this is the whole grid at offset zero, which
-        // is why the loops below read the same as they always did.
-        const vp_cols = layer.viewportCols();
-        const vp_rows = layer.viewportRows();
-        const off = layer.scroll_off;
+        const b: LayerBuild = .{
+            .eng = eng,
+            .lb = lb,
+            .layer = layer,
+            .th = th,
+            .origin_x = origin_x,
+            .origin_y = origin_y,
+            .view_offset = view_offset,
+            .alpha = alpha,
+            .vp_cols = layer.viewportCols(),
+            .vp_rows = layer.viewportRows(),
+            .off = layer.scroll_off,
+            .has_icon_atlas = has_icon_atlas,
+        };
 
-        if (fa) |f| {
-            var row: usize = 0;
-            while (row < vp_rows) : (row += 1) {
-                const cells = layer.viewRow(view_offset, off.row + row);
-                for (cells[off.col .. off.col + vp_cols]) |*c| {
-                    const g = c.grapheme();
-                    if (g.len == 0) continue;
-                    if (c.text_scale == .x1) {
-                        loadCellGlyphs(f, g);
-                    } else if (self.atlasForScale(f, c.text_scale)) |sa| {
-                        // A different, dedicated atlas (`atlasForScale`)
-                        // -- see `DeferredScaledGlyph`'s doc comment.
-                        loadCellGlyphs(sa, g);
-                    }
-                }
-            }
-            if (commitAtlas(f)) self.text_epoch +%= 1;
-            if (self.scaled_atlas_1_5x) |*a| {
-                if (commitAtlas(a)) self.text_epoch +%= 1;
-            }
-            if (self.scaled_atlas_2x) |*a| {
-                if (commitAtlas(a)) self.text_epoch +%= 1;
-            }
-            if (self.scaled_atlas_3x) |*a| {
-                if (commitAtlas(a)) self.text_epoch +%= 1;
-            }
-        }
+        if (fa) |f| self.packLayerGlyphs(&b, f);
 
         self.deferred_icons.clearRetainingCapacity();
         self.deferred_scaled_text.clearRetainingCapacity();
         const any_highlight = layer.sel.highlighted_ids.items.len > 0;
 
-        // `shadow` (see `core.Shadow`): drawn around the viewport's
-        // pixel rect, before -- so under -- everything else here.
-        if (layer.shadow) |sh_ref| {
-            var sh = sh_ref;
-            sh.color = th.resolve(sh.color);
-            self.emitShadow(eng, lb, sh, origin_x, origin_y, @as(i32, @intCast(vp_cols)) * geometry.cell_w, @as(i32, @intCast(vp_rows)) * geometry.cell_h);
-        }
-
-        // `background` (see `core.PropertyName.background`): one rect
-        // under the whole viewport, in its own `base` batch so the
-        // nine-patches and every cell's own background and glyph
-        // composite over it.
-        if (layer.background) |bg_ref| {
-            const bg = th.resolve(bg_ref);
-            if (bg.a != 0) {
-                addRect(
-                    &lb.base,
-                    host_eng.RectF.fromPosSize(
-                        origin_x,
-                        origin_y,
-                        @as(i32, @intCast(vp_cols)) * geometry.cell_w,
-                        @as(i32, @intCast(vp_rows)) * geometry.cell_h,
-                    ),
-                    fade(host_eng.Color.from(bg.r, bg.g, bg.b, bg.a), alpha),
-                );
-            }
-        }
+        self.emitLayerBackdrop(&b);
 
         var row: usize = 0;
-        while (row < vp_rows) : (row += 1) {
-            const cells = layer.viewRow(view_offset, off.row + row);
+        while (row < b.vp_rows) : (row += 1) {
+            const cells = layer.viewRow(view_offset, b.off.row + row);
             var col: usize = 0;
-            while (col < vp_cols) : (col += 1) {
-                const c = &cells[off.col + col];
+            while (col < b.vp_cols) : (col += 1) {
+                const c = &cells[b.off.col + col];
                 const px = origin_x + @as(i32, @intCast(col)) * geometry.cell_w;
                 const py = origin_y + @as(i32, @intCast(row)) * geometry.cell_h;
-
-                switch (c.style.bg) {
-                    .color => |bg_ref| {
-                        const bg = th.resolve(bg_ref);
-                        // Alpha alone decides transparency: the default
-                        // background is alpha 0, and an explicit black
-                        // paints (see `core.default_style`).
-                        if (bg.a != 0) {
-                            addRect(
-                                &lb.color_bg,
-                                host_eng.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
-                                fade(host_eng.Color.from(bg.r, bg.g, bg.b, bg.a), alpha),
-                            );
-                        }
-                    },
-                    .image => |img| self.emitImageCell(eng, lb, img, px, py),
-                    .icon => |icon| self.emitIcon(eng, lb, icon, px, py, false, has_icon_atlas),
-                }
-                // `fg_icon` (`draw_icon`'s `foreground: true`, and every
-                // table body icon) sits over a same-cell `.icon`
-                // background -- routed to the `icon_fg` batch, drawn after
-                // `icon_bg`.
-                if (c.fg_icon) |icon| self.emitIcon(eng, lb, icon, px, py, true, has_icon_atlas);
-
-                // Highlight tint: any cell whose `metadata_id` is in the
-                // layer's highlighted-id set. Into `color_bg` so the text
-                // pass paints over it and stays readable.
-                if (any_highlight and layer.sel.isHighlighted(c.metadata_id)) {
-                    addRect(
-                        &lb.color_bg,
-                        host_eng.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
-                        fade(selection.selection_highlight_color, alpha),
-                    );
-                }
-
-                // Before the glyph, but into a batch drawn after it: an
-                // underline belongs to the cell whether or not anything is
-                // written in it, so a run of blanks in an underlined span
-                // (a diagnostic covering trailing whitespace, a scaled
-                // glyph's fill columns) still draws its part of the line.
-                if (c.style.underline.style != .none) {
-                    const ul = c.style.underline;
-                    const src = th.resolve(ul.color orelse c.style.fg);
-                    emitUnderline(
-                        &lb.underline,
-                        ul.style,
-                        px,
-                        py,
-                        fade(host_eng.Color.from(src.r, src.g, src.b, src.a), alpha),
-                    );
-                }
-                // A wide character's spacer copies its lead's style, but
-                // the lead already drew the line across both halves.
-                if (c.style.strike and c.wide != .wide_spacer) {
-                    const src = th.resolve(c.style.fg);
-                    const per_col: usize = if (c.wide == .wide_lead) 2 else 1;
-                    emitStrike(
-                        &lb.underline,
-                        textScaleFactor(c.text_scale),
-                        per_col * glyphwire.scaledPitch(c.text_scale),
-                        px,
-                        py,
-                        fade(host_eng.Color.from(src.r, src.g, src.b, src.a), alpha),
-                    );
-                }
-
-                if (fa) |f| {
-                    const g = c.grapheme();
-                    if (g.len > 0) {
-                        const fg = th.resolve(c.style.fg);
-                        const color = fade(host_eng.Color.from(fg.r, fg.g, fg.b, fg.a), alpha);
-                        if (c.text_scale == .x1) {
-                            if (!self.emitEmoji(lb, f, .x1, g, px, py)) emitGlyphs(&lb.text, f, g, px, py, color);
-                        } else {
-                            var dg: DeferredScaledGlyph = .{
-                                .grapheme_bytes = undefined,
-                                .grapheme_len = @intCast(g.len),
-                                .pos = .{ .x = px, .y = py },
-                                .color = color,
-                                .scale = c.text_scale,
-                            };
-                            @memcpy(dg.grapheme_bytes[0..g.len], g);
-                            self.deferred_scaled_text.append(self.app.alloc, dg) catch {};
-                        }
-                    }
-                }
+                self.emitCellBackground(&b, c, px, py, any_highlight);
+                emitCellDecorations(&b, c, px, py);
+                if (fa) |f| self.emitCellGlyph(&b, f, c, px, py);
             }
         }
 
-        // `.natural`-scale icons overflow past their own cell, so they are
-        // emitted after the grid -- when an overflow paints over
-        // neighbours regardless of order.
-        for (self.deferred_icons.items) |d| {
-            self.emitIconCell(eng, lb, d.icon, d.pos.x, d.pos.y, d.foreground, has_icon_atlas);
-        }
-
-        // `text_scale != .x1` glyphs overflow past their own cell the same
-        // way -- deferred so that overflow paints over already-emitted
-        // neighbours regardless of grid order. See `DeferredScaledGlyph`.
-        // Each drawn from its own dedicated, already-loaded atlas
-        // (`atlasForScale`) into its own batch (`scaledTextBatchFor`),
-        // since it isn't bound to `lb.text`'s (the default atlas's)
-        // texture.
-        if (fa) |f| {
-            for (self.deferred_scaled_text.items) |d| {
-                const sa = self.atlasForScale(f, d.scale) orelse continue;
-                if (self.emitEmoji(lb, sa, d.scale, d.grapheme(), d.pos.x, d.pos.y)) continue;
-                const batch = self.scaledTextBatchFor(lb, d.scale, &sa.texture) orelse continue;
-                emitGlyphs(batch, sa, d.grapheme(), d.pos.x, d.pos.y, d.color);
-            }
-        }
-
-        // Selection tint: one rect per selected row span
-        // (`LayerSelection.colRange`), `above = view_offset - row` the
-        // scroll-stable row key. Into `color_bg`, same reason as the
-        // highlight tint.
-        if (layer.sel.range != null) {
-            var srow: usize = 0;
-            while (srow < vp_rows) : (srow += 1) {
-                // The selection is keyed on *content* rows, so the
-                // viewport's own scroll offset has to go back in before
-                // asking, and come back out of the drawn column span.
-                const above: i64 = @as(i64, @intCast(view_offset)) - @as(i64, @intCast(off.row + srow));
-                const range = layer.sel.colRange(above) orelse continue;
-                const start = @max(range.start, off.col);
-                const end = @min(range.end, off.col + vp_cols);
-                if (end <= start) continue;
-                const x0 = origin_x + @as(i32, @intCast(start - off.col)) * geometry.cell_w;
-                const rect_w = @as(i32, @intCast(end - start)) * geometry.cell_w;
-                const y0 = origin_y + @as(i32, @intCast(srow)) * geometry.cell_h;
-                addRect(
-                    &lb.color_bg,
-                    host_eng.RectF.fromPosSize(x0, y0, rect_w, geometry.cell_h),
-                    fade(selection.selection_highlight_color, alpha),
-                );
-            }
-        }
+        self.emitDeferred(&b, fa);
+        emitSelection(&b);
 
         // Nine-patches (`create_nine_patch`): each cell rect goes to
         // pixels at the live cell size, then `ninePatchQuads` splits it --
@@ -1286,84 +1097,11 @@ pub const Renderer = struct {
         // samples its slice of the `.9.png`.
         if (layer.nine_patches.count() > 0) {
             var np_it = layer.nine_patches.valueIterator();
-            while (np_it.next()) |np| self.emitNinePatch(eng, lb, np.*, origin_x, origin_y, off.row, off.col);
+            while (np_it.next()) |np| self.emitNinePatch(eng, lb, np.*, origin_x, origin_y, b.off.row, b.off.col);
         }
 
-        // Overlay rects (`create_rect`): pixel-space boxes in the layer's
-        // own content coordinate frame, translated to screen pixels by
-        // subtracting the same cell-based scroll offset every other pass
-        // above reads off `off`. Built into their own `rects` batch,
-        // composited last (see `drawLayerBatches`) so a rect sits on top
-        // of everything else the layer paints, text included.
-        if (layer.rects.count() > 0) {
-            const scroll_px_x = @as(i32, @intCast(off.col)) * geometry.cell_w;
-            const scroll_px_y = @as(i32, @intCast(off.row)) * geometry.cell_h;
-            var rect_it = layer.rects.valueIterator();
-            while (rect_it.next()) |r| {
-                const rx = origin_x + @as(i32, @intCast(r.x)) - scroll_px_x;
-                const ry = origin_y + @as(i32, @intCast(r.y)) - scroll_px_y;
-                const rw: i32 = @intCast(r.w);
-                const rh: i32 = @intCast(r.h);
-                const rc = th.resolve(r.color);
-                const col = fade(host_eng.Color.from(rc.r, rc.g, rc.b, rc.a), alpha);
-                if (r.filled) {
-                    addRect(&lb.rects, host_eng.RectF.fromPosSize(rx, ry, rw, rh), col);
-                } else {
-                    // Four non-overlapping strips (top, bottom, then the
-                    // left/right strips filling exactly the band between
-                    // them) rather than four full-height/width bars, so a
-                    // translucent `color` doesn't double up at the corners.
-                    const lw_u32: u32 = @min(r.line_width, @max(@min(r.w, r.h) / 2, 1));
-                    const lw: i32 = @intCast(lw_u32);
-                    addRect(&lb.rects, host_eng.RectF.fromPosSize(rx, ry, rw, lw), col);
-                    addRect(&lb.rects, host_eng.RectF.fromPosSize(rx, ry + rh - lw, rw, lw), col);
-                    addRect(&lb.rects, host_eng.RectF.fromPosSize(rx, ry + lw, lw, rh - 2 * lw), col);
-                    addRect(&lb.rects, host_eng.RectF.fromPosSize(rx + rw - lw, ry + lw, lw, rh - 2 * lw), col);
-                }
-            }
-        }
-
-        // The drop-target highlight (`set_drop_target`), after the overlay
-        // rects so it sits over everything the layer paints. Content cells
-        // go to screen pixels through the same scroll offset as above.
-        if (layer.drop_target) |dt| {
-            const rc = th.resolve(glyphwire.Color.role(.drop_target));
-            const cw = geometry.cell_w;
-            const ch = geometry.cell_h;
-            const scroll_col: i32 = @intCast(off.col);
-            const scroll_row: i32 = @intCast(off.row);
-            switch (dt) {
-                .layer, .cells => {
-                    const wash = fade(host_eng.Color.from(rc.r, rc.g, rc.b, rc.a), alpha * self.drop_target_opacity);
-                    const r: host_eng.RectF = switch (dt) {
-                        .layer => .fromPosSize(origin_x, origin_y, @as(i32, @intCast(vp_cols)) * cw, @as(i32, @intCast(vp_rows)) * ch),
-                        .cells => |c| .fromPosSize(
-                            origin_x + (@as(i32, @intCast(c.col)) - scroll_col) * cw,
-                            origin_y + (@as(i32, @intCast(c.row)) - scroll_row) * ch,
-                            @as(i32, @intCast(c.cols)) * cw,
-                            @as(i32, @intCast(c.rows)) * ch,
-                        ),
-                        .insert => unreachable,
-                    };
-                    addRect(&lb.rects, r, wash);
-                },
-                .insert => |ins| {
-                    // A quarter of a cell, at least two pixels, centred on
-                    // the column boundary -- but never left of the layer,
-                    // where a bar at column 0 would be half cut off.
-                    const bar_w: i32 = @max(2, @divTrunc(cw, 4));
-                    const edge = origin_x + (@as(i32, @intCast(ins.col)) - scroll_col) * cw;
-                    const x = @max(origin_x, edge - @divTrunc(bar_w, 2));
-                    const solid = fade(host_eng.Color.from(rc.r, rc.g, rc.b, rc.a), alpha);
-                    addRect(&lb.rects, host_eng.RectF.fromPosSize(
-                        x,
-                        origin_y + (@as(i32, @intCast(ins.row)) - scroll_row) * ch,
-                        bar_w,
-                        @as(i32, @intCast(ins.rows)) * ch,
-                    ), solid);
-                },
-            }
-        }
+        emitOverlayRects(&b);
+        self.emitDropTarget(&b);
 
         lb.base.endBuild();
         lb.color_bg.endBuild();
@@ -1380,6 +1118,300 @@ pub const Renderer = struct {
         for (lb.icon_fallback.items) |*t| t.batch.endBuild();
         for (lb.scaled_text.items) |*t| t.batch.endBuild();
         for (lb.emoji.items) |*t| t.batch.endBuild();
+    }
+
+    /// Packs every glyph the layer shows into its atlas (the default one,
+    /// or a scaled one for `text_scale` cells), then uploads once. A grow
+    /// re-normalizes every glyph UV, so it bumps `text_epoch` --
+    /// `syncBatches`'s loop then rebuilds the rest.
+    fn packLayerGlyphs(self: *Renderer, b: *const LayerBuild, f: *host_eng.renderer.FontAtlas) void {
+        var row: usize = 0;
+        while (row < b.vp_rows) : (row += 1) {
+            const cells = b.layer.viewRow(b.view_offset, b.off.row + row);
+            for (cells[b.off.col .. b.off.col + b.vp_cols]) |*c| {
+                const g = c.grapheme();
+                if (g.len == 0) continue;
+                if (c.text_scale == .x1) {
+                    loadCellGlyphs(f, g);
+                } else if (self.atlasForScale(f, c.text_scale)) |sa| {
+                    // A different, dedicated atlas (`atlasForScale`)
+                    // -- see `DeferredScaledGlyph`'s doc comment.
+                    loadCellGlyphs(sa, g);
+                }
+            }
+        }
+        if (commitAtlas(f)) self.text_epoch +%= 1;
+        if (self.scaled_atlas_1_5x) |*a| {
+            if (commitAtlas(a)) self.text_epoch +%= 1;
+        }
+        if (self.scaled_atlas_2x) |*a| {
+            if (commitAtlas(a)) self.text_epoch +%= 1;
+        }
+        if (self.scaled_atlas_3x) |*a| {
+            if (commitAtlas(a)) self.text_epoch +%= 1;
+        }
+    }
+
+    /// The drop shadow and the layer's own background: under everything
+    /// else the layer paints.
+    fn emitLayerBackdrop(self: *Renderer, b: *const LayerBuild) void {
+        // `shadow` (see `core.Shadow`): drawn around the viewport's
+        // pixel rect, before -- so under -- everything else here.
+        if (b.layer.shadow) |sh_ref| {
+            var sh = sh_ref;
+            sh.color = b.th.resolve(sh.color);
+            self.emitShadow(b.eng, b.lb, sh, b.origin_x, b.origin_y, @as(i32, @intCast(b.vp_cols)) * geometry.cell_w, @as(i32, @intCast(b.vp_rows)) * geometry.cell_h);
+        }
+
+        // `background` (see `core.PropertyName.background`): one rect
+        // under the whole viewport, in its own `base` batch so the
+        // nine-patches and every cell's own background and glyph
+        // composite over it.
+        if (b.layer.background) |bg_ref| {
+            const bg = b.th.resolve(bg_ref);
+            if (bg.a != 0) {
+                addRect(
+                    &b.lb.base,
+                    host_eng.RectF.fromPosSize(
+                        b.origin_x,
+                        b.origin_y,
+                        @as(i32, @intCast(b.vp_cols)) * geometry.cell_w,
+                        @as(i32, @intCast(b.vp_rows)) * geometry.cell_h,
+                    ),
+                    fade(host_eng.Color.from(bg.r, bg.g, bg.b, bg.a), b.alpha),
+                );
+            }
+        }
+    }
+
+    /// One cell's background (a colour fill, an image or an icon), its
+    /// foreground icon, and the highlight tint over it.
+    fn emitCellBackground(self: *Renderer, b: *const LayerBuild, c: *const glyphwire.Cell, px: i32, py: i32, any_highlight: bool) void {
+        switch (c.style.bg) {
+            .color => |bg_ref| {
+                const bg = b.th.resolve(bg_ref);
+                // Alpha alone decides transparency: the default
+                // background is alpha 0, and an explicit black
+                // paints (see `core.default_style`).
+                if (bg.a != 0) {
+                    addRect(
+                        &b.lb.color_bg,
+                        host_eng.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
+                        fade(host_eng.Color.from(bg.r, bg.g, bg.b, bg.a), b.alpha),
+                    );
+                }
+            },
+            .image => |img| self.emitImageCell(b.eng, b.lb, img, px, py),
+            .icon => |icon| self.emitIcon(b.eng, b.lb, icon, px, py, false, b.has_icon_atlas),
+        }
+        // `fg_icon` (`draw_icon`'s `foreground: true`, and every
+        // table body icon) sits over a same-cell `.icon`
+        // background -- routed to the `icon_fg` batch, drawn after
+        // `icon_bg`.
+        if (c.fg_icon) |icon| self.emitIcon(b.eng, b.lb, icon, px, py, true, b.has_icon_atlas);
+
+        // Highlight tint: any cell whose `metadata_id` is in the
+        // layer's highlighted-id set. Into `color_bg` so the text
+        // pass paints over it and stays readable.
+        if (any_highlight and b.layer.sel.isHighlighted(c.metadata_id)) {
+            addRect(
+                &b.lb.color_bg,
+                host_eng.RectF.fromPosSize(px, py, geometry.cell_w, geometry.cell_h),
+                fade(selection.selection_highlight_color, b.alpha),
+            );
+        }
+    }
+
+    /// One cell's underline and strikethrough.
+    fn emitCellDecorations(b: *const LayerBuild, c: *const glyphwire.Cell, px: i32, py: i32) void {
+        // Before the glyph, but into a batch drawn after it: an
+        // underline belongs to the cell whether or not anything is
+        // written in it, so a run of blanks in an underlined span
+        // (a diagnostic covering trailing whitespace, a scaled
+        // glyph's fill columns) still draws its part of the line.
+        if (c.style.underline.style != .none) {
+            const ul = c.style.underline;
+            const src = b.th.resolve(ul.color orelse c.style.fg);
+            emitUnderline(
+                &b.lb.underline,
+                ul.style,
+                px,
+                py,
+                fade(host_eng.Color.from(src.r, src.g, src.b, src.a), b.alpha),
+            );
+        }
+        // A wide character's spacer copies its lead's style, but
+        // the lead already drew the line across both halves.
+        if (c.style.strike and c.wide != .wide_spacer) {
+            const src = b.th.resolve(c.style.fg);
+            const per_col: usize = if (c.wide == .wide_lead) 2 else 1;
+            emitStrike(
+                &b.lb.underline,
+                textScaleFactor(c.text_scale),
+                per_col * glyphwire.scaledPitch(c.text_scale),
+                px,
+                py,
+                fade(host_eng.Color.from(src.r, src.g, src.b, src.a), b.alpha),
+            );
+        }
+    }
+
+    /// One cell's glyph: an emoji, a glyph from the default atlas, or a
+    /// scaled glyph deferred to `emitDeferred`.
+    fn emitCellGlyph(self: *Renderer, b: *const LayerBuild, f: *host_eng.renderer.FontAtlas, c: *const glyphwire.Cell, px: i32, py: i32) void {
+        const g = c.grapheme();
+        if (g.len > 0) {
+            const fg = b.th.resolve(c.style.fg);
+            const color = fade(host_eng.Color.from(fg.r, fg.g, fg.b, fg.a), b.alpha);
+            if (c.text_scale == .x1) {
+                if (!self.emitEmoji(b.lb, f, .x1, g, px, py)) emitGlyphs(&b.lb.text, f, g, px, py, color);
+            } else {
+                var dg: DeferredScaledGlyph = .{
+                    .grapheme_bytes = undefined,
+                    .grapheme_len = @intCast(g.len),
+                    .pos = .{ .x = px, .y = py },
+                    .color = color,
+                    .scale = c.text_scale,
+                };
+                @memcpy(dg.grapheme_bytes[0..g.len], g);
+                self.deferred_scaled_text.append(self.app.alloc, dg) catch {};
+            }
+        }
+    }
+
+    /// What overflows its own cell, after the grid so it paints over the
+    /// neighbours: natural-size icons, then scaled text.
+    fn emitDeferred(self: *Renderer, b: *const LayerBuild, fa: ?*host_eng.renderer.FontAtlas) void {
+        // `.natural`-scale icons overflow past their own cell, so they are
+        // emitted after the grid -- when an overflow paints over
+        // neighbours regardless of order.
+        for (self.deferred_icons.items) |d| {
+            self.emitIconCell(b.eng, b.lb, d.icon, d.pos.x, d.pos.y, d.foreground, b.has_icon_atlas);
+        }
+
+        // `text_scale != .x1` glyphs overflow past their own cell the same
+        // way -- deferred so that overflow paints over already-emitted
+        // neighbours regardless of grid order. See `DeferredScaledGlyph`.
+        // Each drawn from its own dedicated, already-loaded atlas
+        // (`atlasForScale`) into its own batch (`scaledTextBatchFor`),
+        // since it isn't bound to `lb.text`'s (the default atlas's)
+        // texture.
+        if (fa) |f| {
+            for (self.deferred_scaled_text.items) |d| {
+                const sa = self.atlasForScale(f, d.scale) orelse continue;
+                if (self.emitEmoji(b.lb, sa, d.scale, d.grapheme(), d.pos.x, d.pos.y)) continue;
+                const batch = self.scaledTextBatchFor(b.lb, d.scale, &sa.texture) orelse continue;
+                emitGlyphs(batch, sa, d.grapheme(), d.pos.x, d.pos.y, d.color);
+            }
+        }
+    }
+
+    fn emitSelection(b: *const LayerBuild) void {
+        // Selection tint: one rect per selected row span
+        // (`LayerSelection.colRange`), `above = view_offset - row` the
+        // scroll-stable row key. Into `color_bg`, same reason as the
+        // highlight tint.
+        if (b.layer.sel.range != null) {
+            var srow: usize = 0;
+            while (srow < b.vp_rows) : (srow += 1) {
+                // The selection is keyed on *content* rows, so the
+                // viewport's own scroll offset has to go back in before
+                // asking, and come back out of the drawn column span.
+                const above: i64 = @as(i64, @intCast(b.view_offset)) - @as(i64, @intCast(b.off.row + srow));
+                const range = b.layer.sel.colRange(above) orelse continue;
+                const start = @max(range.start, b.off.col);
+                const end = @min(range.end, b.off.col + b.vp_cols);
+                if (end <= start) continue;
+                const x0 = b.origin_x + @as(i32, @intCast(start - b.off.col)) * geometry.cell_w;
+                const rect_w = @as(i32, @intCast(end - start)) * geometry.cell_w;
+                const y0 = b.origin_y + @as(i32, @intCast(srow)) * geometry.cell_h;
+                addRect(
+                    &b.lb.color_bg,
+                    host_eng.RectF.fromPosSize(x0, y0, rect_w, geometry.cell_h),
+                    fade(selection.selection_highlight_color, b.alpha),
+                );
+            }
+        }
+    }
+
+    fn emitOverlayRects(b: *const LayerBuild) void {
+        // Overlay rects (`create_rect`): pixel-space boxes in the layer's
+        // own content coordinate frame, translated to screen pixels by
+        // subtracting the same cell-based scroll offset every other pass
+        // above reads off `off`. Built into their own `rects` batch,
+        // composited last (see `drawLayerBatches`) so a rect sits on top
+        // of everything else the layer paints, text included.
+        if (b.layer.rects.count() > 0) {
+            const scroll_px_x = @as(i32, @intCast(b.off.col)) * geometry.cell_w;
+            const scroll_px_y = @as(i32, @intCast(b.off.row)) * geometry.cell_h;
+            var rect_it = b.layer.rects.valueIterator();
+            while (rect_it.next()) |r| {
+                const rx = b.origin_x + @as(i32, @intCast(r.x)) - scroll_px_x;
+                const ry = b.origin_y + @as(i32, @intCast(r.y)) - scroll_px_y;
+                const rw: i32 = @intCast(r.w);
+                const rh: i32 = @intCast(r.h);
+                const rc = b.th.resolve(r.color);
+                const col = fade(host_eng.Color.from(rc.r, rc.g, rc.b, rc.a), b.alpha);
+                if (r.filled) {
+                    addRect(&b.lb.rects, host_eng.RectF.fromPosSize(rx, ry, rw, rh), col);
+                } else {
+                    // Four non-overlapping strips (top, bottom, then the
+                    // left/right strips filling exactly the band between
+                    // them) rather than four full-height/width bars, so a
+                    // translucent `color` doesn't double up at the corners.
+                    const lw_u32: u32 = @min(r.line_width, @max(@min(r.w, r.h) / 2, 1));
+                    const lw: i32 = @intCast(lw_u32);
+                    addRect(&b.lb.rects, host_eng.RectF.fromPosSize(rx, ry, rw, lw), col);
+                    addRect(&b.lb.rects, host_eng.RectF.fromPosSize(rx, ry + rh - lw, rw, lw), col);
+                    addRect(&b.lb.rects, host_eng.RectF.fromPosSize(rx, ry + lw, lw, rh - 2 * lw), col);
+                    addRect(&b.lb.rects, host_eng.RectF.fromPosSize(rx + rw - lw, ry + lw, lw, rh - 2 * lw), col);
+                }
+            }
+        }
+    }
+
+    fn emitDropTarget(self: *Renderer, b: *const LayerBuild) void {
+        // The drop-target highlight (`set_drop_target`), after the overlay
+        // rects so it sits over everything the layer paints. Content cells
+        // go to screen pixels through the same scroll offset as above.
+        if (b.layer.drop_target) |dt| {
+            const rc = b.th.resolve(glyphwire.Color.role(.drop_target));
+            const cw = geometry.cell_w;
+            const ch = geometry.cell_h;
+            const scroll_col: i32 = @intCast(b.off.col);
+            const scroll_row: i32 = @intCast(b.off.row);
+            switch (dt) {
+                .layer, .cells => {
+                    const wash = fade(host_eng.Color.from(rc.r, rc.g, rc.b, rc.a), b.alpha * self.drop_target_opacity);
+                    const r: host_eng.RectF = switch (dt) {
+                        .layer => .fromPosSize(b.origin_x, b.origin_y, @as(i32, @intCast(b.vp_cols)) * cw, @as(i32, @intCast(b.vp_rows)) * ch),
+                        .cells => |c| .fromPosSize(
+                            b.origin_x + (@as(i32, @intCast(c.col)) - scroll_col) * cw,
+                            b.origin_y + (@as(i32, @intCast(c.row)) - scroll_row) * ch,
+                            @as(i32, @intCast(c.cols)) * cw,
+                            @as(i32, @intCast(c.rows)) * ch,
+                        ),
+                        .insert => unreachable,
+                    };
+                    addRect(&b.lb.rects, r, wash);
+                },
+                .insert => |ins| {
+                    // A quarter of a cell, at least two pixels, centred on
+                    // the column boundary -- but never left of the layer,
+                    // where a bar at column 0 would be half cut off.
+                    const bar_w: i32 = @max(2, @divTrunc(cw, 4));
+                    const edge = b.origin_x + (@as(i32, @intCast(ins.col)) - scroll_col) * cw;
+                    const x = @max(b.origin_x, edge - @divTrunc(bar_w, 2));
+                    const solid = fade(host_eng.Color.from(rc.r, rc.g, rc.b, rc.a), b.alpha);
+                    addRect(&b.lb.rects, host_eng.RectF.fromPosSize(
+                        x,
+                        b.origin_y + (@as(i32, @intCast(ins.row)) - scroll_row) * ch,
+                        bar_w,
+                        @as(i32, @intCast(ins.rows)) * ch,
+                    ), solid);
+                },
+            }
+        }
     }
 
     /// Emits a layer's drop shadow around its `w x h` pixel rect at
@@ -1421,7 +1453,7 @@ pub const Renderer = struct {
     /// not on the layer's size, which the nine-patch split absorbs -- and
     /// kept for the session: a program uses a handful of looks, so the
     /// cache stays a few small textures and is never evicted.
-    fn shadowTexture(self: *Renderer, eng: *Engine, sh: glyphwire.Shadow) ?*host_eng.Texture {
+    pub fn shadowTexture(self: *Renderer, eng: *Engine, sh: glyphwire.Shadow) ?*host_eng.Texture {
         const key: ShadowKey = .{ .blur = sh.blur, .radius = sh.radius, .color = .{ sh.color.r, sh.color.g, sh.color.b, sh.color.a } };
         const managed = self.shadow_textures.get(key) orelse blk: {
             const pixels = shadow_mod.build(self.app.alloc, sh) catch |err| {
@@ -1933,8 +1965,8 @@ pub const Renderer = struct {
         // Bands sit in their own cells between split layers, never inside
         // a viewport, so the bars drawn earlier can't be painted over.
         eng.renderer.begin(eng.projMat);
-        self.renderDividers(eng);
-        self.renderScrollbar(eng);
+        overlays.renderDividers(self, eng);
+        overlays.renderScrollbar(self, eng);
         eng.renderer.end();
 
         // The manager's raised overlay (`Session.overlay_pane`): over
@@ -1957,7 +1989,7 @@ pub const Renderer = struct {
 
         // Over everything a program drew, dividers and scrollbar included:
         // it is a modal the host owns.
-        self.drawListDialog(eng);
+        overlays.drawListDialog(self, eng);
 
         // `--screenshot`: everything for this frame is drawn but not yet
         // swapped, so GL_BACK holds exactly what's about to be shown. The
@@ -1965,12 +1997,12 @@ pub const Renderer = struct {
         // scripted screenshot.
         if (self.app.screenshot.path) |path| {
             if (!self.app.screenshot.done and self.app.screenshot.elapsed_ms >= self.app.screenshot.delay_ms) {
-                self.captureContentArea(eng, path);
+                capture.captureContentArea(self, eng, path);
                 self.app.screenshot.done = true;
             }
         }
 
-        self.drawProfilerHud(eng);
+        overlays.drawProfilerHud(self, eng);
     }
 
     /// Composites one pane's on-screen context. `focused` gates the caret:
@@ -2005,7 +2037,7 @@ pub const Renderer = struct {
         // *floats* (a popup, the Ctrl+` shell panel) then covers them the
         // way it covers everything else it is laid over. Drawn in the
         // chrome pass, zoe's tree divider ran straight down the panel.
-        self.drawLayerDividers(eng, ctx_handle, ctx);
+        overlays.drawLayerDividers(self, eng, ctx_handle, ctx);
 
         // The caret follows `ctx.caret_layer` when a client set one --
         // otherwise the root cursor. Drawn here, on top of root's content
@@ -2022,13 +2054,13 @@ pub const Renderer = struct {
         const shape: CursorShape = if (focused) self.app.caret.shapeFor(ctx.caret_shape) else .box;
         if (ctx.caret_visible and focus_caret == null) {
             if (focused)
-                self.drawRootCaret(eng, &ctx.root, origin.x, origin.y, root_view, shape, caretColor(&ctx.theme))
+                overlays.drawRootCaret(self, eng, &ctx.root, origin.x, origin.y, root_view, shape, overlays.caretColor(&ctx.theme))
             else
-                drawIdleRootCaret(eng, &ctx.root, origin.x, origin.y, root_view, caretColor(&ctx.theme));
+                overlays.drawIdleRootCaret(eng, &ctx.root, origin.x, origin.y, root_view, overlays.caretColor(&ctx.theme));
         }
         // IME composition, over both: it covers the cells the caret is
         // about to write into, so it has to sit above the caret too.
-        if (focused) self.drawPreedit(eng, &ctx.root, origin.x, origin.y, root_view);
+        if (focused) overlays.drawPreedit(self, eng, &ctx.root, origin.x, origin.y, root_view);
 
         for (ctx.layer_order.items) |handle| {
             const layer = ctx.layers.getPtr(handle) orelse continue;
@@ -2040,791 +2072,9 @@ pub const Renderer = struct {
             // Right after the layer's own content, not in the chrome pass:
             // a popup created later has to cover the bars of whatever it
             // floats over, the same as it covers that layer's cells.
-            drawLayerScrollbars(eng, layer, origin);
-            drawResizeEdge(eng, layer, origin, themeColor(&ctx.theme, .pane_divider));
-            if (ctx.caret_visible and focus_caret == layer) self.drawFocusedCaret(eng, layer, origin, shape, caretColor(&ctx.theme), focused);
+            overlays.drawLayerScrollbars(eng, layer, origin);
+            overlays.drawResizeEdge(eng, layer, origin, overlays.themeColor(&ctx.theme, .pane_divider));
+            if (ctx.caret_visible and focus_caret == layer) overlays.drawFocusedCaret(self, eng, layer, origin, shape, overlays.caretColor(&ctx.theme), focused);
         }
-    }
-
-    /// A floating layer's `resize_edge` band, over the outer pixels of
-    /// its own edge row or column (`geometry.resizeEdgeBand`). Drawn with the layer,
-    /// like its scrollbars, so a popup over the layer covers it too --
-    /// matching `Panes.edgeAt`, which won't grab an edge it can't see.
-    fn drawResizeEdge(eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin, color: host_eng.Color) void {
-        if (layer.resize_edge == .none) return;
-        const r = geometry.resizeEdgeBand(geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows()), layer.resize_edge);
-        eng.renderer.begin(eng.projMat);
-        defer eng.renderer.end();
-        eng.renderer.drawFilledRect(
-            host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-            color,
-        );
-    }
-
-    /// One context's layer-split bands. Drawn per context inside
-    /// `drawOneContext` rather than with the pane bands in the chrome
-    /// pass, so a floating layer covers them -- the same move
-    /// `drawLayerScrollbars` made, for the same reason.
-    ///
-    /// `App.panes` holds every band for every on-screen context, already
-    /// translated into window cells (`Panes.syncLocked`), so this filters
-    /// the cache down to the context being composited and draws those
-    /// where they are. The cache is refreshed each frame by the mouse
-    /// handler, which runs before any of this.
-    ///
-    /// The style is the host's `pane_divider` with the context's own
-    /// `set_divider_style` laid over it; the colour is always the
-    /// context theme's dimmer `divider` role, so the seam between
-    /// programs still reads as the bigger boundary.
-    fn drawLayerDividers(self: *Renderer, eng: *Engine, ctx_handle: glyphwire.ContextHandle, ctx: *const glyphwire.Context) void {
-        // `render` holds `ctx_mutex` around this whole pass, which is what
-        // `syncLocked` wants. Refreshing here rather than relying on the
-        // mouse handler keeps the bands right in a session that has never
-        // seen a pointer.
-        self.app.panes.syncLocked();
-        const color = themeColor(&ctx.theme, .divider);
-        const style = ctx.divider_style.resolve(self.pane_divider);
-        const glyphs: ?*const dividers.Glyphs = switch (style) {
-            .block => null,
-            .glyphs => |*g| g,
-        };
-
-        const alloc = self.app.alloc;
-        self.layer_divider_lines.clearRetainingCapacity();
-        var drawing = false;
-        defer if (drawing) eng.renderer.end();
-        for (self.app.panes.bands.items) |d| {
-            switch (d.level) {
-                .pane, .edge => continue,
-                .layer => |h| if (h != ctx_handle) continue,
-            }
-            if (!drawing) {
-                drawing = true;
-                eng.renderer.begin(eng.projMat);
-            }
-            // A glyph covers only part of its cell, so a glyph band gets
-            // the context's background under it, as a pane band gets the
-            // window's.
-            const r = geometry.cellRectPx(d.rect);
-            eng.renderer.drawFilledRect(
-                host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-                if (glyphs == null) color else themeColor(&ctx.theme, .bg),
-            );
-            if (glyphs != null) {
-                self.layer_divider_lines.append(alloc, .{ .rect = d.rect, .vertical = d.axis == .row }) catch return;
-            }
-        }
-        const g = glyphs orelse return;
-        if (self.layer_divider_lines.items.len == 0) return;
-        dividers.layout(alloc, self.layer_divider_lines.items, g, &self.layer_divider_cells) catch return;
-        for (self.layer_divider_cells.items) |c| _ = drawCellText(eng, c.glyph, c.col, c.row, 1, color);
-    }
-
-    /// Paints whichever modal list dialog is open (`host/modal_list.zig`:
-    /// the context switcher or the theme switcher), centred on the pane
-    /// it was opened from. Looks like zoe's file finder: the window
-    /// theme's `panel_style` nine-patch one cell out round the content,
-    /// standing off the screen on `Shadow.dialog`, a title bar in the
-    /// finder header colours, and the selected row in the list cursor's.
-    /// Cell-aligned like `drawPreedit`, so its text sits on the same grid
-    /// as the content around it.
-    ///
-    /// Immediate mode, so the draw order is the engine's per-`end`
-    /// order: textured quads (shadow, then frame), then flat fills (title
-    /// bar, selection), then text.
-    fn drawListDialog(self: *Renderer, eng: *Engine) void {
-        const view = self.app.switcher.view() orelse self.app.theme_switcher.view() orelse return;
-
-        const server = self.app.server;
-        const session_lock = server.lockSession();
-        defer session_lock.unlock();
-
-        const pane = server.session.panePtr(view.pane) orelse return;
-        const area: modal_list.Rect = .{ .row = pane.rect.row, .col = pane.rect.col, .rows = pane.rect.rows, .cols = pane.rect.cols };
-        const lay = modal_list.layout(area, view) orelse return;
-
-        // The window theme's, not the pane program's: the dialog is the
-        // host's, and the theme switcher's preview should show on it.
-        const th = &server.session.theme;
-        const header_bg = themeColor(th, .finder_header_bg);
-        const header_fg = themeColor(th, .finder_header_fg);
-        const sel_bg = themeColor(th, .list_cursor_bg);
-        const sel_fg = themeColor(th, .list_cursor_fg);
-        const text_fg = themeColor(th, .popup_fg);
-        const dim_fg = themeColor(th, .fg_dim);
-
-        eng.renderer.begin(eng.projMat);
-        defer eng.renderer.end();
-
-        const frame = geometry.cellRectPx(.{ .row = lay.frame.row, .col = lay.frame.col, .rows = lay.frame.rows, .cols = lay.frame.cols });
-        const fx: i32 = @intFromFloat(frame.x);
-        const fy: i32 = @intFromFloat(frame.y);
-        const fw: i32 = @intFromFloat(frame.w);
-        const fh: i32 = @intFromFloat(frame.h);
-        self.drawShadowImmediate(eng, glyphwire.Shadow.dialog, fx, fy, fw, fh);
-        if (!self.drawNinePatchImmediate(eng, th.panelStyle(), fx, fy, fw, fh)) {
-            // No such nine-patch: a flat panel in the popup colour.
-            eng.renderer.drawFilledRect(host_eng.RectF{ .l = frame.x, .t = frame.y, .r = frame.x + frame.w, .b = frame.y + frame.h }, themeColor(th, .popup_bg));
-        }
-
-        const c = lay.content;
-        const inner = c.cols -| 2;
-        fillCells(eng, .{ .row = c.row, .col = c.col, .rows = 1, .cols = c.cols }, header_bg);
-        _ = drawCellText(eng, view.title, c.col + 1, c.row, inner, header_fg);
-
-        for (view.rows[lay.first .. lay.first + lay.visible], lay.first..) |row, i| {
-            const r = c.row + 1 + (i - lay.first);
-            const selected = i == view.selected;
-            if (selected) fillCells(eng, .{ .row = r, .col = c.col, .rows = 1, .cols = c.cols }, sel_bg);
-            if (modal_list.label(i)) |key| {
-                _ = drawCellText(eng, &.{key}, c.col + 1, r, inner, if (selected) sel_fg else dim_fg);
-            }
-            const text_cols = inner -| modal_list.label_cols;
-            const used = drawCellText(eng, row.text, c.col + 1 + modal_list.label_cols, r, text_cols, if (selected) sel_fg else text_fg);
-            _ = drawCellText(eng, row.tag, c.col + 1 + modal_list.label_cols + used, r, text_cols -| used, if (selected) sel_fg else dim_fg);
-        }
-        _ = drawCellText(eng, view.foot, c.col + 1, c.row + c.rows - 1, inner, dim_fg);
-    }
-
-    fn fillCells(eng: *Engine, rect: glyphwire.CellRect, color: host_eng.Color) void {
-        const px = geometry.cellRectPx(rect);
-        eng.renderer.drawFilledRect(host_eng.RectF{ .l = px.x, .t = px.y, .r = px.x + px.w, .b = px.y + px.h }, color);
-    }
-
-    /// `emitShadow` for an immediate-mode overlay: the same cached
-    /// texture and split, queued on the renderer's sprite batch.
-    fn drawShadowImmediate(self: *Renderer, eng: *Engine, sh: glyphwire.Shadow, x0: i32, y0: i32, w: i32, h: i32) void {
-        const out = shadow_mod.outset(sh);
-        const dw = w + 2 * out;
-        const dh = h + 2 * out;
-        if (dw <= 0 or dh <= 0) return;
-        const tex = self.shadowTexture(eng, sh) orelse return;
-        const g = shadow_mod.geometry(sh);
-        const left = x0 + sh.x - out;
-        const top = y0 + sh.y - out;
-        const side: f32 = @floatFromInt(g.side);
-        for (glyphwire.ninePatchQuads(g.style(), @intCast(dw), @intCast(dh))) |q| {
-            if (q.dst_w == 0 or q.dst_h == 0 or q.src_w == 0 or q.src_h == 0) continue;
-            eng.renderer.draw(tex, host_eng.RectF.fromPosSize(
-                left + @as(i32, @intCast(q.dst_x)),
-                top + @as(i32, @intCast(q.dst_y)),
-                @intCast(q.dst_w),
-                @intCast(q.dst_h),
-            ), .{
-                .l = @as(f32, @floatFromInt(q.src_x)) / side,
-                .t = @as(f32, @floatFromInt(q.src_y)) / side,
-                .r = @as(f32, @floatFromInt(q.src_x + q.src_w)) / side,
-                .b = @as(f32, @floatFromInt(q.src_y + q.src_h)) / side,
-            });
-        }
-    }
-
-    /// `emitNinePatch` for an immediate-mode overlay: the root context's
-    /// nine-patch style `name` over the `w x h` pixel rect at `(x0, y0)`.
-    /// False when there is no such style (or its image won't load), so
-    /// the caller can draw something flat instead. Call under `ctx_mutex`.
-    fn drawNinePatchImmediate(self: *Renderer, eng: *Engine, name: []const u8, x0: i32, y0: i32, w: i32, h: i32) bool {
-        if (w <= 0 or h <= 0) return false;
-        const root = self.app.server.session.rootContext();
-        const style = root.ninePatchStyle(name) orelse return false;
-        const entry = self.imageEntryIn(glyphwire.root_context_handle, style.image) orelse return false;
-        const tex = self.textureForImage(eng, glyphwire.root_context_handle, style.image) orelse return false;
-        const tex_w: f32 = @floatFromInt(entry.width);
-        const tex_h: f32 = @floatFromInt(entry.height);
-        for (glyphwire.ninePatchQuads(style, @intCast(w), @intCast(h))) |q| {
-            if (q.dst_w == 0 or q.dst_h == 0 or q.src_w == 0 or q.src_h == 0) continue;
-            eng.renderer.draw(tex, host_eng.RectF.fromPosSize(
-                x0 + @as(i32, @intCast(q.dst_x)),
-                y0 + @as(i32, @intCast(q.dst_y)),
-                @intCast(q.dst_w),
-                @intCast(q.dst_h),
-            ), .{
-                .l = @as(f32, @floatFromInt(q.src_x)) / tex_w,
-                .t = @as(f32, @floatFromInt(q.src_y)) / tex_h,
-                .r = @as(f32, @floatFromInt(q.src_x + q.src_w)) / tex_w,
-                .b = @as(f32, @floatFromInt(q.src_y + q.src_h)) / tex_h,
-            });
-        }
-        return true;
-    }
-
-    /// Paints the profiler overlay in the top-right corner while the HUD
-    /// is toggled on (Ctrl+Alt+Shift+P; only possible when
-    /// `host.conf.lua` set `profile`). Immediate-mode like the caret.
-    /// Lines are formatted first so the panel can be sized to the widest
-    /// one (and clamped to the window) -- monospace, so column count is
-    /// exact. All numbers
-    /// are the profiler's windowed values, not lifetime.
-    fn drawProfilerHud(self: *Renderer, eng: *Engine) void {
-        if (!self.app.profiler.hud_visible) return;
-        const snap = self.app.profiler.snapshot();
-
-        const cap = 2 + glyphwire.profile_max_phases + glyphwire.profile_max_counters;
-        var text: [cap][80]u8 = undefined;
-        var len: [cap]usize = undefined;
-        var head: [cap]bool = undefined;
-        var n: usize = 0;
-
-        const put = struct {
-            fn f(buf: []u8, comptime fmt: []const u8, args: anytype) usize {
-                const s = std.fmt.bufPrint(buf, fmt, args) catch return 0;
-                return s.len;
-            }
-        }.f;
-
-        const mode: []const u8 = if (self.app.profiler.force_redraw) "   [FORCED REDRAW]" else "";
-        len[n] = put(&text[n], "PROFILER   fps {d:.1}   skip/s {d:.0}{s}", .{ snap.fps, snap.skips_per_sec, mode });
-        head[n] = true;
-        n += 1;
-        len[n] = put(&text[n], "phase           avg     p95     max", .{});
-        head[n] = true;
-        n += 1;
-        for (snap.phaseSlice()) |ph| {
-            len[n] = put(&text[n], "  {s:<12}{d:>7.2} {d:>7.2} {d:>7.2}", .{ ph.name, ph.avg_ms, ph.p95_ms, ph.max_ms });
-            head[n] = false;
-            n += 1;
-        }
-        len[n] = put(&text[n], "counter       per frame", .{});
-        head[n] = true;
-        n += 1;
-        for (snap.counterSlice()) |c| {
-            len[n] = put(&text[n], "  {s:<14}{d:>9.1}", .{ c.name, c.per_frame });
-            head[n] = false;
-            n += 1;
-        }
-
-        var max_cols: i32 = 0;
-        for (len[0..n]) |l| max_cols = @max(max_cols, @as(i32, @intCast(l)));
-
-        const pad: i32 = 6;
-        const line_h: i32 = geometry.cell_h;
-        const char_w: i32 = geometry.cell_w;
-        const fb = eng.window_state.framebuffer_size;
-        const panel_w = @min(max_cols * char_w + pad * 2, @max(char_w, fb.x - pad * 2));
-        const panel_h = @as(i32, @intCast(n)) * line_h + pad * 2;
-        const x0: i32 = @max(pad, fb.x - panel_w - pad);
-        const y0: i32 = pad;
-
-        eng.renderer.begin(eng.projMat);
-        defer eng.renderer.end();
-        eng.renderer.drawFilledRect(host_eng.RectF.fromPosSize(x0, y0, panel_w, panel_h), hud_bg);
-        for (0..n) |i| {
-            _ = eng.renderer.drawStringColored(
-                text[i][0..len[i]],
-                .{ .x = x0 + pad, .y = y0 + pad + @as(i32, @intCast(i)) * line_h },
-                if (head[i]) hud_head else hud_fg,
-            );
-        }
-    }
-
-    /// The caret for the root layer, drawn immediately (never batched) and
-    /// only while visible -- it blinks on its own clock (see `Caret`).
-    /// Normally at the live grid cursor; a mouse-driven scroll pins it
-    /// (`caret.Caret.pin`) to the buffer cell it was on when the scroll
-    /// began, clipping off-screen once that cell leaves the viewport.
-    fn drawRootCaret(self: *Renderer, eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize, shape: CursorShape, color: host_eng.Color) void {
-        if (!self.app.caret.visible()) return;
-        const cell = self.app.caret.screenCell(root, view_offset) orelse return;
-
-        eng.renderer.begin(eng.projMat);
-        drawCaret(eng, root, origin_x, origin_y, cell.row, cell.col, view_offset, shape, color);
-        eng.renderer.end();
-    }
-
-    /// An unfocused pane's root caret: a steady hollow box at its grid
-    /// cursor. Not `drawRootCaret`, whose blink clock and scroll pin
-    /// belong to the focused context. Hidden by DECTCEM like any caret.
-    fn drawIdleRootCaret(eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize, color: host_eng.Color) void {
-        if (!root.vt.cursor_visible) return;
-        if (root.cursor.row >= root.height or root.cursor.col >= root.width) return;
-        eng.renderer.begin(eng.projMat);
-        drawCaret(eng, root, origin_x, origin_y, root.cursor.row, root.cursor.col, view_offset, .box, color);
-        eng.renderer.end();
-    }
-
-    /// The caret for a `caret_layer` pane (see `core.Context.caret_layer`):
-    /// `gmux` points it at the focused pane, whose cursor is driven by
-    /// that pane's PTY. Positioned through the pane's own bounds
-    /// (`layer.pos`, set by the split layout), viewport and scroll
-    /// offset -- the same transform `syncOneLayer` uses for the pane's
-    /// content. Hidden while the pane has DECTCEM cursor-hide set, while
-    /// it is scrolled back into its own history (`view_scroll != 0`), or
-    /// while the cursor sits outside the visible viewport. Shares the
-    /// blink clock with the root caret.
-    /// `blink` is false for an unfocused pane's caret, which holds still.
-    fn drawFocusedCaret(self: *Renderer, eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin, shape: CursorShape, color: host_eng.Color, blink: bool) void {
-        if (!layer.vt.cursor_visible) return;
-        if (blink and !self.app.caret.blinkOn()) return;
-        if (layer.view_scroll != 0) return;
-
-        const off = layer.scroll_off;
-        if (layer.cursor.row < off.row or layer.cursor.col < off.col) return;
-        const crow = layer.cursor.row - off.row;
-        const ccol = layer.cursor.col - off.col;
-        if (crow >= layer.viewportRows() or ccol >= layer.viewportCols()) return;
-
-        const ox = @as(i32, @intFromFloat(@round(layer.pos.x))) + origin.x;
-        const oy = @as(i32, @intFromFloat(@round(layer.pos.y))) + origin.y;
-
-        eng.renderer.begin(eng.projMat);
-        drawCaret(eng, layer, ox, oy, crow, ccol, 0, shape, color);
-        eng.renderer.end();
-    }
-
-    /// Paints the IME's in-progress composition over the grid, starting at
-    /// the caret cell and running right along the row. Uncommitted text
-    /// never reaches the `text` event stream (that only carries what the
-    /// IME has committed), so without this the user types Japanese into an
-    /// apparently dead terminal and only sees the result on commit.
-    ///
-    /// Drawn cell-aligned using glyphwire's own East Asian Width rules
-    /// rather than the font's advances, so it sits on the same column grid
-    /// as the content underneath. Clipped at the row's right edge -- a
-    /// composition longer than the remaining columns just stops; it is
-    /// transient overlay text, not grid content, and wrapping it would
-    /// have to reflow around content it is about to replace anyway.
-    ///
-
-    fn drawPreedit(self: *Renderer, eng: *Engine, root: *const glyphwire.Layer, origin_x: i32, origin_y: i32, view_offset: usize) void {
-
-        const text = self.app.preedit.text(eng);
-        if (text.len == 0) return;
-        const cell = self.app.caret.screenCell(root, view_offset) orelse return;
-
-        const cols_left = root.width - cell.col;
-        const span_cols = @min(preedit_mod.Preedit.cellWidth(text), cols_left);
-        if (span_cols == 0) return;
-
-        const x0 = origin_x + @as(i32, @intCast(cell.col)) * geometry.cell_w;
-        const y0 = origin_y + @as(i32, @intCast(cell.row)) * geometry.cell_h;
-        const span_px = @as(i32, @intCast(span_cols)) * geometry.cell_w;
-
-        eng.renderer.begin(eng.projMat);
-        defer eng.renderer.end();
-
-        eng.renderer.drawFilledRect(
-            host_eng.RectF.fromPosSize(x0, y0, span_px, geometry.cell_h),
-            preedit_bg,
-        );
-
-        // One `drawStringColored` per codepoint so each lands on its own
-        // cell boundary, and so the renderer's `syncAtlasForText` packs
-        // any CJK glyph that isn't in the atlas yet before drawing it.
-        const cursor_byte = self.app.preedit.cursorByte(eng);
-        var cursor_col: ?usize = null;
-        var col = cell.col;
-        var byte: usize = 0;
-        var it = (std.unicode.Utf8View.initUnchecked(text)).iterator();
-        while (it.nextCodepointSlice()) |cp_bytes| {
-            if (cursor_byte) |cb| {
-                if (cursor_col == null and byte >= cb) cursor_col = col;
-            }
-            const cp = std.unicode.utf8Decode(cp_bytes) catch continue;
-            const w: usize = @max(1, glyphwire.codepointWidth(cp));
-            if (col + w > root.width) break;
-            _ = eng.renderer.drawStringColored(cp_bytes, .{
-                .x = origin_x + @as(i32, @intCast(col)) * geometry.cell_w,
-                .y = y0,
-            }, preedit_fg);
-            col += w;
-            byte += cp_bytes.len;
-        }
-        // Cursor at the very end of the composition: the loop never saw a
-        // codepoint at or past it, so it lands on the column after the last.
-        if (cursor_byte != null and cursor_col == null) cursor_col = col;
-
-        eng.renderer.drawFilledRect(
-            host_eng.RectF.fromPosSize(x0, y0 + geometry.cell_h - preedit_underline_px, span_px, preedit_underline_px),
-            preedit_fg,
-        );
-
-        // The IME's own caret inside the composition -- where the next
-        // keystroke lands, which is not necessarily the end (arrow keys
-        // move within a composition before it commits).
-        if (cursor_col) |cc| {
-            if (cc <= root.width) {
-                eng.renderer.drawFilledRect(
-                    host_eng.RectF.fromPosSize(
-                        origin_x + @as(i32, @intCast(cc)) * geometry.cell_w,
-                        y0,
-                        cursor_width,
-                        geometry.cell_h,
-                    ),
-                    preedit_fg,
-                );
-            }
-        }
-    }
-
-    /// Paints the caret for `layer` at grid cell `(crow, ccol)` (already
-    /// resolved by the caller). `block`/`box`/`underline` cover the whole
-    /// cell -- two cells on the lead of a wide (CJK) character -- while
-    /// `line` stays a thin bar at the left edge. Assumes an open renderer
-    /// pass.
-    /// The caret is the theme's `cursor_bg`: a fixed white would vanish
-    /// on a light theme.
-    fn caretColor(th: *const glyphwire.theme.Stored) host_eng.Color {
-        const c = th.theme.roleColor(.cursor_bg);
-        return host_eng.Color.from(c.r, c.g, c.b, 255);
-    }
-
-    /// `th`'s colour for role `r`, for the host's own chrome.
-    fn themeColor(th: *const glyphwire.theme.Stored, r: glyphwire.theme.Role) host_eng.Color {
-        const c = th.theme.roleColor(r);
-        return host_eng.Color.from(c.r, c.g, c.b, c.a);
-    }
-
-    fn drawCaret(eng: *Engine, layer: *const glyphwire.Layer, origin_x: i32, origin_y: i32, crow: usize, ccol: usize, view_offset: usize, shape: CursorShape, color: host_eng.Color) void {
-        const cx = origin_x + @as(i32, @intCast(ccol)) * geometry.cell_w;
-        const cy = origin_y + @as(i32, @intCast(crow)) * geometry.cell_h;
-
-        const on_wide_lead = layer.viewRow(view_offset, crow)[ccol].wide == .wide_lead;
-        const cell_span: i32 = if (on_wide_lead) geometry.cell_w * 2 else geometry.cell_w;
-
-        switch (shape) {
-            .line => eng.renderer.drawFilledRect(
-                host_eng.RectF.fromPosSize(cx, cy, cursor_width, geometry.cell_h),
-                color,
-            ),
-            .block => eng.renderer.drawFilledRect(
-                host_eng.RectF.fromPosSize(cx, cy, cell_span, geometry.cell_h),
-                color,
-            ),
-            .box => eng.renderer.drawRect(
-                host_eng.RectF.fromPosSize(cx, cy, cell_span, geometry.cell_h),
-                color,
-                cursor_box_line_px,
-            ),
-            .underline => eng.renderer.drawFilledRect(
-                host_eng.RectF.fromPosSize(cx, cy + geometry.cell_h - cursor_underline_px, cell_span, cursor_underline_px),
-                color,
-            ),
-        }
-    }
-
-    /// Reads back just the composited grid region -- the left/right
-    /// `content_pad_px` margins and the scrollbar excluded -- from the GL
-    /// framebuffer and writes it to `path` as a PNG. Best-effort.
-    fn captureContentArea(self: *Renderer, eng: *Engine, path: []const u8) void {
-        const gl = host_eng.gl;
-        const fb = eng.window_state.framebuffer_size;
-        const x0: i32 = geometry.content_pad_px;
-
-        var used_rows: usize = geometry.min_grid_rows;
-        var gutter: i32 = 0;
-        {
-            const server = self.app.server;
-            const session_lock = server.lockSession();
-            defer session_lock.unlock();
-            // Whatever the grid was sized against -- a context that opts
-            // the bar out has no gutter to crop off, unless a pane tree
-            // is keeping it reserved.
-            gutter = geometry.rightGutterPx(server.ctx.window_scrollbar, server.session.root_pane_split != null);
-            // Cropping to the cursor row keeps a one-line shell session's
-            // screenshot from being mostly blank, which is what the README
-            // assets want. It only makes sense for a single pane, though:
-            // with a pane tree installed, one pane's cursor says nothing
-            // about how far down the window has content, so capture the
-            // whole grid.
-            //
-            // The same goes for a full-screen program (zoe, gwmd,
-            // salacommander) that has put its own context on screen: the
-            // shell's cursor is hidden behind it, so crop nothing.
-            if (server.session.root_pane_split != null or self.showsOtherContext()) {
-                used_rows = geometry.grid_rows;
-            } else {
-                used_rows = @max(geometry.min_grid_rows, server.ctx.root.cursor.row + 2);
-            }
-        }
-        const w: i32 = @min(@as(i32, @intCast(geometry.grid_cols)) * geometry.cell_w, fb.x - gutter - 2 * geometry.content_pad_px);
-        used_rows = @min(used_rows, geometry.grid_rows);
-        const h: i32 = @min(@as(i32, @intCast(used_rows)) * geometry.cell_h, fb.y);
-        if (w <= 0 or h <= 0) {
-            std.log.warn("glyphwire-host: screenshot region is empty ({d}x{d}), skipping", .{ w, h });
-            return;
-        }
-
-        const uw: usize = @intCast(w);
-        const uh: usize = @intCast(h);
-        const row_bytes = uw * 4;
-
-        const pixels = self.app.alloc.alloc(u8, uh * row_bytes) catch |err| {
-            std.log.err("glyphwire-host: screenshot buffer alloc failed: {t}", .{err});
-            return;
-        };
-        defer self.app.alloc.free(pixels);
-
-        gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
-        // glReadPixels' origin is the framebuffer's bottom-left; read the
-        // top `h` rows.
-        gl.readPixels(x0, fb.y - h, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels.ptr);
-
-        // GL returns rows bottom-to-top; flip so the PNG reads top-to-bottom.
-        const tmp = self.app.alloc.alloc(u8, row_bytes) catch return;
-        defer self.app.alloc.free(tmp);
-        var top: usize = 0;
-        var bot: usize = uh - 1;
-        while (top < bot) : ({
-            top += 1;
-            bot -= 1;
-        }) {
-            @memcpy(tmp, pixels[top * row_bytes ..][0..row_bytes]);
-            @memcpy(pixels[top * row_bytes ..][0..row_bytes], pixels[bot * row_bytes ..][0..row_bytes]);
-            @memcpy(pixels[bot * row_bytes ..][0..row_bytes], tmp);
-        }
-
-        const img = host_eng.stbi.Image{
-            .data = pixels,
-            .width = @intCast(uw),
-            .height = @intCast(uh),
-            .num_components = 4,
-            .bytes_per_component = 1,
-            .bytes_per_row = @intCast(row_bytes),
-            .is_hdr = false,
-        };
-        const path_z = std.mem.concatWithSentinel(self.app.alloc, u8, &.{path}, 0) catch return;
-        defer self.app.alloc.free(path_z);
-        img.writeToFile(path_z, .png) catch |err| {
-            std.log.err("glyphwire-host: screenshot write to '{s}' failed: {t}", .{ path, err });
-            return;
-        };
-        std.log.info("glyphwire-host: wrote screenshot {s} ({d}x{d})", .{ path, uw, uh });
-    }
-
-    /// Whether some mapped pane has a program's context stacked over its
-    /// base (shell) context. `server.ctx` can't answer this: it follows
-    /// focus, so it *is* the full-screen program's context by then.
-    /// Caller holds `ctx_mutex`.
-    fn showsOtherContext(self: *Renderer) bool {
-        var it = self.app.server.session.panes.valueIterator();
-        while (it.next()) |pane| {
-            if (pane.mapped and pane.stack.items.len > 1) return true;
-        }
-        return false;
-    }
-
-    /// The bands between *panes*, drawn as a flat separator over
-    /// everything: they separate whole programs, so nothing one program
-    /// draws may cover them. Their geometry comes from `App.panes`' cache,
-    /// which the mouse handler already refreshes each frame -- see
-    /// `panes.Panes.syncLocked`.
-    ///
-    /// A context's own layer bands are *not* drawn here. See
-    /// `drawLayerDividers`.
-    fn renderDividers(self: *Renderer, eng: *Engine) void {
-        const server = self.app.server;
-        // The window theme's: a band between panes belongs to no program.
-        const color, const bg, const focus = blk: {
-            const session_lock = server.lockSession();
-            defer session_lock.unlock();
-            self.app.panes.syncLocked();
-            break :blk .{
-                themeColor(&server.session.theme, .pane_divider),
-                themeColor(&server.session.theme, .bg),
-                self.focusHighlight(),
-            };
-        };
-        switch (self.pane_divider) {
-            .block => for (self.app.panes.bands.items) |d| {
-                if (d.level != .pane) continue;
-                const r = geometry.cellRectPx(d.rect);
-                eng.renderer.drawFilledRect(
-                    host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-                    color,
-                );
-                // The stretch of this band along the focused pane, over
-                // the band just drawn.
-                const f = focus orelse continue;
-                const part = pane_focus.clip(d.rect, f.rect) orelse continue;
-                const pr = geometry.cellRectPx(part);
-                eng.renderer.drawFilledRect(
-                    host_eng.RectF{ .l = pr.x, .t = pr.y, .r = pr.x + pr.w, .b = pr.y + pr.h },
-                    f.color,
-                );
-            },
-            .glyphs => |*g| {
-                self.syncDividerCells(g);
-                // The band's own cells are nobody's surface, so they get
-                // the window background first: the line glyph covers only
-                // part of its cell.
-                for (self.app.panes.bands.items) |d| {
-                    if (d.level != .pane) continue;
-                    const r = geometry.cellRectPx(d.rect);
-                    eng.renderer.drawFilledRect(
-                        host_eng.RectF{ .l = r.x, .t = r.y, .r = r.x + r.w, .b = r.y + r.h },
-                        bg,
-                    );
-                }
-                for (self.divider_cells.items) |c| {
-                    const lit = if (focus) |f| pane_focus.touches(c.row, c.col, f.rect) else false;
-                    _ = drawCellText(eng, c.glyph, c.col, c.row, 1, if (lit) focus.?.color else color);
-                }
-            },
-        }
-        // The drag ghost, over the top: the real dividers above are still
-        // at their pre-drag positions until the drag ends.
-        if (self.app.panes.preview) |p| {
-            eng.renderer.drawFilledRect(
-                host_eng.RectF{ .l = p.x, .t = p.y, .r = p.x + p.w, .b = p.y + p.h },
-                divider_preview_color,
-            );
-        }
-    }
-
-    /// One visible layer's own scrollbars, drawn inside its viewport
-    /// bounds -- distinct from `renderScrollbar`, which is the window's
-    /// bar for the root layer's scrollback. Opt-in per axis
-    /// (`core.PropertyName.scrollbars`) and skipped entirely on an axis
-    /// with nothing to scroll, so this is a no-op for every session that
-    /// isn't running a TUI. Called from `drawOneContext` straight after
-    /// the layer's batches (under `ctx_mutex`), so it composites in layer
-    /// order: gw-read's page bars used to show through the OCR dialog
-    /// floating over them when this was a final pass over everything.
-    /// Draws `text` along window row `row` from window column `col`, one
-    /// codepoint per cell boundary (the grid's own East Asian Width rules,
-    /// as `drawPreedit` does), stopping before it would pass `max_cols`.
-    /// Returns the columns used. For host-drawn chrome text; call between
-    /// `begin`/`end`.
-    const FocusHighlight = struct {
-        rect: glyphwire.CellRect,
-        color: host_eng.Color,
-    };
-
-    /// The focused pane's rect and its highlight colour this frame, or
-    /// null for none: `pane_focus_highlight = "none"`, or a focused pane
-    /// that isn't on screen. Caller holds `ctx_mutex`.
-    fn focusHighlight(self: *Renderer) ?FocusHighlight {
-        const session = &self.app.server.session;
-        const c = self.app.pane_focus.color(&session.theme.theme) orelse return null;
-        const focused = session.focused_pane.load(.monotonic);
-        // The raised overlay covers the window; outlining all of it would
-        // only frame the screen.
-        if (session.isOverlayPane(focused)) return null;
-        const pane = session.panePtr(focused) orelse return null;
-        if (!pane.mapped) return null;
-        return .{ .rect = pane.rect, .color = host_eng.Color.from(c.r, c.g, c.b, c.a) };
-    }
-
-    /// Rebuilds `divider_cells` when the pane bands moved since the last
-    /// build. A failed build (out of memory) leaves the old cells and
-    /// tries again next frame.
-    fn syncDividerCells(self: *Renderer, glyphs: *const dividers.Glyphs) void {
-        const gen = self.app.panes.pane_gen;
-        if (self.divider_cells_gen == gen) return;
-        const alloc = self.app.alloc;
-        self.divider_lines.clearRetainingCapacity();
-        for (self.app.panes.bands.items) |d| {
-            if (d.level != .pane) continue;
-            self.divider_lines.append(alloc, .{ .rect = d.rect, .vertical = d.axis == .row }) catch return;
-        }
-        dividers.layout(alloc, self.divider_lines.items, glyphs, &self.divider_cells) catch return;
-        self.divider_cells_gen = gen;
-    }
-
-    fn drawCellText(eng: *Engine, text: []const u8, col: usize, row: usize, max_cols: usize, color: host_eng.Color) usize {
-        const y = @as(i32, @intCast(row)) * geometry.cell_h;
-        var used: usize = 0;
-        var it = (std.unicode.Utf8View.init(text) catch return 0).iterator();
-        while (it.nextCodepointSlice()) |cp_bytes| {
-            const cp = std.unicode.utf8Decode(cp_bytes) catch continue;
-            const w: usize = @max(1, glyphwire.codepointWidth(cp));
-            if (used + w > max_cols) break;
-            _ = eng.renderer.drawStringColored(cp_bytes, .{
-                .x = geometry.content_pad_px + @as(i32, @intCast(col + used)) * geometry.cell_w,
-                .y = y,
-            }, color);
-            used += w;
-        }
-        return used;
-    }
-
-    fn drawLayerScrollbars(eng: *Engine, layer: *const glyphwire.Layer, origin: geometry.Origin) void {
-        const state = layer.scrollbarState();
-        if (!state.vertical and !state.horizontal) return;
-
-        const rect = geometry.layerRectIn(origin, layer.pos, layer.viewportCols(), layer.viewportRows());
-        const bars = geometry.paneScrollbars(
-            rect,
-            state,
-            layer.viewportCols(),
-            layer.viewportRows(),
-        );
-        if (bars.vertical == null and bars.horizontal == null) return;
-        eng.renderer.begin(eng.projMat);
-        defer eng.renderer.end();
-        if (bars.vertical) |v| drawBar(eng, v);
-        if (bars.horizontal) |h| drawBar(eng, h);
-    }
-
-    fn drawBar(eng: *Engine, bar: geometry.PaneScrollbarGeom) void {
-        eng.renderer.drawFilledRect(
-            host_eng.RectF{
-                .l = bar.track.x,
-                .t = bar.track.y,
-                .r = bar.track.x + bar.track.w,
-                .b = bar.track.y + bar.track.h,
-            },
-            pane_track_color,
-        );
-        eng.renderer.drawFilledRect(
-            host_eng.RectF{
-                .l = bar.thumb.x + 1,
-                .t = bar.thumb.y + 1,
-                .r = bar.thumb.x + bar.thumb.w - 1,
-                .b = bar.thumb.y + bar.thumb.h - 1,
-            },
-            pane_thumb_color,
-        );
-    }
-
-    /// The always-on scrollbar over the right edge: a dark track with a
-    /// lighter thumb reflecting the root layer's scrollback and view
-    /// offset (`geometry.scrollbarGeom`). Its own render pass (see
-    /// `render`) so it composites over every layer; `Scroll.handleScrollbar`
-    /// owns the interaction.
-    fn renderScrollbar(self: *Renderer, eng: *Engine) void {
-        const fb = eng.window_state.framebuffer_size;
-        const server = self.app.server;
-        var history_len: usize = undefined;
-        var height: usize = undefined;
-        var view_scroll: usize = undefined;
-        var owned: bool = undefined;
-        var enabled: bool = undefined;
-        {
-            const session_lock = server.lockSession();
-            defer session_lock.unlock();
-            history_len = server.ctx.root.history_len;
-            height = server.ctx.root.height;
-            view_scroll = server.ctx.root.view_scroll;
-            owned = scroll.rootOwned(&server.ctx.root);
-            enabled = server.ctx.window_scrollbar;
-        }
-        // A pure-TUI context opts the bar out entirely -- see
-        // `core.Context.window_scrollbar`. Under a pane tree its gutter
-        // stays reserved and just isn't painted (see
-        // `geometry.rightGutterPx`).
-        if (!enabled) return;
-        if (owned) {
-            eng.renderer.drawFilledRect(
-                host_eng.RectF.fromPosSize(fb.x - geometry.scrollbar_width_px, 0, geometry.scrollbar_width_px, fb.y),
-                host_eng.Color.from(28, 28, 32, 255),
-            );
-            return;
-        }
-        const geom = geometry.scrollbarGeom(fb.x, fb.y, history_len, height, view_scroll);
-
-        eng.renderer.drawFilledRect(
-            host_eng.RectF.fromPosSize(@as(i32, @intFromFloat(geom.left)), 0, geometry.scrollbar_width_px, fb.y),
-            host_eng.Color.from(28, 28, 32, 255),
-        );
-        eng.renderer.drawFilledRect(
-            host_eng.RectF{
-                .l = geom.left + 2,
-                .t = geom.thumb_top,
-                .r = geom.left + @as(f32, @floatFromInt(geometry.scrollbar_width_px)) - 2,
-                .b = geom.thumb_top + geom.thumb_h,
-            },
-            host_eng.Color.from(120, 120, 130, 255),
-        );
     }
 };

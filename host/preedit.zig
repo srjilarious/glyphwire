@@ -51,7 +51,7 @@ pub const Preedit = struct {
     }
 
     /// Byte offset of the IME's caret within `text()`, or null when the
-    /// IME didn't report one. `drawPreedit` marks it with a bar so the
+    /// IME didn't report one. `overlays.drawPreedit` marks it with a bar so the
     /// user can see where in the composition they are.
     pub fn cursorByte(self: *const Preedit, eng: *Engine) ?usize {
         _ = self;

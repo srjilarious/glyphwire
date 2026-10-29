@@ -147,7 +147,7 @@ pub const App = struct {
 
     /// Set from `--screenshot <path>`: once `elapsed_ms` passes `delay_ms`,
     /// `render` writes the composited grid region to `path` (see
-    /// `render.Renderer.captureContentArea`) and `update` quits the next
+    /// `capture.captureContentArea`) and `update` quits the next
     /// frame. `path` null for a normal run. Used by
     /// `scripts/regen-readme-assets.sh` together with the shell's
     /// `GLYPHWIRE_SHELL_SCRIPT` (see shell/main.zig) to produce the README

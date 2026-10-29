@@ -12,7 +12,7 @@ const CursorShape = config.CursorShape;
 /// Caret appearance + blink phase + mouse-scroll pin state. The caret is a
 /// property of the rendering front end, not the shared grid model, so all
 /// of this is host-local (see `config.CursorConfig`). Drawing lives in
-/// `render.zig`; this struct owns only the state and the logic that moves
+/// `overlays.zig`; this struct owns only the state and the logic that moves
 /// it.
 pub const Caret = struct {
     app: *App,

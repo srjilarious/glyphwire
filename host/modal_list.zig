@@ -3,7 +3,7 @@
 
 //! What glyphwire-host's modal list dialogs share: the context switcher
 //! (`switcher.zig`) and the theme switcher (`theme_switcher.zig`). Each
-//! hands the renderer a `View` while it is open, and `Renderer.drawListDialog`
+//! hands the renderer a `View` while it is open, and `overlays.drawListDialog`
 //! draws it the same way: a title bar, one row per entry with the
 //! selected one highlighted, a key hint footer, all inside the window
 //! theme's `panel_style` nine-patch with the dialog drop shadow -- the
