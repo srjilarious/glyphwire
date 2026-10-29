@@ -2334,7 +2334,7 @@ pub const Dispatcher = struct {
         const session = try self.requireManager();
         const parsed = try codec.parseParams(protocol.PaneSplitHandleParams, alloc, params_value);
         defer parsed.deinit();
-        const split = session.pane_splits.getPtr(parsed.value.split) orelse return DispatchError.UnknownPaneSplit;
+        const split = session.pane_tree.node(parsed.value.split) orelse return DispatchError.UnknownPaneSplit;
 
         const n = split.children.items.len;
         const extents = try alloc.alloc(usize, n);
@@ -2617,7 +2617,7 @@ pub const Dispatcher = struct {
         // `createSplit` has no resizable param (keeps its many in-process
         // and test call sites untouched) -- set it here, before the split
         // has children or a layout.
-        if (self.ctx.splits.getPtr(split_handle)) |s| s.resizable = parsed.value.resizable;
+        if (self.ctx.split_tree.node(split_handle)) |s| s.resizable = parsed.value.resizable;
         return try self.respond(alloc, id, protocol.CreateSplitResult{ .handle = split_handle });
     }
 
@@ -2688,7 +2688,7 @@ pub const Dispatcher = struct {
     fn handleGetSplit(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const parsed = try codec.parseParams(protocol.GetSplitParams, alloc, params_value);
         defer parsed.deinit();
-        const split = self.ctx.splits.getPtr(parsed.value.split) orelse return DispatchError.UnknownSplit;
+        const split = self.ctx.split_tree.node(parsed.value.split) orelse return DispatchError.UnknownSplit;
 
         const n = split.children.items.len;
         const extents = try alloc.alloc(usize, n);

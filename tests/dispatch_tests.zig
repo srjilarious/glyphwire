@@ -3321,7 +3321,7 @@ pub fn createSplitReturnsAHandleTest(io: std.Io, alloc: std.mem.Allocator) !void
     });
     defer parsed.deinit();
     try testz.expectEqual(parsed.value.result.handle, 1);
-    try testz.expectEqual(ctx.splits.getPtr(1).?.axis, .row);
+    try testz.expectEqual(ctx.split_tree.node(1).?.axis, .row);
 }
 
 pub fn createSplitCarriesTheResizableFlagTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3339,7 +3339,7 @@ pub fn createSplitCarriesTheResizableFlagTest(io: std.Io, alloc: std.mem.Allocat
         const body = (try d.handle(alloc, decoded)).response.?;
         defer alloc.free(body);
     }
-    try testz.expectTrue(ctx.splits.getPtr(1).?.resizable);
+    try testz.expectTrue(ctx.split_tree.node(1).?.resizable);
 
     // Explicit false lands on the split.
     {
@@ -3350,7 +3350,7 @@ pub fn createSplitCarriesTheResizableFlagTest(io: std.Io, alloc: std.mem.Allocat
         const body = (try d.handle(alloc, decoded)).response.?;
         defer alloc.free(body);
     }
-    try testz.expectTrue(!ctx.splits.getPtr(2).?.resizable);
+    try testz.expectTrue(!ctx.split_tree.node(2).?.resizable);
 }
 
 pub fn createSplitRejectsABadAxisTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5411,7 +5411,7 @@ pub fn replaceSplitChildKeepsTheSlotsSizeOverTheWireTest(io: std.Io, alloc: std.
     try notifyThrough(alloc, &d,
         \\{"jsonrpc":"2.0","method":"replace_split_child","params":{"split":1,"index":0,"child":{"layer":3}}}
     );
-    const children = ctx.splits.getPtr(1).?.children.items;
+    const children = ctx.split_tree.node(1).?.children.items;
     try testz.expectEqual(children[0].target.layer, third);
     try testz.expectEqual(children[0].size.weight, 3);
     try testz.expectEqual(children[1].size.fixed, 20);

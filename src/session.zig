@@ -13,6 +13,7 @@ const core = @import("core.zig");
 /// a key that also produces committed text. Pure, same module.
 const key_encode = @import("key_encode.zig");
 const version = @import("version.zig");
+const split_tree = @import("split_tree.zig");
 
 const CellRect = core.CellRect;
 const ConnId = core.ConnId;
@@ -175,37 +176,22 @@ pub const PaneSplitChild = struct {
     size: Size = .{ .weight = 1 },
 
     pub const Target = union(enum) { pane: PaneHandle, split: PaneSplitHandle };
-    pub const Size = union(enum) { weight: f32, fixed: usize };
+    pub const Size = split_tree.Size;
 };
 
-pub const PaneSplit = struct {
-    axis: SplitAxis,
-    children: std.ArrayList(PaneSplitChild) = .empty,
-    /// Whether the user may drag the bands between this split's children.
-    /// False reserves no gap and emits no `PaneDividerRect`, same as
-    /// `Split.resizable`.
-    resizable: bool = true,
-    /// The cell rect this split occupied at the last `layoutPanes` --
-    /// `movePaneDivider` needs it to turn a drag in cells back into sizes.
-    last_rect: CellRect = .{},
-    laid_out: bool = false,
+/// The window's split tree: panes are the leaves.
+pub const PaneSplitTree = split_tree.SplitTree(PaneSplitChild, .{
+    .max_depth = max_pane_split_depth,
+    .min_extent = min_pane_extent,
+});
 
-    pub fn deinit(self: *PaneSplit, alloc: std.mem.Allocator) void {
-        self.children.deinit(alloc);
-    }
-};
+/// One pane split container. See `split_tree.SplitTree.Node`.
+pub const PaneSplit = PaneSplitTree.Node;
 
 /// A draggable band between two children of a pane split. The band
 /// between two *panes* -- the one a multiplexer's user grabs to resize
 /// them.
-pub const PaneDividerRect = struct {
-    split: PaneSplitHandle,
-    /// The divider *after* child `index`, so `index` and `index + 1` are
-    /// the pair it separates.
-    index: usize,
-    axis: SplitAxis,
-    rect: CellRect,
-};
+pub const PaneDividerRect = PaneSplitTree.Divider;
 
 /// One pane's laid-out rect, as carried by a `pane_layout` notification.
 pub const PaneBounds = struct {
@@ -328,15 +314,12 @@ pub const Session = struct {
     /// exists and holds the root context.
     panes: std.AutoHashMap(PaneHandle, Pane),
     next_pane_handle: PaneHandle = 1,
-    /// Pane split containers, keyed by handle. Empty, and
-    /// `root_pane_split` null, for every session that never installs a
-    /// window layout -- which is all of them until a multiplexer runs.
-    pane_splits: std.AutoHashMap(PaneSplitHandle, PaneSplit),
-    next_pane_split_handle: PaneSplitHandle = 1,
-    /// The pane split that fills the window, if any. Null means the root
-    /// pane simply *is* the window, which is the single-program case and
-    /// the default.
-    root_pane_split: ?PaneSplitHandle = null,
+    /// Pane split containers. Empty, and its `root` null, for every
+    /// session that never installs a window layout -- which is all of
+    /// them until a multiplexer runs. A null `root` means the root pane
+    /// simply *is* the window, which is the single-program case and the
+    /// default.
+    pane_tree: PaneSplitTree,
     /// The pane the manager has raised over the whole window, if any
     /// (`set_overlay_pane`): laid out at the full window rect whatever the
     /// tree says, composited after every other pane, and hit first by the
@@ -504,7 +487,7 @@ pub const Session = struct {
             .alloc = alloc,
             .contexts = contexts,
             .panes = panes,
-            .pane_splits = std.AutoHashMap(PaneSplitHandle, PaneSplit).init(alloc),
+            .pane_tree = PaneSplitTree.init(alloc),
             .input = InputState.init(alloc),
             .theme = root.theme,
             .window_cols = root.root.width,
@@ -523,9 +506,7 @@ pub const Session = struct {
         var pit = self.panes.valueIterator();
         while (pit.next()) |p| p.deinit(self.alloc);
         self.panes.deinit();
-        var sit = self.pane_splits.valueIterator();
-        while (sit.next()) |sp| sp.deinit(self.alloc);
-        self.pane_splits.deinit();
+        self.pane_tree.deinit(self.alloc);
         self.input.deinit();
         self.clipboard.deinit(self.alloc);
     }
@@ -1032,30 +1013,23 @@ pub const Session = struct {
     // ── Pane split tree ─────────────────────────────────────────────────
 
     /// `create_pane_split`: an empty container. Draws and lays out
-    /// nothing until it has children and is reached from
-    /// `root_pane_split`.
+    /// nothing until it has children and is reached from the root.
     pub fn createPaneSplit(self: *Session, axis: SplitAxis, resizable: bool) !PaneSplitHandle {
-        const handle = self.next_pane_split_handle;
-        try self.pane_splits.put(handle, .{ .axis = axis, .resizable = resizable });
-        self.next_pane_split_handle += 1;
-        return handle;
+        return self.pane_tree.create(axis, resizable);
     }
 
     /// `destroy_pane_split`: frees the container. Its children are *not*
     /// touched -- a child pane is a separate object with programs running
     /// in it, and a nested split is a handle its creator may still want.
     pub fn destroyPaneSplit(self: *Session, handle: PaneSplitHandle) PaneSplitError!void {
-        var removed = self.pane_splits.fetchRemove(handle) orelse return PaneSplitError.UnknownPaneSplit;
-        removed.value.deinit(self.alloc);
-        if (self.root_pane_split == handle) self.root_pane_split = null;
+        if (!self.pane_tree.destroy(self.alloc, handle)) return PaneSplitError.UnknownPaneSplit;
         _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
     }
 
     /// `set_pane_split_children`: replaces the child list wholesale.
     pub fn setPaneSplitChildren(self: *Session, handle: PaneSplitHandle, children: []const PaneSplitChild) !void {
-        const split = self.pane_splits.getPtr(handle) orelse return PaneSplitError.UnknownPaneSplit;
-        split.children.clearRetainingCapacity();
-        try split.children.appendSlice(self.alloc, children);
+        const split = self.pane_tree.node(handle) orelse return PaneSplitError.UnknownPaneSplit;
+        try PaneSplitTree.setChildren(self.alloc, split, children);
         _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
     }
 
@@ -1071,11 +1045,8 @@ pub const Session = struct {
         target: PaneSplitChild.Target,
         size: ?PaneSplitChild.Size,
     ) PaneSplitError!void {
-        const split = self.pane_splits.getPtr(handle) orelse return PaneSplitError.UnknownPaneSplit;
-        if (index >= split.children.items.len) return PaneSplitError.PaneSplitChildOutOfRange;
-        const slot = &split.children.items[index];
-        slot.target = target;
-        if (size) |sz| slot.size = sz;
+        const split = self.pane_tree.node(handle) orelse return PaneSplitError.UnknownPaneSplit;
+        if (!PaneSplitTree.replaceChild(split, index, target, size)) return PaneSplitError.PaneSplitChildOutOfRange;
         _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
     }
 
@@ -1085,20 +1056,16 @@ pub const Session = struct {
     ///
     /// `out.len` must equal the child count.
     pub fn paneSplitExtents(self: *const Session, split: *const PaneSplit, out: []usize) void {
-        if (!split.laid_out) {
-            @memset(out, 0);
-            return;
-        }
-        self.paneChildExtents(split, split.last_rect, out);
+        PaneSplitTree.laidOutExtents(split, self.pane_divider_cells, out);
     }
 
     /// `set_root_pane_split`: which split fills the window. Null tears
     /// the layout down, leaving the root pane as the whole window again.
     pub fn setRootPaneSplit(self: *Session, handle: ?PaneSplitHandle) PaneSplitError!void {
         if (handle) |h| {
-            if (!self.pane_splits.contains(h)) return PaneSplitError.UnknownPaneSplit;
+            if (!self.pane_tree.contains(h)) return PaneSplitError.UnknownPaneSplit;
         }
-        self.root_pane_split = handle;
+        self.pane_tree.root = handle;
         _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
     }
 
@@ -1121,8 +1088,9 @@ pub const Session = struct {
         while (it.next()) |p| p.mapped = false;
 
         const full: CellRect = .{ .cols = self.window_cols, .rows = self.window_rows };
-        if (self.root_pane_split) |root| {
-            try self.layoutPaneSplit(root, full, changed, dividers, 0);
+        if (self.pane_tree.root != null) {
+            const placer: PanePlacer = .{ .session = self, .changed = changed };
+            try self.pane_tree.layout(self.alloc, full, self.pane_divider_cells, placer, dividers);
         } else {
             try self.applyPaneRect(root_pane_handle, full, changed);
         }
@@ -1170,98 +1138,16 @@ pub const Session = struct {
         self.focused_pane.store(root_pane_handle, .monotonic);
     }
 
-    fn layoutPaneSplit(
-        self: *Session,
-        handle: PaneSplitHandle,
-        rect: CellRect,
+    /// The leaf half of `layoutPanes`: a split child that names a pane
+    /// gets that rect (`applyPaneRect`).
+    const PanePlacer = struct {
+        session: *Session,
         changed: ?*std.ArrayList(PaneBounds),
-        dividers: ?*std.ArrayList(PaneDividerRect),
-        depth: usize,
-    ) !void {
-        if (depth >= max_pane_split_depth) return;
-        const split = self.pane_splits.getPtr(handle) orelse return;
-        split.last_rect = rect;
-        split.laid_out = true;
 
-        const n = split.children.items.len;
-        if (n == 0) return;
-
-        const extents = try self.alloc.alloc(usize, n);
-        defer self.alloc.free(extents);
-        self.paneChildExtents(split, rect, extents);
-
-        const gap: usize = if (split.resizable) self.pane_divider_cells else 0;
-
-        var pos: usize = if (split.axis == .row) rect.col else rect.row;
-        for (split.children.items, 0..) |child, i| {
-            const extent = extents[i];
-            const child_rect: CellRect = if (split.axis == .row)
-                .{ .row = rect.row, .col = pos, .cols = extent, .rows = rect.rows }
-            else
-                .{ .row = pos, .col = rect.col, .cols = rect.cols, .rows = extent };
-
-            switch (child.target) {
-                .pane => |h| try self.applyPaneRect(h, child_rect, changed),
-                .split => |h| try self.layoutPaneSplit(h, child_rect, changed, dividers, depth + 1),
-            }
-
-            pos += extent;
-            if (i + 1 < n and gap > 0) {
-                if (dividers) |out| {
-                    const band: CellRect = if (split.axis == .row)
-                        .{ .row = rect.row, .col = pos, .cols = gap, .rows = rect.rows }
-                    else
-                        .{ .row = pos, .col = rect.col, .cols = rect.cols, .rows = gap };
-                    try out.append(self.alloc, .{
-                        .split = handle,
-                        .index = i,
-                        .axis = split.axis,
-                        .rect = band,
-                    });
-                }
-                pos += gap;
-            }
+        pub fn place(self: PanePlacer, target: PaneSplitChild.Target, rect: CellRect) !void {
+            try self.session.applyPaneRect(target.pane, rect, self.changed);
         }
-    }
-
-    /// `childExtents` for panes. Same rules: `fixed` children take their
-    /// cells first, `weight` children share what's left, the last
-    /// weighted one absorbs the rounding remainder.
-    fn paneChildExtents(self: *const Session, split: *const PaneSplit, rect: CellRect, out: []usize) void {
-        const n = split.children.items.len;
-        const axis_total: usize = if (split.axis == .row) rect.cols else rect.rows;
-        const gap: usize = if (split.resizable) self.pane_divider_cells else 0;
-        var remaining = axis_total -| (n - 1) * gap;
-
-        var fixed_total: usize = 0;
-        var weight_total: f32 = 0;
-        var last_weighted: ?usize = null;
-        for (split.children.items, 0..) |c, i| switch (c.size) {
-            .fixed => |f| fixed_total += f,
-            .weight => |w| {
-                weight_total += @max(w, 0);
-                last_weighted = i;
-            },
-        };
-        const flexible = remaining -| fixed_total;
-
-        var flexible_used: usize = 0;
-        for (split.children.items, 0..) |child, i| {
-            const want: usize = switch (child.size) {
-                .fixed => |f| f,
-                .weight => |w| blk: {
-                    if (weight_total <= 0) break :blk 0;
-                    if (i == last_weighted.?) break :blk flexible -| flexible_used;
-                    const share_f = @as(f32, @floatFromInt(flexible)) * (@max(w, 0) / weight_total);
-                    const share: usize = @intFromFloat(@floor(share_f));
-                    flexible_used += share;
-                    break :blk share;
-                },
-            };
-            out[i] = @min(want, remaining);
-            remaining -= out[i];
-        }
-    }
+    };
 
     /// Places one pane at `rect` and marks it mapped. An unknown handle
     /// (a stale child the manager hasn't cleaned up) is skipped rather
@@ -1290,50 +1176,9 @@ pub const Session = struct {
     /// drag never silently converts a child's sizing mode. The caller
     /// re-runs `layoutPanes` afterwards.
     pub fn movePaneDivider(self: *Session, handle: PaneSplitHandle, index: usize, delta: i64) PaneSplitError!void {
-        const split = self.pane_splits.getPtr(handle) orelse return PaneSplitError.UnknownPaneSplit;
-        if (!split.laid_out or !split.resizable) return;
-        const n = split.children.items.len;
-        if (index + 1 >= n) return;
-        if (delta == 0) return;
-
-        const extents = self.alloc.alloc(usize, n) catch return;
-        defer self.alloc.free(extents);
-        self.paneChildExtents(split, split.last_rect, extents);
-
-        const before = extents[index];
-        const after = extents[index + 1];
-        const pair = before + after;
-        if (pair < 2 * min_pane_extent) return;
-
-        const lo: i64 = @intCast(min_pane_extent);
-        const hi: i64 = @intCast(pair - min_pane_extent);
-        const want: i64 = @as(i64, @intCast(before)) + delta;
-        const new_before: usize = @intCast(std.math.clamp(want, lo, hi));
-        const new_after = pair - new_before;
-        if (new_before == before) return;
-
-        const a = &split.children.items[index];
-        const b = &split.children.items[index + 1];
-        const wa: ?f32 = switch (a.size) {
-            .weight => |w| @max(w, 0),
-            .fixed => null,
-        };
-        const wb: ?f32 = switch (b.size) {
-            .weight => |w| @max(w, 0),
-            .fixed => null,
-        };
-
-        if (wa == null) a.size = .{ .fixed = new_before };
-        if (wb == null) b.size = .{ .fixed = new_after };
-        if (wa != null and wb != null) {
-            const total_w = wa.? + wb.?;
-            if (total_w <= 0) return;
-            const frac = @as(f32, @floatFromInt(new_before)) / @as(f32, @floatFromInt(pair));
-            a.size = .{ .weight = total_w * frac };
-            b.size = .{ .weight = total_w * (1 - frac) };
-        }
-
-        _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
+        const split = self.pane_tree.node(handle) orelse return PaneSplitError.UnknownPaneSplit;
+        if (PaneSplitTree.moveDivider(self.alloc, split, index, delta, self.pane_divider_cells))
+            _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
     }
 
     // ── Contexts ────────────────────────────────────────────────────────
@@ -1552,7 +1397,7 @@ pub const Session = struct {
             // The tree still names panes that no longer exist; without a
             // manager to fix it, drop it so the root pane fills the
             // window again rather than leaving holes on screen.
-            self.root_pane_split = null;
+            self.pane_tree.root = null;
             _ = self.pane_layout_gen.fetchAdd(1, .monotonic);
             self.layoutPanes(null, null) catch {};
         }

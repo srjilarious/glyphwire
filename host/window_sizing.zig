@@ -111,7 +111,7 @@ pub const WindowSizing = struct {
         const server = self.app.server;
         const session_lock = server.lockSession();
         defer session_lock.unlock();
-        return geometry.rightGutterPx(server.ctx.window_scrollbar, server.session.root_pane_split != null);
+        return geometry.rightGutterPx(server.ctx.window_scrollbar, server.session.pane_tree.root != null);
     }
 
     /// A bounded wait, in ms, while a resize is still settling -- null

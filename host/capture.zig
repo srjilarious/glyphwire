@@ -33,7 +33,7 @@ pub fn captureContentArea(self: *Renderer, eng: *Engine, path: []const u8) void 
         // Whatever the grid was sized against -- a context that opts
         // the bar out has no gutter to crop off, unless a pane tree
         // is keeping it reserved.
-        gutter = geometry.rightGutterPx(server.ctx.window_scrollbar, server.session.root_pane_split != null);
+        gutter = geometry.rightGutterPx(server.ctx.window_scrollbar, server.session.pane_tree.root != null);
         // Cropping to the cursor row keeps a one-line shell session's
         // screenshot from being mostly blank, which is what the README
         // assets want. It only makes sense for a single pane, though:
@@ -44,7 +44,7 @@ pub fn captureContentArea(self: *Renderer, eng: *Engine, path: []const u8) void 
         // The same goes for a full-screen program (zoe, gwmd,
         // salacommander) that has put its own context on screen: the
         // shell's cursor is hidden behind it, so crop nothing.
-        if (server.session.root_pane_split != null or showsOtherContext(self)) {
+        if (server.session.pane_tree.root != null or showsOtherContext(self)) {
             used_rows = geometry.grid_rows;
         } else {
             used_rows = @max(geometry.min_grid_rows, server.ctx.root.cursor.row + 2);

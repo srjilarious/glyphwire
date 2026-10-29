@@ -1338,6 +1338,9 @@ pub fn iconName(rel_path: []const u8) ?[]const u8 {
 }
 
 // ─── Contexts ───────────────────────────────────────────────────────────
+
+/// The split tree `Context` and `Session` share (`split_tree.zig`).
+pub const split_tree = @import("split_tree.zig");
 //
 // A program's screen: its layers, their split tree, images and input
 // state. See `context.zig`.

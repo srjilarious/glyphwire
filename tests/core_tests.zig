@@ -4264,6 +4264,112 @@ pub fn scrollbarStateReportsTheRingWhenThereIsNoViewportSlackTest(io: std.Io, al
     try testz.expectEqual(layer.scrollbarState().row, history - 4);
 }
 
+// ─── split_tree.SplitTree ───────────────────────────────────────────────
+//
+// The generic tree under both `Context`'s layer splits and `Session`'s
+// pane splits, tested with a leaf type of its own.
+
+const TestChild = struct {
+    target: Target,
+    size: glyphwire.split_tree.Size = .{ .weight = 1 },
+
+    const Target = union(enum) { leaf: u8, split: u32 };
+};
+const TestTree = glyphwire.split_tree.SplitTree(TestChild, .{ .max_depth = 4, .min_extent = 3 });
+
+const PlacedLeaf = struct { leaf: u8, rect: glyphwire.CellRect };
+
+/// Collects every leaf `layout` places, in order.
+const TestPlacer = struct {
+    placed: *std.ArrayList(PlacedLeaf),
+    alloc: std.mem.Allocator,
+
+    pub fn place(self: TestPlacer, target: TestChild.Target, rect: glyphwire.CellRect) !void {
+        try self.placed.append(self.alloc, .{ .leaf = target.leaf, .rect = rect });
+    }
+};
+
+/// Fixed children are measured first, weights share the rest, the gap
+/// sits between resizable children, and a nested split lays out inside
+/// its slot.
+pub fn splitTreeLaysOutLeavesAndBandsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var tree = TestTree.init(alloc);
+    defer tree.deinit(alloc);
+    const inner = try tree.create(.column, false);
+    try TestTree.setChildren(alloc, tree.node(inner).?, &.{
+        .{ .target = .{ .leaf = 2 }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .leaf = 3 }, .size = .{ .fixed = 2 } },
+    });
+    const root = try tree.create(.row, true);
+    try TestTree.setChildren(alloc, tree.node(root).?, &.{
+        .{ .target = .{ .leaf = 1 }, .size = .{ .fixed = 10 } },
+        .{ .target = .{ .split = inner }, .size = .{ .weight = 1 } },
+    });
+    tree.root = root;
+
+    var placed: std.ArrayList(PlacedLeaf) = .empty;
+    defer placed.deinit(alloc);
+    var bands: std.ArrayList(TestTree.Divider) = .empty;
+    defer bands.deinit(alloc);
+    try tree.layout(alloc, .{ .cols = 41, .rows = 20 }, 1, TestPlacer{ .placed = &placed, .alloc = alloc }, &bands);
+
+    try testz.expectEqual(placed.items.len, 3);
+    try testz.expectEqual(placed.items[0].leaf, 1);
+    try testz.expectEqual(placed.items[0].rect.cols, 10);
+    // 41 - 10 - one gap cell, and no gap inside the non-resizable split.
+    try testz.expectEqual(placed.items[1].rect.col, 11);
+    try testz.expectEqual(placed.items[1].rect.cols, 30);
+    try testz.expectEqual(placed.items[1].rect.rows, 18);
+    try testz.expectEqual(placed.items[2].rect.row, 18);
+    try testz.expectEqual(placed.items[2].rect.rows, 2);
+    try testz.expectEqual(bands.items.len, 1);
+    try testz.expectEqual(bands.items[0].split, root);
+    try testz.expectEqual(bands.items[0].rect.col, 10);
+}
+
+/// A drag keeps each child's sizing mode, never squeezes one below
+/// `min_extent`, and does nothing on a split that isn't resizable.
+pub fn splitTreeMoveDividerTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var tree = TestTree.init(alloc);
+    defer tree.deinit(alloc);
+    const root = try tree.create(.row, true);
+    const split = tree.node(root).?;
+    try TestTree.setChildren(alloc, split, &.{
+        .{ .target = .{ .leaf = 1 }, .size = .{ .fixed = 10 } },
+        .{ .target = .{ .leaf = 2 }, .size = .{ .weight = 1 } },
+    });
+    // Not laid out yet: nothing to drag against.
+    try testz.expectFalse(TestTree.moveDivider(alloc, split, 0, 5, 1));
+
+    tree.root = root;
+    var placed: std.ArrayList(PlacedLeaf) = .empty;
+    defer placed.deinit(alloc);
+    try tree.layout(alloc, .{ .cols = 31, .rows = 5 }, 1, TestPlacer{ .placed = &placed, .alloc = alloc }, null);
+
+    try testz.expectTrue(TestTree.moveDivider(alloc, split, 0, 5, 1));
+    try testz.expectEqual(split.children.items[0].size.fixed, 15);
+    try testz.expectTrue(split.children.items[1].size == .weight);
+    // Clamped so the right child keeps `min_extent` cells.
+    try testz.expectTrue(TestTree.moveDivider(alloc, split, 0, 100, 1));
+    try testz.expectEqual(split.children.items[0].size.fixed, 27);
+
+    split.resizable = false;
+    try testz.expectFalse(TestTree.moveDivider(alloc, split, 0, -5, 1));
+}
+
+/// Destroying the root clears it; an unknown handle is reported, not
+/// ignored.
+pub fn splitTreeDestroyTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var tree = TestTree.init(alloc);
+    defer tree.deinit(alloc);
+    const root = try tree.create(.row, true);
+    tree.root = root;
+    try testz.expectTrue(tree.destroy(alloc, root));
+    try testz.expectTrue(tree.root == null);
+    try testz.expectFalse(tree.destroy(alloc, root));
+    try testz.expectFalse(TestTree.replaceChild(tree.node(try tree.create(.row, true)).?, 0, .{ .leaf = 1 }, null));
+}
+
 // ─── Split layout ───────────────────────────────────────────────────────
 
 /// The pane arrangement zoe uses: a tree beside a buffer, with a
@@ -4558,7 +4664,7 @@ pub fn splitExtentsAreTheLastLayoutsTest(io: std.Io, alloc: std.mem.Allocator) !
         .{ .target = .{ .layer = left }, .size = .{ .fixed = 20 } },
         .{ .target = .{ .layer = right }, .size = .{ .weight = 1 } },
     });
-    const split = ctx.splits.getPtr(handle).?;
+    const split = ctx.split_tree.node(handle).?;
 
     var extents: [2]usize = undefined;
     ctx.splitExtents(split, &extents);
@@ -4580,7 +4686,7 @@ pub fn destroyingTheRootSplitDropsTheLayoutTest(io: std.Io, alloc: std.mem.Alloc
     try ctx.layoutSplits(null, null);
 
     try ctx.destroySplit(l.root);
-    try testz.expectTrue(ctx.root_split == null);
+    try testz.expectTrue(ctx.split_tree.root == null);
 
     // The layers survive their container, keeping the bounds they had --
     // a destroyed split frees the arrangement, not the panes.
@@ -4602,7 +4708,7 @@ pub fn splitRejectsUnknownHandlesTest(io: std.Io, alloc: std.mem.Allocator) !voi
     try testz.expectError(ctx.setRootSplit(77), error.UnknownSplit);
     try testz.expectError(ctx.destroySplit(77), error.UnknownSplit);
     try testz.expectError(ctx.setSplitChildren(77, &.{}), error.UnknownSplit);
-    try testz.expectTrue(ctx.root_split == null);
+    try testz.expectTrue(ctx.split_tree.root == null);
 }
 
 pub fn splitCycleStopsAtTheDepthCapTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -4616,7 +4722,7 @@ pub fn splitCycleStopsAtTheDepthCapTest(io: std.Io, alloc: std.mem.Allocator) !v
     try ctx.setSplitChildren(split, &.{.{ .target = .{ .split = split } }});
     try ctx.setRootSplit(split);
     try ctx.layoutSplits(null, null);
-    try testz.expectTrue(ctx.splits.getPtr(split).?.laid_out);
+    try testz.expectTrue(ctx.split_tree.node(split).?.laid_out);
 }
 
 pub fn nonResizableSplitReservesNoGapAndEmitsNoDividerTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -4627,7 +4733,7 @@ pub fn nonResizableSplitReservesNoGapAndEmitsNoDividerTest(io: std.Io, alloc: st
     const status = try ctx.createLayer(100, 1, 0);
 
     const split = try ctx.createSplit(.column);
-    ctx.splits.getPtr(split).?.resizable = false;
+    ctx.split_tree.node(split).?.resizable = false;
     try ctx.setSplitChildren(split, &.{
         .{ .target = .{ .layer = body }, .size = .{ .weight = 1 } },
         .{ .target = .{ .layer = status }, .size = .{ .fixed = 1 } },
@@ -4654,7 +4760,7 @@ pub fn moveDividerNoOpsOnNonResizableSplitTest(io: std.Io, alloc: std.mem.Alloca
     const status = try ctx.createLayer(100, 1, 0);
 
     const split = try ctx.createSplit(.column);
-    ctx.splits.getPtr(split).?.resizable = false;
+    ctx.split_tree.node(split).?.resizable = false;
     try ctx.setSplitChildren(split, &.{
         .{ .target = .{ .layer = body }, .size = .{ .weight = 1 } },
         .{ .target = .{ .layer = status }, .size = .{ .fixed = 1 } },
@@ -5233,7 +5339,7 @@ pub fn replacePaneSplitChildKeepsTheSlotsSizeTest(io: std.Io, alloc: std.mem.All
     try testz.expectEqual(session.panePtr(b.pane).?.rect.cols, @as(usize, 10));
 
     var extents: [2]usize = undefined;
-    session.paneSplitExtents(session.pane_splits.getPtr(split).?, &extents);
+    session.paneSplitExtents(session.pane_tree.node(split).?, &extents);
     try testz.expectEqual(extents[0], 30);
     try testz.expectEqual(extents[1], 10);
 
@@ -5395,7 +5501,7 @@ pub fn movePaneDividerRebalancesWeightsWithoutChangingSizingModeTest(io: std.Io,
     try testz.expectEqual(left.rect.cols, @as(usize, 25));
     try testz.expectEqual(right.rect.cols, @as(usize, 15));
     // Still weighted, not silently converted to fixed.
-    const children = session.pane_splits.getPtr(split).?.children.items;
+    const children = session.pane_tree.node(split).?.children.items;
     try testz.expectTrue(children[0].size == .weight);
     try testz.expectTrue(children[1].size == .weight);
 }

@@ -147,6 +147,7 @@ pub const SplitChild = core.SplitChild;
 pub const Split = core.Split;
 pub const SplitError = core.SplitError;
 pub const CellRect = core.CellRect;
+pub const split_tree = core.split_tree;
 pub const LayerBounds = core.LayerBounds;
 pub const DividerRect = core.DividerRect;
 pub const Layer = core.Layer;

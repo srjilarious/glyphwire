@@ -11,6 +11,7 @@
 const std = @import("std");
 const core = @import("core.zig");
 const cell_paint = @import("cell_paint.zig");
+const split_tree = @import("split_tree.zig");
 
 const CellPos = core.CellPos;
 const ConnId = core.ConnId;
@@ -84,26 +85,8 @@ pub const SplitError = error{
     SplitChildOutOfRange,
 };
 
-/// Which way a split's children run.
-pub const SplitAxis = enum {
-    /// Left to right, separated by vertical dividers.
-    row,
-    /// Top to bottom, separated by horizontal dividers.
-    column,
-};
-
-/// A rectangle in grid cells.
-pub const CellRect = struct {
-    row: usize = 0,
-    col: usize = 0,
-    cols: usize = 0,
-    rows: usize = 0,
-
-    pub fn contains(self: CellRect, row: usize, col: usize) bool {
-        return row >= self.row and row < self.row + self.rows and
-            col >= self.col and col < self.col + self.cols;
-    }
-};
+pub const SplitAxis = split_tree.SplitAxis;
+pub const CellRect = split_tree.CellRect;
 
 /// One child of a split: what to place, and how big it is along the
 /// parent's axis.
@@ -113,36 +96,18 @@ pub const SplitChild = struct {
 
     pub const Target = union(enum) { layer: LayerHandle, split: SplitHandle };
 
-    /// `fixed` children are measured first and `weight` children share
-    /// what's left. That's what lets a one-row statusline sit beside a
-    /// pane that takes "the rest" without the client recomputing a
-    /// fraction every time the window changes height.
-    pub const Size = union(enum) { weight: f32, fixed: usize };
+    /// See `split_tree.Size`.
+    pub const Size = split_tree.Size;
 };
 
-pub const Split = struct {
-    axis: SplitAxis,
-    children: std.ArrayList(SplitChild) = .empty,
-    /// Whether the user may drag the bands between this split's children.
-    /// When false the split reserves no `divider_cells` gap between its
-    /// children (the row/column returns to content), emits no
-    /// `DividerRect` for glyphwire-host to draw or hit-test, and
-    /// `moveDivider` is a no-op. What a TUI wants for a structural split
-    /// like an editor's buffer-area-over-command-line: the command line
-    /// is a fixed one-row child and a resize handle there is just a
-    /// wasted row.
-    resizable: bool = true,
-    /// The cell rect this split occupied at the last `layoutSplits`.
-    /// `moveDivider` needs it to turn a drag in cells back into sizes,
-    /// and there is nowhere else to get it: a split has no size of its
-    /// own until the tree is laid out.
-    last_rect: CellRect = .{},
-    laid_out: bool = false,
+/// A context's split tree: its layers are the leaves.
+pub const SplitTree = split_tree.SplitTree(SplitChild, .{
+    .max_depth = max_split_depth,
+    .min_extent = min_pane_cells,
+});
 
-    pub fn deinit(self: *Split, alloc: std.mem.Allocator) void {
-        self.children.deinit(alloc);
-    }
-};
+/// One split container. See `split_tree.SplitTree.Node`.
+pub const Split = SplitTree.Node;
 
 /// One layer's laid-out bounds, as carried by a `layout` notification.
 pub const LayerBounds = struct {
@@ -154,14 +119,7 @@ pub const LayerBounds = struct {
 };
 
 /// A draggable band between two children of a split.
-pub const DividerRect = struct {
-    split: SplitHandle,
-    /// The divider *after* child `index`, so `index` and `index + 1` are
-    /// the pair it separates and `index` is always a valid child.
-    index: usize,
-    axis: SplitAxis,
-    rect: CellRect,
-};
+pub const DividerRect = SplitTree.Divider;
 
 /// Recursion cap for the layout walk. A tree this deep is a bug or a
 /// cycle; either way the walk stops rather than smashing the stack.
@@ -215,16 +173,12 @@ pub const Context = struct {
     /// a renderer should draw in.
     layer_order: std.ArrayList(LayerHandle) = .empty,
     next_layer_handle: LayerHandle = 1,
-    /// Split containers, keyed by handle -- the pane tree (see the Splits
-    /// section above). Empty, and `root_split` null, for every client
-    /// that positions its layers by hand, which is all of them until one
-    /// asks for a tree.
-    splits: std.AutoHashMap(SplitHandle, Split),
-    next_split_handle: SplitHandle = 1,
-    /// The split that fills the context, if any. Null means no split
-    /// layout at all: layers stay wherever `position` / `cell_position`
-    /// put them.
-    root_split: ?SplitHandle = null,
+    /// Split containers -- the layer tree (see the Splits section above).
+    /// Empty, and its `root` null, for every client that positions its
+    /// layers by hand, which is all of them until one asks for a tree.
+    /// A null `root` means no split layout at all: layers stay wherever
+    /// `position` / `cell_position` put them.
+    split_tree: SplitTree,
     /// Cells of gap between two children of a split -- the band a mouse
     /// grabs to resize them. One cell is wide enough to hit and cheap to
     /// draw.
@@ -427,7 +381,7 @@ pub const Context = struct {
             .theme = .init(theme.initDefault()),
             .root = try Layer.init(alloc, width, height, scrollback_rows),
             .layers = std.AutoHashMap(LayerHandle, Layer).init(alloc),
-            .splits = std.AutoHashMap(SplitHandle, Split).init(alloc),
+            .split_tree = SplitTree.init(alloc),
             .images = std.AutoHashMap(ImageHandle, ImageEntry).init(alloc),
             .icons = std.StringHashMap(ImageHandle).init(alloc),
             .nine_patch_styles = std.StringHashMap(NinePatchStyle).init(alloc),
@@ -446,9 +400,7 @@ pub const Context = struct {
         while (layer_it.next()) |l| l.deinit();
         self.layers.deinit();
         self.layer_order.deinit(self.alloc);
-        var split_it = self.splits.valueIterator();
-        while (split_it.next()) |sp| sp.deinit(self.alloc);
-        self.splits.deinit();
+        self.split_tree.deinit(self.alloc);
         var it = self.images.valueIterator();
         while (it.next()) |entry| self.alloc.free(entry.bytes);
         self.images.deinit();
@@ -881,11 +833,9 @@ pub const Context = struct {
     // ── Splits ──────────────────────────────────────────────────────────
 
     /// `create_split`: an empty container. It draws nothing and lays out
-    /// nothing until it is given children and reached from `root_split`.
+    /// nothing until it is given children and reached from the root.
     pub fn createSplit(self: *Context, axis: SplitAxis) !SplitHandle {
-        const handle = self.next_split_handle;
-        try self.splits.put(handle, .{ .axis = axis });
-        self.next_split_handle += 1;
+        const handle = try self.split_tree.create(axis, true);
         self.layout_gen +%= 1;
         return handle;
     }
@@ -893,12 +843,10 @@ pub const Context = struct {
     /// `destroy_split`: frees the container. Its children are *not*
     /// destroyed -- a layer outlives the pane it was sitting in, and a
     /// nested split is a separate handle its creator may still want. A
-    /// destroyed `root_split` clears the root, dropping the whole layout
+    /// destroyed root split clears the root, dropping the whole layout
     /// back to hand-positioned layers.
     pub fn destroySplit(self: *Context, handle: SplitHandle) SplitError!void {
-        var removed = self.splits.fetchRemove(handle) orelse return SplitError.UnknownSplit;
-        removed.value.deinit(self.alloc);
-        if (self.root_split == handle) self.root_split = null;
+        if (!self.split_tree.destroy(self.alloc, handle)) return SplitError.UnknownSplit;
         self.layout_gen +%= 1;
     }
 
@@ -907,9 +855,8 @@ pub const Context = struct {
     /// rebuilding a pane arrangement always knows the whole new list and
     /// the incremental forms would each need their own index semantics.
     pub fn setSplitChildren(self: *Context, handle: SplitHandle, children: []const SplitChild) !void {
-        const split = self.splits.getPtr(handle) orelse return SplitError.UnknownSplit;
-        split.children.clearRetainingCapacity();
-        try split.children.appendSlice(self.alloc, children);
+        const split = self.split_tree.node(handle) orelse return SplitError.UnknownSplit;
+        try SplitTree.setChildren(self.alloc, split, children);
         self.layout_gen +%= 1;
     }
 
@@ -926,11 +873,8 @@ pub const Context = struct {
         target: SplitChild.Target,
         size: ?SplitChild.Size,
     ) SplitError!void {
-        const split = self.splits.getPtr(handle) orelse return SplitError.UnknownSplit;
-        if (index >= split.children.items.len) return SplitError.SplitChildOutOfRange;
-        const slot = &split.children.items[index];
-        slot.target = target;
-        if (size) |sz| slot.size = sz;
+        const split = self.split_tree.node(handle) orelse return SplitError.UnknownSplit;
+        if (!SplitTree.replaceChild(split, index, target, size)) return SplitError.SplitChildOutOfRange;
         self.layout_gen +%= 1;
     }
 
@@ -942,20 +886,16 @@ pub const Context = struct {
     ///
     /// `out.len` must equal the child count.
     pub fn splitExtents(self: *const Context, split: *const Split, out: []usize) void {
-        if (!split.laid_out) {
-            @memset(out, 0);
-            return;
-        }
-        self.childExtents(split, split.last_rect, out);
+        SplitTree.laidOutExtents(split, self.divider_cells, out);
     }
 
     /// `set_root_split`: which split fills the context. Null tears the
     /// layout down without destroying anything.
     pub fn setRootSplit(self: *Context, handle: ?SplitHandle) SplitError!void {
         if (handle) |h| {
-            if (!self.splits.contains(h)) return SplitError.UnknownSplit;
+            if (!self.split_tree.contains(h)) return SplitError.UnknownSplit;
         }
-        self.root_split = handle;
+        self.split_tree.root = handle;
         self.layout_gen +%= 1;
     }
 
@@ -981,118 +921,25 @@ pub const Context = struct {
         changed: ?*std.ArrayList(LayerBounds),
         dividers: ?*std.ArrayList(DividerRect),
     ) !void {
-        const root = self.root_split orelse return;
-        try self.layoutSplit(root, .{
+        const placer: LayerPlacer = .{ .ctx = self, .changed = changed };
+        try self.split_tree.layout(self.alloc, .{
             .row = 0,
             .col = 0,
             .cols = self.root.width,
             .rows = self.root.height,
-        }, changed, dividers, 0);
+        }, self.divider_cells, placer, dividers);
     }
 
-    fn layoutSplit(
-        self: *Context,
-        handle: SplitHandle,
-        rect: CellRect,
+    /// The leaf half of `layoutSplits`: a split child that names a layer
+    /// gets that rect (`applyBounds`).
+    const LayerPlacer = struct {
+        ctx: *Context,
         changed: ?*std.ArrayList(LayerBounds),
-        dividers: ?*std.ArrayList(DividerRect),
-        depth: usize,
-    ) !void {
-        // A cycle or a pathologically deep tree stops here rather than
-        // running off the stack -- see `max_split_depth`.
-        if (depth >= max_split_depth) return;
-        const split = self.splits.getPtr(handle) orelse return;
-        split.last_rect = rect;
-        split.laid_out = true;
 
-        const n = split.children.items.len;
-        if (n == 0) return;
-
-        const extents = try self.alloc.alloc(usize, n);
-        defer self.alloc.free(extents);
-        self.childExtents(split, rect, extents);
-
-        // A non-resizable split leaves no gap between its children and
-        // draws no grab band -- see `Split.resizable`.
-        const gap: usize = if (split.resizable) self.divider_cells else 0;
-
-        var pos: usize = if (split.axis == .row) rect.col else rect.row;
-        for (split.children.items, 0..) |child, i| {
-            const extent = extents[i];
-            const child_rect: CellRect = if (split.axis == .row)
-                .{ .row = rect.row, .col = pos, .cols = extent, .rows = rect.rows }
-            else
-                .{ .row = pos, .col = rect.col, .cols = rect.cols, .rows = extent };
-
-            switch (child.target) {
-                .layer => |h| try self.applyBounds(h, child_rect, changed),
-                .split => |h| try self.layoutSplit(h, child_rect, changed, dividers, depth + 1),
-            }
-
-            pos += extent;
-            if (i + 1 < n and gap > 0) {
-                if (dividers) |out| {
-                    const band: CellRect = if (split.axis == .row)
-                        .{ .row = rect.row, .col = pos, .cols = gap, .rows = rect.rows }
-                    else
-                        .{ .row = pos, .col = rect.col, .cols = rect.cols, .rows = gap };
-                    try out.append(self.alloc, .{
-                        .split = handle,
-                        .index = i,
-                        .axis = split.axis,
-                        .rect = band,
-                    });
-                }
-                pos += gap;
-            }
+        pub fn place(self: LayerPlacer, target: SplitChild.Target, rect: CellRect) !void {
+            try self.ctx.applyBounds(target.layer, rect, self.changed);
         }
-    }
-
-    /// Splits `rect`'s extent along the split's axis across its children:
-    /// `fixed` children take their cells first, `weight` children share
-    /// what's left. The last weighted child absorbs the rounding
-    /// remainder, so the children plus dividers always fill the split
-    /// exactly rather than leaving a stray blank column.
-    ///
-    /// `out.len` must equal the child count.
-    fn childExtents(self: *const Context, split: *const Split, rect: CellRect, out: []usize) void {
-        const n = split.children.items.len;
-        const axis_total: usize = if (split.axis == .row) rect.cols else rect.rows;
-        const gap: usize = if (split.resizable) self.divider_cells else 0;
-        var remaining = axis_total -| (n - 1) * gap;
-
-        var fixed_total: usize = 0;
-        var weight_total: f32 = 0;
-        var last_weighted: ?usize = null;
-        for (split.children.items, 0..) |c, i| switch (c.size) {
-            .fixed => |f| fixed_total += f,
-            .weight => |w| {
-                weight_total += @max(w, 0);
-                last_weighted = i;
-            },
-        };
-        const flexible = remaining -| fixed_total;
-
-        var flexible_used: usize = 0;
-        for (split.children.items, 0..) |child, i| {
-            const want: usize = switch (child.size) {
-                .fixed => |f| f,
-                .weight => |w| blk: {
-                    if (weight_total <= 0) break :blk 0;
-                    if (i == last_weighted.?) break :blk flexible -| flexible_used;
-                    const share_f = @as(f32, @floatFromInt(flexible)) * (@max(w, 0) / weight_total);
-                    const share: usize = @intFromFloat(@floor(share_f));
-                    flexible_used += share;
-                    break :blk share;
-                },
-            };
-            // Clamped against what's actually left: a client whose fixed
-            // children over-subscribe the window gets truncation at the
-            // end rather than panes drawn outside it.
-            out[i] = @min(want, remaining);
-            remaining -= out[i];
-        }
-    }
+    };
 
     /// Places one layer at `rect` -- position in cells, viewport to the
     /// pane's size. The layer's *content* size is left alone: a file tree
@@ -1138,67 +985,12 @@ pub const Context = struct {
 
     /// `move_divider`: drags the band after child `index` by `delta`
     /// cells along the split's axis, growing one neighbour and shrinking
-    /// the other. This is what a mouse drag on a divider does; a client
-    /// can send it too (a keyboard "grow this pane" binding).
-    ///
-    /// How the sizes change depends on how the pair was declared, so that
-    /// a drag doesn't silently convert a pane's sizing mode: a `fixed`
-    /// neighbour keeps its cells and just gets more or fewer of them, and
-    /// a `weight` pair keeps its combined weight and re-splits it by the
-    /// new ratio (so the rest of the tree is undisturbed).
+    /// the other (see `split_tree.SplitTree.moveDivider` for how the
+    /// sizes change). This is what a mouse drag on a divider does; a
+    /// client can send it too (a keyboard "grow this pane" binding).
     pub fn moveDivider(self: *Context, handle: SplitHandle, index: usize, delta: i64) SplitError!void {
-        const split = self.splits.getPtr(handle) orelse return SplitError.UnknownSplit;
-        if (!split.laid_out) return;
-        // A non-resizable split has no draggable bands -- a client asking
-        // to move one is asking for nothing (see `Split.resizable`).
-        if (!split.resizable) return;
-        const n = split.children.items.len;
-        if (index + 1 >= n) return;
-        if (delta == 0) return;
-
-        const extents = self.alloc.alloc(usize, n) catch return;
-        defer self.alloc.free(extents);
-        self.childExtents(split, split.last_rect, extents);
-
-        const before = extents[index];
-        const after = extents[index + 1];
-        const pair = before + after;
-        if (pair < 2 * min_pane_cells) return;
-
-        // Clamp the drag so neither neighbour is squeezed out of
-        // existence -- a pane at zero cells can't be grabbed back.
-        const lo: i64 = @intCast(min_pane_cells);
-        const hi: i64 = @intCast(pair - min_pane_cells);
-        const want: i64 = @as(i64, @intCast(before)) + delta;
-        const new_before: usize = @intCast(std.math.clamp(want, lo, hi));
-        const new_after = pair - new_before;
-        if (new_before == before) return;
-
-        const a = &split.children.items[index];
-        const b = &split.children.items[index + 1];
-        const wa: ?f32 = switch (a.size) {
-            .weight => |w| @max(w, 0),
-            .fixed => null,
-        };
-        const wb: ?f32 = switch (b.size) {
-            .weight => |w| @max(w, 0),
-            .fixed => null,
-        };
-
-        // A fixed neighbour just gets a new cell count. A weighted one
-        // next to a fixed one needs no change at all -- it already
-        // absorbs whatever the fixed one leaves.
-        if (wa == null) a.size = .{ .fixed = new_before };
-        if (wb == null) b.size = .{ .fixed = new_after };
-        if (wa != null and wb != null) {
-            const total_w = wa.? + wb.?;
-            if (total_w <= 0) return;
-            const frac = @as(f32, @floatFromInt(new_before)) / @as(f32, @floatFromInt(pair));
-            a.size = .{ .weight = total_w * frac };
-            b.size = .{ .weight = total_w * (1 - frac) };
-        }
-
-        self.layout_gen +%= 1;
+        const split = self.split_tree.node(handle) orelse return SplitError.UnknownSplit;
+        if (SplitTree.moveDivider(self.alloc, split, index, delta, self.divider_cells)) self.layout_gen +%= 1;
     }
 
     /// Resolves a wire-level layer handle to its `Layer` -- `null` (an
