@@ -13,9 +13,8 @@
 //! Was `shell/pty.zig`; moved here so more than glyphwire-shell can reach
 //! it. The `Pty` half is Linux-only (libc `openpty`/`fork`/`execvp`/
 //! `ioctl`/`waitpid` -- this reduced-`std.posix` Zig has none of them);
-//! other platforms get a stub whose `spawn` returns `error.Unsupported`,
-//! the same degrade-off-Linux shape `file_watcher.zig` uses. `ModeTracker`
-//! is pure and platform-independent.
+//! other platforms get a stub whose `spawn` returns `error.Unsupported`.
+//! `ModeTracker` is pure and platform-independent.
 //!
 //! The point of the pty is not VT emulation -- `core.Layer` already
 //! interprets SGR colour + simple cursor/erase (Phase A). It's that a

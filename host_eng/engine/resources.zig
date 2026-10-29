@@ -3,8 +3,7 @@
 
 //! The resource manager: ref-counted textures, shaders, atlases and
 //! fonts, keyed by name. pixzig's tilemaps and asset hot-reload are not
-//! carried; `file_watcher.zig` is kept on its own for watching the user's
-//! config files rather than engine assets.
+//! carried.
 
 const std = @import("std");
 const stbi = @import("zstbi");
@@ -19,7 +18,6 @@ const TextureImage = textures.TextureImage;
 const Texture = textures.Texture;
 const Shader = shaders.Shader;
 const FontAtlas = font_atlas_mod.FontAtlas;
-const CharToColor = textures.CharToColor;
 const SpackFile = textures.SpackFile;
 
 const Vec2U = common.Vec2U;
@@ -403,81 +401,6 @@ pub const ResourceManager = struct {
     // -----------------------------------------------------------------------
     // Texture loading
     // -----------------------------------------------------------------------
-
-    /// Creates a texture from a character buffer, where each character is mapped
-    /// to a color. This is useful for creating textures from ASCII art or other
-    /// character-based representations.  This can be helpful for making games with
-    /// simple retro textures embedded in the source itself.
-    ///
-    /// An example:
-    /// ```zig
-    /// const blockChars =
-    ///     \\=------=
-    ///     \\-..####-
-    ///     \\-.####=-
-    ///     \\-#####=-
-    ///     \\-#####=-
-    ///     \\-#####=-
-    ///     \\-##===@-
-    ///     \\=------=
-    ///     ;
-    ///
-    ///     const tex = try eng.resources.createTextureImageFromChars("test", 8, 8, blockChars, &[_]CharToColor{
-    ///         .{ .char = '#', .color = Color8.from(40, 255, 40, 255) },
-    ///         .{ .char = '-', .color = Color8.from(100, 100, 200, 255) },
-    ///         .{ .char = '=', .color = Color8.from(100, 100, 100, 255) },
-    ///         .{ .char = '.', .color = Color8.from(240, 240, 240, 255) },
-    ///         .{ .char = '@', .color = Color8.from(30, 155, 30, 255) },
-    ///         .{ .char = ' ', .color = Color8.from(0, 0, 0, 0) },
-    ///     });
-    /// ```
-    pub fn createTextureImageFromChars(
-        self: *Self,
-        name: []const u8,
-        width: usize,
-        height: usize,
-        chars: []const u8,
-        mapping: []const CharToColor,
-    ) !*ManagedTexture {
-        // Generate the color buffer, mapping chars to their given colors.
-        var buffer: []u8 = try self.alloc.alloc(u8, width * height * 4);
-        defer self.alloc.free(buffer);
-
-        // Manually track the index since we need to skip newlines.
-        var chrIdx: usize = 0;
-        var h: usize = 0;
-        var w: usize = 0;
-
-        while (chrIdx < chars.len) {
-            const curr_ch = chars[chrIdx];
-            chrIdx += 1;
-
-            // Skip over newlines from raw literals
-            if (curr_ch == '\n' or curr_ch == '\r') continue;
-
-            var color: Color8 = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
-            for (0..mapping.len) |idx| {
-                if (mapping[idx].char == curr_ch) {
-                    color = mapping[idx].color;
-                }
-            }
-
-            const col_idx: usize = (h * width + w) * 4;
-            buffer[col_idx] = color.r;
-            buffer[col_idx + 1] = color.g;
-            buffer[col_idx + 2] = color.b;
-            buffer[col_idx + 3] = color.a;
-
-            // Update pixel buffer locations.
-            w += 1;
-            if (w >= width) {
-                w = 0;
-                h += 1;
-            }
-        }
-
-        return try self.loadTextureFromBuffer(name, width, height, buffer);
-    }
 
     /// Loads an RGBA texture from a raw buffer. The buffer should be in RGBA
     /// format, with 4 bytes per pixel. The name is the name that the texture

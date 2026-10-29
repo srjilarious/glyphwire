@@ -86,13 +86,13 @@ const RedrawSig = struct {
 };
 
 pub const EngOptions: host_eng.EngineOptions = .{
-    // `maxSprites`: a full-window character grid draws far more than the
-    // 1000-quad default per category (background rects, glyphs, icons). The
-    // per-category flushed passes in `render.Renderer.renderLayer` keep the
-    // paint order correct regardless, but sizing every batch queue to hold
-    // a whole large grid keeps each category to a single draw call. 30k
-    // covers a ~240x125 cell grid of solid backgrounds; the renderer's
-    // `u32` batch indices make it safe.
+    // `maxSprites` sizes the engine's immediate queues (sprites, shapes,
+    // tinted text), which only the overlays use now: the grid itself goes
+    // through `render.zig`'s own static batches. An overlay can still be
+    // window-sized (a list dialog full of text, a dimmed backdrop of cell
+    // fills), and a queue that auto-flushes mid-frame would paint its
+    // category early, out of order with the others. 30k covers a ~240x125
+    // cell window in one flush; the `u32` batch indices make it safe.
     .rendererOpts = .{ .textRendering = true, .maxSprites = 30_000 },
     // A terminal is static most of the time: block in the event loop when
     // idle and only repaint when `App.needsRedraw` says something changed

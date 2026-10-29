@@ -37,11 +37,6 @@ pub const Texture = struct {
     }
 };
 
-pub const CharToColor = struct {
-    char: u8,
-    color: Color8,
-};
-
 // A sprite pack file.
 pub const SpackFile = struct { frames: []SpackFrame };
 
@@ -63,41 +58,5 @@ pub fn blit(dest: []u8, destSize: Vec2U, src: []const u8, srcSize: Vec2U, offset
         @memcpy(dest[destIdx .. destIdx + lineLen], src[srcIdx .. srcIdx + lineLen]);
         srcIdx += lineLen;
         destIdx += destLineLen;
-    }
-}
-
-pub fn drawBufferFromChars(buffer: []u8, buffSize: Vec2U, chars: []const u8, charsSize: Vec2U, offsetIntoBuffer: Vec2U, mapping: []const CharToColor) void {
-    // Manually track the index since we need to skip newlines.
-    var chrIdx: usize = 0;
-    var h: usize = offsetIntoBuffer.y;
-    var w: usize = offsetIntoBuffer.x;
-
-    while (chrIdx < chars.len) {
-        const curr_ch = chars[chrIdx];
-        chrIdx += 1;
-
-        // Skip over newlines from raw literals
-        if (curr_ch == '\n' or curr_ch == '\r') continue;
-
-        // Find the color for the char.
-        var color: Color8 = .{ .r = 0, .g = 0, .b = 0, .a = 255 };
-        for (0..mapping.len) |idx| {
-            if (mapping[idx].char == curr_ch) {
-                color = mapping[idx].color;
-            }
-        }
-
-        const col_idx: usize = (h * buffSize.x + w) * 4;
-        buffer[col_idx] = color.r;
-        buffer[col_idx + 1] = color.g;
-        buffer[col_idx + 2] = color.b;
-        buffer[col_idx + 3] = color.a;
-
-        // Update pixel buffer locations.
-        w += 1;
-        if (w >= (offsetIntoBuffer.x + charsSize.x)) {
-            w = offsetIntoBuffer.x;
-            h += 1;
-        }
     }
 }

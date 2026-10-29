@@ -20,7 +20,7 @@ const Inner = quad_batch.QuadBatch(.{ .posDim = 2, .colorDim = 4 });
 /// shapes to draw in one go. This is a thin wrapper over `QuadBatch`,
 /// translating a destination rect + color into the 4 corner
 /// positions/colors the generic batch expects, plus the multi-rect
-/// composition used by `drawRect`/`drawEnclosingRect` for line-drawn
+/// composition used by `drawRect` for line-drawn
 /// outlines. The batch is drawn via `flush`, which happens on render or
 /// queueing more than the batch's quad capacity (`C.MaxSprites` by
 /// default, or whatever `initCapacity` was given).
@@ -108,47 +108,6 @@ pub const ShapeBatchQueue = struct {
         self.drawFilledRect(bottomRect, color);
     }
 
-    /// This moves the outline of the rect to enclose the dest by lineWidth.
-    pub fn drawEnclosingRect(self: *ShapeBatchQueue, dest: RectF, color: Color, lineWidth: u8) void {
-        const lF = @as(f32, @floatFromInt(lineWidth));
-        // Draw top rect
-        const topRect = RectF{
-            .l = dest.l - lF,
-            .t = dest.t - lF,
-            .r = dest.r + lF,
-            .b = dest.t,
-        };
-        self.drawFilledRect(topRect, color);
-
-        // Draw the left rect
-        const leftRect = RectF{
-            .l = dest.l - lF,
-            .t = dest.t,
-            .r = dest.l,
-            .b = dest.b,
-        };
-        self.drawFilledRect(leftRect, color);
-
-        // Draw the right rect.
-        const rightRect = RectF{
-            .l = dest.r,
-            .t = dest.t,
-            .r = dest.r + lF,
-            .b = dest.b,
-        };
-        self.drawFilledRect(rightRect, color);
-
-        // Draw the bottom rect.
-        const bottomRect = RectF{
-            .l = dest.l - lF,
-            .t = dest.b,
-            .r = dest.r + lF,
-            .b = dest.b + lF,
-        };
-        self.drawFilledRect(bottomRect, color);
-    }
-
-    /// Finishes a draw cycle with the shape batch, executing the draw calls.
     pub fn end(self: *ShapeBatchQueue) void {
         self.inner.end();
     }

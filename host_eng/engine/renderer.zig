@@ -53,15 +53,14 @@ pub const TextRenderer = textMod.TextRenderer;
 pub const RendererOptions = struct {
     /// Number of sprite batch queues to allocate. `begin`/`end`/`deinit`
     /// operate on all of them, but the public draw calls (`draw`,
-    /// `drawSprite`, `drawTexture`, `drawFullTexture`) currently only submit
-    /// to `batches[0]` — there is no API yet to route a draw call to a
+    /// `drawSprite`) currently only submit to `batches[0]` — there is no API yet to route a draw call to a
     /// different batch index, so raising this above 1 has no visible effect.
     numSpriteTextures: u8 = 1,
     shapeRendering: bool = true,
     textRendering: bool = false,
 
-    /// Quad capacity of every batch queue (sprite, overlay, shape, and the
-    /// two text batches). A batch auto-flushes once this many quads are
+    /// Quad capacity of every batch queue (sprite, shape, and the text
+    /// batch). A batch auto-flushes once this many quads are
     /// queued, so a scene that draws more than this in one `begin`/`end`
     /// simply costs extra draw calls -- correctness is unaffected. Raise it
     /// for scenes that legitimately draw tens of thousands of quads per
@@ -95,7 +94,6 @@ pub fn Renderer(opts: RendererOptions) type {
 
         const Impl = struct {
             batches: [opts.numSpriteTextures]SpriteBatchQueue,
-            overlays: SpriteBatchQueue,
 
             shapes: ShapeBatchQueue = undefined,
             text: TextRenderer = undefined,
@@ -111,13 +109,11 @@ pub fn Renderer(opts: RendererOptions) type {
             // failure unwinds only what actually got initialized, in
             // reverse construction order.
             var batchesInit: usize = 0;
-            var overlaysInit = false;
             var shapesInit = false;
             var textInit = false;
             errdefer {
                 if (textInit) rend.text.deinit();
                 if (shapesInit) rend.shapes.deinit();
-                if (overlaysInit) rend.overlays.deinit();
                 for (0..batchesInit) |idx| rend.batches[idx].deinit();
             }
 
@@ -129,8 +125,6 @@ pub fn Renderer(opts: RendererOptions) type {
                 rend.batches[idx] = try SpriteBatchQueue.initCapacity(alloc, texShader, opts.maxSprites);
                 batchesInit += 1;
             }
-            rend.overlays = try SpriteBatchQueue.initCapacity(alloc, texShader, opts.maxSprites);
-            overlaysInit = true;
 
             if (opts.shapeRendering) {
                 std.log.info("Setting up shaders for shape renderering.", .{});
@@ -143,10 +137,8 @@ pub fn Renderer(opts: RendererOptions) type {
                 std.log.info("Setting up text renderering.\n", .{});
 
                 if (builtin.os.tag == .emscripten) {
-                    _ = try resMgr.loadShader(shaders.FontShader, &shaders.TexVertexShader, &shaders.TextPixelShader_Web);
                     _ = try resMgr.loadShader(shaders.TextColorShader, &shaders.TextColorVertexShader, &shaders.TextColorPixelShader_Web);
                 } else {
-                    _ = try resMgr.loadShader(shaders.FontShader, &shaders.TexVertexShader, &shaders.TextPixelShader_Desktop);
                     _ = try resMgr.loadShader(shaders.TextColorShader, &shaders.TextColorVertexShader, &shaders.TextColorPixelShader_Desktop);
                 }
 
@@ -187,7 +179,6 @@ pub fn Renderer(opts: RendererOptions) type {
             for (0..self.impl.batches.len) |idx| {
                 self.impl.batches[idx].deinit();
             }
-            self.impl.overlays.deinit();
             if (opts.shapeRendering) {
                 self.impl.shapes.deinit();
             }
@@ -225,7 +216,7 @@ pub fn Renderer(opts: RendererOptions) type {
         ///
         /// Returned by pointer so callers can drive the atlas directly, e.g.
         /// `atlas.setFontSize(pt)` to repack it at a new pixel size. Such a
-        /// change is picked up by the next `drawString` with no re-`setFont`;
+        /// change is picked up by the next `drawStringColored` with no re-`setFont`;
         /// make it outside a `begin`/`end` pair. Any size clamping/stepping
         /// is the caller's to apply.
         pub fn defaultFontAtlas(self: *Self) ?*FontAtlas {
@@ -242,7 +233,6 @@ pub fn Renderer(opts: RendererOptions) type {
             for (0..self.impl.batches.len) |idx| {
                 self.impl.batches[idx].begin(mvp);
             }
-            self.impl.overlays.begin(mvp);
 
             if (opts.shapeRendering) {
                 self.impl.shapes.begin(mvp);
@@ -253,7 +243,7 @@ pub fn Renderer(opts: RendererOptions) type {
             }
         }
 
-        /// Flushes every open batch queue (sprites, overlays, shapes, text),
+        /// Flushes every open batch queue (sprites, shapes, text),
         /// issuing the actual GL draw calls buffered since `begin()`.
         pub fn end(self: *Self) void {
             for (0..self.impl.batches.len) |idx| {
@@ -263,8 +253,6 @@ pub fn Renderer(opts: RendererOptions) type {
             if (opts.shapeRendering) {
                 self.impl.shapes.end();
             }
-
-            self.impl.overlays.end();
 
             if (opts.textRendering) {
                 self.impl.text.end();
@@ -290,24 +278,6 @@ pub fn Renderer(opts: RendererOptions) type {
             self.impl.batches[0].drawSprite(sprite);
         }
 
-        /// Equivalent to `draw()`. Always submits to `batches[0]`.
-        pub fn drawTexture(self: *Self, texture: *Texture, dest: RectF, srcCoords: RectF) void {
-            self.impl.batches[0].draw(texture, dest, srcCoords, .none);
-        }
-
-        /// Draws a texture after shape batches, useful for image content in UI panels.
-        pub fn drawOverlayTexture(self: *Self, texture: *Texture, dest: RectF, srcCoords: RectF) void {
-            self.impl.overlays.draw(texture, dest, srcCoords, .none);
-        }
-
-        /// Draws the whole texture at `pos`, scaled uniformly by `scale`.
-        /// Always submits to `batches[0]`; see `draw()`.
-        pub fn drawFullTexture(self: *Self, texture: *Texture, pos: Vec2I, scale: f32) void {
-            const tsx = @as(f32, @floatFromInt(texture.size.x)) * scale;
-            const tsy = @as(f32, @floatFromInt(texture.size.y)) * scale;
-            self.impl.batches[0].draw(texture, RectF.fromPosSize(pos.x, pos.y, @intFromFloat(tsx), @intFromFloat(tsy)), texture.src, .none);
-        }
-
         /// Requires `RendererOptions.shapeRendering == true`. Only checked
         /// with `std.debug.assert`, so calling this when shape rendering is
         /// compiled out is undefined behavior in release builds (`shapes` is
@@ -323,38 +293,14 @@ pub fn Renderer(opts: RendererOptions) type {
             self.impl.shapes.drawRect(dest, color, lineWidth);
         }
 
-        // This moves the outline of the rect to enclose the dest by lineWidth.
-        /// Requires `RendererOptions.shapeRendering == true`; see `drawFilledRect()`.
-        pub fn drawEnclosingRect(self: *Self, dest: RectF, color: Color, lineWidth: u8) void {
-            std.debug.assert(opts.shapeRendering);
-            self.impl.shapes.drawEnclosingRect(dest, color, lineWidth);
-        }
-
-        /// Requires `RendererOptions.textRendering == true`. Only checked
-        /// with `std.debug.assert`; see `drawFilledRect()` for the release-build
-        /// caveat. Also traps if no default font has been set (see `setDefaultFont`).
-        pub fn drawString(self: *Self, text: []const u8, pos: Vec2I) Vec2I {
-            std.debug.assert(opts.textRendering);
-            return self.impl.text.drawString(text, pos);
-        }
-
-        /// Requires `RendererOptions.textRendering == true`; see `drawString()`.
-        pub fn drawScaledString(self: *Self, text: []const u8, pos: Vec2I, scale: f32) Vec2I {
-            std.debug.assert(opts.textRendering);
-            return self.impl.text.drawScaledString(text, pos, scale);
-        }
-
-        /// Like `drawString`, but tints every glyph by `color` instead of
-        /// rendering plain white. Requires `RendererOptions.textRendering == true`.
+        /// Draws `text` with every glyph tinted by `color`. Requires
+        /// `RendererOptions.textRendering == true`. Only checked with
+        /// `std.debug.assert`; see `drawFilledRect()` for the release-build
+        /// caveat. Logs and draws nothing if no default font has been set
+        /// (see `setDefaultFont`).
         pub fn drawStringColored(self: *Self, text: []const u8, pos: Vec2I, color: Color) Vec2I {
             std.debug.assert(opts.textRendering);
             return self.impl.text.drawStringColored(text, pos, color);
-        }
-
-        /// Measures `text` without drawing it. Requires `RendererOptions.textRendering == true`.
-        pub fn measureString(self: *Self, text: []const u8) Vec2I {
-            std.debug.assert(opts.textRendering);
-            return self.impl.text.measureString(text);
         }
     };
 }

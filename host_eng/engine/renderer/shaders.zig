@@ -98,30 +98,6 @@ pub const ColorPixelShader: ShaderCode =
     \\}
 ;
 
-/// A pixel shader that applies all white, using red as the alpha channel.
-pub const TextPixelShader_Desktop: ShaderCode =
-    \\ #version 300 es
-    \\ precision mediump float;
-    \\ in vec2 Texcoord; // Received from vertex shader
-    \\ uniform sampler2D tex; // Texture sampler
-    \\ out vec4 fragColor;
-    \\ void main() {
-    \\   fragColor = vec4(1.0, 1.0, 1.0, texture(tex, Texcoord).r); 
-    \\ }
-;
-
-/// A web version of the text pixel shader that uses the alpha channel instead of the red channel.
-pub const TextPixelShader_Web: ShaderCode =
-    \\ #version 300 es
-    \\ precision mediump float;
-    \\ in vec2 Texcoord; // Received from vertex shader
-    \\ uniform sampler2D tex; // Texture sampler
-    \\ out vec4 fragColor;
-    \\ void main() {
-    \\   fragColor = vec4(1.0, 1.0, 1.0, texture(tex, Texcoord).a); 
-    \\ }
-;
-
 /// A 2d vertex shader for tinted text: passes through texcoord plus a
 /// per-vertex color for the pixel shader to multiply against the font
 /// atlas's alpha mask, so each glyph draw can carry its own fg color.
@@ -157,7 +133,7 @@ pub const TextColorPixelShader_Desktop: ShaderCode =
 ;
 
 /// Web/WASM variant: the font atlas mask lives in the alpha channel instead
-/// of red (see TextPixelShader_Web).
+/// of red (WebGL's single-channel upload).
 pub const TextColorPixelShader_Web: ShaderCode =
     \\ #version 300 es
     \\ precision mediump float;
@@ -187,9 +163,6 @@ pub const ColorShader = "color_shader";
 
 /// The name for our normal texture shader used for sprites.
 pub const TextureShader = "texture_shader";
-
-/// Our text/font shader.
-pub const FontShader = "font_shader";
 
 /// Our tinted text/font shader (per-draw fg color).
 pub const TextColorShader = "text_color_shader";
