@@ -209,7 +209,7 @@ keeps its size and the grid gains or loses cells to match.
 
 | Path | What |
 |---|---|
-| `src/` | Protocol core: grid model (`core.zig` for cells and `Layer`, with `vt.zig` for its VT machine), layer components (`table.zig`, `outline.zig`, `rect.zig`, `nine_patch.zig`), `context.zig`, `session.zig`, dispatch, server, client (`client.zig`, `client_ops.zig`), wire framing and codecs, PTY |
+| `src/` | Protocol core: grid model (`core.zig` for cells and styles, `layer.zig` for `Layer` with `vt.zig` for its VT machine, `image.zig` for image headers), layer components (`table.zig`, `outline.zig`, `rect.zig`, `nine_patch.zig`), `context.zig`, `session.zig`, dispatch, server, client (`client.zig`, `client_ops.zig`), wire framing and codecs, PTY |
 | `applib/` | Helpers shared by two or more applications: line editor, keymaps, fuzzy finder, shell panel, tab strip, history, file operations |
 | `host/`, `host_eng/` | `glyphwire`, the SDL3 / OpenGL host, and its engine backend |
 | `shell/`, `hist/` | `gw-shell` and `gw-hist` |

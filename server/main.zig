@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     const cols = if (args.len >= 3) try std.fmt.parseInt(usize, args[2], 10) else 80;
     const rows = if (args.len >= 4) try std.fmt.parseInt(usize, args[3], 10) else 24;
 
-    // Scrollback is a per-layer creation parameter (see core.zig); until
+    // Scrollback is a per-layer creation parameter (see layer.zig); until
     // `create_context` exists over the wire, this default stands in for
     // what a real shell would specify when allocating its root context.
     const default_scrollback_rows = 1000;
