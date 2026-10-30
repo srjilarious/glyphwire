@@ -927,21 +927,32 @@ pub const Dispatcher = struct {
                 const h = pane.stack.items[i];
                 if (!self.mayAccess(h)) continue;
                 if (session.contextPtr(h)) |c| {
-                    self.active_ctx = h;
-                    self.ctx = c;
+                    self.enterContext(h, c);
                     return;
                 }
             }
             if (session.contextPtr(pane.top())) |c| {
-                self.active_ctx = pane.top();
-                self.ctx = c;
+                self.enterContext(pane.top(), c);
                 return;
             }
         }
         // This connection's pane is gone too (the manager destroyed it).
         self.active_pane = session.focusedPaneHandle();
-        self.active_ctx = session.focusedContextHandle();
-        self.ctx = session.focusedContext();
+        self.enterContext(session.focusedContextHandle(), session.focusedContext());
+    }
+
+    /// Moves this connection onto context `target`. Every switch goes
+    /// through here because the surface has to be dropped on each one: a
+    /// layer handle only means anything inside the context that owns it,
+    /// and every context numbers its layers from 1. Kept across a switch,
+    /// a program started in a panel (`GLYPHWIRE_LAYER`) would draw its
+    /// full-screen context's root calls onto whichever of its own layers
+    /// shares the panel's number, and once that context was destroyed and
+    /// it fell back to the panel's, onto the panel itself.
+    fn enterContext(self: *Dispatcher, target: core.ContextHandle, ctx: *core.Context) void {
+        self.active_ctx = target;
+        self.ctx = ctx;
+        self.surface = null;
     }
 
     /// Handles one decoded frame body. See `HandleResult`.
@@ -1875,8 +1886,7 @@ pub const Dispatcher = struct {
             new_ctx.window_scrollbar = p.window_scrollbar;
             if (p.title) |t| try new_ctx.setTitle(t);
         }
-        self.active_ctx = new_handle;
-        self.ctx = session.contextPtr(new_handle).?;
+        self.enterContext(new_handle, session.contextPtr(new_handle).?);
 
         var result = try self.contextBroadcast(alloc);
         result.response = try self.respond(alloc, id, protocol.CreateContextResult{
@@ -1995,16 +2005,11 @@ pub const Dispatcher = struct {
                 else => |e| e,
             };
         }
-        self.ctx = target_ctx;
-        self.active_ctx = target;
+        self.enterContext(target, target_ctx);
         // Follow the context into its pane: attaching to a context means
         // joining wherever it lives, and anything this connection creates
         // afterwards belongs there too.
         self.active_pane = target_ctx.pane;
-        // A layer handle is only meaningful in the context that owns it,
-        // so the surface doesn't travel; the new context's root is where
-        // an omitted `layer` lands until this connection says otherwise.
-        self.surface = null;
     }
 
     /// Binds this connection to `pane_handle` and whatever is on screen
@@ -2015,9 +2020,9 @@ pub const Dispatcher = struct {
         const session = try self.requireManager();
         const pane = session.panePtr(pane_handle) orelse return DispatchError.UnknownPane;
         const top = pane.top();
-        self.ctx = session.contextPtr(top) orelse return DispatchError.UnknownContext;
+        const ctx = session.contextPtr(top) orelse return DispatchError.UnknownContext;
         self.active_pane = pane_handle;
-        self.active_ctx = top;
+        self.enterContext(top, ctx);
     }
 
     /// `attach_layer`: declares this connection's surface -- the layer an

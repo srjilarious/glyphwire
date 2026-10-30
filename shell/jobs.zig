@@ -14,6 +14,7 @@ const keyencode = @import("shell_support").keyencode;
 const parse = @import("shell_support").parse;
 const jobstack = @import("shell_support").jobstack;
 const jobstop = @import("shell_support").jobstop;
+const embed = @import("shell_support").embed;
 
 const main = @import("main.zig");
 const Prompt = main.Prompt;
@@ -267,10 +268,16 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
     // click can be reported to the child in *its* screen's
     // coordinates. Zero when the shell owns the context and its
     // screen is the whole grid. Read once rather than per event: the
-    // panel only moves on a window resize, which is handled in the
-    // loop, and motion reporting would otherwise put a round trip on
-    // every pointer move.
-    var mouse_origin = self.surfaceOrigin();
+    // panel only moves when the host re-places it, which it says with
+    // `size` (`JobControl`), and motion reporting would otherwise put a
+    // round trip on every pointer move. Under `client_lock`, since a
+    // plain child's reader may already be drawing.
+    var mouse_origin: glyphwire.CellPos = blk: {
+        self.client_lock.lockUncancelable(self.client.io);
+        defer self.client_lock.unlock(self.client.io);
+        break :blk self.surfaceOrigin();
+    };
+    var job_control: JobControl = .{ .prompt = self, .pty = pty, .mouse_origin = &mouse_origin };
 
     // Whether this pane's stack may have changed since it was last
     // read. A `context` event only sets this; the stack is read once
@@ -287,6 +294,11 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
     while (!pty.reaped()) {
         // The kill-job key's SIGKILL, once SIGTERM's grace has run out.
         if (job.stop.tick(jobMs(self, job))) |sig| pty.signalGroup(jobstop.posixSignal(sig));
+
+        // Embedded, the panel's size and place are the host's to change,
+        // and `size` is how it says so: read here, between events, so a
+        // child in the panel is resized with it (see `JobControl`).
+        if (self.control) |ctl| ctl.drain(&job_control, JobControl.apply) catch {};
 
         // Once the handshake resolves an aware child, it's drawing
         // over its own wire connection and never reads its own stdin
@@ -312,6 +324,20 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
         }
 
         const any_ev = (listener.next(.{ .duration = .{ .raw = .fromMilliseconds(120), .clock = .awake } }) catch null) orelse continue;
+        // Read the pipe again before deciding whose this is: the wait
+        // above can outlast a `blur` the host sent while it blocked.
+        if (self.control) |ctl| ctl.drain(&job_control, JobControl.apply) catch {};
+        // Embedded and blurred, input and the pointer are the host's: it
+        // sees every event too, and the child would get them doubled up
+        // (typing in zoe's buffer landing in a vim in the panel as well).
+        // Dropped, not queued, the same as at the prompt. The host's own
+        // toggle key goes too: it closes the panel, and a child on the
+        // kitty keyboard protocol (neovim, helix) would get it as a key
+        // of its own (`CSI 96;5u`).
+        if (dropForHost(self, any_ev)) {
+            any_ev.deinit(alloc);
+            continue;
+        }
         if (!any_ev.isInput()) {
             defer any_ev.deinit(alloc);
             switch (any_ev) {
@@ -329,12 +355,14 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
                 // `adoptPendingResize` once the child is reaped; not
                 // here, since `handleResize` would redraw a prompt
                 // over whatever the child is showing.
+                //
+                // Embedded, the event is the host's whole window, not
+                // the panel: the child's size comes from the `size` the
+                // host sends once it has re-placed the panel
+                // (`JobControl`), and this is only recorded.
                 .resize => |rev| {
-                    pty.resize(@intCast(rev.cols), @intCast(rev.rows));
+                    if (self.layer == null) pty.resize(@intCast(rev.cols), @intCast(rev.rows));
                     self.noteResize(rev.cols, rev.rows);
-                    // A resize is also when an embedded panel is
-                    // re-placed, so the click origin moves with it.
-                    mouse_origin = self.surfaceOrigin();
                 },
                 // Visibility moved: read the pane's stack at the top of
                 // the next pass, where awareness is current (see
@@ -456,6 +484,62 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
         if (keyencode.toPtyBytesOpts(ev.key, mods, modes.encodeOpts(), &kb)) |seq| pty.writeAll(seq);
     }
     return .exited;
+}
+
+/// The host's control pipe while a job holds the foreground of an
+/// embedded shell (`foregroundJob` drains it each pass). The prompt
+/// drains it between keystrokes, which it never reaches during a run, so
+/// without this a panel resized under a running program left the child
+/// at its old size.
+///
+/// `size` is acted on here: the panel's layer is asked its size and
+/// corner (under `client_lock`, a plain child's reader may be drawing),
+/// the child's pty takes the size, and the click origin follows the
+/// corner. It is also recorded as a resize so the next prompt adopts it
+/// (`Prompt.adoptPendingResize`). `cd` and `quit` only set state the
+/// prompt acts on later anyway. `focus` / `blur` wait for the prompt in
+/// `pending_focus`: taking the caret mid-run is not this loop's to do.
+const JobControl = struct {
+    prompt: *Prompt,
+    pty: *Pty,
+    mouse_origin: *glyphwire.CellPos,
+
+    fn apply(self: *JobControl, d: embed.Directive) void {
+        const p = self.prompt;
+        switch (d) {
+            .size => {
+                const io = p.client.io;
+                p.client_lock.lockUncancelable(io);
+                const size = p.client.getSize();
+                const origin = p.surfaceOrigin();
+                p.client_lock.unlock(io);
+                const s = size catch return;
+                if (s.cols == 0 or s.rows == 0) return;
+                self.pty.resize(@intCast(s.cols), @intCast(s.rows));
+                p.noteResize(s.cols, s.rows);
+                self.mouse_origin.* = origin;
+            },
+            .focus => p.pending_focus = true,
+            .blur => p.pending_focus = false,
+            .cd, .quit => p.applyDirective(d),
+        }
+    }
+};
+
+/// Whether `ev`, seen by `foregroundJob`, belongs to the host this shell
+/// is embedded in rather than to the job: everything typed or clicked
+/// while the panel doesn't have the keyboard, and the panel's toggle key
+/// (Ctrl+`, which zoe and salacommander both close it on) whenever it
+/// does. `shutdown` is never dropped. Always false for a shell that owns
+/// its context.
+fn dropForHost(self: *const Prompt, ev: glyphwire.Event) bool {
+    if (self.layer == null) return false;
+    const has_keyboard = self.pending_focus orelse self.focused;
+    return switch (ev) {
+        .key => |k| !has_keyboard or (k.ctrl() and std.mem.eql(u8, k.key, "grave_accent")),
+        .text, .paste, .copy_request, .mouse_button, .mouse_move => !has_keyboard,
+        else => false,
+    };
 }
 
 /// Milliseconds since `job` started: `JobStop`'s clock.
@@ -962,7 +1046,10 @@ pub fn syncMouseReport(ctx: *PtyReaderCtx) void {
     const on = ctx.modes.mouseReporting();
     if (on == ctx.mouse_report_sent) return;
     ctx.mouse_report_sent = on;
-    ctx.prompt.drawSetMouseReport(on) catch {};
+    const p = ctx.prompt;
+    p.client_lock.lockUncancelable(p.client.io);
+    defer p.client_lock.unlock(p.client.io);
+    p.drawSetMouseReport(on) catch {};
 }
 
 pub fn awareState(ctx: *const PtyReaderCtx) ?bool {
@@ -1049,7 +1136,11 @@ pub fn ptyReaderThread(ctx: *PtyReaderCtx) void {
     // A character the child's last write cut short.
     if (aware != true) {
         carry.finish(alloc, &text) catch {};
-        if (text.items.len > 0) self.client.writeText(text.items, .{}) catch {};
+        if (text.items.len > 0) {
+            self.client_lock.lockUncancelable(io);
+            defer self.client_lock.unlock(io);
+            self.client.writeText(text.items, .{}) catch {};
+        }
     }
 }
 
@@ -1072,6 +1163,11 @@ pub fn emitChunk(ctx: *PtyReaderCtx, real_out: *std.Io.File.Writer, mirror: Mirr
         real_out.interface.flush() catch {};
     } else {
         mirror.carry.feed(self.client.alloc, bytes, mirror.text) catch return;
-        if (mirror.text.items.len > 0) self.client.writeText(mirror.text.items, .{}) catch {};
+        if (mirror.text.items.len > 0) {
+            // The foreground loop may be mid round trip (`client_lock`).
+            self.client_lock.lockUncancelable(self.client.io);
+            defer self.client_lock.unlock(self.client.io);
+            self.client.writeText(mirror.text.items, .{}) catch {};
+        }
     }
 }

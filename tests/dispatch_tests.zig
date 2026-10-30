@@ -4078,6 +4078,61 @@ pub fn attachLayerSurvivesItsLayerBeingDestroyedTest(io: std.Io, alloc: std.mem.
     try testz.expectEqualStr(root.layerPtr(null).?.cell(0, 0).grapheme(), "x");
 }
 
+/// A program launched in a panel (`GLYPHWIRE_LAYER`) that goes full
+/// screen: its surface is the panel's handle, which means nothing in the
+/// context it creates -- and every context numbers its layers from 1, so
+/// it can name one of the program's own there. Dropped on the switch, the
+/// program's omitted-`layer` calls land on its own root, and after it
+/// destroys that context and falls back, never on the panel.
+pub fn surfaceDoesNotFollowCreateContextTest(io: std.Io, alloc: std.mem.Allocator) !void {
+    _ = io;
+    var root = try glyphwire.Context.init(alloc, 40, 10, 0);
+    defer root.deinit();
+    var session = try glyphwire.Session.init(alloc, &root);
+    defer session.deinit();
+
+    var d = try helpers.attachedConnection(&session, 7);
+    const panel_made = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":1,"method":"create_layer","params":{"width":20,"height":4}}
+    );
+    if (panel_made.response) |r| alloc.free(r);
+    if (panel_made.broadcast) |b| alloc.free(b.body);
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"attach_layer","params":{"layer":1}}
+    );
+
+    const created = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":2,"method":"create_context","params":{"scrollback_rows":0}}
+    );
+    if (created.response) |r| alloc.free(r);
+    if (created.broadcast) |b| alloc.free(b.body);
+    // Its first layer: the same handle as the panel.
+    const own = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","id":3,"method":"create_layer","params":{"width":20,"height":4}}
+    );
+    if (own.response) |r| alloc.free(r);
+    if (own.broadcast) |b| alloc.free(b.body);
+
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"full"}}
+    );
+    const full = session.contextPtr(1).?;
+    try testz.expectEqualStr(full.layerPtr(null).?.cell(0, 0).grapheme(), "f");
+    try testz.expectEqualStr(full.layerPtr(1).?.cell(0, 0).grapheme(), "");
+
+    const gone = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
+    );
+    if (gone.broadcast) |b| alloc.free(b.body);
+
+    // Back on the context it was started in, drawing on its root.
+    _ = try d.handle(alloc,
+        \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"back"}}
+    );
+    try testz.expectEqualStr(root.layerPtr(null).?.cell(0, 0).grapheme(), "b");
+    try testz.expectEqualStr(root.layerPtr(1).?.cell(0, 0).grapheme(), "");
+}
+
 pub fn adoptContextLetsASecondConnectionDestroyItTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var root = try glyphwire.Context.init(alloc, 40, 10, 0);

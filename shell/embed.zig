@@ -22,14 +22,17 @@
 //! is the host's to make, and it says so over the control pipe: `focus`
 //! when it has handed the keyboard to the panel, `blur` when it has
 //! taken it back. The shell ignores input while blurred; the host
-//! ignores everything but its own toggle key while the panel has focus.
+//! ignores everything but its own toggle key while the panel has focus,
+//! and the shell never passes that key (Ctrl+`) to a command it runs.
 //!
 //! **The control pipe** is the read end of a pipe the host created
 //! non-blocking and left open across the spawn -- the same trick the
 //! shell's own `$GLYPHWIRE_RESULT_FD` plays on its children, in the
 //! other direction. The shell drains it between keystrokes
 //! (`Control.drain`, from the prompt's idle pass, so a directive lands
-//! within one idle tick) and treats end-of-file as "the host is gone".
+//! within one idle tick, and from the foreground loop while a command
+//! runs, where only `size` is acted on at once) and treats end-of-file
+//! as "the host is gone".
 //! One directive per line:
 //!
 //!     cd <path>   change the panel's directory -- what makes the popup
@@ -39,8 +42,14 @@
 //!     focus       keystrokes are the shell's, and so is the host caret
 //!                 (pointed at the panel's layer, in the default shape)
 //!     blur        keystrokes are the host's, and so is the caret: the
-//!                 shell sends nothing, the host sets its own up
-//!     size        the layer was resized; re-read it
+//!                 shell sends nothing, the host sets its own up. A
+//!                 command running in the panel gets no input either
+//!                 until `focus`
+//!     size        the layer was resized or moved; re-read it. Also
+//!                 read while a command runs, so a program in the
+//!                 panel is resized with it -- the window's own
+//!                 `resize` is the host's whole context, never the
+//!                 panel's size
 //!     quit        leave, as if `exit` had been typed
 //!
 //! Unknown directives are ignored rather than fatal: the host and the

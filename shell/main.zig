@@ -1442,6 +1442,19 @@ pub const Prompt = struct {
     /// `size` and `quit`, drained between keystrokes. Borrowed from
     /// `runPrompt`.
     control: ?*embed.Control = null,
+    /// A `focus` or `blur` the host sent while a job held the foreground.
+    /// `jobs.foregroundJob` drains the control pipe for the panel's
+    /// `size`, and these come out of it too. The caret waits for the
+    /// prompt (`drainControl`); whose input it is changes at once
+    /// (`jobs.dropForHost` reads this ahead of `focused`).
+    pending_focus: ?bool = null,
+    /// Serializes this connection's `Client` between the main thread and
+    /// a plain child's pty reader (`jobs.ptyReaderThread`), which mirrors
+    /// the child's output through it while the foreground loop may need
+    /// a round trip of its own (the panel's size and corner, embedded).
+    /// The `Client` is one socket and one write buffer, not safe to share.
+    /// Taken only on those paths: everywhere else no reader is running.
+    client_lock: std.Io.Mutex = .init,
     /// A directory the host asked for that hasn't been taken yet: applied
     /// before the next prompt is drawn rather than the moment it arrives,
     /// so following the file pane never lands in the middle of a command
@@ -1869,6 +1882,11 @@ pub const Prompt = struct {
     /// the loop is somewhere it can honour it.
     pub fn drainControl(self: *Prompt) void {
         const ctl = self.control orelse return;
+        // Held from a job's run, and older than anything still in the pipe.
+        if (self.pending_focus) |on| {
+            self.pending_focus = null;
+            self.setFocused(on);
+        }
         ctl.drain(self, applyDirective) catch {};
         // Every writer closed: the host exited and took the layer we draw
         // on with it.
@@ -2035,22 +2053,38 @@ pub const Prompt = struct {
     /// same way `core.Layer.resize` moves the cursor -- it's only a
     /// fallback here, but a stale one is how the next prompt ends up over
     /// old output.
+    ///
+    /// Embedded, the event is no size of ours: it reports the host's
+    /// whole context (`applyPendingResize` says the same), and a
+    /// multiplexer sends one to every program on any pane-tree edit, so
+    /// one arrives while a full-screen program like `gwmd` is up even
+    /// though the panel never moved. Taken as the grid, the window's rows
+    /// made the next `size` from the host look like a shrink, and
+    /// `handleResize` redrew the prompt at the top of the panel. So the
+    /// surface is asked instead; the reader thread is gone by now, which
+    /// is what leaves the `Client` free to ask.
     pub fn adoptPendingResize(self: *Prompt) void {
         const rev = self.pending_resize orelse return;
         self.pending_resize = null;
         self.resize_seen_at = null;
-        if (rev.cols == 0 or rev.rows == 0) return;
+        // Embedded and the host can't say: keep the grid we have rather
+        // than believe the window's size.
+        const size: glyphwire.LayerSize = if (self.layer != null)
+            self.client.getSize() catch return
+        else
+            .{ .cols = rev.cols, .rows = rev.rows };
+        if (size.cols == 0 or size.rows == 0) return;
 
         // `grid_rows == 0` means no size has been learned yet (see
         // `runPrompt`'s startup snapshot), so there is no delta to shift by.
         const dh: i64 = if (self.grid_rows == 0)
             0
         else
-            @as(i64, @intCast(rev.rows)) - @as(i64, @intCast(self.grid_rows));
-        self.grid_cols = rev.cols;
-        self.grid_rows = rev.rows;
-        self.line_start_row = glyphwire.shiftRowByHeightDelta(self.line_start_row, dh, rev.rows);
-        self.pl_top_row = glyphwire.shiftRowByHeightDelta(self.pl_top_row, dh, rev.rows);
+            @as(i64, @intCast(size.rows)) - @as(i64, @intCast(self.grid_rows));
+        self.grid_cols = size.cols;
+        self.grid_rows = size.rows;
+        self.line_start_row = glyphwire.shiftRowByHeightDelta(self.line_start_row, dh, size.rows);
+        self.pl_top_row = glyphwire.shiftRowByHeightDelta(self.pl_top_row, dh, size.rows);
         self.input_max_col = self.grid_cols;
         // The rows a browse cursor or a completion picker referred to are
         // gone, same as in `handleResize`.

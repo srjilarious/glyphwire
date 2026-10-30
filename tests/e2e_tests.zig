@@ -2297,3 +2297,306 @@ pub fn shellWithContextFlagDrawsOnThatContextNotTheVisibleOneTest(_: std.Io, all
     try testz.expectEqual(entries[1].context, shell_ctx);
     try testz.expectTrue(entries[1].shell);
 }
+
+/// Waits until the session's context list has `want` entries: a
+/// full-screen program's context has come (or gone).
+fn waitForContextCount(client: *glyphwire.Client, want: usize) !void {
+    var attempts: usize = 0;
+    while (attempts < 1000) : (attempts += 1) {
+        var list = try client.listContexts();
+        defer list.deinit();
+        if (list.entries().len == want) return;
+        std.Io.sleep(client.io, .fromMilliseconds(10), .awake) catch {};
+    }
+    return error.TimedOutWaitingForContexts;
+}
+
+/// The Ctrl+` panel's prompt after a full-screen program: `gwmd` run
+/// from an embedded shell opens a context of its own over the panel's,
+/// and once it quits the next prompt goes under the command line, where
+/// it was, rather than back at the top of the panel. The `resize` a
+/// multiplexer sends while it runs reports the whole window, which the
+/// shell used to take as the panel's size (`Prompt.adoptPendingResize`).
+pub fn embeddedShellPromptStaysPutAfterFullScreenProgramTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    const panel = try ctx.createLayer(80, 10, 200);
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-embed-fs-e2e-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const cwd = cwd_buf[0..cwd_len];
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd});
+    defer alloc.free(shell_path);
+
+    var fds: [2]i32 = undefined;
+    if (std.c.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer _ = std.c.close(fds[1]);
+    var arg_buf: [64]u8 = undefined;
+    const embed_arg = try std.fmt.bufPrint(&arg_buf, "{d},{d},{d}", .{ glyphwire.root_context_handle, panel, fds[0] });
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try helpers.putSessionEnv(&shell_env, socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+
+    var shell_child = try spawnChecked(io, .{
+        .argv = &.{ shell_path, "--embed", embed_arg },
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+    _ = std.c.close(fds[0]);
+    _ = std.c.write(fds[1], "focus\n", 6);
+
+    var reporter = try helpers.connectReporter(io, alloc, socket_path);
+    defer reporter.deinit();
+
+    const arrow_col = cwd_len + 1;
+    try waitForPanelCell(&reporter, panel, 0, arrow_col, ">");
+
+    // Two failed commands walk the prompt down off the panel's top row.
+    for (0..2) |_| {
+        try reporter.reportText("nosuchcmd");
+        try reporter.reportKey("enter", true);
+        try reporter.reportKey("enter", false);
+    }
+    try waitForPanelCell(&reporter, panel, 6, arrow_col, ">");
+
+    const command = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gwmd README.md", .{cwd});
+    defer alloc.free(command);
+    try reporter.reportText(command);
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    try waitForContextCount(&reporter, 2);
+    // What a multiplexer's pane-tree edit sends every program: a
+    // `resize` carrying its context's size, which for the panel's shell
+    // is the whole window rather than the panel.
+    try srv.applyPaneLayout(alloc);
+    std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
+    try reporter.reportKey("q", true);
+    try reporter.reportKey("q", false);
+    try waitForContextCount(&reporter, 1);
+
+    // The command line on row 6 (and whatever rows it wrapped onto),
+    // nothing under it, then the blank gap `promptrow.afterCommand`
+    // leaves.
+    const after = 6 + wrapRows(arrow_col, command) + 2;
+    try waitForPanelCell(&reporter, panel, after, arrow_col, ">");
+
+    // The host re-placing the panel (zoe's `layout` handling) must not
+    // move it either.
+    // Given time to be drained (at the prompt's idle pass) before the
+    // keystroke, so the re-layout it causes has happened by the check.
+    _ = std.c.write(fds[1], "size\n", 5);
+    std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
+    try reporter.reportText("z");
+    try waitForPanelCell(&reporter, panel, after, arrow_col + 2, "z");
+}
+
+fn waitForPanelCell(client: *glyphwire.Client, layer: glyphwire.LayerHandle, row: usize, col: usize, expected: []const u8) !void {
+    var attempts: usize = 0;
+    while (attempts < 500) : (attempts += 1) {
+        var snapshot = try client.getCells(.{ .layer = layer });
+        defer snapshot.deinit();
+        if (std.mem.eql(u8, snapshot.cellAt(row, col).grapheme, expected)) return;
+        std.Io.sleep(client.io, .fromMilliseconds(10), .awake) catch {};
+    }
+    var snapshot = client.getCells(.{ .layer = layer }) catch return error.TimedOutWaitingForCell;
+    defer snapshot.deinit();
+    std.log.err("waited for \"{s}\" at row {d}, col {d}; the panel holds:", .{ expected, row, col });
+    var line: [512]u8 = undefined;
+    for (0..snapshot.rows()) |r| {
+        var len: usize = 0;
+        for (0..snapshot.cols()) |c| {
+            const g = snapshot.cellAt(r, c).grapheme;
+            const cell = if (g.len == 0) " " else g;
+            if (len + cell.len > line.len) break;
+            @memcpy(line[len..][0..cell.len], cell);
+            len += cell.len;
+        }
+        std.log.err("{d:>3}| {s}", .{ r, std.mem.trimEnd(u8, line[0..len], " ") });
+    }
+    return error.TimedOutWaitingForCell;
+}
+
+/// A plain program in the Ctrl+` panel is sized to the panel, not the
+/// window: the host shrinking the panel (and saying `size`) reaches the
+/// child's pty while it runs, and the window-wide `resize` a
+/// multiplexer sends at the same time does not.
+pub fn embeddedShellSizesPlainChildToThePanelTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    const panel = try ctx.createLayer(80, 10, 200);
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-embed-size-e2e-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var fds: [2]i32 = undefined;
+    if (std.c.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer _ = std.c.close(fds[1]);
+    var arg_buf: [64]u8 = undefined;
+    const embed_arg = try std.fmt.bufPrint(&arg_buf, "{d},{d},{d}", .{ glyphwire.root_context_handle, panel, fds[0] });
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try helpers.putSessionEnv(&shell_env, socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+
+    var shell_child = try spawnChecked(io, .{
+        .argv = &.{ shell_path, "--embed", embed_arg },
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+    _ = std.c.close(fds[0]);
+    _ = std.c.write(fds[1], "focus\n", 6);
+
+    var reporter = try helpers.connectReporter(io, alloc, socket_path);
+    defer reporter.deinit();
+    try waitForPanelCell(&reporter, panel, 0, cwd_len + 1, ">");
+
+    // Reads its terminal's size only after the panel has changed.
+    try reporter.reportText("/bin/sh -c '/usr/bin/sleep 1.5; /usr/bin/stty size'");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+    std.Io.sleep(io, .fromMilliseconds(400), .awake) catch {};
+
+    try reporter.setLayerSize(panel, 80, 6);
+    _ = std.c.write(fds[1], "size\n", 5);
+    try srv.applyPaneLayout(alloc);
+
+    try waitForPanelText(&reporter, panel, "6 80");
+}
+
+/// Polls the panel until some row holds `needle`.
+fn waitForPanelText(client: *glyphwire.Client, layer: glyphwire.LayerHandle, needle: []const u8) !void {
+    var attempts: usize = 0;
+    while (attempts < 500) : (attempts += 1) {
+        if (try panelHasText(client, layer, needle)) return;
+        std.Io.sleep(client.io, .fromMilliseconds(10), .awake) catch {};
+    }
+    // Leaves the panel in the log, the way `waitForPanelCell` does.
+    return waitForPanelCell(client, layer, 0, 0, needle);
+}
+
+/// Whether some row of the panel holds `needle` right now.
+fn panelHasText(client: *glyphwire.Client, layer: glyphwire.LayerHandle, needle: []const u8) !bool {
+    var snapshot = try client.getCells(.{ .layer = layer });
+    defer snapshot.deinit();
+    var line: [512]u8 = undefined;
+    for (0..snapshot.rows()) |r| {
+        var len: usize = 0;
+        for (0..snapshot.cols()) |c| {
+            const g = snapshot.cellAt(r, c).grapheme;
+            const cell = if (g.len == 0) " " else g;
+            if (len + cell.len > line.len) break;
+            @memcpy(line[len..][0..cell.len], cell);
+            len += cell.len;
+        }
+        if (std.mem.indexOf(u8, line[0..len], needle) != null) return true;
+    }
+    return false;
+}
+
+/// A command running in the Ctrl+` panel gets no input while the host has
+/// the keyboard back (`blur`): both programs see every event, so passing
+/// them on typed into the child and the host at once. The toggle key is
+/// pressed on the way back too; legacy encoding sends nothing for Ctrl+`,
+/// so this only shows it doesn't disturb the line.
+pub fn embeddedShellJobIgnoresInputWhileBlurredTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+    const panel = try ctx.createLayer(80, 10, 200);
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-embed-blur-e2e-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+    _ = try std.Thread.spawn(.{}, serveForeverThread, .{ &srv, alloc });
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(io, &cwd_buf);
+    const shell_path = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gw-shell", .{cwd_buf[0..cwd_len]});
+    defer alloc.free(shell_path);
+
+    var fds: [2]i32 = undefined;
+    if (std.c.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer _ = std.c.close(fds[1]);
+    var arg_buf: [64]u8 = undefined;
+    const embed_arg = try std.fmt.bufPrint(&arg_buf, "{d},{d},{d}", .{ glyphwire.root_context_handle, panel, fds[0] });
+
+    var shell_env = std.process.Environ.Map.init(alloc);
+    defer shell_env.deinit();
+    try helpers.putSessionEnv(&shell_env, socket_path);
+    try sandboxShellConfig(&shell_env, alloc);
+
+    var shell_child = try spawnChecked(io, .{
+        .argv = &.{ shell_path, "--embed", embed_arg },
+        .environ_map = &shell_env,
+    });
+    defer shell_child.kill(io);
+    _ = std.c.close(fds[0]);
+    _ = std.c.write(fds[1], "focus\n", 6);
+
+    var reporter = try helpers.connectReporter(io, alloc, socket_path);
+    defer reporter.deinit();
+    try waitForPanelCell(&reporter, panel, 0, cwd_len + 1, ">");
+
+    try reporter.reportText("/bin/sh -c 'read a; echo \"got:$a\"'");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+    std.Io.sleep(io, .fromMilliseconds(400), .awake) catch {};
+
+    // Typed into the host while it has the keyboard.
+    _ = std.c.write(fds[1], "blur\n", 5);
+    std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
+    try reporter.reportText("host");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+    std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
+
+    // Back to the panel, and the toggle key pressed on the way.
+    _ = std.c.write(fds[1], "focus\n", 6);
+    std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
+    try reporter.reportKey("left_control", true);
+    try reporter.reportKey("grave_accent", true);
+    try reporter.reportKey("grave_accent", false);
+    try reporter.reportKey("left_control", false);
+    try reporter.reportText("ok");
+    try reporter.reportKey("enter", true);
+    try reporter.reportKey("enter", false);
+
+    try waitForPanelText(&reporter, panel, "got:ok");
+    try testz.expectTrue(!try panelHasText(&reporter, panel, "host"));
+}
