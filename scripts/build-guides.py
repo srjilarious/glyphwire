@@ -113,6 +113,12 @@ def main():
                  f"missing {sorted(listed - on_disk)}")
 
     frame = read("site/guide.template.html")
+    # Each placeholder once: a second copy (say, named in a comment) would
+    # be filled with the whole page too.
+    for slot in ("{{title}}", "{{nav}}", "{{toc}}", "{{content}}"):
+        if frame.count(slot) != 1:
+            sys.exit(f"build-guides: site/guide.template.html has {slot} "
+                     f"{frame.count(slot)} times, not once")
     nav_html = "\n".join(f'<a href="{name}.html">{html.escape(label)}</a>'
                          for name, label in PAGES)
 
