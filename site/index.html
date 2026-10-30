@@ -30,6 +30,7 @@
       <a href="#why">Why</a>
       <a href="#features">Features</a>
       <a href="#apps">Apps</a>
+      <a href="guide/index.html">Guides</a>
       <a href="#protocol">Protocol</a>
       <a href="#install">Install</a>
     </nav>
@@ -160,6 +161,7 @@
       <p class="section-lead">
         Each is an ordinary client of the public protocol, with no private
         hooks into the host, and each shows off something a byte stream can't do.
+        The <a href="guide/index.html">guides</a> walk through using each one.
       </p>
 
       <div class="app">
@@ -172,8 +174,9 @@
             <li>Unsaved changes backed up continuously: <code>:q</code> and pick up later</li>
             <li>Lua extensions and fully rebindable keys</li>
           </ul>
+          <p><a href="guide/zoe.html">The zoe guide &rarr;</a></p>
         </div>
-        <figure class="window"><img src="images/zoe.png" alt="zoe editing a Zig file with the file tree and tab strip" loading="lazy" width="1650" height="660"></figure>
+        <figure class="window"><img src="images/zoe.png" alt="zoe editing a Zig file with the file tree and tab strip" loading="lazy" width="1661" height="660"></figure>
       </div>
 
       <div class="app reverse">
@@ -186,14 +189,16 @@
             <li>Desktop trash, permission and owner editing</li>
             <li>Fuzzy search and a drop-down shell panel</li>
           </ul>
+          <p><a href="guide/salacommander.html">The salacommander guide &rarr;</a></p>
         </div>
-        <figure class="window"><img src="images/salacommander.png" alt="salacommander showing the repository and the docs folder side by side" loading="lazy" width="1650" height="660"></figure>
+        <figure class="window"><img src="images/salacommander.png" alt="salacommander showing the repository and the docs folder side by side" loading="lazy" width="1661" height="660"></figure>
       </div>
 
       <div class="app">
         <div class="app-text">
           <h3>gw-grep <span class="tag">search</span></h3>
           <p>ripgrep results as a syntax-highlighted, collapsible outline right in your scrollback. The outline is server-side state, so clicking &#9656; still expands a hit after the command has exited.</p>
+          <p><a href="guide/tools.html#gw-grep">More on gw-grep &rarr;</a></p>
         </div>
         <figure class="window"><img src="images/grep.png" alt="gw-grep hits as an expanded outline with highlighted code" loading="lazy" width="1650" height="594"></figure>
       </div>
@@ -202,32 +207,35 @@
         <div class="app-text">
           <h3>gw-ls <span class="tag">listing</span></h3>
           <p>An <code>ls</code> with file-type icons, or a long listing in a real table: colour-coded sizes, striped rows, and headers you can click to re-sort whenever you like.</p>
+          <p><a href="guide/tools.html#gw-ls">More on gw-ls &rarr;</a></p>
         </div>
-        <figure class="window"><img src="images/ls-table.png" alt="gw-ls long listing as a server-side table" loading="lazy" width="1650" height="660"></figure>
+        <figure class="window"><img src="images/ls-table.png" alt="gw-ls long listing as a server-side table" loading="lazy" width="1650" height="484"></figure>
       </div>
 
       <div class="app">
         <div class="app-text">
           <h3>gwmd <span class="tag">markdown</span></h3>
           <p>Markdown with scaled headings, GFM tables as native tables, inline images and links you can Tab through. Here in the Catppuccin Latte theme, one of nineteen.</p>
+          <p><a href="guide/gwmd.html">The gwmd guide &rarr;</a></p>
         </div>
-        <figure class="window narrow"><img src="images/gwmd-light.png" alt="gwmd rendering a key reference with headings and a table in a light theme" loading="lazy" width="847" height="1000"></figure>
+        <figure class="window"><img src="images/gwmd-light.png" alt="gwmd rendering the zoe key reference with scaled headings and a code block in a light theme" loading="lazy" width="1661" height="660"></figure>
       </div>
 
       <div class="app reverse">
         <div class="app-text">
           <h3>gw-read <span class="tag">comics &amp; manga</span></h3>
           <p>A reader with zoom and pan, Mokuro OCR text overlays, dictionary lookup on any word in a speech bubble, AI bubble translation, and Anki card mining.</p>
+          <p><a href="guide/gw-read.html">The gw-read guide &rarr;</a></p>
         </div>
         <figure class="window"><img src="images/gw-read.png" alt="gw-read with a word highlighted in a speech bubble and its dictionary entry" loading="lazy" width="1406" height="838"></figure>
       </div>
 
       <div class="grid more-apps">
-        <div class="card"><h3>gw-shell</h3><p>The default shell: pipelines, Lua config, fish-style autosuggestions and completions, a powerline prompt, and Ctrl+R history in a real UI.</p></div>
-        <div class="card"><h3>gmux</h3><p>A multiplexer that is a pure window manager. It asks the host for panes and places them; it never draws or relays a byte.</p></div>
-        <div class="card"><h3>gw-hist</h3><p>Fuzzy history and frecent-directory search with a host-drawn scrollbar, every redraw one atomic frame.</p></div>
-        <div class="card"><h3>gw-view</h3><p>Images inline in your scrollback, or in a context of their own with zoom and pan.</p></div>
-        <div class="card"><h3>gw-agent</h3><p>The far end of an ssh session. It multiplexes remote clients onto one trunk without parsing the protocol.</p></div>
+        <div class="card"><h3><a href="guide/gw-shell.html">gw-shell</a></h3><p>The default shell: pipelines, Lua config, fish-style autosuggestions and completions, a powerline prompt, and Ctrl+R history in a real UI.</p></div>
+        <div class="card"><h3><a href="guide/gmux.html">gmux</a></h3><p>A multiplexer that is a pure window manager. It asks the host for panes and places them; it never draws or relays a byte.</p></div>
+        <div class="card"><h3><a href="guide/tools.html#gw-hist">gw-hist</a></h3><p>Fuzzy history and frecent-directory search with a host-drawn scrollbar, every redraw one atomic frame.</p></div>
+        <div class="card"><h3><a href="guide/tools.html#gw-view">gw-view</a></h3><p>Images inline in your scrollback, or in a context of their own with zoom and pan.</p></div>
+        <div class="card"><h3><a href="guide/tools.html#gw-agent">gw-agent</a></h3><p>The far end of an ssh session. It multiplexes remote clients onto one trunk without parsing the protocol.</p></div>
         <div class="card"><h3>Dev tools</h3><p><code>glyphwire-probe</code> drives and inspects a live session; demos exercise tables, panels and text.</p></div>
       </div>
     </div>
@@ -350,7 +358,7 @@ cd glyphwire && zig build glyphwire</code></pre>
       <a href="https://github.com/srjilarious/glyphwire">GitHub</a>
       <a href="https://github.com/srjilarious/glyphwire/releases">Releases</a>
       <a href="https://github.com/srjilarious/glyphwire/blob/main/docs/protocol.md">Protocol</a>
-      <a href="https://github.com/srjilarious/glyphwire/blob/main/docs/apps.md">Apps</a>
+      <a href="guide/index.html">Guides</a>
       <a href="https://github.com/srjilarious/glyphwire/issues">Issues</a>
     </nav>
     <p class="muted">&copy; 2026 Jeff DeWall. Site content CC-BY-4.0.</p>

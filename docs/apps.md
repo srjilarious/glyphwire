@@ -5,7 +5,8 @@ Every program here is an ordinary glyphwire client: it finds the session
 through `GLYPHWIRE_SOCK` and speaks the protocol in
 [`protocol.md`](protocol.md) like any third-party program would. None of
 them reaches into the host's internals. The README has the one-line
-summary of each; this page has the detail.
+summary of each; this page has the detail. The [guides](guide/index.md)
+walk through using each one, with their keys and config files.
 
 Versions are each program's line in `program_versions` at the top of
 `build.zig`, and every program prints its own with `--version`.

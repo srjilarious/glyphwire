@@ -2,7 +2,10 @@
 #
 # Assembles the GitHub Pages site into _site/ (or the directory given).
 #
-# site/ holds the hand-written pages; the screenshots and logo are not
+# site/ holds the hand-written pages and the app guides' frame
+# (guide.template.html); the guides themselves are Markdown in docs/guide/,
+# rendered into guide/ by scripts/build-guides.py so the same text reads
+# on GitHub and in gwmd. The screenshots and logo are not
 # copied into it but taken from docs/images/ and assets/ here, so the
 # README and the site always show the same images and
 # scripts/regen-readme-assets.sh refreshes both at once.
@@ -25,6 +28,8 @@ rm -rf "$out_dir"
 mkdir -p "$out_dir/images"
 
 cp -r site/. "$out_dir/"
+rm "$out_dir/guide.template.html"
+python3 scripts/build-guides.py "$out_dir"
 cp docs/images/*.png "$out_dir/images/"
 cp assets/glyphwire_icon.svg assets/glyphwire_icon.png "$out_dir/images/"
 

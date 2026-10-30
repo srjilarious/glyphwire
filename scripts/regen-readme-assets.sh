@@ -32,19 +32,21 @@ if [[ -z "${WAYLAND_DISPLAY:-}" && -z "${DISPLAY:-}" ]]; then
 fi
 
 # scene name -> shell command(s) to replay, one per line.
-# ls-table uses -S (compact one-line rows) so the whole table fits the
-# frame without scrolling the header off; it still exercises the table
-# widget (columns, alt-row stripes, magnitude-coloured sizes).
+# ls-table uses -S (compact one-line rows) on scripts/, small enough that
+# the whole table fits the frame without scrolling the header off; it
+# still exercises the table widget (columns, alt-row stripes,
+# magnitude-coloured sizes).
 # gw-read has no scene: a good shot needs a book with a mokuro sidecar and
 # a word selected in the OCR dialog, so docs/images/gw-read.png is taken by
 # hand.
 # zoe-split opens a .zoe-workspace written below (two editor groups side
-# by side, in its own theme), and gwmd-light runs under a config dir of
-# its own whose theme.lua picks a light built-in; @WS@ is replaced by the
-# workspace file's path.
+# by side, in its own theme); @WS@ is replaced by the workspace file's
+# path. shell replays several lines (each scene's lines run as if typed,
+# one per line), and view draws the logo inline below a listing. Scenes name gw-ls rather than ls, which is
+# /usr/bin/ls without an alias.
 declare -A scenes=(
-    [ls-grid]='ls'
-    [ls-table]='ls -l -S'
+    [ls-grid]='gw-ls'
+    [ls-table]='gw-ls -l -S scripts'
     [demo]='glyphwire-demo'
     [zoe]='zoe src/client.zig'
     [salacommander]='salacommander . docs'
@@ -52,16 +54,19 @@ declare -A scenes=(
     [grep]='gw-grep --expand -C 2 -m 3 "fn connect" src'
     [zoe-split]='zoe @WS@'
     [gwmd-light]='gwmd docs/zoe-keys.md'
+    [shell]=$'cd docs\ngw-ls -S\ngit log --oneline -4\nfalse'
+    [view]=$'gw-ls -S assets\ngw-view assets/glyphwire_icon.png'
 )
 
-# scene name -> built-in theme name for a scene shot in a theme of its own.
+# scene name -> built-in theme name for a scene shot in a theme other than
+# the pinned one below.
 declare -A scene_themes=(
     [gwmd-light]='catppuccin-latte'
 )
 
 wanted=("$@")
 if [[ ${#wanted[@]} -eq 0 ]]; then
-    wanted=(ls-grid ls-table demo zoe salacommander gwmd grep zoe-split gwmd-light)
+    wanted=(ls-grid ls-table demo zoe salacommander gwmd grep zoe-split gwmd-light shell view)
 fi
 
 echo "==> building (zig build)"
@@ -99,16 +104,35 @@ for scene in "${wanted[@]}"; do
     png="$out_dir/$scene.png"
     echo "==> $scene  ->  $png   (commands: $cmds)"
 
-    # A themed scene gets a config dir holding only its theme.lua, so the
-    # rest of the shot is the built-in defaults.
-    scene_env=()
+    # Every scene runs on a config dir of its own, never yours: the
+    # window's look pinned (font, size, grid, theme), the example powerline
+    # prompt, and nothing else, so no alias, saved session or
+    # default_program of yours reaches the shot. State and history go to
+    # the temp dir too, so a run leaves no trace in your own.
+    cfg="$tmp_dir/config-$scene"
+    mkdir -p "$cfg"
+    cat > "$cfg/host.conf.lua" <<'HOST'
+config = {
+    font_face = "DejaVuSansM Nerd Font Mono",
+    font_size = 22.0,
+    cursor_shape = "underline",
+    grid_cols = 150,
+    grid_rows = 30,
+}
+HOST
     theme="${scene_themes[$scene]:-}"
     if [[ -n "$theme" ]]; then
-        cfg="$tmp_dir/config-$scene"
-        mkdir -p "$cfg"
         printf 'config = { theme = "%s" }\n' "$theme" > "$cfg/theme.lua"
-        scene_env=(GLYPHWIRE_CONFIG_DIR="$cfg")
+    else
+        printf 'config = { theme = { base = "gruvbox-dark", palette = { bg = "#121212" } } }\n' \
+            > "$cfg/theme.lua"
     fi
+    cp assets/shell.conf.example.lua "$cfg/shell.conf.lua"
+    scene_env=(
+        GLYPHWIRE_CONFIG_DIR="$cfg"
+        XDG_STATE_HOME="$tmp_dir/state-$scene"
+        GLYPHWIRE_NO_HISTORY=1
+    )
 
     env "${scene_env[@]}" GLYPHWIRE_SHELL_SCRIPT="$tmp_script" \
         timeout "$host_timeout" ./zig-out/bin/glyphwire \
@@ -124,6 +148,7 @@ for scene in "${wanted[@]}"; do
     pkill -f 'zig-out/bin/salacommander' 2>/dev/null || true
     pkill -f 'zig-out/bin/gwmd' 2>/dev/null || true
     pkill -f 'zig-out/bin/gw-grep' 2>/dev/null || true
+    pkill -f 'zig-out/bin/gw-view' 2>/dev/null || true
 
     if [[ -f "$png" ]]; then
         echo "    wrote $(du -h "$png" | cut -f1)  $png"

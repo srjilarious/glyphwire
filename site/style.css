@@ -436,6 +436,78 @@ h3 { margin: 0 0 8px; font-size: 1.12rem; letter-spacing: -.01em; }
 .footer nav a:hover { color: var(--text); }
 .footer p { margin: 0 0 0 auto; font-size: .9rem; }
 
+/* ── App guides (guide/*.html, from docs/guide/) ────────────────── */
+
+.guide {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 48px;
+  padding-top: 40px;
+  padding-bottom: 80px;
+}
+
+.guide-side {
+  position: sticky;
+  top: 84px;
+  align-self: start;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+  font-size: .92rem;
+}
+.guide-nav { display: flex; flex-direction: column; gap: 2px; margin-bottom: 22px; }
+.guide-nav a { color: var(--muted); padding: 5px 10px; border-radius: 8px; }
+.guide-nav a:hover { color: var(--text); background: var(--surface); }
+.guide-nav a[aria-current="page"] { color: var(--accent); background: var(--surface-hi); font-weight: 600; }
+
+.guide-toc { border-left: 1px solid var(--border); padding-left: 12px; }
+.guide-toc ul { list-style: none; margin: 0; padding: 0; }
+.guide-toc ul ul { padding-left: 12px; }
+.guide-toc li { margin: 4px 0; }
+.guide-toc a { color: var(--muted); }
+.guide-toc a:hover { color: var(--text); }
+
+.prose { max-width: 820px; min-width: 0; }
+.prose h1 { font-size: clamp(2rem, 4vw, 2.8rem); margin: 0 0 18px; }
+.prose h2 { font-size: 1.6rem; margin: 48px 0 14px; }
+.prose h3 { font-size: 1.15rem; margin: 30px 0 10px; }
+.prose p, .prose li { color: var(--text); }
+.prose ul, .prose ol { padding-left: 24px; }
+.prose li { margin: 4px 0; }
+.prose img {
+  margin: 18px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.prose pre {
+  background: var(--code-bg);
+  color: #d6efe2;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 18px;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+.prose table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 16px 0;
+  font-size: .94rem;
+}
+.prose th, .prose td { border: 1px solid var(--border); padding: 7px 12px; text-align: left; vertical-align: top; }
+.prose th { background: var(--surface-hi); }
+.prose blockquote {
+  margin: 18px 0;
+  padding: 10px 18px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  border-radius: 0 10px 10px 0;
+  color: var(--muted);
+}
+.prose .headerlink { margin-left: 8px; color: var(--border); font-weight: 400; opacity: 0; }
+.prose :is(h2, h3):hover .headerlink { opacity: 1; }
+
 /* ── Narrow screens ─────────────────────────────────────────────── */
 
 @media (max-width: 960px) {
@@ -443,6 +515,10 @@ h3 { margin: 0 0 8px; font-size: 1.12rem; letter-spacing: -.01em; }
   .app, .app.reverse, .two-col { grid-template-columns: 1fr; gap: 26px; }
   .app.reverse .app-text { order: 0; }
   .app { margin-bottom: 64px; }
+  .guide { grid-template-columns: 1fr; gap: 24px; }
+  .guide-side { position: static; max-height: none; }
+  .guide-nav { flex-direction: row; flex-wrap: wrap; }
+  .guide-toc { display: none; }
 }
 
 @media (max-width: 640px) {

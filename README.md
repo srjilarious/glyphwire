@@ -94,7 +94,11 @@ wheel and gamepad streams.
 ## Applications
 
 Each is an ordinary client of the protocol, versioned on its own.
-[`docs/apps.md`](docs/apps.md) has the full feature list for each.
+[`docs/apps.md`](docs/apps.md) has the full feature list for each, and
+the [guides](docs/guide/index.md) (also on the
+[website](https://srjilarious.github.io/glyphwire/guide/)) walk through
+using each one: its screen, its keys, how to find every command, and
+what its config file can change.
 
 | App | Version | What it is |
 |---|---|---|
@@ -125,7 +129,7 @@ salacommander, the repository on the left and `docs/` on the right:
 
 ![gw-grep outline of search hits](docs/images/grep.png)
 
-`gw-ls -l -S`, a long listing in a server-side table:
+`gw-ls -l -S scripts`, a long listing in a server-side table:
 
 ![gw-ls table listing](docs/images/ls-table.png)
 
@@ -217,7 +221,7 @@ keeps its size and the grid gains or loses cells to match.
 | `agent/` | `gw-agent`, the remote end of an ssh session |
 | `debug/`, `demo/`, `table-demo/`, `notify/`, `client/`, `server/` | Developer tools and demos |
 | `tests/` | testz suite |
-| `docs/` | Protocol spec, API reference, app and key references |
+| `docs/` | Protocol spec, API reference, app and key references, and the app guides (`docs/guide/`) |
 | `site/` | The project website, published to GitHub Pages |
 
 ## Regenerating the screenshots
@@ -227,9 +231,16 @@ scripts/regen-readme-assets.sh            # all scenes
 scripts/regen-readme-assets.sh ls-grid    # just one
 ```
 
-Scenes are defined at the top of the script. `docs/images/gw-read.png` is
-taken by hand. The website uses the same images, copied in when the Pages
-workflow builds it.
+Scenes are defined at the top of the script. Each runs on a config
+directory of its own (a pinned font, grid and theme, and the example
+shell prompt), so your own config and state neither show in the shots
+nor get touched. `docs/images/gw-read.png` is taken by hand. The website
+uses the same images, copied in when the Pages workflow builds it.
+
+The guides in `docs/guide/` are Markdown, rendered into the website's
+`guide/` pages by `scripts/build-guides.py` (python-markdown).
+`scripts/build-site.sh && python3 -m http.server -d _site 8000` previews
+the whole site.
 
 ## Contributing: issues welcome, forks encouraged
 

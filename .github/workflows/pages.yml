@@ -1,8 +1,9 @@
 name: Pages
 
-# Publishes the project website (site/, plus the screenshots in
-# docs/images/) to GitHub Pages. scripts/build-site.sh does the assembling,
-# so a local preview builds exactly what ships.
+# Publishes the project website (site/, the app guides in docs/guide/,
+# plus the screenshots in docs/images/) to GitHub Pages.
+# scripts/build-site.sh does the assembling, so a local preview builds
+# exactly what ships.
 #
 # The repository's Pages source must be set to "GitHub Actions"
 # (Settings -> Pages -> Build and deployment) for the deploy step to
@@ -17,8 +18,10 @@ on:
     paths:
       - "site/**"
       - "docs/images/**"
+      - "docs/guide/**"
       - "assets/glyphwire_icon.*"
       - "scripts/build-site.sh"
+      - "scripts/build-guides.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -41,6 +44,9 @@ jobs:
       # The site quotes the protocol version; refuse to publish a stale one.
       - name: Check quoted versions
         run: scripts/sync-versions.py --check
+      # build-guides.py renders docs/guide/*.md with python-markdown.
+      - name: Install python-markdown
+        run: sudo apt-get update && sudo apt-get install -y python3-markdown
       - name: Assemble site
         run: scripts/build-site.sh _site
       - uses: actions/configure-pages@v5

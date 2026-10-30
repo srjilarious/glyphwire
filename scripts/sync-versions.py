@@ -10,8 +10,8 @@ The numbers live in exactly one place each:
   * the protocol version: `protocol_version` in src/protocol.zig
 
 The README (badges, the protocol paragraph, the Applications table, the
-`--version` example), site/index.html and docs/protocol.md's header all
-repeat them, and hand-copied they drifted: the README once listed zoe
+`--version` example), site/index.html, docs/protocol.md's header and each
+app guide's "This page covers" line (docs/guide/) all repeat them, and hand-copied they drifted: the README once listed zoe
 0.19.0 four releases after 0.23.0. This script rewrites those spots from
 the sources, so bumping a version is an edit to the source plus one run:
 
@@ -94,6 +94,22 @@ def sync_spec(text, protocol):
                       rf"\g<1>{protocol}\g<2>")
 
 
+def sync_guide(text, path, programs):
+    """A guide's "This page covers `zoe` 0.26.1." paragraph, every program
+    it names (the small tools page names five)."""
+    def program(m):
+        name = m.group(2)
+        if name not in programs:
+            errors.append(f"{path}: `{name}` is not in build.zig's program_versions")
+            return m.group(0)
+        return f"{m.group(1)}{programs[name]}"
+
+    def paragraph(m):
+        return re.sub(r"(`([a-z][a-z-]*)` )[0-9]+\.[0-9]+\.[0-9]+", program, m.group(0))
+
+    return substitute(text, path, r"This page covers [^\n]*(?:\n[^\n]+)*", paragraph)
+
+
 def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(root)
@@ -108,6 +124,11 @@ def main():
         "site/index.html": lambda t: sync_site(t, protocol),
         "docs/protocol.md": lambda t: sync_spec(t, protocol),
     }
+    # Every guide but the overview says which versions it covers.
+    for name in sorted(os.listdir("docs/guide")):
+        if name.endswith(".md") and name != "index.md":
+            path = f"docs/guide/{name}"
+            targets[path] = lambda t, path=path: sync_guide(t, path, programs)
 
     stale = []
     updated = {}
