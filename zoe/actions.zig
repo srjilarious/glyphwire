@@ -92,10 +92,14 @@ pub const Action = enum {
     /// A selection is extended to it, and the jumplist remembers where
     /// the cursor was.
     jump,
+    /// The selection (or the line) to the system clipboard. In the
+    /// sidebar, the entry's path.
+    copy,
     /// The selection (or the line) to the system clipboard, removed.
     cut,
-    /// The system clipboard, pasted after the cursor (vim's `p`), or over
-    /// a selection.
+    /// The system clipboard, the way the host's Ctrl+Shift+V pastes it:
+    /// typed at the caret in insert mode (and into the `:` and `/` lines),
+    /// after the cursor in normal mode (vim's `p`), or over a selection.
     paste,
     /// The language server's definition of / documentation for what is
     /// under the cursor: normal mode's `gd` and `K`, by name. Unbound by
@@ -139,6 +143,13 @@ pub const Action = enum {
     selectSubwordRight,
     selectFileStart,
     selectFileEnd,
+    /// The whole buffer selected: visual mode from normal, select mode
+    /// from insert, the way the Shift motions choose.
+    selectAll,
+    /// A `Go to line:` prompt (`Mode.goto_line`) taking `N` or `N:col`;
+    /// the cursor previews the line as it is typed and Escape puts it
+    /// back.
+    gotoLine,
 
     undo,
     redo,
@@ -227,11 +238,13 @@ pub const Action = enum {
             .unfoldAll => "Unfold All",
             .replace => "Find and Replace",
             .paste => "Paste from Clipboard",
+            .copy => "Copy to Clipboard",
             .cut => "Cut to Clipboard",
             .jump => "Jump to Word",
             .selectTheme => "Select Color Theme",
             .fileStart => "Go to Start of File",
             .fileEnd => "Go to End of File",
+            .gotoLine => "Go to Line",
             .gotoDefinition => "Go to Definition",
             .showHover => "Show Hover Documentation",
             else => null,
@@ -293,10 +306,18 @@ pub const global_defaults = [_]Default{
     // VS Code's.
     .{ .chord = "alt+z", .action = .toggleWordWrap },
     .{ .chord = "ctrl+shift+p", .action = .commandPalette },
-    // `paste` has no chord of its own: Ctrl+Shift+V is the host's, which
-    // reads the system clipboard and sends it as a `paste` event zoe
-    // already splices in. The action stays for the palette and `keys`.
+    // VS Code's clipboard chords, in every mode: vim's normal-mode
+    // meanings for them (cancel, decrement, block visual, increment)
+    // aren't implemented, and `keys` can unbind them for anyone who
+    // wants the keys back. Ctrl+Shift+C / V stay the host's, which sends
+    // a `copy_request` / `paste` zoe answers the same way.
+    .{ .chord = "ctrl+c", .action = .copy },
+    .{ .chord = "ctrl+x", .action = .cut },
+    .{ .chord = "ctrl+v", .action = .paste },
     .{ .chord = "ctrl+shift+x", .action = .cut },
+    .{ .chord = "ctrl+a", .action = .selectAll },
+    // vim's Ctrl+G (file info) is the statusline's already.
+    .{ .chord = "ctrl+g", .action = .gotoLine },
 
     .{ .chord = "left", .action = .left },
     .{ .chord = "right", .action = .right },

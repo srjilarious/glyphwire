@@ -180,6 +180,12 @@
 --     -- Ctrl+Shift+[ and ]) works either way.
 --     fold_column = true,
 --
+--     -- The mode every buffer opens in: "normal" (vim's) or "insert",
+--     -- for typing straight away the way a non-modal editor does. It
+--     -- covers files opened later too (`:e`, the tree, Ctrl+P, :enew).
+--     -- Escape still leaves insert mode.
+--     start_mode = "normal",
+--
 --     -- Milliseconds the pointer rests on a tab before the file's full
 --     -- path pops up under it. 0 shows it at once.
 --     tab_tooltip_delay_ms = 400,

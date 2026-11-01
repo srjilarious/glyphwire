@@ -56,8 +56,9 @@ tree's keys, the key after Ctrl+W, and the completion popup's keys.
 | `zoomGroup` | (unbound; Ctrl+W z) | The focused group fills the editor area, the other groups hidden (the sidebar stays); again to restore (`:zoom`). Splitting, closing or moving to another group unzooms first |
 | `jumpBack` / `jumpForward` | Ctrl+O / Ctrl+I | Jumplist (the way back from `gd`) |
 | `jump` | Shift+Enter | Two-letter labels over every word start on the focused pane's visible rows, the nearest to the cursor first (home row letters). Typing a label's first letter hides the labels it doesn't start and leaves the second letter of the rest; the second moves the cursor there. Backspace takes the first letter back; Escape, any other key, a click or a scroll cancels. Extends a selection, and records a jumplist entry |
-| `cut` | Ctrl+Shift+X | Selection (or line) to the clipboard, removed |
-| `paste` | (unbound; the host's Ctrl+Shift+V) | Clipboard after the cursor, or over a selection |
+| `copy` | Ctrl+C | Selection (or line) to the clipboard; a select-mode selection stays up. In the tree, the entry's path. Does nothing in the `:` / `/` lines, the find widget or the Ctrl+G prompt |
+| `cut` | Ctrl+X, Ctrl+Shift+X | Selection (or line) to the clipboard, removed |
+| `paste` | Ctrl+V (and the host's Ctrl+Shift+V) | Clipboard typed at the caret in insert mode and the prompts, after the cursor in normal mode (`p`), or over a selection |
 | `gotoDefinition` / `showHover` | (unbound; `gd` / `K` in normal mode) | The language server's definition of, or documentation for, what is under the cursor |
 | `complete` | Ctrl+Space (insert) | Ask the language servers for completions |
 
@@ -79,6 +80,8 @@ Ctrl+= font size, Super+F10 theme switcher, Super+F12 job switcher.
 | `selectSubwordLeft` / `selectSubwordRight` | Ctrl+Shift+Left / Right |
 | `selectWordLeft` / `selectWordRight` | Shift+Alt+Left / Right |
 | `selectFileStart` / `selectFileEnd` | Ctrl+Shift+Home / End |
+| `selectAll` | Ctrl+A |
+| `gotoLine` | Ctrl+G: a `Go to line:` prompt on the status line taking `N` or `N:col`. The cursor follows as you type; Enter keeps it, Escape (or Backspace on an empty prompt) puts it back. Returns to the mode it came from, so from visual mode it extends the selection |
 
 The `subword…` actions stop at word parts, as VS Code's word-part
 motions do: a lower-to-upper change (`foo|Bar`), the last capital of an
@@ -397,9 +400,9 @@ Escape back to the buffer.
 | `d` / F8 | Move to the desktop trash, after a `y`/`n` on the status line. If the filesystem has no trash, it asks again to delete for good. |
 | `D` / Shift+F8 | Delete for good (folders and all), after a `y`/`n` |
 | `c` | Copy the entry to the sidebar's clipboard |
-| `x` / Ctrl+Shift+X | Cut it (drawn dim until it is pasted) |
-| `p` / Ctrl+Shift+V | Paste into the folder under the cursor (or the cursor file's folder). A copy stays on the clipboard for more pastes; a cut is used up. |
-| Ctrl+Shift+C | Copy the entry's absolute path to the system clipboard |
+| `x` / Ctrl+X | Cut it (drawn dim until it is pasted) |
+| `p` / Ctrl+V | Paste into the folder under the cursor (or the cursor file's folder). A copy stays on the clipboard for more pastes; a cut is used up. |
+| Ctrl+C / Ctrl+Shift+C | Copy the entry's absolute path to the system clipboard |
 
 The name is typed into the row itself; Enter commits, Escape (or leaving
 the tree) abandons it. A name that already exists keeps the field open
@@ -487,19 +490,17 @@ groups or the shell panel.
 
 ### Missing for a VSCode user
 
-- **Ctrl+A** select all.
-- **Ctrl+C / Ctrl+X / Ctrl+V** unshifted (glyphwire's host owns Ctrl+Shift+C/V
-  as its terminal-style copy and paste). Rebindable now for X and V; C is
-  the host's.
 - **Ctrl+Shift+H / Ctrl+Shift+F** replace and find across files.
-- **Ctrl+G** go to line, **F12** definition.
+- **F12** definition.
 - **Ctrl+Shift+K** delete line, **Ctrl+Enter / Ctrl+Shift+Enter** insert line below / above.
 - **Ctrl+D** add next occurrence / multi-cursor (Ctrl+D is half-page down in normal mode).
 
 Closed since the first version of this list: Shift+arrow selection, Ctrl+Z
 / Ctrl+Y, Ctrl+Backspace / Ctrl+Delete, Ctrl+/, Ctrl+S, Shift+Alt+Up/Down,
 rebindable keys, the Ctrl+Shift+P command palette, auto-indent, bracket
-pairing, folding, and Ctrl+F / Ctrl+H find and replace.
+pairing, folding, Ctrl+F / Ctrl+H find and replace, Ctrl+C / Ctrl+X /
+Ctrl+V, Ctrl+A, Ctrl+G, and `start_mode = "insert"` to open buffers
+ready to type.
 
 ## Modal versus Ctrl/Alt-heavy
 

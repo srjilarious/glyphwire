@@ -29,7 +29,7 @@ pub fn startJump(self: *Ui) !bool {
     }
     if (self.focus != .buffer) return false;
     switch (self.buf.ed.mode) {
-        .command, .search, .find => return false,
+        .command, .search, .find, .goto_line => return false,
         .normal, .insert, .visual, .visual_line, .select => {},
     }
     _ = self.closeHover();

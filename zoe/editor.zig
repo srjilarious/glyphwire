@@ -62,7 +62,30 @@ const Pos = buffer.Pos;
 /// search with VS Code's keys, a replace field, and toggles. Its own mode
 /// because it outlives a single search -- Enter steps to the next match
 /// and stays open -- and because its keys are a field's, not the buffer's.
-pub const Mode = enum { normal, insert, command, visual, visual_line, search, select, find };
+/// `goto_line` is Ctrl+G's `Go to line:` prompt: a field like the `/`
+/// line's, previewing the line as it is typed and putting the cursor back
+/// on Escape -- which a `:N` can't do, and which works from insert mode
+/// without leaving it.
+pub const Mode = enum { normal, insert, command, visual, visual_line, search, select, find, goto_line };
+
+/// What Ctrl+G's prompt asks for: a 1-based line, and optionally a
+/// 1-based column.
+pub const GotoLine = struct { line: usize, col: ?usize = null };
+
+/// `N` or `N:col` (VS Code's form), spaces around either allowed; null
+/// for anything else, an empty string included. A trailing `:` with no
+/// column yet is just the line, so the preview doesn't jump back while
+/// the column is being typed.
+pub fn parseGotoLine(text: []const u8) ?GotoLine {
+    var parts = std.mem.splitScalar(u8, text, ':');
+    const line_text = std.mem.trim(u8, parts.first(), " ");
+    const line = std.fmt.parseInt(usize, line_text, 10) catch return null;
+    const col_text = std.mem.trim(u8, parts.next() orelse return .{ .line = line }, " ");
+    if (parts.next() != null) return null;
+    if (col_text.len == 0) return .{ .line = line };
+    const col = std.fmt.parseInt(usize, col_text, 10) catch return null;
+    return .{ .line = line, .col = col };
+}
 
 /// Which of the find widget's two fields has the keyboard.
 pub const FindField = enum { find, replace };
@@ -367,6 +390,10 @@ pub const Editor = struct {
     /// that can fold, ▸ beside each closed one. Pure display, like
     /// `line_numbers`. `zoe.conf`'s `fold_column`, `:set foldcolumn=…`.
     fold_column: bool = true,
+    /// The mode a buffer opens in, and goes back to when `:e` or the
+    /// tree loads another file into it: `.normal` or `.insert`.
+    /// `zoe.conf`'s `start_mode`. Escape still leaves insert mode.
+    start_mode: Mode = .normal,
     /// A line ending in `:` opens a block, so Enter after it indents --
     /// Python's rule. Set by the host from the file's language.
     colon_block: bool = false,
@@ -449,6 +476,14 @@ pub const Editor = struct {
     /// The pattern on the open `/` line matches nothing, so the prompt
     /// draws in the error colour while you keep typing.
     search_failed: bool = false,
+    /// Where the cursor was when Ctrl+G's prompt opened, and the mode it
+    /// returns to -- `search_origin` / `search_return`'s twins, so a
+    /// Ctrl+G from visual mode extends the selection to the line.
+    goto_origin: usize = 0,
+    goto_return: Mode = .normal,
+    /// The `Go to line:` prompt holds something that isn't `N` or
+    /// `N:col`, so it draws in the error colour.
+    goto_failed: bool = false,
     /// The stored pattern is case-sensitive whatever smartcase would
     /// say -- set when the find widget's Match Case was on as it closed,
     /// cleared by a `/`, `?`, `*` or `#`.
@@ -637,7 +672,7 @@ pub const Editor = struct {
         self.buf.* = fresh;
         self.cursor = 0;
         self.sticky_col = 0;
-        self.mode = .normal;
+        self.mode = self.start_mode;
         self.resetPending();
         // The pattern survives -- it is session state, like vim's search
         // register -- but everything that points *into* the old text does
@@ -668,7 +703,9 @@ pub const Editor = struct {
         while (suf < common - pre and old[old.len - 1 - suf] == text[text.len - 1 - suf]) suf += 1;
         if (pre == old.len and pre == text.len) return;
 
-        self.mode = .normal;
+        // Back to the mode a fresh buffer opens in: this runs as a file
+        // is opened, and `start_mode = "insert"` should survive it.
+        self.mode = self.start_mode;
         self.resetPending();
         self.buf.undoCheckpoint(self.cursor);
         try self.mutBuf().delete(pre, old.len - pre - suf);
@@ -730,6 +767,11 @@ pub const Editor = struct {
                 },
                 .find => {
                     try self.findText(rest);
+                    return self.takeYankPending();
+                },
+                .goto_line => {
+                    _ = try self.cmdline.insert(self.alloc, rest);
+                    self.previewGotoLine();
                     return self.takeYankPending();
                 },
                 .normal, .visual, .visual_line => {
@@ -848,6 +890,20 @@ pub const Editor = struct {
                 try self.findKey(key, mods);
                 return .none;
             },
+            .goto_line => {
+                // Backspacing an empty prompt closes it, as on the `/`
+                // line.
+                if (eq(u8, key, "backspace") and self.cmdline.isEmpty()) {
+                    self.leaveGotoLine(.restore);
+                    return .none;
+                }
+                switch (self.cmdline.handleKey(key, mods)) {
+                    .submit => self.commitGotoLine(),
+                    .edited => self.previewGotoLine(),
+                    .moved, .ignored, .cancel => {},
+                }
+                return .none;
+            },
         }
     }
 
@@ -869,7 +925,7 @@ pub const Editor = struct {
             .normal => .normal,
             .visual, .visual_line => .visual,
             .insert, .select => .insert,
-            .command, .search, .find => .global,
+            .command, .search, .find, .goto_line => .global,
         };
     }
 
@@ -880,11 +936,20 @@ pub const Editor = struct {
     pub fn runAction(self: *Editor, action: actions.Action) !Outcome {
         switch (self.mode) {
             .normal, .visual, .visual_line, .insert, .select => {},
-            .command, .search, .find => return .none,
+            .command, .search, .find, .goto_line => return .none,
         }
         self.yank_pending = false;
         defer self.settleUndo();
         return self.perform(action);
+    }
+
+    /// A field has the keyboard: the `:` or `/` line, the find widget or
+    /// Ctrl+G's prompt. Keys there edit the field, not the buffer.
+    pub fn inPrompt(self: *const Editor) bool {
+        return switch (self.mode) {
+            .command, .search, .find, .goto_line => true,
+            .normal, .insert, .visual, .visual_line, .select => false,
+        };
     }
 
     /// Visual, visual-line or select mode: a selection is up.
@@ -928,6 +993,7 @@ pub const Editor = struct {
             .jumpBack,
             .jumpForward,
             .jump,
+            .copy,
             .cut,
             .paste,
             .gotoDefinition,
@@ -962,6 +1028,8 @@ pub const Editor = struct {
             .selectSubwordRight => self.selectMove(.subword_right),
             .selectFileStart => self.selectMove(.file_start),
             .selectFileEnd => self.selectMove(.file_end),
+            .selectAll => self.selectAll(),
+            .gotoLine => self.startGotoLine(),
 
             .undo => return self.undoAction(false),
             .redo => return self.undoAction(true),
@@ -979,7 +1047,7 @@ pub const Editor = struct {
                     },
                     .visual, .visual_line, .select => try self.visualShift(right, n),
                     .insert => try self.shiftCaretLine(right),
-                    .command, .search, .find => {},
+                    .command, .search, .find, .goto_line => {},
                 }
             },
 
@@ -1145,6 +1213,28 @@ pub const Editor = struct {
         }
     }
 
+    /// Ctrl+A: the whole buffer, anchored at its start with the cursor at
+    /// its end. The mode follows `selectMove`'s rule -- visual from
+    /// normal, select from insert -- and a selection already up just
+    /// grows to everything.
+    fn selectAll(self: *Editor) void {
+        switch (self.mode) {
+            .normal => self.enterVisual(.visual),
+            .insert => self.mode = .select,
+            else => {},
+        }
+        // An empty buffer has nothing to select.
+        if (self.mode == .select and self.buf.len() == 0) {
+            self.mode = .insert;
+            return;
+        }
+        self.select_anchor = 0;
+        // Select mode covers `[anchor, cursor)`, so its cursor goes past
+        // the last character; visual mode's sits on it.
+        const end = if (self.mode == .select) self.buf.len() else motion.clampNormal(self.buf, self.buf.len());
+        self.moveTo(end, true);
+    }
+
     /// Removes a select-mode selection's text, without touching the
     /// clipboard, and returns to insert mode with the caret where it was.
     fn dropSelectSpan(self: *Editor) !void {
@@ -1236,6 +1326,7 @@ pub const Editor = struct {
             },
             .search => self.leaveSearch(.restore),
             .find => self.leaveFind(),
+            .goto_line => self.leaveGotoLine(.restore),
             .visual, .visual_line => self.exitVisual(),
             // Straight to normal mode, the way Escape leaves insert mode.
             .select => {
@@ -1270,7 +1361,7 @@ pub const Editor = struct {
     pub fn jumpTo(self: *Editor, offset: usize) bool {
         const at = @min(offset, self.buf.len());
         switch (self.mode) {
-            .command, .search, .find => return false,
+            .command, .search, .find, .goto_line => return false,
             .insert, .select => self.moveTo(at, true),
             .normal, .visual, .visual_line => {
                 self.resetPending();
@@ -3372,6 +3463,68 @@ pub const Editor = struct {
     /// The character the `/` prompt is drawn with, for the status line.
     pub fn searchPrompt(self: *const Editor) u8 {
         return if (self.search_dir == .forward) '/' else '?';
+    }
+
+    // ── Go to line ──────────────────────────────────────────────────────
+    //
+    // Ctrl+G's prompt. Like the `/` line it previews on every keystroke
+    // from where it opened, so Escape (or emptying it) puts the cursor
+    // back, and Enter leaves it where the preview is.
+
+    /// The prompt's label, drawn before what is typed.
+    pub const goto_prompt = "Go to line: ";
+
+    fn startGotoLine(self: *Editor) void {
+        self.resetPending();
+        self.goto_return = self.mode;
+        self.goto_origin = self.cursor;
+        self.goto_failed = false;
+        self.mode = .goto_line;
+        self.cmdline.clear();
+    }
+
+    fn leaveGotoLine(self: *Editor, how: SearchExit) void {
+        self.mode = self.goto_return;
+        self.cmdline.clear();
+        self.goto_failed = false;
+        if (how == .restore) self.moveTo(self.goto_origin, true);
+    }
+
+    /// Enter: the preview stands. Something unparsable leaves the cursor
+    /// where the prompt found it and says why.
+    fn commitGotoLine(self: *Editor) void {
+        const typed = self.cmdline.text();
+        if (typed.len > 0 and parseGotoLine(typed) == null) {
+            self.setStatus("E: not a line number: {s}", .{typed});
+            self.leaveGotoLine(.restore);
+            return;
+        }
+        self.leaveGotoLine(.keep);
+    }
+
+    /// Moves the cursor to what the prompt says, or back to where it
+    /// opened while it says nothing usable.
+    fn previewGotoLine(self: *Editor) void {
+        const typed = self.cmdline.text();
+        const target = parseGotoLine(typed) orelse {
+            self.goto_failed = typed.len > 0;
+            self.moveTo(self.goto_origin, true);
+            return;
+        };
+        self.goto_failed = false;
+        self.moveTo(self.gotoTarget(target), true);
+    }
+
+    /// The byte offset for a parsed `N` / `N:col`, clamped into the
+    /// buffer: a bare line lands on its first non-blank, the way `:N`
+    /// does; a column is the one the statusline shows, from 1. The mode
+    /// the prompt returns to decides whether the line's end is a place
+    /// to stand.
+    fn gotoTarget(self: *const Editor, t: GotoLine) usize {
+        const line = @min(t.line -| 1, self.buf.lineCount() - 1);
+        const col = t.col orelse return motion.gotoLine(self.buf, line);
+        const allow_eol = self.goto_return == .insert or self.goto_return == .select;
+        return motion.atColumn(self.buf, line, col -| 1, allow_eol);
     }
 
     // ── Command line ────────────────────────────────────────────────────

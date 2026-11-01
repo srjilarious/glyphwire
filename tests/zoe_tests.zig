@@ -965,6 +965,49 @@ pub fn clipboardCopyUsesTheVisualSelectionTest(_: std.Io, alloc: std.mem.Allocat
     try testz.expectEqual(ed.mode, .normal);
 }
 
+/// Ctrl+A from normal mode: charwise visual over the whole buffer, so
+/// `y` / `d` take everything.
+pub fn selectAllFromNormalIsVisualTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "jl<c-a>");
+    try testz.expectEqual(ed.mode, .visual);
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 0);
+    try testz.expectEqual(span.hi, 7);
+    try expectEdit(alloc, "one\ntwo", "<c-a>d", "");
+}
+
+/// Ctrl+A from insert mode: select mode, so typing replaces it all and
+/// one undo brings it back.
+pub fn selectAllFromInsertIsSelectModeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i<c-a>");
+    try testz.expectEqual(ed.mode, .select);
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 0);
+    try testz.expectEqual(span.hi, 7);
+    try expectEdit(alloc, "one\ntwo", "i<c-a>new<esc>", "new");
+    try expectEdit(alloc, "one\ntwo", "i<c-a>new<c-z>", "one\ntwo");
+    // Nothing to select in an empty buffer: insert mode stays.
+    var empty = try Editor.initFromText(alloc, "", null);
+    defer empty.deinit();
+    _ = try keys.feed(&empty, "i<c-a>");
+    try testz.expectEqual(empty.mode, .insert);
+}
+
+pub fn clipboardCopyKeepsASelectAllSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i<c-a>");
+    switch (try ed.clipboardCopy()) {
+        .set_clipboard => |got| try testz.expectEqualStr(got, "one\ntwo"),
+        else => try testz.fail(),
+    }
+    try testz.expectEqual(ed.mode, .select);
+}
+
 pub fn mouseDragBuildsACharwiseSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "hello world", null);
     defer ed.deinit();
@@ -4167,6 +4210,80 @@ pub fn editorBareSlashRepeatsThePreviousPatternTest(_: std.Io, alloc: std.mem.Al
     try testz.expectEqual(ed.cursor, 4);
 }
 
+pub fn parseGotoLineTest(_: std.Io, _: std.mem.Allocator) !void {
+    const parse = zoe.editor.parseGotoLine;
+    try testz.expectEqual(parse("12").?.line, 12);
+    try testz.expectEqual(parse("12").?.col, null);
+    try testz.expectEqual(parse(" 12 : 5 ").?.col.?, 5);
+    // A trailing `:` is the line while the column is still to come.
+    try testz.expectEqual(parse("12:").?.col, null);
+    try testz.expectEqual(parse(""), null);
+    try testz.expectEqual(parse("x"), null);
+    try testz.expectEqual(parse("1:2:3"), null);
+    try testz.expectEqual(parse("3:y"), null);
+}
+
+/// Ctrl+G previews the line as it is typed, Enter keeps it, and Escape
+/// puts the cursor back where the prompt opened.
+pub fn gotoLinePromptPreviewsAndRestoresTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\n  two\nthree\nfour", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "l<c-g>");
+    try testz.expectEqual(ed.mode, .goto_line);
+    _ = try keys.feed(&ed, "2");
+    try testz.expectEqual(ed.pos().line, 1);
+    try testz.expectEqual(ed.pos().col, 2); // first non-blank, like `:2`
+    _ = try keys.feed(&ed, "<esc>");
+    try testz.expectEqual(ed.mode, .normal);
+    try testz.expectEqual(ed.cursor, 1);
+
+    // Past the end clamps; Enter keeps it.
+    _ = try keys.feed(&ed, "<c-g>99<cr>");
+    try testz.expectEqual(ed.mode, .normal);
+    try testz.expectEqual(ed.pos().line, 3);
+
+    // `N:col`, 1-based.
+    _ = try keys.feed(&ed, "<c-g>3:4<cr>");
+    try testz.expectEqual(ed.pos().line, 2);
+    try testz.expectEqual(ed.pos().col, 3);
+
+    // Garbage restores the cursor and says so.
+    _ = try keys.feed(&ed, "<c-g>abc");
+    try testz.expectTrue(ed.goto_failed);
+    try testz.expectEqual(ed.pos().line, 2);
+    _ = try keys.feed(&ed, "<cr>");
+    try testz.expectEqual(ed.pos().line, 2);
+    try testz.expectTrue(std.mem.startsWith(u8, ed.status.items, "E"));
+
+    // Backspacing past the empty prompt closes it.
+    _ = try keys.feed(&ed, "<c-g>1<bs><bs>");
+    try testz.expectEqual(ed.mode, .normal);
+    try testz.expectEqual(ed.pos().line, 2);
+}
+
+/// From insert mode the prompt goes back to insert mode, and a column
+/// may be the line's end.
+pub fn gotoLineFromInsertStaysInInsertTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "i<c-g>2:4<cr>");
+    try testz.expectEqual(ed.mode, .insert);
+    try testz.expectEqual(ed.pos().line, 1);
+    try testz.expectEqual(ed.pos().col, 3);
+    _ = try keys.feed(&ed, "!");
+    try expectText(alloc, ed.buf, "one\ntwo!");
+}
+
+pub fn gotoLineFromVisualExtendsTheSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo\nthree", null);
+    defer ed.deinit();
+    _ = try keys.feed(&ed, "v<c-g>3<cr>");
+    try testz.expectEqual(ed.mode, .visual);
+    const span = ed.selectionSpan().?;
+    try testz.expectEqual(span.lo, 0);
+    try testz.expectEqual(span.hi, 9);
+}
+
 pub fn editorSearchFromVisualModeExtendsTheSelectionTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "one two three", null);
     defer ed.deinit();
@@ -4910,6 +5027,27 @@ pub fn keymapsJumpAndWordWrapChordsTest(_: std.Io, alloc: std.mem.Allocator) !vo
     try testz.expectTrue(actions.Action.toggleWordWrap.inPalette());
     try testz.expectFalse(actions.Action.toggleWordWrap.isUi());
     try testz.expectFalse(actions.Action.subwordLeft.inPalette());
+}
+
+/// VS Code's clipboard, select-all and go-to-line chords, in every mode.
+pub fn keymapsVsCodeClipboardChordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
+    defer km.deinit(alloc);
+    const ctrl: zoe.editor.Mods = .{ .ctrl = true };
+    for ([_]actions.Scope{ .normal, .visual, .insert, .global }) |scope| {
+        try testz.expectEqual(km.lookup(scope, "c", ctrl).?, .copy);
+        try testz.expectEqual(km.lookup(scope, "x", ctrl).?, .cut);
+        try testz.expectEqual(km.lookup(scope, "v", ctrl).?, .paste);
+        try testz.expectEqual(km.lookup(scope, "a", ctrl).?, .selectAll);
+        try testz.expectEqual(km.lookup(scope, "g", ctrl).?, .gotoLine);
+    }
+    // The shifted cut stays.
+    try testz.expectEqual(km.lookup(.normal, "x", .{ .ctrl = true, .shift = true }).?, .cut);
+    try testz.expectTrue(actions.Action.copy.isUi());
+    try testz.expectFalse(actions.Action.selectAll.isUi());
+    try testz.expectFalse(actions.Action.gotoLine.isUi());
+    try testz.expectEqualStr(actions.Action.gotoLine.paletteLabel().?, "Go to Line");
+    try testz.expectEqualStr(actions.Action.copy.paletteLabel().?, "Copy to Clipboard");
 }
 
 /// The palette lists the start and end of the file and the LSP's `gd` /
@@ -6897,6 +7035,29 @@ pub fn editorConfigTogglesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectTrue(dflt.auto_indent);
     try testz.expectTrue(dflt.auto_close);
     try testz.expectTrue(dflt.fold_column);
+}
+
+pub fn startModeConfigTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var cfg = try parseConf(alloc, "config = { start_mode = \"insert\" }");
+    defer cfg.deinit();
+    try testz.expectEqual(cfg.start_mode, .insert);
+    try testz.expectEqual(cfg.start_mode.mode(), .insert);
+
+    // Anything else is ignored and the default stands.
+    var bad = try parseConf(alloc, "config = { start_mode = \"visual\" }");
+    defer bad.deinit();
+    try testz.expectEqual(bad.start_mode, .normal);
+}
+
+/// `:e` (`loadText`) opens the new file in `start_mode`.
+pub fn loadTextOpensInStartModeTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one", null);
+    defer ed.deinit();
+    ed.start_mode = .insert;
+    try ed.loadText("two", null);
+    try testz.expectEqual(ed.mode, .insert);
+    _ = try keys.feed(&ed, "x");
+    try expectText(alloc, ed.buf, "xtwo");
 }
 
 // ─── :s and ranges ──────────────────────────────────────────────────────

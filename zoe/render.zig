@@ -2253,6 +2253,10 @@ pub fn renderStatus(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
         if (self.buf.ed.search_failed) fg = role(.message_error);
         try line.append(self.alloc, self.buf.ed.searchPrompt());
         try line.appendSlice(self.alloc, self.buf.ed.cmdline.text());
+    } else if (self.buf.ed.mode == .goto_line) {
+        if (self.buf.ed.goto_failed) fg = role(.message_error);
+        try line.appendSlice(self.alloc, editor.Editor.goto_prompt);
+        try line.appendSlice(self.alloc, self.buf.ed.cmdline.text());
     } else if (self.buf.ed.status.items.len > 0) {
         if (std.mem.startsWith(u8, self.buf.ed.status.items, "E")) fg = role(.message_error);
         try line.appendSlice(self.alloc, self.buf.ed.status.items);
@@ -2297,7 +2301,7 @@ pub fn renderStatus(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     // Only the plain status form starts with the mode word; the tree's
     // search and name field take the row with text of their own.
     const show_mode = self.buf.ed.mode != .command and self.buf.ed.mode != .search and
-        self.buf.ed.status.items.len == 0 and self.find == null and self.tree_edit == null and
+        self.buf.ed.mode != .goto_line and self.buf.ed.status.items.len == 0 and self.find == null and self.tree_edit == null and
         self.tree_ask == null;
     const opts: glyphwire.client.Client.TextOpts = .{
         .layer = self.status_layer,
@@ -2323,9 +2327,11 @@ pub fn renderStatus(self: *Ui, batch: *glyphwire.client.Client.Batch) !void {
     // buffer pane draws. Only needed now that the command line is a
     // real field: while it was append-only the caret was always at
     // the end, and the statusline's own trailing blank read as one.
-    if (self.buf.ed.mode == .command or self.buf.ed.mode == .search) {
+    if (self.buf.ed.mode == .command or self.buf.ed.mode == .search or self.buf.ed.mode == .goto_line) {
         const cmd = &self.buf.ed.cmdline;
-        const col = 1 + cmd.caretCol(); // past the leading `:` or `/`
+        // Past the leading `:` or `/`, or Ctrl+G's label.
+        const label: usize = if (self.buf.ed.mode == .goto_line) editor.Editor.goto_prompt.len else 1;
+        const col = label + cmd.caretCol();
         if (col < b.cols) {
             const under = if (cmd.caret < cmd.text().len)
                 cmd.text()[cmd.caret..lineedit.nextBoundary(cmd.text(), cmd.caret)]
@@ -2352,6 +2358,7 @@ pub fn modeName(mode: editor.Mode) []const u8 {
         .search => "SEARCH",
         .select => "SELECT",
         .find => "FIND",
+        .goto_line => "GOTO",
     };
 }
 

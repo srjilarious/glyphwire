@@ -1593,7 +1593,7 @@ pub const Ui = struct {
         const typing = switch (self.buf.ed.mode) {
             // The `/` line is typed into, like the `:` line, so it wants
             // the typing cadence rather than the normal-mode one.
-            .insert, .command, .search, .find => true,
+            .insert, .command, .search, .find, .goto_line => true,
             .normal, .visual, .visual_line, .select => false,
         };
         const cfg = self.hl_config orelse return if (typing) .{
@@ -1814,6 +1814,8 @@ pub const Ui = struct {
             slot.ed.auto_indent = cfg.auto_indent;
             slot.ed.auto_close = cfg.auto_close;
             slot.ed.fold_column = cfg.fold_column;
+            slot.ed.start_mode = cfg.start_mode.mode();
+            slot.ed.mode = slot.ed.start_mode;
 
             if (syntax.Highlighter.init(self.alloc, syntax.Theme.fromTheme(&self.th.theme))) |h| {
                 slot.doc.hl = h;
@@ -1883,6 +1885,10 @@ pub const Ui = struct {
         ed.auto_indent = src.auto_indent;
         ed.auto_close = src.auto_close;
         ed.fold_column = src.fold_column;
+        // A new tab like any other, so it opens in the configured mode
+        // rather than whichever one `from` is in.
+        ed.start_mode = src.start_mode;
+        ed.mode = src.start_mode;
         ed.moveCursorTo(src.cursor);
 
         slot.top_line = from.top_line;
@@ -2570,17 +2576,26 @@ pub const Ui = struct {
                 self.jumpStep(action == .jumpBack);
             },
             .jump => return self.startJump(),
-            // Through the system clipboard. (Ctrl+Shift+C is swallowed by
-            // glyphwire-host, which broadcasts a `copy_request` instead --
-            // see the `.copy_request` arm.) In the sidebar, the same chords
-            // cut and paste files through its own clipboard: `x` and `p`.
+            // Through the system clipboard. (Ctrl+Shift+C / V are
+            // swallowed by glyphwire-host, which broadcasts a
+            // `copy_request` or sends a `paste` instead -- see those
+            // arms, which Ctrl+C / V match.) In the sidebar, the same
+            // chords cut and paste files through its own clipboard: `x`
+            // and `p`. In the `:` / `/` lines, the find widget and
+            // Ctrl+G's prompt, copy and cut fall through to the field,
+            // which has no selection to give them; paste types there.
+            .copy => {
+                if (self.focus == .tree and (self.tree_edit != null or self.tree_ask != null)) return false;
+                if (in_buffer and self.buf.ed.inPrompt()) return false;
+                try self.copyToClipboard();
+            },
             .cut => {
                 if (self.focus == .tree) {
                     if (self.tree_edit != null or self.tree_ask != null) return false;
                     try self.treeClipTake(true);
                     return true;
                 }
-                if (!in_buffer) return false;
+                if (!in_buffer or self.buf.ed.inPrompt()) return false;
                 try self.applyOutcome(try self.buf.ed.clipboardCut());
                 self.buf.full_redraw = true;
                 self.grp.buffer_dirty = true;
@@ -2593,7 +2608,13 @@ pub const Ui = struct {
                     return true;
                 }
                 if (!in_buffer) return false;
-                try self.pasteFromClipboard(true);
+                const text = self.client.getClipboard() catch return true;
+                defer self.alloc.free(text);
+                if (text.len == 0) return true;
+                self.buf.ed.status.clearRetainingCapacity();
+                self.closeCompletion();
+                try self.pasteIntoBuffer(text);
+                self.status_dirty = true;
             },
             // `gd` and `K` by name: the same requests, for the buffer the
             // cursor is in.
@@ -3216,28 +3237,7 @@ pub const Ui = struct {
                 // popup.
                 self.closeCompletion();
                 if (self.focus == .buffer) {
-                    // Insert mode and the two typed lines (`:` and `/`)
-                    // all want the text *typed*, which is what `feedText`
-                    // does for them -- a pasted search pattern belongs on
-                    // the prompt, not in the buffer.
-                    const typed = switch (self.buf.ed.mode) {
-                        // Over a select-mode selection a paste is typing
-                        // too: it replaces the selection.
-                        .insert, .command, .search, .select, .find => true,
-                        .normal, .visual, .visual_line => false,
-                    };
-                    if (typed) {
-                        try self.applyOutcome(try self.buf.ed.feedText(t.text));
-                        try self.syncPathMenu();
-                    } else {
-                        // Normal / visual mode: splice the pasted text in
-                        // like `p`, replacing any selection first, rather
-                        // than obeying each character as a command.
-                        try self.buf.ed.dropSelection();
-                        try self.buf.ed.putText(t.text, true);
-                        self.buf.full_redraw = true;
-                        self.grp.buffer_dirty = true;
-                    }
+                    try self.pasteIntoBuffer(t.text);
                 } else if (self.tree_edit != null) {
                     // Into the name field, as typing.
                     try self.treeEditText(t.text);
@@ -3258,15 +3258,7 @@ pub const Ui = struct {
             // While the shell panel is up the request is its business
             // (it copies its own selection), not the buffer's.
             .copy_request => if (self.isVisible() and !self.shell.isFocused()) {
-                // In the sidebar it copies the entry's path instead.
-                if (self.focus == .tree) {
-                    try self.copyTreePath();
-                    self.status_dirty = true;
-                    return;
-                }
-                try self.applyOutcome(try self.buf.ed.clipboardCopy());
-                self.grp.buffer_dirty = true;
-                self.status_dirty = true;
+                try self.copyToClipboard();
             },
             // The host closing already ends zoe's run loop when the shell
             // that spawned it exits; nothing persistent to flush here that
@@ -4034,6 +4026,44 @@ pub const Ui = struct {
     /// cursor (`p` / `P`, and the Ctrl+Shift+P chord). A visual-mode `p`
     /// has already dropped the selection, so this is always a plain
     /// insert.
+    /// Pasted text into the focused buffer, Ctrl+Shift+V's way and Ctrl+V's.
+    /// Insert mode and the typed lines (`:`, `/`, the find widget, Ctrl+G's
+    /// prompt) all want it *typed*, which is what `feedText` does for them
+    /// -- a pasted search pattern belongs on the prompt, not in the buffer.
+    fn pasteIntoBuffer(self: *Ui, text: []const u8) !void {
+        const typed = switch (self.buf.ed.mode) {
+            // Over a select-mode selection a paste is typing too: it
+            // replaces the selection.
+            .insert, .command, .search, .select, .find, .goto_line => true,
+            .normal, .visual, .visual_line => false,
+        };
+        if (typed) {
+            try self.applyOutcome(try self.buf.ed.feedText(text));
+            try self.syncPathMenu();
+        } else {
+            // Normal / visual mode: splice the pasted text in like `p`,
+            // replacing any selection first, rather than obeying each
+            // character as a command.
+            try self.buf.ed.dropSelection();
+            try self.buf.ed.putText(text, true);
+            self.buf.full_redraw = true;
+            self.grp.buffer_dirty = true;
+        }
+    }
+
+    /// Ctrl+C, and Ctrl+Shift+C's `copy_request`: the selection or the
+    /// line to the system clipboard, or in the sidebar the entry's path.
+    fn copyToClipboard(self: *Ui) !void {
+        if (self.focus == .tree) {
+            try self.copyTreePath();
+            self.status_dirty = true;
+            return;
+        }
+        try self.applyOutcome(try self.buf.ed.clipboardCopy());
+        self.grp.buffer_dirty = true;
+        self.status_dirty = true;
+    }
+
     pub fn pasteFromClipboard(self: *Ui, after: bool) !void {
         const text = self.client.getClipboard() catch return;
         defer self.alloc.free(text);
@@ -4835,7 +4865,7 @@ pub const Ui = struct {
     /// their keys.
     fn extCommandFor(self: *Ui, scope: actions.Scope, key: []const u8, mods: glyphwire.Mods) ?u32 {
         const rt = self.extensions orelse return null;
-        if (self.focus == .buffer and (self.buf.ed.mode == .command or self.buf.ed.mode == .search or self.buf.ed.mode == .find)) return null;
+        if (self.focus == .buffer and self.buf.ed.inPrompt()) return null;
         if (rt.lookup(scope, key, mods)) |cmd| return cmd;
         if (scope == .global) return null;
         if (self.keymaps.table(scope).lookup(key, mods) != null) return null;
@@ -5220,7 +5250,9 @@ pub const Ui = struct {
         const last_line = slot.ed.buf.lineCount() - 1;
         const line = @min(pos.line, last_line);
         slot.ed.moveCursorTo(motion.atColumn(slot.ed.buf, line, pos.col, false));
-        if (was_insert) slot.ed.mode = .insert;
+        // `loadText` opened it in `start_mode`; a reload keeps the mode
+        // it was in instead.
+        slot.ed.mode = if (was_insert) .insert else .normal;
         slot.top_line = @min(slot.top_line, last_line);
         slot.full_redraw = true;
         g.buffer_dirty = true;

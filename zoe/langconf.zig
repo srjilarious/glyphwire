@@ -10,7 +10,7 @@
 //! an `injections` on/off switch, and
 //! the editor's display options (`page_lines`, `line_numbers`,
 //! `tab_width`, `expand_tab`, `show_whitespace`, `wrap`,
-//! `auto_indent`, `auto_close`, `fold_column`,
+//! `auto_indent`, `auto_close`, `fold_column`, `start_mode`,
 //! `tab_tooltip_delay_ms`), `workspace_autosave`, `backups`, `file_watch` and
 //! `unignore`.
 //! With no file present
@@ -70,6 +70,19 @@ pub const key_repeat_insert_interval_ms_default: f64 = 30;
 /// across the strip on the way to somewhere else doesn't flash a popup
 /// per tab, short enough that resting on one to ask feels answered.
 pub const tab_tooltip_delay_ms_default: f64 = 400;
+
+/// `config.start_mode`'s values: the two modes a buffer can open in.
+pub const StartMode = enum {
+    normal,
+    insert,
+
+    pub fn mode(self: StartMode) editor.Mode {
+        return switch (self) {
+            .normal => .normal,
+            .insert => .insert,
+        };
+    }
+};
 
 /// The language servers zoe knows about without being told. Each is started
 /// only if its binary is on `PATH`, so having all three listed costs nothing
@@ -174,6 +187,11 @@ pub const Config = struct {
     /// `config.fold_column` -- the gutter column of fold markers.
     /// Default true; `:set foldcolumn=…` overrides.
     fold_column: bool = true,
+    /// `config.start_mode` -- the mode a buffer opens in: `"normal"`
+    /// (the default) or `"insert"`, for typing straight away the way a
+    /// non-modal editor does. Every buffer, not just the first: `:e`,
+    /// the tree, Ctrl+P and `:enew` all open in it.
+    start_mode: StartMode = .normal,
     /// `config.tab_tooltip_delay_ms` -- how long the pointer rests on a
     /// tab before its file's full path pops up under it. Zero shows it
     /// at once; a negative value or a non-number is ignored.
@@ -329,6 +347,7 @@ const Apply = struct {
         if (conf.boolean(lua, "auto_indent")) |v| cfg.auto_indent = v;
         if (conf.boolean(lua, "auto_close")) |v| cfg.auto_close = v;
         if (conf.boolean(lua, "fold_column")) |v| cfg.fold_column = v;
+        if (conf.enumValue(lua, StartMode, "start_mode")) |v| cfg.start_mode = v;
         if (conf.number(lua, f64, "tab_tooltip_delay_ms", delay)) |v| cfg.tab_tooltip_delay_ms = v;
         if (conf.boolean(lua, "workspace_autosave")) |v| cfg.workspace_autosave = v;
         if (conf.boolean(lua, "backups")) |v| cfg.backups = v;

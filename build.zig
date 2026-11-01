@@ -25,7 +25,7 @@ const program_versions = [_]struct { name: []const u8, version: []const u8 }{
     .{ .name = "gw-view", .version = "0.8.2" },
     .{ .name = "gwmd", .version = "0.11.1" },
     .{ .name = "glyphwire-notify", .version = "0.8.1" },
-    .{ .name = "zoe", .version = "0.26.1" },
+    .{ .name = "zoe", .version = "0.27.0" },
     .{ .name = "gmux", .version = "0.12.0" },
     .{ .name = "salacommander", .version = "0.12.1" },
 };

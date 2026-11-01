@@ -9,7 +9,7 @@ tabs, split editor groups, multi-folder workspaces, tree-sitter
 highlighting, language servers, a drop-down shell, and unsaved changes
 that survive quitting.
 
-This page covers `zoe` 0.26.1. Every key is in the
+This page covers `zoe` 0.27.0. Every key is in the
 [zoe key reference](../zoe-keys.md).
 
 ![zoe with the file tree and two editor groups side by side](../images/zoe-split.png)
@@ -50,7 +50,8 @@ Resting the pointer on a tab shows the file's full path.
 
 ## Modes
 
-zoe starts in **normal** mode, as vim does.
+zoe starts in **normal** mode, as vim does. Set `start_mode = "insert"`
+in `zoe.conf.lua` to have every buffer open ready to type instead.
 
 | Mode | Enter it with | What keys do |
 |---|---|---|
@@ -60,9 +61,10 @@ zoe starts in **normal** mode, as vim does.
 | Command | `:` | An ex command line with history and Tab path completion |
 
 If you never want modes: Ctrl+S saves, Ctrl+Z / Ctrl+Shift+Z undo and
-redo, Ctrl+/ comments, Ctrl+F finds and Shift+arrows select, in any mode.
-Insert mode is then an ordinary editor and Escape is only needed for
-vim's keys.
+redo, Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste, Ctrl+A selects all,
+Ctrl+G goes to a line, Ctrl+/ comments, Ctrl+F finds and Shift+arrows
+select, in any mode. With `start_mode = "insert"` insert mode is then an
+ordinary editor and Escape is only needed for vim's keys.
 
 ## Finding every command: the palette
 
@@ -92,6 +94,9 @@ and read the key off the right-hand column.
 | Ctrl+P | Fuzzy-find a file in the workspace |
 | Ctrl+Shift+P | Command palette |
 | Ctrl+S | Save |
+| Ctrl+C / Ctrl+X / Ctrl+V | Copy, cut, paste; with no selection copy and cut take the line |
+| Ctrl+A | Select all |
+| Ctrl+G | Go to line: `N` or `N:col`, previewed as you type, Escape goes back |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+F4 or Ctrl+W x | Close the tab |
 | Ctrl+Shift+N | New scratch buffer |
@@ -120,7 +125,7 @@ and read the key off the right-hand column.
 | `c`, `x`, `p` | Copy, cut, paste; a paste never overwrites, it offers a free name |
 | `f` | Jump by name prefix |
 | `/` | Search the whole tree, opening folders as needed |
-| Ctrl+Shift+C | Copy the entry's absolute path |
+| Ctrl+C or Ctrl+Shift+C | Copy the entry's absolute path |
 | `q`, Escape | Back to the buffer |
 
 ## Workspaces
@@ -266,10 +271,8 @@ For a vim user:
 
 For a VS Code user:
 
-- Ctrl+A select all, and unshifted Ctrl+C / Ctrl+V (the window keeps
-  Ctrl+Shift+C / V for terminal-style copy and paste).
 - Find and replace across files (Ctrl+Shift+F / Ctrl+Shift+H).
-- Ctrl+G go to line, F12 for definition, Ctrl+Shift+K delete line.
+- F12 for definition, Ctrl+Shift+K delete line.
 - Multiple cursors.
 
 The pane layout itself is not configurable from `zoe.conf.lua` yet,
