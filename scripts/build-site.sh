@@ -33,6 +33,17 @@ python3 scripts/build-guides.py "$out_dir"
 cp docs/images/*.png "$out_dir/images/"
 cp assets/glyphwire_icon.svg assets/glyphwire_icon.png "$out_dir/images/"
 
+# GitHub Pages serves every file with max-age=600 and no way to change it,
+# and a browser restoring a tab (phones especially) may reuse a cached copy
+# for longer than that. A page from a new deploy could then be drawn with
+# the previous deploy's style.css: the guides came up as bare Markdown
+# until a hard reload. Tagging the stylesheet link with a hash of its
+# contents gives each version of the CSS its own URL, so a new page never
+# picks up an old stylesheet.
+css_hash="$(sha256sum "$out_dir/style.css" | cut -c1-12)"
+find "$out_dir" -name '*.html' -exec \
+    sed -i -E "s#href=\"((\.\./)?style\.css)\"#href=\"\1?v=$css_hash\"#" {} +
+
 # GitHub Pages runs Jekyll over a plain upload unless told not to, which
 # would skip any path starting with an underscore.
 touch "$out_dir/.nojekyll"
