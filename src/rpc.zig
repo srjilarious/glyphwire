@@ -144,9 +144,9 @@ pub fn terminalReplyNotification(alloc: std.mem.Allocator, bytes: []const u8) ![
 /// `rows` cells. Window-sized for a client that has the window to itself;
 /// pane-sized for one running inside a pane, which is why
 /// `Server.reportContextSizes` builds this per connection rather than
-/// broadcasting one body.
-pub fn resizeNotification(alloc: std.mem.Allocator, cols: usize, rows: usize) ![]u8 {
-    return notification(alloc, "resize", protocol.ResizeParams{ .cols = cols, .rows = rows });
+/// broadcasting one body. `cell` is the context's cell size in pixels.
+pub fn resizeNotification(alloc: std.mem.Allocator, cols: usize, rows: usize, cell: core.CellMetrics) ![]u8 {
+    return notification(alloc, "resize", protocol.ResizeParams{ .cols = cols, .rows = rows, .cell_w = cell.w, .cell_h = cell.h });
 }
 
 /// `pane_layout` -- the panes whose window rects changed. The only

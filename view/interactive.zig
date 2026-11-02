@@ -162,11 +162,9 @@ pub const Ui = struct {
         switch (ev) {
             .resize => |r| {
                 self.win = .{ .cols = r.cols, .rows = r.rows };
-                // A font-size step arrives as a resize and changes the
-                // cell metrics with it.
-                if (self.client.getCellMetrics()) |m| {
-                    self.cell = .{ .w = m.w, .h = m.h };
-                } else |_| {}
+                // A font-size step arrives as a resize and carries the
+                // new cell metrics with it.
+                self.cell = .{ .w = r.cell.w, .h = r.cell.h };
                 try self.client.setLayerSize(self.status_layer, r.cols, 1);
                 try self.client.setLayerCellPosition(self.status_layer, r.rows -| 1, 0);
                 self.page_dirty = true;

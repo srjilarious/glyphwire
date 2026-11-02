@@ -400,6 +400,11 @@ pub const default_style: Style = .{
     .bg = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 0 } },
 };
 
+/// One cell's size in pixels. The session's font decides it, and a font
+/// step changes it, which is why `resize` carries it alongside the grid
+/// size (`get_cell_metrics` returns the same pair on request).
+pub const CellMetrics = struct { w: u32, h: u32 };
+
 /// Modifier keys held when an input event was generated, folded left and
 /// right. Captured by the server at the moment it routes the event (from
 /// `Session.mods`) and carried on `key_down`/`key_up`/`mouse_button`/

@@ -37,9 +37,16 @@ pub fn plColor(s: ?[]const u8) ?glyphwire.Color {
 /// cell-height so it fills the row without spilling onto the row above
 /// or below, and how many columns that makes it (`ceil(h / w)`, ~2 for
 /// a square icon in a roughly 1:2 cell). Leaves the fit-in-one-cell
-/// default if the metrics request fails.
+/// default if the metrics request fails. Only at startup: after that a
+/// font step arrives as a `resize` carrying the new metrics, which go
+/// through `applyIconMetrics` with no round trip.
 pub fn resolveIconMetrics(self: *Prompt) void {
     const m = self.client.getCellMetrics() catch return;
+    applyIconMetrics(self, m);
+}
+
+/// The sizing half of `resolveIconMetrics`, for metrics already in hand.
+pub fn applyIconMetrics(self: *Prompt, m: glyphwire.CellMetrics) void {
     if (m.w == 0 or m.h == 0) return;
     self.icon_max_h = m.h;
     const render_px = @min(icon_native_px, m.h);

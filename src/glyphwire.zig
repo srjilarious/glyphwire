@@ -45,6 +45,7 @@ pub const HostVersion = client.HostVersion;
 pub const SplitState = client.SplitState;
 pub const PaneSplitState = client.PaneSplitState;
 pub const ResizeEvent = client.ResizeEvent;
+pub const CellMetrics = core.CellMetrics;
 pub const ShutdownEvent = client.ShutdownEvent;
 pub const FocusEvent = client.FocusEvent;
 pub const ScrollEvent = client.ScrollEvent;

@@ -49,7 +49,7 @@ pub const Options = struct {
     root_background: ?glyphwire.Color = null,
 };
 
-pub const CellMetrics = struct { w: u32, h: u32 };
+pub const CellMetrics = glyphwire.CellMetrics;
 
 pub const Opened = struct {
     /// The context and its token: `grant.context` is the handle, and the
@@ -94,7 +94,7 @@ pub fn open(
     return .{
         .grant = grant,
         .size = size,
-        .metrics = .{ .w = m.w, .h = m.h },
+        .metrics = m,
         .th = th,
     };
 }

@@ -115,10 +115,10 @@ pub fn mouseButtonNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !v
 
 pub fn resizeNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    const body = try rpc.resizeNotification(alloc, 80, 24);
+    const body = try rpc.resizeNotification(alloc, 80, 24, .{ .w = 9, .h = 18 });
     defer alloc.free(body);
     try expectJson(alloc,
-        \\{"jsonrpc":"2.0","method":"resize","params":{"cols":80,"rows":24}}
+        \\{"jsonrpc":"2.0","method":"resize","params":{"cols":80,"rows":24,"cell_w":9,"cell_h":18}}
     , body);
 }
 

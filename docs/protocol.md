@@ -1700,8 +1700,9 @@ the change from the next press, never mid-hold.
 The metrics change at runtime with a font-size step. The host keeps the
 window's pixel size and reflows the grid instead, and announces the step
 as a `resize` to every client, even one whose cell count came out the
-same. A client that works in pixels re-reads `get_cell_metrics` on every
-`resize`; there is no separate metrics notification.
+same. The `resize` carries the new metrics (`cell_w`, `cell_h`), so a
+client that works in pixels takes them from it; there is no separate
+metrics notification.
 
 `subscribe` **replaces** the connection's subscription set; it is not
 additive. `events` is an array of stream names (section 7.1). Unknown names
@@ -1822,7 +1823,7 @@ the client drains with `get_errors`.
 | `text` | `{text}` |
 | `mouse_button` | `{button, pressed, px, cell, view_offset, mods, clicks}` |
 | `mouse_move` | `{px, cell, mods}` |
-| `resize` | `{cols, rows}` |
+| `resize` | `{cols, rows, cell_w, cell_h}` |
 | `scroll` | `{layer, offset, max}` |
 | `scroll_offset` | `{layer, row, col, max_row, max_col}` |
 | `layout` | `{layers: [{layer, row, col, cols, rows}]}` |

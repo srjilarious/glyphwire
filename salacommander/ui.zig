@@ -858,10 +858,8 @@ pub const Ui = struct {
     fn handleResize(self: *Ui, r: glyphwire.ResizeEvent) !void {
         self.win = .{ .cols = r.cols, .rows = r.rows };
         // A font-size step changes the cell metrics too, and arrives as
-        // one resize.
-        if (self.client.getCellMetrics()) |m| {
-            self.cell = .{ .w = m.w, .h = m.h };
-        } else |_| {}
+        // one resize carrying them.
+        self.cell = .{ .w = r.cell.w, .h = r.cell.h };
         // No pane geometry from this: the `layout` that comes with it
         // carries the new pane rects. Only the floating panel, which is
         // outside the split tree, is placed against the window here.

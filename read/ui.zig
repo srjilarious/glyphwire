@@ -840,11 +840,9 @@ pub const Ui = struct {
             .resize => |r| {
                 self.win = .{ .cols = r.cols, .rows = r.rows };
                 // A font-size step reflows the grid *and* changes the cell
-                // metrics, and arrives as one resize -- so re-read them here
-                // rather than only at startup.
-                if (self.client.getCellMetrics()) |m| {
-                    self.cell = .{ .w = m.w, .h = m.h };
-                } else |_| {}
+                // metrics, and arrives as one resize carrying both -- so
+                // take them here rather than only at startup.
+                self.cell = .{ .w = r.cell.w, .h = r.cell.h };
                 self.page_dirty = true;
                 self.status_dirty = true;
             },

@@ -2948,12 +2948,10 @@ pub const Ui = struct {
             // again, the area past it stays transparent, and the
             // scrollbar keeps measuring the small grid. Only `layout`
             // carries the true, unclamped rect.
-            .resize => {
-                // A font-size step arrives as a resize too, so the tree
-                // icons' row height is re-read here, not only at startup.
-                if (self.client.getCellMetrics()) |m| {
-                    self.cell_px_h = m.h;
-                } else |_| {}
+            .resize => |r| {
+                // A font-size step arrives as a resize too, carrying the
+                // tree icons' new row height.
+                self.cell_px_h = r.cell.h;
                 self.buf.full_redraw = true;
                 self.grp.buffer_dirty = true;
                 self.markTreeDirty(.full);

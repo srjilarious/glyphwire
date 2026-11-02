@@ -281,10 +281,8 @@ pub const Ui = struct {
             .resize => |r| {
                 self.win = .{ .cols = r.cols, .rows = r.rows };
                 // A font-size step changes the cell metrics too, and
-                // arrives as one resize.
-                if (self.client.getCellMetrics()) |m| {
-                    self.cell = .{ .w = m.w, .h = m.h };
-                } else |_| {}
+                // arrives as one resize carrying them.
+                self.cell = .{ .w = r.cell.w, .h = r.cell.h };
                 const old_rows = if (self.lay) |l| l.rows else 1;
                 const old_scroll = self.scroll;
                 try self.relayout();

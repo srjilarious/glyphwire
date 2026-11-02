@@ -888,7 +888,10 @@ fn promptEventLoop(prompt: *Prompt, io: std.Io, alloc: std.mem.Allocator, listen
 fn handleSessionEvent(prompt: *Prompt, any_ev: glyphwire.Event) !void {
     if (!prompt.focused) {
         switch (any_ev) {
-            .resize => |rev| prompt.noteResize(rev.cols, rev.rows),
+            .resize => |rev| {
+            prompt.noteResize(rev.cols, rev.rows);
+            prompt.applyIconMetrics(rev.cell);
+        },
             else => {},
         }
         return;
@@ -906,7 +909,10 @@ fn handleSessionEvent(prompt: *Prompt, any_ev: glyphwire.Event) !void {
         // A window resize rebuilt the grid (bottom-anchored) and
         // changed its dimensions. The re-layout is debounced
         // (`Prompt.noteResize` / `applyPendingResize`).
-        .resize => |rev| prompt.noteResize(rev.cols, rev.rows),
+        .resize => |rev| {
+            prompt.noteResize(rev.cols, rev.rows);
+            prompt.applyIconMetrics(rev.cell);
+        },
         else => {},
     }
 }
@@ -1475,7 +1481,7 @@ pub const Prompt = struct {
     /// is held off until the size settles (see `resize_settle_ms` and the
     /// resize handling in `runPrompt`). Only the latest size in a burst is
     /// kept; `resize_seen_at` is when it arrived.
-    pending_resize: ?glyphwire.ResizeEvent = null,
+    pending_resize: ?glyphwire.LayerSize = null,
     resize_seen_at: ?std.Io.Clock.Timestamp = null,
     /// Non-null while the cursor is browsing the grid instead of sitting on
     /// the live prompt (`browseUp`/`browseDown`/`browseLeft`/`browseRight`,
@@ -1825,6 +1831,7 @@ pub const Prompt = struct {
 
     // ── Prompt rendering (render.zig) ────────────────────────────────────
     pub const resolveIconMetrics = render.resolveIconMetrics;
+    pub const applyIconMetrics = render.applyIconMetrics;
     pub const writePromptPrefix = render.writePromptPrefix;
     pub const cursorAfter = render.cursorAfter;
     pub const writeDefaultPrefix = render.writeDefaultPrefix;

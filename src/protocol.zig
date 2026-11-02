@@ -1834,8 +1834,11 @@ pub const TerminalReplyParams = struct { bytes: []const u8 };
 /// cells. The window's size for a client that has the window to itself;
 /// its pane's size for one running inside a pane -- deliberately
 /// indistinguishable, so a program needs no awareness of being
-/// multiplexed (see session.zig's Panes section).
-pub const ResizeParams = struct { cols: usize, rows: usize };
+/// multiplexed (see session.zig's Panes section). `cell_w` / `cell_h` are
+/// one cell in pixels: a font step changes them and arrives as a
+/// `resize`, so a program that works in pixels needs no
+/// `get_cell_metrics` round trip to follow it.
+pub const ResizeParams = struct { cols: usize, rows: usize, cell_w: u32, cell_h: u32 };
 
 /// One pane's window rect inside a `pane_layout` notification.
 pub const PaneBounds = struct {

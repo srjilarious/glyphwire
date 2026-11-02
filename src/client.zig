@@ -1292,7 +1292,7 @@ pub const Client = struct {
     /// `get_cell_metrics` -- a request returning the session's fixed cell
     /// pixel size, for a client computing `draw_image`'s span from an
     /// image's natural pixel dimensions.
-    pub fn getCellMetrics(self: *Client) !struct { w: u32, h: u32 } {
+    pub fn getCellMetrics(self: *Client) !core.CellMetrics {
         var parsed = try self.request(protocol.CellMetricsResult, "get_cell_metrics", .{});
         defer parsed.deinit();
         return .{ .w = parsed.value.result.cell_px_w, .h = parsed.value.result.cell_px_h };
@@ -2660,9 +2660,11 @@ pub const MouseButtonEvent = struct {
 /// position. No owned memory -- handed back by value like `ResizeEvent`.
 /// Only arrives on a cell change (the server coalesces per-pixel motion).
 pub const MouseMoveEvent = struct { px: PxPos, cell: CellPos, mods: core.Mods = .{} };
-/// One `resize` notification: the window's new size in cells. No owned
-/// memory (unlike `KeyEvent.key`): nothing for the caller to free.
-pub const ResizeEvent = struct { cols: usize, rows: usize };
+/// One `resize` notification: the window's new size in cells, and one
+/// cell's size in pixels (a font step arrives as a resize, so this is
+/// where a pixel-aware program picks up the new metrics). No owned
+/// memory: nothing for the caller to free.
+pub const ResizeEvent = struct { cols: usize, rows: usize, cell: core.CellMetrics };
 
 /// One `shutdown` notification: the host window is closing. `grace_ms` is
 /// roughly how long the host waits for this process to exit before it
@@ -3503,7 +3505,11 @@ pub const InputListener = struct {
             .resize => {
                 const p = try self.parseParams(protocol.ResizeParams, params);
                 defer p.deinit();
-                try self.enqueue(.{ .resize = .{ .cols = p.value.cols, .rows = p.value.rows } });
+                try self.enqueue(.{ .resize = .{
+                    .cols = p.value.cols,
+                    .rows = p.value.rows,
+                    .cell = .{ .w = p.value.cell_w, .h = p.value.cell_h },
+                } });
             },
             .shutdown => {
                 const p = try self.parseParams(protocol.ShutdownParams, params);

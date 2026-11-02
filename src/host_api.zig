@@ -446,9 +446,13 @@ fn reportContextSizes(self: *Server, alloc: std.mem.Allocator) !void {
             const session_lock = self.lockSession();
             defer session_lock.unlock();
             const ctx = self.session.contextPtr(conn.route.active_ctx) orelse continue;
-            break :blk .{ .cols = ctx.root.width, .rows = ctx.root.height };
+            break :blk .{
+                .cols = ctx.root.width,
+                .rows = ctx.root.height,
+                .cell = core.CellMetrics{ .w = ctx.cell_px_w, .h = ctx.cell_px_h },
+            };
         };
-        const body = try rpc.resizeNotification(alloc, size.cols, size.rows);
+        const body = try rpc.resizeNotification(alloc, size.cols, size.rows, size.cell);
         defer alloc.free(body);
         conn.send(self.io, body) catch |err| {
             std.log.err("glyphwire: resize to a connection failed: {t}", .{err});
