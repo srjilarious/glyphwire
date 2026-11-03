@@ -387,11 +387,10 @@ const Ui = struct {
         while (!self.quit) {
             try self.render();
             // Every notification wakes this, so it can block outright.
-            const first = try self.listener.next(.none) orelse continue;
-            try self.handleEvent(first);
-            // Fold everything else already queued into the same redraw.
+            // Everything already queued folds into the same redraw.
+            var batch = self.listener.batch(.none);
             while (!self.quit) {
-                const ev = self.listener.pollNext() orelse break;
+                const ev = try batch.next() orelse break;
                 try self.handleEvent(ev);
             }
         }

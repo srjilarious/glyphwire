@@ -2843,18 +2843,17 @@ pub const Ui = struct {
             else
                 .none;
             const parsing = self.highlightPending();
-            const next = if (parsing) self.listener.pollNext() else try self.listener.next(timeout);
-            if (next) |first| {
-                const t_input = self.prof.now();
-                try self.handleEvent(first);
+            var batch = if (parsing) self.listener.pollBatch() else self.listener.batch(timeout);
+            // Input time runs from the first event's arrival, not from
+            // the start of the wait.
+            var t_input: ?std.Io.Timestamp = null;
+            while (!self.quit) {
+                const ev = try batch.next() orelse break;
+                if (t_input == null) t_input = self.prof.now();
+                try self.handleEvent(ev);
                 self.prof.events += 1;
-                while (!self.quit) {
-                    const ev = self.listener.pollNext() orelse break;
-                    try self.handleEvent(ev);
-                    self.prof.events += 1;
-                }
-                self.prof.add(.input, t_input);
             }
+            if (t_input) |t| self.prof.add(.input, t);
             if (parsing and !self.quit) {
                 const t_parse = self.prof.now();
                 self.stepHighlight();

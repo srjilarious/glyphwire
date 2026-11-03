@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Opening a full-screen program's own context: the handful of calls
-//! gwmd, gw-read, salacommander, zoe and gw-hist all start with, in the
+//! gwmd, gw-read, salacommander, zoe, gw-hist and gw-view all start with, in the
 //! one order that works.
 //!
 //!   1. `createContext`, shown at once, with no window scrollbar (each of

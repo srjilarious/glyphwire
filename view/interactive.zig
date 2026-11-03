@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const glyphwire = @import("glyphwire");
+const fullscreen = @import("applib").fullscreen;
 const zoom = glyphwire.zoom;
 
 const Color = glyphwire.Color;
@@ -96,13 +97,13 @@ pub const Ui = struct {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
 
-        const grant = try client.createContext(null, null, 0, false);
-        const context = grant.context;
-        errdefer client.destroyContext(context) catch {};
-        try listener.attachContext(context, &grant.token);
-        try client.setContextTitle("gw-view");
-        // Nothing here takes typed text at a caret.
-        try client.setCaretVisible(false);
+        // Nothing here takes typed text at a caret (`caret`'s default).
+        const opened = try fullscreen.open(client, listener, .{
+            .title = "gw-view",
+            .root_background = bg_page,
+        });
+        errdefer opened.close(client);
+        const context = opened.grant.context;
 
         // Load *after* the context exists. Images (and the icon catalog)
         // are per-context and handles restart at 1 in a new one, so a
@@ -112,12 +113,11 @@ pub const Ui = struct {
         const handle = try client.loadImage(opts.format, opts.bytes);
         const info = try client.getImageInfo(handle);
 
-        const size = try client.getSize();
-        const metrics = try client.getCellMetrics();
+        const size = opened.size;
+        const metrics = opened.metrics;
 
         const page_layer = try client.createLayer(size.cols, size.rows, 0);
         const status_layer = try client.createLayer(size.cols, 1, 0);
-        try client.setLayerBackground(glyphwire.root_layer_handle, bg_page);
         try client.setLayerBackground(page_layer, bg_page);
         try client.setLayerBackground(status_layer, bg_status);
         try client.setLayerCellPosition(status_layer, size.rows -| 1, 0);
@@ -148,10 +148,9 @@ pub const Ui = struct {
     pub fn run(self: *Ui) !void {
         while (!self.quit) {
             try self.flush();
-            const first = try self.listener.next(.none) orelse continue;
-            try self.handleEvent(first);
+            var batch = self.listener.batch(.none);
             while (!self.quit) {
-                const ev = self.listener.pollNext() orelse break;
+                const ev = try batch.next() orelse break;
                 try self.handleEvent(ev);
             }
         }

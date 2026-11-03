@@ -3081,6 +3081,51 @@ pub const InputListener = struct {
         return self.takeFirst(anyEvent);
     }
 
+    /// One pass of a full-screen program's event loop: wait for the
+    /// first event, then take whatever else is already queued, so the
+    /// whole burst is handled before the next frame is drawn.
+    ///
+    ///     var batch = listener.batch(timeout);
+    ///     while (!self.quit) {
+    ///         const ev = try batch.next() orelse break;
+    ///         try self.handleEvent(ev);
+    ///     }
+    ///
+    /// The caller keeps its own stop condition (a `quit` set mid-burst
+    /// leaves the rest queued) and owns each event as with `next`.
+    pub fn batch(self: *InputListener, timeout: std.Io.Timeout) Batch {
+        return .{ .listener = self, .timeout = timeout };
+    }
+
+    /// `batch` that doesn't wait for the first event either: for a loop
+    /// that has work of its own pending (a parse step) and only wants
+    /// what has already arrived.
+    pub fn pollBatch(self: *InputListener) Batch {
+        return .{ .listener = self, .timeout = .none, .waited = true };
+    }
+
+    /// The iterator `batch` / `pollBatch` return. `next` blocks (up to
+    /// `timeout`) only on its first call; after that it polls, and null
+    /// means the queue is empty. `taken` counts the events handed out,
+    /// so a caller can tell a timeout (0) from a burst.
+    pub const Batch = struct {
+        listener: *InputListener,
+        timeout: std.Io.Timeout,
+        waited: bool = false,
+        taken: usize = 0,
+
+        pub fn next(self: *Batch) !?Event {
+            const ev = if (self.waited)
+                self.listener.pollNext()
+            else blk: {
+                self.waited = true;
+                break :blk try self.listener.next(self.timeout);
+            };
+            if (ev != null) self.taken += 1;
+            return ev;
+        }
+    };
+
     fn anyEvent(_: Event) bool {
         return true;
     }

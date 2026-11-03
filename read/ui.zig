@@ -825,10 +825,9 @@ pub const Ui = struct {
                 .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }
             else
                 .none;
-            const first = try self.listener.next(timeout) orelse continue;
-            try self.handleEvent(first);
+            var batch = self.listener.batch(timeout);
             while (!self.quit) {
-                const ev = self.listener.pollNext() orelse break;
+                const ev = try batch.next() orelse break;
                 try self.handleEvent(ev);
             }
         }

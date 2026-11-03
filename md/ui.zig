@@ -264,12 +264,10 @@ pub const Ui = struct {
             // `next` returns as no event); the poll's beat ends it on time.
             self.armDiskCheck();
             const timeout: std.Io.Timeout = if (self.disk_due) |due| .{ .deadline = due } else .none;
-            if (try self.listener.next(timeout)) |first| {
-                try self.handleEvent(first);
-                while (!self.quit) {
-                    const ev = self.listener.pollNext() orelse break;
-                    try self.handleEvent(ev);
-                }
+            var batch = self.listener.batch(timeout);
+            while (!self.quit) {
+                const ev = try batch.next() orelse break;
+                try self.handleEvent(ev);
             }
             if (self.diskCheckDue()) try self.checkDisk();
         }

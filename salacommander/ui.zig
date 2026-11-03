@@ -748,15 +748,14 @@ pub const Ui = struct {
                 .{ .duration = .{ .raw = .fromMilliseconds(reap_poll_ms), .clock = .awake } }
             else
                 .none;
-            const first = try self.listener.next(timeout) orelse {
-                try self.autoScroll();
-                continue;
-            };
-            try self.handleEvent(first);
+            var batch = self.listener.batch(timeout);
             while (!self.quit) {
-                const ev = self.listener.pollNext() orelse break;
+                const ev = try batch.next() orelse break;
                 try self.handleEvent(ev);
             }
+            // Nothing arrived: the timeout was the auto-scroll's beat (or
+            // the reap poll's, where this does nothing).
+            if (batch.taken == 0) try self.autoScroll();
         }
     }
 

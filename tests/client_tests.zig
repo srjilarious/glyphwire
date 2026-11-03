@@ -552,7 +552,59 @@ pub fn inputListenerNextKeepsOrderAndEventTimeModsTest(_: std.Io, alloc: std.mem
     defer ev.deinit(alloc);
     try testz.expectTrue(ev == .resize);
     try testz.expectEqual(ev.resize.cols, 100);
+    // The context's cell metrics ride along (the defaults here).
+    try testz.expectEqual(ev.resize.cell.w, 12);
+    try testz.expectEqual(ev.resize.cell.h, 12);
     try testz.expectEqual(listener.size().?.rows, 30);
+}
+
+pub fn inputListenerBatchWaitsOnceThenPollsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try glyphwire.Context.init(alloc, 80, 24, 0);
+    defer ctx.deinit();
+
+    const socket_path = try std.fmt.allocPrint(alloc, "/tmp/glyphwire-client-test-{d}.sock", .{std.Thread.getCurrentId()});
+    defer alloc.free(socket_path);
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
+    var srv = try helpers.bindServer(io, &ctx, socket_path);
+    defer srv.deinit(alloc);
+
+    const thread1 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread1.join();
+    const thread2 = try std.Thread.spawn(.{}, serveOne, .{ &srv, alloc });
+    defer thread2.join();
+
+    const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{.text});
+    defer listener.deinit();
+
+    // Nothing queued: a poll batch is empty at once, and a waiting batch
+    // gives up after its timeout.
+    {
+        var batch = listener.pollBatch();
+        try testz.expectTrue((try batch.next()) == null);
+        try testz.expectEqual(batch.taken, 0);
+    }
+    {
+        var batch = listener.batch(.{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } });
+        try testz.expectTrue((try batch.next()) == null);
+        try testz.expectEqual(batch.taken, 0);
+    }
+
+    var reporter = try helpers.connectReporter(io, alloc, socket_path);
+    defer reporter.deinit();
+    try reporter.reportText("x");
+
+    // The first `next` waits for it; the second only polls.
+    var batch = listener.batch(.{ .duration = .{ .raw = .fromMilliseconds(2000), .clock = .awake } });
+    const ev = (try batch.next()) orelse return error.TestUnexpectedResult;
+    defer ev.deinit(alloc);
+    try testz.expectEqualStr(ev.text.text, "x");
+    try testz.expectTrue((try batch.next()) == null);
+    try testz.expectEqual(batch.taken, 1);
 }
 
 /// A minimal byte stream `pngDimensions` accepts -- see core_tests.zig's
