@@ -101,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
     }) catch return dump(alloc, io, path, dump_width, max_width);
     defer conn.deinit();
 
-    const ui = try md.Ui.init(alloc, io, &conn.client, conn.listener, max_width);
+    const ui = try md.Ui.init(alloc, io, &conn.client, conn.listener, max_width, init.environ_map.get("HOME"));
     defer ui.deinit();
 
     try ui.open(path, fragment);

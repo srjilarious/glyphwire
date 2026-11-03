@@ -159,6 +159,9 @@ pub const Ui = struct {
     win: struct { cols: usize, rows: usize },
     cell: struct { w: u32, h: u32 },
     max_width: usize,
+    /// `$HOME`, borrowed from the environment, for spelling the title's
+    /// path with `~`.
+    home: ?[]const u8,
 
     page: ?Page = null,
     lay: ?Layout = null,
@@ -198,6 +201,7 @@ pub const Ui = struct {
         client: *glyphwire.Client,
         listener: *glyphwire.InputListener,
         max_width: usize,
+        home: ?[]const u8,
     ) !*Ui {
         const self = try alloc.create(Ui);
         errdefer alloc.destroy(self);
@@ -233,6 +237,7 @@ pub const Ui = struct {
             .win = .{ .cols = size.cols, .rows = size.rows },
             .cell = .{ .w = metrics.w, .h = metrics.h },
             .max_width = max_width,
+            .home = home,
             // Without it the page still follows the file, a second late.
             .watcher = inotify.Watcher.start(alloc, listener) catch null,
         };
@@ -314,10 +319,24 @@ pub const Ui = struct {
         const page = (try self.readPage(path)) orelse return;
         self.closePage();
         self.page = page;
+        self.syncTitle();
         self.watchPage();
         try self.loadImages();
         try self.relayout();
         self.scrollTo(self.anchorRow(fragment) orelse 0);
+    }
+
+    /// Names this context `gwmd <file>` after the open page (`~` for
+    /// `$HOME`), so the context switcher and `jobs` say what is being
+    /// read. Called on every page change; a failure only leaves the old
+    /// title up.
+    fn syncTitle(self: *Ui) void {
+        const p = &(self.page orelse return);
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const shown = homepath.collapseHome(p.path, self.home, &home_buf);
+        var buf: [glyphwire.Context.max_title_len]u8 = undefined;
+        const title = std.fmt.bufPrint(&buf, "gwmd {s}", .{shown}) catch "gwmd";
+        self.client.setContextTitle(title) catch {};
     }
 
     /// Reads and parses `path` into a `Page`, or sets the statusline and
