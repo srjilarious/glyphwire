@@ -375,24 +375,24 @@ pub fn inputListenerReceivesReportedInputTest(_: std.Io, alloc: std.mem.Allocato
 
     const listener = try glyphwire.InputListener.connect(io, alloc, socket_path, &.{ .key, .mouse_button });
     defer listener.deinit();
-    try testz.expectTrue(!listener.isKeyDown("a"));
+    try testz.expectTrue(!listener.isKeyDown(.a));
 
     var reporter = try helpers.connectReporter(io, alloc, socket_path);
     defer reporter.deinit();
-    try reporter.reportKey("a", true);
-    try reporter.reportMouseButton("left", true, .{ .x = 12, .y = 34 }, .{ .row = 1, .col = 2 }, 0, 1);
+    try reporter.reportKey(.a, true);
+    try reporter.reportMouseButton(.left, true, .{ .x = 12, .y = 34 }, .{ .row = 1, .col = 2 }, 0, 1);
 
     // The listener's background thread updates asynchronously, and the key
     // and mouse-button reports are two separate notifications -- polling
     // only until the first lands doesn't guarantee the second has too, so
     // wait for both.
     var attempts: usize = 0;
-    while (!(listener.isKeyDown("a") and listener.isMouseButtonDown("left")) and attempts < 100) : (attempts += 1) {
+    while (!(listener.isKeyDown(.a) and listener.isMouseButtonDown(.left)) and attempts < 100) : (attempts += 1) {
         std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
     }
 
-    try testz.expectTrue(listener.isKeyDown("a"));
-    try testz.expectTrue(listener.isMouseButtonDown("left"));
+    try testz.expectTrue(listener.isKeyDown(.a));
+    try testz.expectTrue(listener.isMouseButtonDown(.left));
     try testz.expectEqual(listener.cursorCell().row, 1);
     try testz.expectEqual(listener.cursorCell().col, 2);
     try testz.expectEqual(listener.cursorPixel().x, 12);
@@ -429,14 +429,14 @@ pub fn inputListenerQueuesMouseButtonEventsTest(_: std.Io, alloc: std.mem.Alloca
 
     var reporter = try helpers.connectReporter(io, alloc, socket_path);
     defer reporter.deinit();
-    try reporter.reportMouseButton("left", true, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0, 1);
-    try reporter.reportMouseButton("left", false, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0, 1);
+    try reporter.reportMouseButton(.left, true, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0, 1);
+    try reporter.reportMouseButton(.left, false, .{ .x = 5, .y = 9 }, .{ .row = 2, .col = 3 }, 0, 1);
 
     const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(2000), .clock = .awake } };
     const press = (try listener.next(timeout)) orelse return error.TestUnexpectedResult;
     defer press.deinit(alloc);
     try testz.expectTrue(press == .mouse_button);
-    try testz.expectEqualStr(press.mouse_button.button, "left");
+    try testz.expectEqual(press.mouse_button.button, .left);
     try testz.expectTrue(press.mouse_button.pressed);
     try testz.expectEqual(press.mouse_button.cell.row, 2);
     try testz.expectEqual(press.mouse_button.cell.col, 3);
@@ -514,31 +514,31 @@ pub fn inputListenerNextKeepsOrderAndEventTimeModsTest(_: std.Io, alloc: std.mem
     var reporter = try helpers.connectReporter(io, alloc, socket_path);
     defer reporter.deinit();
     // A fast Ctrl+W, fully released before anything is consumed.
-    try reporter.reportKey("left_control", true);
-    try reporter.reportKey("w", true);
-    try reporter.reportKey("w", false);
-    try reporter.reportKey("left_control", false);
+    try reporter.reportKey(.left_control, true);
+    try reporter.reportKey(.w, true);
+    try reporter.reportKey(.w, false);
+    try reporter.reportKey(.left_control, false);
     try reporter.reportText("x");
 
     const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(2000), .clock = .awake } };
-    const Expect = struct { key: []const u8, pressed: bool, ctrl: bool };
+    const Expect = struct { key: glyphwire.Key, pressed: bool, ctrl: bool };
     const keys = [_]Expect{
-        .{ .key = "left_control", .pressed = true, .ctrl = true },
-        .{ .key = "w", .pressed = true, .ctrl = true },
-        .{ .key = "w", .pressed = false, .ctrl = true },
-        .{ .key = "left_control", .pressed = false, .ctrl = false },
+        .{ .key = .left_control, .pressed = true, .ctrl = true },
+        .{ .key = .w, .pressed = true, .ctrl = true },
+        .{ .key = .w, .pressed = false, .ctrl = true },
+        .{ .key = .left_control, .pressed = false, .ctrl = false },
     };
     for (keys) |want| {
         const ev = (try listener.next(timeout)) orelse return error.TestUnexpectedResult;
         defer ev.deinit(alloc);
         try testz.expectTrue(ev == .key);
-        try testz.expectEqualStr(ev.key.key, want.key);
+        try testz.expectEqual(ev.key.key, want.key);
         try testz.expectEqual(ev.key.pressed, want.pressed);
         try testz.expectEqual(ev.key.ctrl(), want.ctrl);
     }
     // By now the live down-set says Ctrl is up -- the race the event's own
     // `mods` exists to avoid.
-    try testz.expectTrue(!listener.isKeyDown("left_control"));
+    try testz.expectTrue(!listener.isKeyDown(.left_control));
 
     {
         const ev = (try listener.next(timeout)) orelse return error.TestUnexpectedResult;

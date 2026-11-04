@@ -14,9 +14,9 @@ const MouseButton = host_eng.input.MouseButton;
 // ─── wire-visible enum names ──────────────────────────────────────────
 
 pub fn keyNamesAreWireStableTest(_: std.Io, _: std.mem.Allocator) !void {
-    // `host/input.zig` forwards each key by `@tagName`, and
-    // `src/key_encode.zig` matches on those strings, so a rename here is
-    // a silent protocol change. These are the spellings that have to hold.
+    // The wire carries each key as its `@tagName` (`glyphwire.Key`, which
+    // the engine uses directly), so a rename here is a silent protocol
+    // change. These are the spellings that have to hold.
     try testz.expectEqualStr(@tagName(Key.escape), "escape");
     try testz.expectEqualStr(@tagName(Key.enter), "enter");
     try testz.expectEqualStr(@tagName(Key.backspace), "backspace");
@@ -24,7 +24,7 @@ pub fn keyNamesAreWireStableTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqualStr(@tagName(Key.page_up), "page_up");
     try testz.expectEqualStr(@tagName(Key.grave_accent), "grave_accent");
     try testz.expectEqualStr(@tagName(Key.kp_subtract), "kp_subtract");
-    // Uppercase, matching key_encode's F1..F12 entries.
+    // Uppercase, as the wire has always spelled them.
     try testz.expectEqualStr(@tagName(Key.F1), "F1");
     try testz.expectEqualStr(@tagName(Key.F12), "F12");
 }
@@ -44,9 +44,12 @@ pub fn keyEnumHasNoPhantomKeysTest(_: std.Io, _: std.mem.Allocator) !void {
 }
 
 pub fn mouseButtonNamesAreWireStableTest(_: std.Io, _: std.mem.Allocator) !void {
-    // `host/input.zig` forwards every field of this enum by name too.
+    // Carried by name too. `unknown` (a decoded name this build lacks)
+    // and the wheel notches are never reported held by the engine.
     const fields = @typeInfo(MouseButton).@"enum".field_names;
-    try testz.expectEqual(fields.len, 5);
+    try testz.expectEqual(fields.len, 8);
+    try testz.expectEqualStr(@tagName(MouseButton.wheel_up), "wheel_up");
+    try testz.expectEqualStr(@tagName(MouseButton.wheel_down), "wheel_down");
     try testz.expectEqualStr(@tagName(MouseButton.left), "left");
     try testz.expectEqualStr(@tagName(MouseButton.right), "right");
     try testz.expectEqualStr(@tagName(MouseButton.middle), "middle");

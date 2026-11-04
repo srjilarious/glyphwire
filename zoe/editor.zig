@@ -815,11 +815,10 @@ pub const Editor = struct {
     /// A named physical key (glyphwire's `key_down` notification). Only
     /// the keys with no character to carry them are handled here --
     /// everything printable arrives through `feedText`.
-    pub fn feedKey(self: *Editor, key: []const u8, mods: Mods) !Outcome {
+    pub fn feedKey(self: *Editor, key: glyphwire.Key, mods: Mods) !Outcome {
         self.yank_pending = false;
         defer self.settleUndo();
-        const eq = std.mem.eql;
-        if (eq(u8, key, "escape")) {
+        if (key == .escape) {
             self.escape();
             return .none;
         }
@@ -836,7 +835,7 @@ pub const Editor = struct {
                 // Backspacing over the `:` itself leaves the mode, same
                 // as vim -- tested before the field sees the key, since
                 // to the field an empty line is simply nothing to delete.
-                if (eq(u8, key, "backspace") and self.cmdline.isEmpty()) {
+                if (key == .backspace and self.cmdline.isEmpty()) {
                     self.mode = .normal;
                     return .none;
                 }
@@ -860,7 +859,7 @@ pub const Editor = struct {
                 // Backspacing the `/` away leaves the prompt, same rule
                 // the `:` line has -- and the cursor goes back where it
                 // started, since incremental search has been moving it.
-                if (eq(u8, key, "backspace") and self.cmdline.isEmpty()) {
+                if (key == .backspace and self.cmdline.isEmpty()) {
                     self.leaveSearch(.restore);
                     return .none;
                 }
@@ -893,7 +892,7 @@ pub const Editor = struct {
             .goto_line => {
                 // Backspacing an empty prompt closes it, as on the `/`
                 // line.
-                if (eq(u8, key, "backspace") and self.cmdline.isEmpty()) {
+                if (key == .backspace and self.cmdline.isEmpty()) {
                     self.leaveGotoLine(.restore);
                     return .none;
                 }
@@ -909,7 +908,7 @@ pub const Editor = struct {
 
     /// The bindings `feedKey` reads: the session's, or the defaults when
     /// the host never set any.
-    fn lookupKey(self: *Editor, key: []const u8, mods: Mods) ?actions.Action {
+    fn lookupKey(self: *Editor, key: glyphwire.Key, mods: Mods) ?actions.Action {
         const km: *const actions.Keymaps = self.keymaps orelse blk: {
             if (self.own_keymaps == null) {
                 self.own_keymaps = actions.Keymaps.initDefaults(self.alloc, actions.defaults) catch return null;
@@ -3558,13 +3557,12 @@ pub const Editor = struct {
     /// when there was nothing further to go to, so the line's own
     /// handling never sees them). Up/Down with a modifier, or with no
     /// history at all, are left to the line.
-    fn browseHistory(self: *Editor, hist: ?*cmdhistory.History, key: []const u8, mods: Mods) !bool {
+    fn browseHistory(self: *Editor, hist: ?*cmdhistory.History, key: glyphwire.Key, mods: Mods) !bool {
         const h = hist orelse return false;
         if (mods.ctrl or mods.alt or mods.shift or mods.super) return false;
-        const eq = std.mem.eql;
-        const entry = if (eq(u8, key, "up"))
+        const entry = if (key == .up)
             try h.older(self.cmdline.text())
-        else if (eq(u8, key, "down"))
+        else if (key == .down)
             h.newer()
         else
             return false;
@@ -4374,8 +4372,7 @@ pub const Editor = struct {
     ///  - Alt+C / Alt+W / Alt+L     match case, whole word, in selection
     ///  - Up / Down                 the `/` history (find field)
     ///  - Ctrl+F / Ctrl+H           whatever `find` / `replace` are bound to
-    fn findKey(self: *Editor, key: []const u8, mods: Mods) !void {
-        const eq = std.mem.eql;
+    fn findKey(self: *Editor, key: glyphwire.Key, mods: Mods) !void {
         self.find_swallow = null;
 
         if (self.lookupKey(key, mods)) |a| switch (a) {
@@ -4383,8 +4380,8 @@ pub const Editor = struct {
             else => {},
         };
 
-        if (mods.alt and !mods.ctrl and key.len == 1) {
-            const c = std.ascii.toLower(key[0]);
+        if (mods.alt and !mods.ctrl and key.isLetter()) {
+            const c = key.letter().?;
             const toggle: ?FindCommand = switch (c) {
                 'c' => .toggle_case,
                 'w' => .toggle_word,
@@ -4398,17 +4395,17 @@ pub const Editor = struct {
             }
         }
 
-        if (eq(u8, key, "enter") or eq(u8, key, "kp_enter")) {
+        if (key == .enter or key == .kp_enter) {
             if (mods.ctrl and mods.alt) return self.findReplaceAll();
             if (self.find_field == .replace and !mods.shift) return self.findReplaceOne();
             self.findStep(if (mods.shift) .backward else .forward);
             return;
         }
-        if (eq(u8, key, "F3")) {
+        if (key == .F3) {
             self.findStep(if (mods.shift) .backward else .forward);
             return;
         }
-        if (eq(u8, key, "tab") and !mods.ctrl and !mods.alt) {
+        if (key == .tab and !mods.ctrl and !mods.alt) {
             if (self.find_show_replace) {
                 self.find_field = if (self.find_field == .find) .replace else .find;
                 self.find_fresh = false;
@@ -4427,7 +4424,7 @@ pub const Editor = struct {
         // A key that edits the prefilled text replaces it, the way a
         // typed character does; one that moves the caret keeps it.
         if (self.find_fresh and self.find_field == .find and
-            (eq(u8, key, "backspace") or eq(u8, key, "delete")))
+            (key == .backspace or key == .delete))
         {
             line.clear();
             self.find_fresh = false;

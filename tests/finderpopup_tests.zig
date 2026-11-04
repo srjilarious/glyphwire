@@ -68,26 +68,26 @@ pub fn applyKeyMovesAndClampsTheHighlightTest(_: std.Io, alloc: std.mem.Allocato
     var f = try finderOf(alloc, &.{ "a.zig", "b.zig", "c.zig", "d.zig", "e.zig" });
     defer f.deinit();
 
-    try testz.expectEqual(try popup.applyKey(&f, "down", .{}, 3), .changed);
+    try testz.expectEqual(try popup.applyKey(&f, .down, .{}, 3), .changed);
     try testz.expectEqual(f.list.selected, 1);
-    try testz.expectEqual(try popup.applyKey(&f, "n", .{ .ctrl = true }, 3), .changed);
+    try testz.expectEqual(try popup.applyKey(&f, .n, .{ .ctrl = true }, 3), .changed);
     try testz.expectEqual(f.list.selected, 2);
     // A page is the list's own height, and clamps at the end rather than
     // wrapping back to the top: the list is ranked.
-    _ = try popup.applyKey(&f, "page_down", .{}, 3);
+    _ = try popup.applyKey(&f, .page_down, .{}, 3);
     try testz.expectEqual(f.list.selected, 4);
     try testz.expectEqual(f.list.top, 2);
-    _ = try popup.applyKey(&f, "p", .{ .ctrl = true }, 3);
+    _ = try popup.applyKey(&f, .p, .{ .ctrl = true }, 3);
     try testz.expectEqual(f.list.selected, 3);
 }
 
 pub fn applyKeyAnswersEnterAndEscapeWithoutTouchingTheQueryTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var f = try finderOf(alloc, &.{ "a.zig", "b.zig" });
     defer f.deinit();
-    try testz.expectEqual(try popup.applyKey(&f, "enter", .{}, 5), .accept);
-    try testz.expectEqual(try popup.applyKey(&f, "kp_enter", .{}, 5), .accept);
-    try testz.expectEqual(try popup.applyKey(&f, "escape", .{}, 5), .cancel);
-    try testz.expectEqual(try popup.applyKey(&f, "c", .{ .ctrl = true }, 5), .cancel);
+    try testz.expectEqual(try popup.applyKey(&f, .enter, .{}, 5), .accept);
+    try testz.expectEqual(try popup.applyKey(&f, .kp_enter, .{}, 5), .accept);
+    try testz.expectEqual(try popup.applyKey(&f, .escape, .{}, 5), .cancel);
+    try testz.expectEqual(try popup.applyKey(&f, .c, .{ .ctrl = true }, 5), .cancel);
     try testz.expectEqualStr(f.query.text(), "");
 }
 
@@ -99,7 +99,7 @@ pub fn applyKeyEditsTheQueryAndRefiltersTest(_: std.Io, alloc: std.mem.Allocator
     try testz.expectTrue(try f.query.insert(alloc, "zoeuix"));
     try f.refilter();
     try testz.expectEqual(f.matchCount(), 0);
-    try testz.expectEqual(try popup.applyKey(&f, "backspace", .{}, 5), .changed);
+    try testz.expectEqual(try popup.applyKey(&f, .backspace, .{}, 5), .changed);
     try testz.expectEqualStr(f.query.text(), "zoeui");
     try testz.expectEqual(f.matchCount(), 1);
     try testz.expectEqualStr(f.selected().?, "zoe/ui.zig");

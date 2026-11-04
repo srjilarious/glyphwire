@@ -269,33 +269,32 @@ pub fn acceptCompletion(self: *Ui) !void {
 /// accept, Escape closes only the popup so a second one leaves insert
 /// mode. Left/Right/Home/End close it and then move as usual.
 pub fn completionKey(self: *Ui, k: glyphwire.KeyEvent) !bool {
-    const eq = std.mem.eql;
     const m = if (self.completion) |*x| x else return false;
     const rows = @min(m.count(), complete_max_rows);
     const ctrl = k.ctrl();
     // Alt+Up/Down moves the line, not the popup's cursor; the popup
     // closes like it does for any other cursor move.
-    if (k.alt() and (eq(u8, k.key, "up") or eq(u8, k.key, "down"))) {
+    if (k.alt() and (k.key == .up or k.key == .down)) {
         self.closeCompletion();
         return false;
     }
-    if (eq(u8, k.key, "down") or (ctrl and eq(u8, k.key, "n"))) {
+    if (k.key == .down or (ctrl and k.key == .n)) {
         m.move(1, rows);
-    } else if (eq(u8, k.key, "up") or (ctrl and eq(u8, k.key, "p"))) {
+    } else if (k.key == .up or (ctrl and k.key == .p)) {
         m.move(-1, rows);
-    } else if (eq(u8, k.key, "page_down")) {
+    } else if (k.key == .page_down) {
         m.move(@intCast(rows), rows);
-    } else if (eq(u8, k.key, "page_up")) {
+    } else if (k.key == .page_up) {
         m.move(-@as(i64, @intCast(rows)), rows);
-    } else if (!ctrl and (eq(u8, k.key, "tab") or eq(u8, k.key, "enter") or eq(u8, k.key, "kp_enter"))) {
+    } else if (!ctrl and (k.key == .tab or k.key == .enter or k.key == .kp_enter)) {
         try self.acceptCompletion();
         return true;
-    } else if (eq(u8, k.key, "escape")) {
+    } else if (k.key == .escape) {
         self.closeCompletion();
         return true;
     } else {
-        if (eq(u8, k.key, "left") or eq(u8, k.key, "right") or
-            eq(u8, k.key, "home") or eq(u8, k.key, "end"))
+        if (k.key == .left or k.key == .right or
+            k.key == .home or k.key == .end)
         {
             self.closeCompletion();
         }

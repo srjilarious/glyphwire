@@ -412,7 +412,7 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
     ;
     const press_result = try d.handle(alloc, press_msg);
     try testz.expectTrue(press_result.response == null);
-    try testz.expectTrue(session.input.isKeyDown("a"));
+    try testz.expectTrue(session.input.isKeyDown(.a));
 
     const broadcast = press_result.broadcast.?;
     defer alloc.free(broadcast.body);
@@ -428,7 +428,7 @@ pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.m
         \\{"jsonrpc":"2.0","method":"report_key","params":{"key":"a","pressed":false}}
     ;
     const release_result = try d.handle(alloc, release_msg);
-    try testz.expectTrue(!session.input.isKeyDown("a"));
+    try testz.expectTrue(!session.input.isKeyDown(.a));
     const release_broadcast = release_result.broadcast.?;
     defer alloc.free(release_broadcast.body);
     try expectPushHas(alloc, release_broadcast.body, "key_up");
@@ -4532,7 +4532,7 @@ pub fn setWindowPrefixRequiresTheRoleAndRegistersTheChordTest(io: std.Io, alloc:
         \\{"jsonrpc":"2.0","method":"set_window_prefix","params":{"key":"a","ctrl":true}}
     );
     try testz.expectTrue(session.window_prefix != null);
-    try testz.expectEqualStr(session.window_prefix.?.key(), "a");
+    try testz.expectEqual(session.window_prefix.?.key, .a);
     try testz.expectTrue(session.window_prefix.?.ctrl);
 
     // Clearing it re-arms nothing.
@@ -4596,7 +4596,7 @@ pub fn sendWindowPrefixDeliversTheChordAsAKeystrokeTest(io: std.Io, alloc: std.m
     // Synthetic: the prefix stays disarmed and nothing is held down.
     try testz.expectFalse(session.prefix_armed);
     try testz.expectFalse(session.mods.ctrl);
-    try testz.expectEqual(session.swallowed_key_len, 0);
+    try testz.expectTrue(session.swallowed_key == null);
 }
 
 pub fn spawnInPaneWithoutASpawnerIsUnsupportedTest(io: std.Io, alloc: std.mem.Allocator) !void {

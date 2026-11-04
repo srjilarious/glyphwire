@@ -507,10 +507,10 @@ pub fn ptyMods(mods: glyphwire.Mods) keyencode.Mods {
 /// The primary mouse button currently held, or null if none -- used to
 /// decide whether `?1002` (motion only while dragging) should report, and
 /// which button to name in the report.
-fn heldMouseButton(listener: *glyphwire.InputListener) ?keyencode.MouseButton {
-    if (listener.isMouseButtonDown("left")) return .left;
-    if (listener.isMouseButtonDown("middle")) return .middle;
-    if (listener.isMouseButtonDown("right")) return .right;
+fn heldMouseButton(listener: *glyphwire.InputListener) ?keyencode.ReportButton {
+    if (listener.isMouseButtonDown(.left)) return .left;
+    if (listener.isMouseButtonDown(.middle)) return .middle;
+    if (listener.isMouseButtonDown(.right)) return .right;
     return null;
 }
 
@@ -524,7 +524,7 @@ fn heldMouseButton(listener: *glyphwire.InputListener) ?keyencode.MouseButton {
 pub fn ptyMouseButton(pty: *Pty, modes: *ModeTracker, mev: glyphwire.MouseButtonEvent, origin: glyphwire.CellPos) void {
     if (!modes.mouseReporting()) return;
     const enc: keyencode.MouseEncoding = if (modes.sgrMouse()) .sgr else .legacy;
-    const btn = keyencode.mouseButtonFromName(mev.button) orelse return;
+    const btn = keyencode.reportButton(mev.button) orelse return;
     // A wheel notch is a press alone in xterm's reports; the release the
     // host pairs it with is only there to keep the button state balanced.
     if (!mev.pressed and (btn == .wheel_up or btn == .wheel_down)) return;
@@ -541,7 +541,7 @@ pub fn ptyMouseMove(listener: *glyphwire.InputListener, pty: *Pty, modes: *ModeT
     // `?1002` reports motion only while a button is held; `?1003`
     // reports it with a "no button" code the rest of the time.
     const btn = heldMouseButton(listener) orelse
-        (if (modes.wantsAnyMotion()) keyencode.MouseButton.none else return);
+        (if (modes.wantsAnyMotion()) keyencode.ReportButton.none else return);
     var buf: [16]u8 = undefined;
     if (keyencode.encodeMouse(enc, btn, .motion, mev.cell.col -| origin.col, mev.cell.row -| origin.row, ptyMods(mev.mods), &buf)) |seq|
         pty.writeAll(seq);
@@ -581,7 +581,7 @@ fn promptIdleTick(prompt: *Prompt) bool {
 /// targeted action, not something that should be gated on browse state
 /// the way keyboard Enter is.
 fn promptClick(prompt: *Prompt, mev: glyphwire.MouseButtonEvent) !void {
-    if (!mev.pressed or !std.mem.eql(u8, mev.button, "left")) return;
+    if (!mev.pressed or mev.button != .left) return;
     // Every cell the host reports is a cell of the *context*, so embedded
     // it has to be brought into the panel's own frame first -- see
     // `surfaceCell`.
@@ -874,7 +874,6 @@ fn promptEventLoop(prompt: *Prompt, io: std.Io, alloc: std.mem.Allocator, listen
             if (prompt.should_exit) return;
             continue;
         };
-        defer alloc.free(ev.key);
         if (!ev.pressed) continue; // only key-down drives the prompt
         try handlePromptKey(prompt, ev);
         if (prompt.should_exit) return; // "exit" was typed -- see submitLine
@@ -995,8 +994,7 @@ fn takeKeyEvent(prompt: *Prompt, alloc: std.mem.Allocator, input_ev: glyphwire.E
         },
         // A window manager's own commands (see `Event.window_key`).
         // Never delivered here: this program is not one.
-        .window_key => |kev| {
-            alloc.free(kev.key);
+        .window_key => {
             return null;
         },
         .window_text => |tev| {
@@ -1028,7 +1026,7 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
     // does nothing here. Read off the event, as it was pressed.
     const ctrl = ev.ctrl();
     const alt = ev.alt();
-    if (std.mem.eql(u8, ev.key, "enter")) {
+    if (ev.key == .enter) {
         // The completion picker takes priority over both browsing and
         // submitting -- accepting the highlighted candidate completes
         // the word, it doesn't run the line.
@@ -1045,7 +1043,7 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         } else {
             try prompt.submitLine();
         }
-    } else if (std.mem.eql(u8, ev.key, "escape")) {
+    } else if (ev.key == .escape) {
         // The explicit "never mind" key. The picker, if open, is
         // dismissed first (leaving whatever's already typed); then, if
         // entries are marked, the first Escape just clears the marks
@@ -1060,13 +1058,13 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         } else {
             try prompt.setCursorAt(prompt.line.caret);
         }
-    } else if (std.mem.eql(u8, ev.key, "space")) {
+    } else if (ev.key == .space) {
         // Space while browsing a listing toggles the entry under the
         // cursor in the multi-select mark set (Ctrl+click does the
         // same with the mouse). Ignored off the browse path -- a
         // literal space on the live line comes from the `.text` stream.
         if (prompt.browse_pos) |bp| try prompt.toggleHighlightAt(bp.row, bp.col, prompt.view_scroll);
-    } else if (std.mem.eql(u8, ev.key, "tab")) {
+    } else if (ev.key == .tab) {
         // Tab cycles the picker's selection forward when it's open
         // (zsh menu-select style, alongside Down); otherwise it follows
         // a showing inline hint (`completeAlongHint`: a path a segment
@@ -1078,62 +1076,62 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         } else if (prompt.browse_pos == null) {
             if (!try prompt.completeAlongHint()) try prompt.doComplete();
         }
-    } else if (ctrl and std.mem.eql(u8, ev.key, "backspace")) {
+    } else if (ctrl and ev.key == .backspace) {
         // Bash's Ctrl+Backspace/Ctrl+Delete (unix-word-rubout /
         // kill-word), stopping at the same class boundaries as
         // Ctrl+Left/Right below rather than bash's whitespace-only
         // rule -- see `deleteWordBackward`'s doc comment.
         try prompt.deleteWordBackward();
-    } else if (ctrl and std.mem.eql(u8, ev.key, "delete")) {
+    } else if (ctrl and ev.key == .delete) {
         try prompt.deleteWordForward();
-    } else if (std.mem.eql(u8, ev.key, "backspace")) {
+    } else if (ev.key == .backspace) {
         try prompt.deleteBackward();
-    } else if (std.mem.eql(u8, ev.key, "delete")) {
+    } else if (ev.key == .delete) {
         try prompt.deleteForward();
-    } else if (std.mem.eql(u8, ev.key, "home") and prompt.browse_pos != null) {
+    } else if (ev.key == .home and prompt.browse_pos != null) {
         // Home/End while browsing act on the scrollback row the browse
         // cursor is on (column 0 / just past its last non-blank cell),
         // staying in browse mode -- unlike ctrl+a / ctrl+e, which
         // still snap back to the live prompt in every state.
         try prompt.browseHome();
-    } else if (std.mem.eql(u8, ev.key, "end") and prompt.browse_pos != null) {
+    } else if (ev.key == .end and prompt.browse_pos != null) {
         try prompt.browseEnd();
-    } else if ((ctrl and std.mem.eql(u8, ev.key, "a")) or std.mem.eql(u8, ev.key, "home")) {
+    } else if ((ctrl and ev.key == .a) or ev.key == .home) {
         // On the live line Home mirrors ctrl+a (go to the start of the
         // caret's line -- the whole buffer's start on a one-line
         // command); via `moveCursorTo` -> `setCursorAt` it also ends
         // any browse and snaps the view back to the live tail.
         try prompt.moveCursorTo(lineedit.lineStartFrom(prompt.line.text(), prompt.line.caret));
-    } else if ((ctrl and std.mem.eql(u8, ev.key, "e")) or std.mem.eql(u8, ev.key, "end")) {
+    } else if ((ctrl and ev.key == .e) or ev.key == .end) {
         // End mirrors ctrl+e on the live line; the browse-mode form is
         // handled above. Already at the end with a dim suggestion
         // showing, it takes the suggestion instead (fish).
         if (!prompt.acceptCompletionHint()) {
             try prompt.moveCursorTo(lineedit.lineEndFrom(prompt.line.text(), prompt.line.caret));
         }
-    } else if (ctrl and std.mem.eql(u8, ev.key, "u")) {
+    } else if (ctrl and ev.key == .u) {
         try prompt.killToStart();
-    } else if (ctrl and std.mem.eql(u8, ev.key, "k")) {
+    } else if (ctrl and ev.key == .k) {
         // readline's kill-line, the mirror of ctrl+u -- the shared
         // field has it, so the prompt may as well bind it.
         try prompt.killToEnd();
-    } else if (ctrl and std.mem.eql(u8, ev.key, "l")) {
+    } else if (ctrl and ev.key == .l) {
         try prompt.clearScreen();
-    } else if (ctrl and std.mem.eql(u8, ev.key, "r")) {
+    } else if (ctrl and ev.key == .r) {
         try prompt.historySearch();
-    } else if (alt and std.mem.eql(u8, ev.key, "d")) {
+    } else if (alt and ev.key == .d) {
         // Drops `cd <cwd>` onto the line to be edited into the
         // directory you actually want -- see `cdCwdLine`.
         try prompt.cdCwdLine();
-    } else if (alt and std.mem.eql(u8, ev.key, "c")) {
+    } else if (alt and ev.key == .c) {
         // fzf's chord for "cd into a directory I pick" -- see
         // `dirSearch`.
         try prompt.dirSearch();
-    } else if (alt and std.mem.eql(u8, ev.key, "up")) {
+    } else if (alt and ev.key == .up) {
         // Up a directory, salacommander's chord for its parent dir --
         // see `cdParentDir`. Ahead of plain Up, which ignores modifiers.
         try prompt.cdParentDir();
-    } else if (ctrl and std.mem.eql(u8, ev.key, "left")) {
+    } else if (ctrl and ev.key == .left) {
         // While browsing, ctrl+left/right is a bigger horizontal step
         // (`scrollback_jump` columns), mirroring ctrl+up/down's row
         // jump -- it does not snap back to the prompt. On the live
@@ -1144,7 +1142,7 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         } else {
             try prompt.moveCursorTo(prompt.wordLeft());
         }
-    } else if (ctrl and std.mem.eql(u8, ev.key, "right")) {
+    } else if (ctrl and ev.key == .right) {
         // At the end of the line with a suggestion showing it takes the
         // suggestion's next word, fish's partial accept.
         if (prompt.browse_pos != null) {
@@ -1152,7 +1150,7 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         } else if (!try prompt.acceptCompletionHintWord()) {
             try prompt.moveCursorTo(prompt.wordRight());
         }
-    } else if (ctrl and std.mem.eql(u8, ev.key, "up")) {
+    } else if (ctrl and ev.key == .up) {
         // The picker (if open) takes priority over browse mode too --
         // Ctrl+Up/Down move the selection exactly like plain Up/Down
         // do below rather than jumping by `scrollback_jump`, since the
@@ -1168,7 +1166,7 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         } else {
             try prompt.browseUp(1);
         }
-    } else if (ctrl and std.mem.eql(u8, ev.key, "down")) {
+    } else if (ctrl and ev.key == .down) {
         // The mirror jump while browsing. At the live prompt there's
         // nothing below the input line, so Ctrl+Down does nothing.
         if (prompt.completion_picker != null) {
@@ -1176,7 +1174,7 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         } else if (prompt.browse_pos != null) {
             try prompt.browseDown(prompt.scrollbackJumpRows());
         }
-    } else if (ctrl and std.mem.eql(u8, ev.key, "page_up")) {
+    } else if (ctrl and ev.key == .page_up) {
         // Ctrl+PgUp jumps the cursor to the previous metadata-id
         // span's landing cell (a gw-ls entry, say) -- the span's
         // focus cell if it named one, which is how a `gw-ls -l` row
@@ -1184,11 +1182,11 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         // else its first visible character. Enters scrollback browse
         // mode from the live prompt if needed.
         try prompt.metadataJump(.prev);
-    } else if (ctrl and std.mem.eql(u8, ev.key, "page_down")) {
+    } else if (ctrl and ev.key == .page_down) {
         // The mirror toward the live tail. A no-op at the live prompt
         // (nothing tagged below the input line).
         try prompt.metadataJump(.next);
-    } else if (std.mem.eql(u8, ev.key, "up")) {
+    } else if (ev.key == .up) {
         // Moves the picker's selection when it's open. Otherwise plain
         // Up is readline-style history recall at the prompt, a
         // one-row browse step while already in scrollback mode.
@@ -1203,7 +1201,7 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         } else {
             try prompt.historyUp();
         }
-    } else if (std.mem.eql(u8, ev.key, "down")) {
+    } else if (ev.key == .down) {
         if (prompt.completion_picker != null) {
             try prompt.moveCompletionPicker(1);
         } else if (prompt.browse_pos != null) {
@@ -1213,7 +1211,7 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
         } else {
             try prompt.historyDown();
         }
-    } else if (std.mem.eql(u8, ev.key, "left")) {
+    } else if (ev.key == .left) {
         // Not explicitly asked for, but needed alongside ctrl+left/
         // right: without plain single-character movement too, the
         // caret (drawn by glyphwire-host wherever the raw grid cursor
@@ -1230,7 +1228,7 @@ fn handlePromptKey(prompt: *Prompt, ev: glyphwire.KeyEvent) !void {
             // three bytes but one cursor stop (see `lineedit`).
             try prompt.moveCursorTo(prompt.line.prevOffset());
         }
-    } else if (std.mem.eql(u8, ev.key, "right")) {
+    } else if (ev.key == .right) {
         if (prompt.browse_pos != null) {
             try prompt.browseRight(1);
         } else if (prompt.completion_picker == null and prompt.line.caret == prompt.line.text().len) {
@@ -3824,15 +3822,14 @@ pub const Prompt = struct {
             // Never delivered here: this program is not one.
             .window_key, .window_text => return false,
             .key => |kev| {
-                defer alloc.free(kev.key);
                 if (!kev.pressed) return false;
                 if (self.isKillJobKey(kev)) {
                     if (stop.press(now_ms)) |sig| sp.signal(jobstop.posixSignal(sig));
                     return false;
                 }
                 const ctrl = kev.ctrl();
-                if (ctrl and std.mem.eql(u8, kev.key, "c")) return true;
-                if (ctrl and std.mem.eql(u8, kev.key, "d")) {
+                if (ctrl and kev.key == .c) return true;
+                if (ctrl and kev.key == .d) {
                     if (sp.stdin_w >= 0) {
                         _ = c.close(sp.stdin_w);
                         sp.stdin_w = -1;
@@ -3841,7 +3838,7 @@ pub const Prompt = struct {
                 }
                 const mods = ptyMods(kev.mods);
                 // A plain printable key already arrived as `.text`.
-                if (!mods.ctrl and !mods.alt and keyencode.charFromKeyName(kev.key, false) != null)
+                if (!mods.ctrl and !mods.alt and keyencode.charFromKey(kev.key, false) != null)
                     return false;
                 var kb: [8]u8 = undefined;
                 if (keyencode.toPtyBytes(kev.key, mods, .normal, &kb)) |seq| {
@@ -3862,10 +3859,9 @@ pub const Prompt = struct {
         var hit = false;
         while (self.nextInput(listener, null)) |iev| switch (iev) {
             .key => |kev| {
-                defer self.client.alloc.free(kev.key);
                 if (self.isKillJobKey(kev)) {
                     if (stop.press(now_ms)) |sig| sp.signal(jobstop.posixSignal(sig));
-                } else if (kev.pressed and kev.ctrl() and std.mem.eql(u8, kev.key, "c"))
+                } else if (kev.pressed and kev.ctrl() and kev.key == .c)
                     hit = true;
             },
             .text => |tev| self.client.alloc.free(tev.text),
@@ -3877,7 +3873,7 @@ pub const Prompt = struct {
             },
             // A window manager's own commands (see `Event.window_key`).
             // Never delivered here: this program is not one.
-            .window_key => |kev| self.client.alloc.free(kev.key),
+            .window_key => {},
             .window_text => |tev| self.client.alloc.free(tev.text),
             // Not input (`Event.isInput`): `nextInput` never returns one.
             else => {},
@@ -4352,8 +4348,7 @@ fn hookPollInterrupt(ctx: *anyopaque) bool {
     var hit = false;
     while (self.nextInput(listener, null)) |iev| switch (iev) {
         .key => |kev| {
-            defer self.client.alloc.free(kev.key);
-            if (kev.pressed and kev.ctrl() and std.mem.eql(u8, kev.key, "c"))
+            if (kev.pressed and kev.ctrl() and kev.key == .c)
                 hit = true;
         },
         .text => |tev| self.client.alloc.free(tev.text),

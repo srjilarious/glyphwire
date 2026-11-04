@@ -25,34 +25,33 @@ const role = ui.role;
 /// Tab always, and with the popup up the keys that drive it. Returns
 /// whether the key was taken. See `zoe/pathmenu.zig`.
 pub fn cmdlineKey(self: *Ui, k: glyphwire.KeyEvent) !bool {
-    const eq = std.mem.eql;
     const key = k.key;
     if (self.path_menu) |*m| {
         const rows = self.pathMenuRows();
-        if ((eq(u8, key, "tab") and !k.mods.shift) or eq(u8, key, "down")) {
+        if ((key == .tab and !k.mods.shift) or key == .down) {
             m.move(1, rows);
             self.popups.path_menu.dirty = true;
             return true;
         }
-        if ((eq(u8, key, "tab") and k.mods.shift) or eq(u8, key, "up")) {
+        if ((key == .tab and k.mods.shift) or key == .up) {
             m.move(-1, rows);
             self.popups.path_menu.dirty = true;
             return true;
         }
         // Enter takes the pick into the line; it never runs the
         // command, so a pick can still be edited or Tab'd further.
-        if (eq(u8, key, "enter")) {
+        if (key == .enter) {
             try self.acceptPathPick();
             return true;
         }
         // Escape closes the popup and leaves the `:` line as it is.
-        if (eq(u8, key, "escape")) {
+        if (key == .escape) {
             self.closePathMenu();
             return true;
         }
         return false;
     }
-    if (eq(u8, key, "tab") and !k.mods.ctrl and !k.mods.alt) {
+    if (key == .tab and !k.mods.ctrl and !k.mods.alt) {
         try self.completePath();
         return true;
     }

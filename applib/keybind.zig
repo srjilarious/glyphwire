@@ -10,10 +10,10 @@
 //!
 //! Chord text is `mod+mod+key`, case-insensitive. Modifiers are `ctrl`
 //! (`control`), `alt` (`meta`, `opt`), `shift` and `super` (`cmd`,
-//! `win`). The key is a glyphwire key name -- the host's `Key` enum
-//! spelled as its tag (`up`, `page_down`, `insert`, `F5`, `kp_add`) --
-//! or one of the friendlier aliases `normalizeKey` accepts (`esc`,
-//! `pgdn`, `del`, `1`, `-`, ...). A chord matches only when its modifier
+//! `win`). The key is a `glyphwire.Key` spelled as its tag, any case
+//! (`up`, `page_down`, `insert`, `F5`, `kp_add`), or one of the
+//! friendlier aliases `normalizeKey` accepts (`esc`, `pgdn`, `del`, `1`,
+//! `-`, ...); a name that is neither fails to parse (`UnknownKey`). A chord matches only when its modifier
 //! set is exactly the event's, so `F5` and `shift+F5` are different
 //! bindings.
 //!
@@ -34,42 +34,54 @@ const glyphwire = @import("glyphwire");
 
 pub const Mods = glyphwire.Mods;
 
-/// Longest key name a chord stores. The longest real one is
-/// `grave_accent`/`print_screen`; this leaves room for a key glyphwire
-/// grows later.
-pub const max_key_len = 24;
+pub const Key = glyphwire.Key;
+
+/// Longest typed character a chord stores: one codepoint, so four bytes
+/// of UTF-8 is the real bound.
+pub const max_typed_len = 4;
 
 pub const ParseError = error{
     EmptyChord,
     UnknownModifier,
-    KeyNameTooLong,
+    /// The key part names no `glyphwire.Key` (after the aliases). A typo
+    /// in a config is reported at load rather than binding a chord that
+    /// can never fire.
+    UnknownKey,
 };
 
 pub const Chord = struct {
-    key_buf: [max_key_len]u8 = undefined,
-    key_len: u8 = 0,
+    /// The key, for a key chord. `unknown` for a `text` chord.
+    key: Key = .unknown,
     mods: Mods = .{},
-    /// A typed character rather than a key: `key()` is the character
+    /// A typed character rather than a key: `typed()` is the character
     /// itself, case and all, and `mods` is empty. See the module doc.
     text: bool = false,
+    typed_buf: [max_typed_len]u8 = undefined,
+    typed_len: u8 = 0,
 
-    /// The chord's key name, lower-cased and normalized (`"page_up"`,
-    /// `"f5"`), or for a `text` chord the character (`"?"`, `"H"`).
-    pub fn key(self: *const Chord) []const u8 {
-        return self.key_buf[0..self.key_len];
+    /// A `text` chord's character (`"?"`, `"H"`); empty for a key chord.
+    pub fn typed(self: *const Chord) []const u8 {
+        return self.typed_buf[0..self.typed_len];
+    }
+
+    /// What the chord is bound to, as text: the key's wire name
+    /// (`"page_up"`, `"F5"`) or a `text` chord's character. For sorting
+    /// and messages; `format` is the on-screen spelling.
+    pub fn name(self: *const Chord) []const u8 {
+        return if (self.text) self.typed() else self.key.name();
     }
 
     /// Parses chord text such as `"ctrl+shift+F5"`. The last `+`-separated
     /// part is the key; every earlier part must be a modifier. A lone
     /// typed-character spelling (`"?"`, `"H"`) is a `text` chord.
-    pub fn parse(text: []const u8) ParseError!Chord {
-        const trimmed = std.mem.trim(u8, text, " \t");
+    pub fn parse(chord_text: []const u8) ParseError!Chord {
+        const trimmed = std.mem.trim(u8, chord_text, " \t");
         if (trimmed.len == 0) return error.EmptyChord;
         if (isTypedChar(trimmed)) {
-            var typed: Chord = .{ .text = true };
-            @memcpy(typed.key_buf[0..trimmed.len], trimmed);
-            typed.key_len = @intCast(trimmed.len);
-            return typed;
+            var typed_chord: Chord = .{ .text = true };
+            @memcpy(typed_chord.typed_buf[0..trimmed.len], trimmed);
+            typed_chord.typed_len = @intCast(trimmed.len);
+            return typed_chord;
         }
 
         var chord: Chord = .{};
@@ -96,31 +108,24 @@ pub const Chord = struct {
         }
         key_part = std.mem.trim(u8, key_part, " \t");
         if (key_part.len == 0) return error.EmptyChord;
-
-        var lower_buf: [max_key_len]u8 = undefined;
-        if (key_part.len > lower_buf.len) return error.KeyNameTooLong;
-        const lower = std.ascii.lowerString(&lower_buf, key_part);
-        const name = normalizeKey(lower);
-        if (name.len > max_key_len) return error.KeyNameTooLong;
-        @memcpy(chord.key_buf[0..name.len], name);
-        chord.key_len = @intCast(name.len);
+        chord.key = keyFromName(key_part) orelse return error.UnknownKey;
         return chord;
     }
 
-    /// True when a key event with this `key_name` and `mods` is this chord.
-    /// `key_name` is compared case-insensitively, since the host spells
-    /// function keys `F5` while chords are stored lower-case.
-    pub fn matches(self: *const Chord, key_name: []const u8, mods: Mods) bool {
-        return !self.text and std.ascii.eqlIgnoreCase(self.key(), key_name) and std.meta.eql(self.mods, mods);
+    /// True when a key event of `key` with `mods` is this chord.
+    pub fn matches(self: *const Chord, key: Key, mods: Mods) bool {
+        return !self.text and key != .unknown and self.key == key and std.meta.eql(self.mods, mods);
     }
 
-    /// True when a `text` event of exactly `typed` is this chord.
-    pub fn matchesText(self: *const Chord, typed: []const u8) bool {
-        return self.text and std.mem.eql(u8, self.key(), typed);
+    /// True when a `text` event of exactly `typed_text` is this chord.
+    pub fn matchesText(self: *const Chord, typed_text: []const u8) bool {
+        return self.text and std.mem.eql(u8, self.typed(), typed_text);
     }
 
     pub fn eql(self: *const Chord, other: *const Chord) bool {
-        return self.text == other.text and std.mem.eql(u8, self.key(), other.key()) and std.meta.eql(self.mods, other.mods);
+        if (self.text != other.text) return false;
+        if (self.text) return std.mem.eql(u8, self.typed(), other.typed());
+        return self.key == other.key and std.meta.eql(self.mods, other.mods);
     }
 
     /// The chord as text, for a help line or a function-key bar:
@@ -129,14 +134,14 @@ pub const Chord = struct {
     pub fn format(self: *const Chord, buf: []u8) []const u8 {
         var w: std.Io.Writer = .fixed(buf);
         if (self.text) {
-            w.writeAll(self.key()) catch {};
+            w.writeAll(self.typed()) catch {};
             return buf[0..w.end];
         }
         if (self.mods.ctrl) w.writeAll("Ctrl+") catch return buf[0..w.end];
         if (self.mods.alt) w.writeAll("Alt+") catch return buf[0..w.end];
         if (self.mods.shift) w.writeAll("Shift+") catch return buf[0..w.end];
         if (self.mods.super) w.writeAll("Super+") catch return buf[0..w.end];
-        for (self.key(), 0..) |c, i| {
+        for (self.key.name(), 0..) |c, i| {
             const out: u8 = if (c == '_') ' ' else if (i == 0) std.ascii.toUpper(c) else c;
             w.writeByte(out) catch break;
         }
@@ -144,13 +149,27 @@ pub const Chord = struct {
     }
 };
 
+/// The key a chord's key part names: an alias (`normalizeKey`) or a
+/// `glyphwire.Key` tag, either case-insensitively (`f5` finds `F5`).
+/// Null when it names neither.
+pub fn keyFromName(spelled: []const u8) ?Key {
+    var lower_buf: [32]u8 = undefined;
+    if (spelled.len > lower_buf.len) return null;
+    const lower = std.ascii.lowerString(&lower_buf, spelled);
+    const wire = normalizeKey(lower);
+    inline for (@typeInfo(Key).@"enum".field_names) |field| {
+        if (!std.mem.eql(u8, field, "unknown") and std.ascii.eqlIgnoreCase(field, wire)) return @field(Key, field);
+    }
+    return null;
+}
+
 /// Whether `s` alone spells a typed character rather than a key: one
 /// codepoint that is ASCII punctuation, an uppercase letter, or anything
 /// non-ASCII. `+` counts when it is the whole string; after a modifier
 /// it is still the separator (`ctrl++` doesn't parse).
 fn isTypedChar(s: []const u8) bool {
     const len = std.unicode.utf8ByteSequenceLength(s[0]) catch return false;
-    if (len != s.len or len > max_key_len) return false;
+    if (len != s.len or len > max_typed_len) return false;
     if (len > 1) return std.unicode.utf8ValidateSlice(s);
     const c = s[0];
     return std.ascii.isUpper(c) or (std.ascii.isPrint(c) and !std.ascii.isAlphanumeric(c) and c != ' ');
@@ -163,9 +182,9 @@ fn eqlAny(s: []const u8, options: []const []const u8) bool {
     return false;
 }
 
-/// Maps a lower-cased key alias onto the glyphwire key name the host
-/// actually sends. Anything unlisted passes through, so a key the host
-/// grows later needs no entry here.
+/// Maps a lower-cased key alias onto the glyphwire key name it stands
+/// for. Anything unlisted passes through unchanged for `keyFromName` to
+/// look up as a `Key` tag.
 pub fn normalizeKey(lower: []const u8) []const u8 {
     const aliases = [_]struct { from: []const u8, to: []const u8 }{
         .{ .from = "esc", .to = "escape" },
@@ -284,9 +303,9 @@ pub fn Keymap(comptime Action: type) type {
         }
 
         /// The action a key event means, if any.
-        pub fn lookup(self: *const Self, key_name: []const u8, mods: Mods) ?Action {
+        pub fn lookup(self: *const Self, key: Key, mods: Mods) ?Action {
             for (self.bindings.items) |*b| {
-                if (b.chord.matches(key_name, mods)) return b.action;
+                if (b.chord.matches(key, mods)) return b.action;
             }
             return null;
         }
@@ -393,10 +412,10 @@ pub fn Scoped(
 
         /// The action a key means in `scope`: its own table's binding,
         /// else the nearest parent's. Null when none binds it.
-        pub fn lookup(self: *const Self, scope: Scope, key_name: []const u8, mods: Mods) ?Action {
+        pub fn lookup(self: *const Self, scope: Scope, key: Key, mods: Mods) ?Action {
             var s: ?Scope = scope;
             while (s) |cur| : (s = parent(cur)) {
-                if (self.tables.getPtrConst(cur).lookup(key_name, mods)) |a| return a;
+                if (self.tables.getPtrConst(cur).lookup(key, mods)) |a| return a;
             }
             return null;
         }
@@ -420,9 +439,9 @@ pub fn Scoped(
                 for (self.tables.getPtrConst(cur).bindings.items) |*b| {
                     if (b.action != action) continue;
                     const resolved = if (b.chord.text)
-                        self.lookupText(scope, b.chord.key())
+                        self.lookupText(scope, b.chord.typed())
                     else
-                        self.lookup(scope, b.chord.key(), b.chord.mods);
+                        self.lookup(scope, b.chord.key, b.chord.mods);
                     if (resolved == action) return b.chord;
                 }
             }

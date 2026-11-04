@@ -91,14 +91,11 @@ pub fn clampTreeScroll(self: *Ui) void {
 /// `escape` is deliberately absent: while a search is up
 /// `findKey` has already taken it, and with no search there is
 /// nothing to cancel.
-pub fn endsTreeSearch(key: []const u8) bool {
-    const commands = [_][]const u8{
-        "down", "up", "page_down", "page_up", "home", "end", "enter",
+pub fn endsTreeSearch(key: glyphwire.Key) bool {
+    return switch (key) {
+        .down, .up, .page_down, .page_up, .home, .end, .enter => true,
+        else => false,
     };
-    for (commands) |c| {
-        if (std.mem.eql(u8, key, c)) return true;
-    }
-    return false;
 }
 
 pub fn treeKey(self: *Ui, ev: glyphwire.KeyEvent) !void {
@@ -116,26 +113,25 @@ pub fn treeKey(self: *Ui, ev: glyphwire.KeyEvent) !void {
     // stops describing where the cursor is. Gated on the command set
     // rather than on "anything findKey didn't want", which is the
     // distinction `endsTreeSearch` exists to make.
-    const eq = std.mem.eql;
     const key = ev.key;
     if (endsTreeSearch(key)) self.cancelFind();
 
-    if (eq(u8, key, "down")) self.treeMove(1);
-    if (eq(u8, key, "up")) self.treeMove(-1);
-    if (eq(u8, key, "page_down")) self.treeMove(@intCast(self.treePageRows()));
-    if (eq(u8, key, "page_up")) self.treeMove(-@as(i64, @intCast(self.treePageRows())));
-    if (eq(u8, key, "home")) self.treeGoto(0);
-    if (eq(u8, key, "end")) self.treeGoto(self.tree.len() -| 1);
-    if (eq(u8, key, "enter")) try self.treeActivate();
-    if (eq(u8, key, "escape")) self.setFocus(.buffer);
+    if (key == .down) self.treeMove(1);
+    if (key == .up) self.treeMove(-1);
+    if (key == .page_down) self.treeMove(@intCast(self.treePageRows()));
+    if (key == .page_up) self.treeMove(-@as(i64, @intCast(self.treePageRows())));
+    if (key == .home) self.treeGoto(0);
+    if (key == .end) self.treeGoto(self.tree.len() -| 1);
+    if (key == .enter) try self.treeActivate();
+    if (key == .escape) self.setFocus(.buffer);
     // salacommander's keys for the same three, alongside `a` and `r`
     // (`treeText`): F2 renames, F7 makes a directory, Shift+F4 a file.
-    if (eq(u8, key, "F2")) try self.startTreeRename();
-    if (eq(u8, key, "F7")) try self.startTreeCreate(.create_dir);
-    if (eq(u8, key, "F4") and ev.mods.shift) try self.startTreeCreate(.create);
+    if (key == .F2) try self.startTreeRename();
+    if (key == .F7) try self.startTreeCreate(.create_dir);
+    if (key == .F4 and ev.mods.shift) try self.startTreeCreate(.create);
     // And its delete pair, alongside `d` and `D`: F8 to the trash,
     // Shift+F8 for good.
-    if (eq(u8, key, "F8")) try self.startTreeAsk(if (ev.mods.shift) .delete else .trash);
+    if (key == .F8) try self.startTreeAsk(if (ev.mods.shift) .delete else .trash);
 }
 
 /// How far Page Up / Page Down move in the tree: `tree_page_lines`
@@ -735,9 +731,9 @@ pub fn cancelTreeAsk(self: *Ui) void {
 /// answers no here. Cancelling on any other key would let its text half
 /// through to the tree as a command (`space` opening the entry).
 pub fn treeAskKey(self: *Ui, ev: glyphwire.KeyEvent) !void {
-    const no = [_][]const u8{ "escape", "tab", "backspace", "delete" };
-    for (no) |k| {
-        if (std.mem.eql(u8, ev.key, k)) return self.cancelTreeAsk();
+    switch (ev.key) {
+        .escape, .tab, .backspace, .delete => return self.cancelTreeAsk(),
+        else => {},
     }
     if (endsTreeSearch(ev.key)) self.cancelTreeAsk();
 }
@@ -814,29 +810,28 @@ pub fn cancelFind(self: *Ui) void {
 /// A named key while a search is up. Returns true when the search
 /// consumed it, false to let the ordinary tree bindings have it.
 pub fn findKey(self: *Ui, ev: glyphwire.KeyEvent) !bool {
-    const eq = std.mem.eql;
     const f = &self.find.?;
 
-    if (eq(u8, ev.key, "escape")) {
+    if (ev.key == .escape) {
         // The cursor stays where the search put it, and so does any
         // folder the search opened to get there: an abandoned search
         // has still told you where the file is.
         self.cancelFind();
         return true;
     }
-    if (eq(u8, ev.key, "enter")) {
+    if (ev.key == .enter) {
         self.cancelFind();
         try self.treeActivate();
         return true;
     }
-    if (eq(u8, ev.key, "tab")) {
+    if (ev.key == .tab) {
         if (f.hits.items.len == 0) return true;
         const n = f.hits.items.len;
         f.pick = if (ev.shift()) (f.pick + n - 1) % n else (f.pick + 1) % n;
         try self.applyFind();
         return true;
     }
-    if (eq(u8, ev.key, "backspace")) {
+    if (ev.key == .backspace) {
         if (f.query.items.len == 0) {
             self.cancelFind();
             return true;

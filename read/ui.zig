@@ -2461,15 +2461,14 @@ pub const Ui = struct {
 
     fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
         const key = k.key;
-        const eq = std.mem.eql;
         self.clearMessage();
 
         // The goto prompt swallows everything but its own control keys,
         // so a digit typed into it doesn't also page the book.
         if (self.pending == .goto_prompt) {
-            if (eq(u8, key, "enter") or eq(u8, key, "kp_enter")) return self.commitGoto();
-            if (eq(u8, key, "escape")) return self.cancelGoto();
-            if (eq(u8, key, "backspace")) {
+            if (key == .enter or key == .kp_enter) return self.commitGoto();
+            if (key == .escape) return self.cancelGoto();
+            if (key == .backspace) {
                 var prompt = &self.pending.goto_prompt;
                 if (prompt.items.len > 0) _ = prompt.pop();
                 self.status_dirty = true;
@@ -2482,7 +2481,7 @@ pub const Ui = struct {
         // first one only arms the prefix.
         if (self.pending == .goto_prefix) {
             self.pending = .none;
-            if (eq(u8, key, "g")) {
+            if (key == .g) {
                 self.goToPage(0);
                 return;
             }
@@ -2587,9 +2586,9 @@ pub const Ui = struct {
     /// The release half of a keystroke. Only the hold-to-peek key cares:
     /// everything else acts on the press and ignores this. Matched on the
     /// key alone, since the modifiers may have changed while it was held.
-    fn handleKeyRelease(self: *Ui, key: []const u8) !void {
+    fn handleKeyRelease(self: *Ui, key: glyphwire.Key) !void {
         for (self.keymaps.table(.page).bindings.items) |b| {
-            if (b.action == .peek and !b.chord.text and std.ascii.eqlIgnoreCase(b.chord.key(), key)) {
+            if (b.action == .peek and !b.chord.text and b.chord.key == key) {
                 return self.setPeek(false);
             }
         }
@@ -2792,7 +2791,7 @@ pub const Ui = struct {
     // ── Mouse ───────────────────────────────────────────────────────────
 
     fn handleMouseButton(self: *Ui, ev: glyphwire.MouseButtonEvent) !void {
-        if (!std.mem.eql(u8, ev.button, "left")) return;
+        if (ev.button != .left) return;
         // A card owns the button: the crop box takes the drag, and in the
         // preview a click on the page must not turn it or close the
         // dialog the card came from.

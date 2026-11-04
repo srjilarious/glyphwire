@@ -92,8 +92,8 @@ fn markJumpDirty(self: *Ui) void {
 /// every other key ends the jump and is swallowed.
 pub fn jumpKey(self: *Ui, k: glyphwire.KeyEvent) void {
     if (ui.isModifierKey(k.key)) return;
-    if (k.key.len == 1 and !k.ctrl() and !k.alt()) return;
-    if (std.mem.eql(u8, k.key, "backspace") and self.jump.?.back()) {
+    if (k.key.isLetter() and !k.ctrl() and !k.alt()) return;
+    if (k.key == .backspace and self.jump.?.back()) {
         markJumpDirty(self);
         return;
     }

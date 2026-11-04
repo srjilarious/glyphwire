@@ -4,6 +4,7 @@
 const std = @import("std");
 const sdl = @import("sdl3");
 const core = @import("core.zig");
+const glyphwire = @import("glyphwire");
 
 const NumKeys = @typeInfo(Key).@"enum".field_names.len;
 const NumMouseButtons = @typeInfo(MouseButton).@"enum".field_names.len;
@@ -49,153 +50,11 @@ fn FixedBuffer(comptime capacity: usize) type {
     };
 }
 
-/// Key identities forwarded to glyphwire by name (`@tagName`), so the
-/// field names here are wire-visible and must match what the rest of
-/// glyphwire matches on -- notably `src/key_encode.zig`'s `F1`..`F12`
-/// entries, hence the uppercase function keys. Every name here is one SDL
-/// actually reports: there is no `F25`, and no `world_1`/`world_2`, both
-/// of which the old GLFW backend declared and no SDL keycode maps to.
-///
-/// These come from SDL's *keycode* (`event.key.key`), which is resolved
-/// through the active OS layout, where zglfw's are physical positions. So
-/// on a Dvorak or AZERTY layout a key reports the identity on its keycap
-/// rather than its QWERTY position -- the right behaviour for a terminal,
-/// and what other terminals do. SDL3's default `SDL_HINT_KEYCODE_OPTIONS`
-/// (`"french_numbers,latin_letters"`) keeps Ctrl-chords on the Latin
-/// letters under a non-Latin layout such as Russian.
-pub const Key = enum {
-    unknown,
-    space,
-    apostrophe,
-    comma,
-    minus,
-    period,
-    slash,
-    zero,
-    one,
-    two,
-    three,
-    four,
-    five,
-    six,
-    seven,
-    eight,
-    nine,
-    semicolon,
-    equal,
-    a,
-    b,
-    c,
-    d,
-    e,
-    f,
-    g,
-    h,
-    i,
-    j,
-    k,
-    l,
-    m,
-    n,
-    o,
-    p,
-    q,
-    r,
-    s,
-    t,
-    u,
-    v,
-    w,
-    x,
-    y,
-    z,
-    left_bracket,
-    backslash,
-    right_bracket,
-    grave_accent,
-    escape,
-    enter,
-    tab,
-    backspace,
-    insert,
-    delete,
-    right,
-    left,
-    down,
-    up,
-    page_up,
-    page_down,
-    home,
-    end,
-    caps_lock,
-    scroll_lock,
-    num_lock,
-    print_screen,
-    pause,
-    F1,
-    F2,
-    F3,
-    F4,
-    F5,
-    F6,
-    F7,
-    F8,
-    F9,
-    F10,
-    F11,
-    F12,
-    F13,
-    F14,
-    F15,
-    F16,
-    F17,
-    F18,
-    F19,
-    F20,
-    F21,
-    F22,
-    F23,
-    F24,
-    kp_0,
-    kp_1,
-    kp_2,
-    kp_3,
-    kp_4,
-    kp_5,
-    kp_6,
-    kp_7,
-    kp_8,
-    kp_9,
-    kp_decimal,
-    kp_divide,
-    kp_multiply,
-    kp_subtract,
-    kp_add,
-    kp_enter,
-    kp_equal,
-    left_shift,
-    left_control,
-    left_alt,
-    left_super,
-    right_shift,
-    right_control,
-    right_alt,
-    right_super,
-    menu,
-};
-
-/// Mouse buttons, also forwarded by name (see `Key`). `x1`/`x2` are the
-/// two side buttons; the old GLFW backend called the same physical
-/// buttons `four`/`five` and declared `six`..`eight` on top, which no
-/// platform ever reported. `host/input.zig` forwards every field of this
-/// enum, so these names are wire-visible too.
-pub const MouseButton = enum {
-    left,
-    right,
-    middle,
-    x1,
-    x2,
-};
+/// Key and mouse-button identities are glyphwire's own (`src/keys.zig`):
+/// the host forwards them by name, so the engine, the session and every
+/// client agree on one enum rather than separate copies of the same list.
+pub const Key = glyphwire.Key;
+pub const MouseButton = glyphwire.MouseButton;
 
 /// One line per raw key event when `InputManager.key_debug` is on.
 ///

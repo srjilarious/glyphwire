@@ -6,6 +6,9 @@ const std = @import("std");
 /// The VT escape machine `Layer.writeRuns` feeds (`vt.zig`): its state is
 /// `Layer.vt`.
 const vt = @import("vt.zig");
+pub const keys = @import("keys.zig");
+pub const Key = keys.Key;
+pub const MouseButton = keys.MouseButton;
 pub const Vt = vt.Vt;
 pub const EscState = vt.EscState;
 pub const SgrPen = vt.SgrPen;
@@ -1235,66 +1238,35 @@ pub const ClickCounter = struct {
 /// owns the session directly) rather than this type knowing anything
 /// about how input was captured.
 ///
-/// Key/button names are whatever string the reporter used (glyphwire-host
-/// uses `@tagName` of its engine's key/button enums, e.g. "a",
-/// "left_shift", "left") -- not a closed set enforced here.
+/// Keys and buttons are `Key` / `MouseButton` members: the host's names
+/// are decoded once where they arrive (`dispatch.zig`'s `report_key`,
+/// the client's `key_down`), so the down-sets are plain bit sets with
+/// nothing to allocate or free.
 pub const InputState = struct {
-    alloc: std.mem.Allocator,
-    keys_down: std.StringHashMap(void),
-    mouse_buttons_down: std.StringHashMap(void),
-
-    pub fn init(alloc: std.mem.Allocator) InputState {
-        return .{
-            .alloc = alloc,
-            .keys_down = std.StringHashMap(void).init(alloc),
-            .mouse_buttons_down = std.StringHashMap(void).init(alloc),
-        };
-    }
-
-    pub fn deinit(self: *InputState) void {
-        freeStringSet(self.alloc, &self.keys_down);
-        freeStringSet(self.alloc, &self.mouse_buttons_down);
-    }
-
-    fn freeStringSet(alloc: std.mem.Allocator, set: *std.StringHashMap(void)) void {
-        var it = set.keyIterator();
-        while (it.next()) |k| alloc.free(k.*);
-        set.deinit();
-    }
+    keys_down: std.EnumSet(Key) = .empty,
+    mouse_buttons_down: std.EnumSet(MouseButton) = .empty,
 
     /// Records a key press/release. Returns true if this actually changed
     /// the down-set (false for a redundant press-while-down or
     /// release-while-up report), so callers can skip broadcasting a
     /// no-op change.
-    pub fn setKey(self: *InputState, key: []const u8, down: bool) !bool {
-        return setInSet(self.alloc, &self.keys_down, key, down);
+    pub fn setKey(self: *InputState, key: Key, down: bool) bool {
+        if (self.keys_down.contains(key) == down) return false;
+        self.keys_down.setPresent(key, down);
+        return true;
     }
 
-    pub fn setMouseButton(self: *InputState, button: []const u8, down: bool) !bool {
-        return setInSet(self.alloc, &self.mouse_buttons_down, button, down);
+    pub fn setMouseButton(self: *InputState, button: MouseButton, down: bool) bool {
+        if (self.mouse_buttons_down.contains(button) == down) return false;
+        self.mouse_buttons_down.setPresent(button, down);
+        return true;
     }
 
-    fn setInSet(alloc: std.mem.Allocator, set: *std.StringHashMap(void), name: []const u8, down: bool) !bool {
-        if (down) {
-            if (set.contains(name)) return false;
-            const owned = try alloc.dupe(u8, name);
-            errdefer alloc.free(owned);
-            try set.put(owned, {});
-            return true;
-        } else {
-            if (set.fetchRemove(name)) |kv| {
-                alloc.free(kv.key);
-                return true;
-            }
-            return false;
-        }
-    }
-
-    pub fn isKeyDown(self: *const InputState, key: []const u8) bool {
+    pub fn isKeyDown(self: *const InputState, key: Key) bool {
         return self.keys_down.contains(key);
     }
 
-    pub fn isMouseButtonDown(self: *const InputState, button: []const u8) bool {
+    pub fn isMouseButtonDown(self: *const InputState, button: MouseButton) bool {
         return self.mouse_buttons_down.contains(button);
     }
 };

@@ -659,7 +659,7 @@ pub fn configKeysKillJobTest(_: std.Io, alloc: std.mem.Allocator) !void {
         var res = try config.load(alloc, "");
         defer res.deinit();
         const chord = res.config.keys.killJobChord().?;
-        try testz.expectEqualStr(chord.key(), "delete");
+        try testz.expectEqual(chord.key, .delete);
         try testz.expectTrue(chord.mods.super);
         try testz.expectFalse(chord.mods.ctrl);
     }
@@ -668,7 +668,7 @@ pub fn configKeysKillJobTest(_: std.Io, alloc: std.mem.Allocator) !void {
         defer res.deinit();
         try testz.expectEqual(res.err, null);
         const chord = res.config.keys.killJobChord().?;
-        try testz.expectEqualStr(chord.key(), "k");
+        try testz.expectEqual(chord.key, .k);
         try testz.expectTrue(chord.mods.ctrl and chord.mods.shift);
     }
     {

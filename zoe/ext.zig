@@ -404,7 +404,7 @@ pub const Runtime = struct {
     /// The command bound to the key in `scope`'s own table, without the
     /// fallback to `global` (the caller interleaves that with the
     /// built-in keymaps).
-    pub fn lookup(self: *const Runtime, scope: actions.Scope, key: []const u8, mods: keybind.Mods) ?u32 {
+    pub fn lookup(self: *const Runtime, scope: actions.Scope, key: glyphwire.Key, mods: keybind.Mods) ?u32 {
         // Newest first: a later binding of the same chord wins.
         var i = self.bindings.items.len;
         while (i > 0) {

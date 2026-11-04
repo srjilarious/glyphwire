@@ -20,6 +20,7 @@ const ConnId = core.ConnId;
 const Context = core.Context;
 const ImageHandle = core.ImageHandle;
 const InputState = core.InputState;
+const Key = core.Key;
 const Mods = core.Mods;
 const SplitAxis = core.SplitAxis;
 const theme = core.theme;
@@ -262,33 +263,16 @@ pub const Pane = struct {
 /// because the manager is not in the delivery path. Here it is decided
 /// before delivery, once, in the one place that knows what has focus.
 pub const WindowPrefix = struct {
-    /// Longest key name this holds inline (no allocation). Real key names
-    /// are one character or a short word ("b", "space", "left").
-    pub const max_key_name = 16;
-
-    key_buf: [max_key_name]u8 = @splat(0),
-    key_len: u8 = 0,
+    key: Key,
     ctrl: bool = true,
     alt: bool = false,
     shift: bool = false,
 
-    /// Builds a chord, truncating an over-long key name (which can then
-    /// never match, rather than silently matching a prefix of itself).
-    pub fn init(key_name: []const u8, ctrl: bool, alt: bool, shift: bool) WindowPrefix {
-        var self: WindowPrefix = .{ .ctrl = ctrl, .alt = alt, .shift = shift };
-        const n = @min(key_name.len, max_key_name);
-        @memcpy(self.key_buf[0..n], key_name[0..n]);
-        self.key_len = @intCast(n);
-        return self;
-    }
-
-    pub fn key(self: *const WindowPrefix) []const u8 {
-        return self.key_buf[0..self.key_len];
-    }
-
-    /// Whether `key_name` with these modifiers held is this chord.
-    pub fn matches(self: *const WindowPrefix, key_name: []const u8, ctrl: bool, alt: bool, shift: bool) bool {
-        if (!std.mem.eql(u8, key_name, self.key())) return false;
+    /// Whether `key` with these modifiers held is this chord. `unknown`
+    /// never matches, so a prefix named after a key this build doesn't
+    /// have is inert rather than catching every unrecognised key.
+    pub fn matches(self: *const WindowPrefix, key: Key, ctrl: bool, alt: bool, shift: bool) bool {
+        if (key == .unknown or key != self.key) return false;
         return ctrl == self.ctrl and alt == self.alt and shift == self.shift;
     }
 };
@@ -381,8 +365,7 @@ pub const Session = struct {
     /// The key name whose *press* was withheld from the focused pane, so
     /// its matching release is withheld too. Without this a program sees a
     /// release with no press, which a VT-aware one can act on.
-    swallowed_key: [WindowPrefix.max_key_name]u8 = @splat(0),
-    swallowed_key_len: u8 = 0,
+    swallowed_key: ?Key = null,
     /// The window-global modifier state `routeKey` matches the prefix
     /// against, folded left/right and maintained from the modifier key
     /// events `routeKey` itself sees.
@@ -486,7 +469,7 @@ pub const Session = struct {
             .contexts = contexts,
             .panes = panes,
             .pane_tree = PaneSplitTree.init(alloc),
-            .input = InputState.init(alloc),
+            .input = .{},
             .theme = root.theme,
             .window_cols = root.root.width,
             .window_rows = root.root.height,
@@ -505,7 +488,6 @@ pub const Session = struct {
         while (pit.next()) |p| p.deinit(self.alloc);
         self.panes.deinit();
         self.pane_tree.deinit(self.alloc);
-        self.input.deinit();
         self.clipboard.deinit(self.alloc);
     }
 
@@ -724,7 +706,7 @@ pub const Session = struct {
         self.manager_token = 0;
         self.window_prefix = null;
         self.prefix_armed = false;
-        self.swallowed_key_len = 0;
+        self.swallowed_key = null;
     }
 
     /// What should happen to one key event, given the prefix state.
@@ -745,21 +727,19 @@ pub const Session = struct {
     /// Takes no modifier arguments: it derives them from the key events it
     /// is already being handed, which is the only view of the keyboard that
     /// stays correct across a focus change -- see `Session.mods`.
-    pub fn routeKey(self: *Session, key_name: []const u8, pressed: bool) KeyRoute {
+    pub fn routeKey(self: *Session, key: Key, pressed: bool) KeyRoute {
         // Folded in before the early return below: a manager can register
         // a prefix while a modifier is already held, and the next
         // keystroke has to match against the real keyboard.
-        const is_mod = self.noteModifier(key_name, pressed);
+        const is_mod = self.noteModifier(key, pressed);
 
         const prefix = self.window_prefix orelse return .pass;
 
         if (!pressed) {
             // Pair the release with the press that was withheld, so a
             // program never sees half a keystroke.
-            if (self.swallowed_key_len > 0 and
-                std.mem.eql(u8, key_name, self.swallowed_key[0..self.swallowed_key_len]))
-            {
-                self.swallowed_key_len = 0;
+            if (self.swallowed_key != null and self.swallowed_key.? == key) {
+                self.swallowed_key = null;
                 return .swallow;
             }
             return .pass;
@@ -787,19 +767,19 @@ pub const Session = struct {
             // terminal sends a control byte, and SDL commits no text), so
             // the key event is the only chance to deliver the command.
             if (!self.mods.ctrl and !self.mods.alt and
-                key_encode.charFromKeyName(key_name, self.mods.shift) != null)
+                key_encode.charFromKey(key, self.mods.shift) != null)
             {
-                self.noteSwallowed(key_name);
+                self.swallowed_key = key;
                 return .swallow;
             }
 
             self.prefix_armed = false;
-            self.noteSwallowed(key_name);
+            self.swallowed_key = key;
             return .manager;
         }
-        if (prefix.matches(key_name, self.mods.ctrl, self.mods.alt, self.mods.shift)) {
+        if (prefix.matches(key, self.mods.ctrl, self.mods.alt, self.mods.shift)) {
             self.prefix_armed = true;
-            self.noteSwallowed(key_name);
+            self.swallowed_key = key;
             return .swallow;
         }
         return .pass;
@@ -817,18 +797,18 @@ pub const Session = struct {
         return .manager;
     }
 
-    /// Whether `key_name` is the key whose press was withheld and whose
+    /// Whether `key` is the key whose press was withheld and whose
     /// release is still owed -- i.e. a key the user is holding down as part
     /// of a prefix sequence. A typematic repeat for it must be dropped, the
     /// same as its press was, or holding a command key (`Ctrl-B` then a
     /// held arrow) starts leaking repeats into the program.
-    pub fn isSwallowedKey(self: *const Session, key_name: []const u8) bool {
-        if (self.swallowed_key_len == 0) return false;
-        return std.mem.eql(u8, key_name, self.swallowed_key[0..self.swallowed_key_len]);
+    pub fn isSwallowedKey(self: *const Session, key: Key) bool {
+        const swallowed = self.swallowed_key orelse return false;
+        return swallowed == key;
     }
 
     /// Folds one modifier key event into `mods`, and reports whether
-    /// `key_name` was a modifier at all -- which is also how `routeKey`
+    /// `key` was a modifier at all -- which is also how `routeKey`
     /// knows not to let one consume the armed prefix.
     ///
     /// Left and right fold together, because nothing in glyphwire
@@ -838,33 +818,18 @@ pub const Session = struct {
     /// OS-level remap like CapsLock acting as Control. A wire client that
     /// reports both physical sides and releases one will read as released
     /// here; the host never produces that.
-    fn noteModifier(self: *Session, key_name: []const u8, pressed: bool) bool {
-        const eql = std.mem.eql;
-        if (eql(u8, key_name, "left_control") or eql(u8, key_name, "right_control")) {
-            self.mods.ctrl = pressed;
-            return true;
+    fn noteModifier(self: *Session, key: Key, pressed: bool) bool {
+        switch (key) {
+            .left_control, .right_control => self.mods.ctrl = pressed,
+            .left_alt, .right_alt => self.mods.alt = pressed,
+            .left_shift, .right_shift => self.mods.shift = pressed,
+            // `WindowPrefix` has no Super, so the prefix never matches on
+            // it; it is stored for the `mods` stamped on input
+            // notifications.
+            .left_super, .right_super => self.mods.super = pressed,
+            else => return false,
         }
-        if (eql(u8, key_name, "left_alt") or eql(u8, key_name, "right_alt")) {
-            self.mods.alt = pressed;
-            return true;
-        }
-        if (eql(u8, key_name, "left_shift") or eql(u8, key_name, "right_shift")) {
-            self.mods.shift = pressed;
-            return true;
-        }
-        // `WindowPrefix` has no Super, so the prefix never matches on it;
-        // it is stored for the `mods` stamped on input notifications.
-        if (eql(u8, key_name, "left_super") or eql(u8, key_name, "right_super")) {
-            self.mods.super = pressed;
-            return true;
-        }
-        return false;
-    }
-
-    fn noteSwallowed(self: *Session, key_name: []const u8) void {
-        const n = @min(key_name.len, WindowPrefix.max_key_name);
-        @memcpy(self.swallowed_key[0..n], key_name[0..n]);
-        self.swallowed_key_len = @intCast(n);
+        return true;
     }
 
     // ── Panes ───────────────────────────────────────────────────────────

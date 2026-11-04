@@ -186,27 +186,26 @@ pub const Ui = struct {
 
     fn handleKey(self: *Ui, k: glyphwire.KeyEvent) !void {
         const key = k.key;
-        const eq = std.mem.eql;
-        if (eq(u8, key, "q") or eq(u8, key, "escape")) {
+        if (key == .q or key == .escape) {
             self.quit = true;
             return;
         }
 
-        if (eq(u8, key, "h") or eq(u8, key, "left")) return self.panBy(0, -pan_step);
-        if (eq(u8, key, "l") or eq(u8, key, "right")) return self.panBy(0, pan_step);
-        if (eq(u8, key, "k") or eq(u8, key, "up")) return self.panBy(-pan_step, 0);
-        if (eq(u8, key, "j") or eq(u8, key, "down")) return self.panBy(pan_step, 0);
+        if (key == .h or key == .left) return self.panBy(0, -pan_step);
+        if (key == .l or key == .right) return self.panBy(0, pan_step);
+        if (key == .k or key == .up) return self.panBy(-pan_step, 0);
+        if (key == .j or key == .down) return self.panBy(pan_step, 0);
         // A screenful at a time, the way a viewer's PgUp/PgDn should read.
         const screenful: i64 = @intCast(self.win.rows -| 2);
-        if (eq(u8, key, "page_down") or eq(u8, key, "space")) return self.panBy(screenful, 0);
-        if (eq(u8, key, "page_up")) return self.panBy(-screenful, 0);
-        if (eq(u8, key, "home")) return self.setPan(0, 0);
-        if (eq(u8, key, "end")) return self.setPan(self.layout.max_pan_row, self.pan.col);
+        if (key == .page_down or key == .space) return self.panBy(screenful, 0);
+        if (key == .page_up) return self.panBy(-screenful, 0);
+        if (key == .home) return self.setPan(0, 0);
+        if (key == .end) return self.setPan(self.layout.max_pan_row, self.pan.col);
 
-        if (eq(u8, key, "f")) return self.setMode(.fit_screen);
-        if (eq(u8, key, "w")) return self.setMode(.fit_width);
-        if (eq(u8, key, "t")) return self.setMode(.fit_height);
-        if (eq(u8, key, "one")) return self.setMode(.natural);
+        if (key == .f) return self.setMode(.fit_screen);
+        if (key == .w) return self.setMode(.fit_width);
+        if (key == .t) return self.setMode(.fit_height);
+        if (key == .one) return self.setMode(.natural);
     }
 
     fn handleText(self: *Ui, text: []const u8) !void {
@@ -218,7 +217,7 @@ pub const Ui = struct {
     }
 
     fn handleMouseButton(self: *Ui, m: glyphwire.MouseButtonEvent) !void {
-        if (!std.mem.eql(u8, m.button, "left")) return;
+        if (m.button != .left) return;
         if (!m.pressed) {
             self.drag = null;
             return;

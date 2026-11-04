@@ -167,19 +167,18 @@ pub const Form = struct {
     }
 
     /// A key press. `key` is a glyphwire key name.
-    pub fn handleKey(self: *Form, key: []const u8, mods: glyphwire.Mods) Event {
-        const eq = std.mem.eql;
-        if (eq(u8, key, "enter") or eq(u8, key, "kp_enter")) {
+    pub fn handleKey(self: *Form, key: glyphwire.Key, mods: glyphwire.Mods) Event {
+        if (key == .enter or key == .kp_enter) {
             if (self.focusedKind()) |k| if (k == .button) return .{ .button = k.button };
             return .{ .button = self.firstButton() orelse return .none };
         }
-        if (eq(u8, key, "escape")) return .{ .button = self.escapeButton() orelse return .none };
-        if (eq(u8, key, "tab")) {
+        if (key == .escape) return .{ .button = self.escapeButton() orelse return .none };
+        if (key == .tab) {
             self.cycleFocus(mods.shift);
             return .none;
         }
-        if (eq(u8, key, "up")) return self.moveFocus(.up);
-        if (eq(u8, key, "down")) return self.moveFocus(.down);
+        if (key == .up) return self.moveFocus(.up);
+        if (key == .down) return self.moveFocus(.down);
 
         if (self.widgets.items.len == 0) return .none;
         const i = self.focus;
@@ -197,9 +196,9 @@ pub const Form = struct {
             },
             else => {},
         }
-        if (eq(u8, key, "left")) return self.moveFocus(.left);
-        if (eq(u8, key, "right")) return self.moveFocus(.right);
-        if (eq(u8, key, "space")) return self.activate(i);
+        if (key == .left) return self.moveFocus(.left);
+        if (key == .right) return self.moveFocus(.right);
+        if (key == .space) return self.activate(i);
         return .none;
     }
 

@@ -988,15 +988,15 @@ pub fn renameFieldKeepsTextKeysTest(_: std.Io, _: std.mem.Allocator) !void {
     // Keys whose text arrives on the `text` stream stay in the F2 field
     // instead of being read as their bindings (Space marks, keypad `+`
     // marks all) -- those would drop the rename mid-word.
-    try testz.expectTrue(sala.ui.typesText("a", .{}));
-    try testz.expectTrue(sala.ui.typesText("A", .{ .shift = true }));
-    try testz.expectTrue(sala.ui.typesText("space", .{}));
-    try testz.expectTrue(sala.ui.typesText("kp_add", .{}));
-    try testz.expectFalse(sala.ui.typesText("kp_enter", .{}));
-    try testz.expectFalse(sala.ui.typesText("tab", .{}));
-    try testz.expectFalse(sala.ui.typesText("F5", .{}));
-    try testz.expectFalse(sala.ui.typesText("d", .{ .alt = true }));
-    try testz.expectFalse(sala.ui.typesText("`", .{ .ctrl = true }));
+    try testz.expectTrue(sala.ui.typesText(.a, .{}));
+    try testz.expectTrue(sala.ui.typesText(.a, .{ .shift = true }));
+    try testz.expectTrue(sala.ui.typesText(.space, .{}));
+    try testz.expectTrue(sala.ui.typesText(.kp_add, .{}));
+    try testz.expectFalse(sala.ui.typesText(.kp_enter, .{}));
+    try testz.expectFalse(sala.ui.typesText(.tab, .{}));
+    try testz.expectFalse(sala.ui.typesText(.F5, .{}));
+    try testz.expectFalse(sala.ui.typesText(.d, .{ .alt = true }));
+    try testz.expectFalse(sala.ui.typesText(.grave_accent, .{ .ctrl = true }));
 }
 
 pub fn isWithinComparesWholeComponentsTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -1017,13 +1017,13 @@ pub fn dialogFieldIsTheSharedLineEditTest(_: std.Io, alloc: std.mem.Allocator) !
     defer e.deinit(alloc);
     _ = try e.insert(alloc, "é!");
     try testz.expectEqualStr(e.text(), "/home/me/codeé!");
-    try testz.expectEqual(e.handleKey("backspace", .{}), .edited); // the `!`
+    try testz.expectEqual(e.handleKey(.backspace, .{}), .edited); // the `!`
     try testz.expectTrue(e.deleteBackward()); // the two-byte `é`, whole
     try testz.expectEqualStr(e.text(), "/home/me/code");
 
     // Ctrl+Backspace takes one path segment, which the old field had no
     // key for at all.
-    try testz.expectEqual(e.handleKey("backspace", .{ .ctrl = true }), .edited);
+    try testz.expectEqual(e.handleKey(.backspace, .{ .ctrl = true }), .edited);
     try testz.expectEqualStr(e.text(), "/home/me/");
 }
 
@@ -1049,26 +1049,26 @@ pub fn clickColumnFindsTheCaretOffsetTest(_: std.Io, _: std.mem.Allocator) !void
 pub fn dialogHotkeysOnlyWithoutATextFieldTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var conflict = try dialog.Dialog.init(alloc, "t", "m", &dialog.conflict_buttons, .{});
     defer conflict.deinit(alloc);
-    try testz.expectEqual(conflict.handleKey("s", .{}).?, dialog.Button.skip);
-    try testz.expectEqual(conflict.handleKey("a", .{}).?, dialog.Button.overwrite_all);
+    try testz.expectEqual(conflict.handleKey(.s, .{}).?, dialog.Button.skip);
+    try testz.expectEqual(conflict.handleKey(.a, .{}).?, dialog.Button.overwrite_all);
 
     var input = try dialog.Dialog.init(alloc, "t", "m", &dialog.ok_cancel, .{ .input = "/tmp" });
     defer input.deinit(alloc);
     // `o` would be OK's hotkey; in a text field it's just typing.
-    try testz.expectTrue(input.handleKey("o", .{}) == null);
+    try testz.expectTrue(input.handleKey(.o, .{}) == null);
     try input.handleText(alloc, "/x");
     try testz.expectEqualStr(input.inputText(), "/tmp/x");
-    try testz.expectEqual(input.handleKey("enter", .{}).?, dialog.Button.ok);
+    try testz.expectEqual(input.handleKey(.enter, .{}).?, dialog.Button.ok);
 }
 
 pub fn dialogEscapeAndFocusTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var d = try dialog.Dialog.init(alloc, "Delete", "sure?", &dialog.yes_no, .{ .focus = 1 });
     defer d.deinit(alloc);
     // Delete starts on No, so Enter alone is safe.
-    try testz.expectEqual(d.handleKey("enter", .{}).?, dialog.Button.no);
-    try testz.expectTrue(d.handleKey("tab", .{}) == null);
-    try testz.expectEqual(d.handleKey("enter", .{}).?, dialog.Button.yes);
-    try testz.expectEqual(d.handleKey("escape", .{}).?, dialog.Button.no);
+    try testz.expectEqual(d.handleKey(.enter, .{}).?, dialog.Button.no);
+    try testz.expectTrue(d.handleKey(.tab, .{}) == null);
+    try testz.expectEqual(d.handleKey(.enter, .{}).?, dialog.Button.yes);
+    try testz.expectEqual(d.handleKey(.escape, .{}).?, dialog.Button.no);
 }
 
 // ─── Repaint cost ───────────────────────────────────────────────────────
@@ -1253,35 +1253,35 @@ pub fn tabsHoldWholePanesTest(io: std.Io, alloc: std.mem.Allocator) !void {
 pub fn tabChordsAreTotalCommandersTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(km.lookup("t", .{ .ctrl = true }).?, actions.Action.newTab);
-    try testz.expectEqual(km.lookup("w", .{ .ctrl = true }).?, actions.Action.closeTab);
-    try testz.expectEqual(km.lookup("tab", .{ .ctrl = true }).?, actions.Action.nextTab);
-    try testz.expectEqual(km.lookup("tab", .{ .ctrl = true, .shift = true }).?, actions.Action.prevTab);
+    try testz.expectEqual(km.lookup(.t, .{ .ctrl = true }).?, actions.Action.newTab);
+    try testz.expectEqual(km.lookup(.w, .{ .ctrl = true }).?, actions.Action.closeTab);
+    try testz.expectEqual(km.lookup(.tab, .{ .ctrl = true }).?, actions.Action.nextTab);
+    try testz.expectEqual(km.lookup(.tab, .{ .ctrl = true, .shift = true }).?, actions.Action.prevTab);
     // Plain Tab still crosses to the other pane.
-    try testz.expectEqual(km.lookup("tab", .{}).?, actions.Action.switchPane);
+    try testz.expectEqual(km.lookup(.tab, .{}).?, actions.Action.switchPane);
 }
 
 pub fn defaultBindingsCoverTheBasicsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(km.lookup("up", .{ .alt = true }).?, actions.Action.upToParentDir);
-    try testz.expectEqual(km.lookup("F2", .{}).?, actions.Action.rename);
-    try testz.expectEqual(km.lookup("F3", .{}).?, actions.Action.find);
-    try testz.expectEqual(km.lookup("F4", .{}).?, actions.Action.edit);
-    try testz.expectEqual(km.lookup("F5", .{}).?, actions.Action.copy);
-    try testz.expectEqual(km.lookup("F6", .{}).?, actions.Action.move);
+    try testz.expectEqual(km.lookup(.up, .{ .alt = true }).?, actions.Action.upToParentDir);
+    try testz.expectEqual(km.lookup(.F2, .{}).?, actions.Action.rename);
+    try testz.expectEqual(km.lookup(.F3, .{}).?, actions.Action.find);
+    try testz.expectEqual(km.lookup(.F4, .{}).?, actions.Action.edit);
+    try testz.expectEqual(km.lookup(.F5, .{}).?, actions.Action.copy);
+    try testz.expectEqual(km.lookup(.F6, .{}).?, actions.Action.move);
     // F8 and Delete trash; Shift is gone for good, Super gone as root.
-    try testz.expectEqual(km.lookup("F8", .{}).?, actions.Action.trash);
-    try testz.expectEqual(km.lookup("delete", .{}).?, actions.Action.trash);
-    try testz.expectEqual(km.lookup("F8", .{ .shift = true }).?, actions.Action.delete);
-    try testz.expectEqual(km.lookup("delete", .{ .shift = true }).?, actions.Action.delete);
-    try testz.expectEqual(km.lookup("F8", .{ .super = true }).?, actions.Action.sudoDelete);
-    try testz.expectEqual(km.lookup("left", .{ .alt = true }).?, actions.Action.historyBack);
-    try testz.expectEqual(km.lookup("right", .{ .alt = true }).?, actions.Action.historyForward);
-    try testz.expectEqual(km.lookup("down", .{ .alt = true }).?, actions.Action.showHistory);
-    try testz.expectEqual(km.lookup("space", .{}).?, actions.Action.toggleMark);
-    try testz.expectEqual(km.lookup("insert", .{}).?, actions.Action.toggleMarkAndDown);
-    try testz.expectEqual(km.lookup("d", .{ .alt = true }).?, actions.Action.editPath);
+    try testz.expectEqual(km.lookup(.F8, .{}).?, actions.Action.trash);
+    try testz.expectEqual(km.lookup(.delete, .{}).?, actions.Action.trash);
+    try testz.expectEqual(km.lookup(.F8, .{ .shift = true }).?, actions.Action.delete);
+    try testz.expectEqual(km.lookup(.delete, .{ .shift = true }).?, actions.Action.delete);
+    try testz.expectEqual(km.lookup(.F8, .{ .super = true }).?, actions.Action.sudoDelete);
+    try testz.expectEqual(km.lookup(.left, .{ .alt = true }).?, actions.Action.historyBack);
+    try testz.expectEqual(km.lookup(.right, .{ .alt = true }).?, actions.Action.historyForward);
+    try testz.expectEqual(km.lookup(.down, .{ .alt = true }).?, actions.Action.showHistory);
+    try testz.expectEqual(km.lookup(.space, .{}).?, actions.Action.toggleMark);
+    try testz.expectEqual(km.lookup(.insert, .{}).?, actions.Action.toggleMarkAndDown);
+    try testz.expectEqual(km.lookup(.d, .{ .alt = true }).?, actions.Action.editPath);
     // Every function-key-bar action has a key to show.
     for (actions.bar_actions) |a| try testz.expectTrue(km.chordFor(a) != null);
 }
@@ -1308,11 +1308,11 @@ pub fn configReadsSettingsAndKeysTest(_: std.Io, alloc: std.mem.Allocator) !void
     var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
     defer km.deinit(alloc);
     try km.apply(alloc, r.config.keys);
-    try testz.expectEqual(km.lookup("up", .{ .ctrl = true }).?, actions.Action.upToParentDir);
+    try testz.expectEqual(km.lookup(.up, .{ .ctrl = true }).?, actions.Action.upToParentDir);
     // The default Alt+Up binding is still there alongside it.
-    try testz.expectEqual(km.lookup("up", .{ .alt = true }).?, actions.Action.upToParentDir);
-    try testz.expectTrue(km.lookup("F10", .{}) == null);
-    try testz.expectTrue(km.lookup("F11", .{}) == null);
+    try testz.expectEqual(km.lookup(.up, .{ .alt = true }).?, actions.Action.upToParentDir);
+    try testz.expectTrue(km.lookup(.F10, .{}) == null);
+    try testz.expectTrue(km.lookup(.F11, .{}) == null);
 }
 
 /// `theme` comes out of the one Lua run that reads the rest of the
@@ -1903,17 +1903,17 @@ pub fn maskedDialogWordKeysTakeTheWholeFieldTest(_: std.Io, alloc: std.mem.Alloc
     var d = try dialog.Dialog.init(alloc, "sudo", "Password for sudo:", &dialog.ok_cancel, .{ .input = "", .masked = true });
     defer d.deinit(alloc);
     try d.handleText(alloc, "hunter/2 x");
-    try testz.expectTrue(d.handleKey("left", .{ .ctrl = true }) == null);
+    try testz.expectTrue(d.handleKey(.left, .{ .ctrl = true }) == null);
     try testz.expectEqual(d.input.?.caret, 0);
-    try testz.expectTrue(d.handleKey("right", .{ .ctrl = true }) == null);
+    try testz.expectTrue(d.handleKey(.right, .{ .ctrl = true }) == null);
     try testz.expectEqual(d.input.?.caret, "hunter/2 x".len);
-    try testz.expectTrue(d.handleKey("backspace", .{ .ctrl = true }) == null);
+    try testz.expectTrue(d.handleKey(.backspace, .{ .ctrl = true }) == null);
     try testz.expectEqualStr(d.inputText(), "");
 
     // An unmasked field keeps its word jumps.
     var plain = try dialog.Dialog.init(alloc, "t", "m", &dialog.ok_cancel, .{ .input = "/a/b" });
     defer plain.deinit(alloc);
-    try testz.expectTrue(plain.handleKey("backspace", .{ .ctrl = true }) == null);
+    try testz.expectTrue(plain.handleKey(.backspace, .{ .ctrl = true }) == null);
     try testz.expectEqualStr(plain.inputText(), "/a/");
 }
 
@@ -2071,11 +2071,11 @@ pub fn sudoLastLineIsTheComplaintTest(_: std.Io, _: std.mem.Allocator) !void {
 pub fn sudoActionsHaveSuperChordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(km.lookup("F5", .{ .super = true }).?, actions.Action.sudoCopy);
-    try testz.expectEqual(km.lookup("F8", .{ .super = true }).?, actions.Action.sudoDelete);
-    try testz.expectEqual(km.lookup("F4", .{ .shift = true }).?, actions.Action.newFile);
-    try testz.expectEqual(km.lookup("F4", .{ .super = true, .shift = true }).?, actions.Action.sudoNewFile);
-    try testz.expectEqual(km.lookup("F5", .{}).?, actions.Action.copy);
+    try testz.expectEqual(km.lookup(.F5, .{ .super = true }).?, actions.Action.sudoCopy);
+    try testz.expectEqual(km.lookup(.F8, .{ .super = true }).?, actions.Action.sudoDelete);
+    try testz.expectEqual(km.lookup(.F4, .{ .shift = true }).?, actions.Action.newFile);
+    try testz.expectEqual(km.lookup(.F4, .{ .super = true, .shift = true }).?, actions.Action.sudoNewFile);
+    try testz.expectEqual(km.lookup(.F5, .{}).?, actions.Action.copy);
 }
 
 // ─── F1: chmod / chown ──────────────────────────────────────────────────
@@ -2241,7 +2241,7 @@ pub fn modeFormKeepsTogglesAndOctalInStepTest(_: std.Io, alloc: std.mem.Allocato
 
     // Owner exec on: the field follows.
     f.form.focus = f.bits[2];
-    try testz.expectTrue((try f.handleKey(alloc, "space", .{})) == null);
+    try testz.expectTrue((try f.handleKey(alloc, .space, .{})) == null);
     try testz.expectEqual(f.mode, 0o744);
     try testz.expectEqualStr(f.form.field(f.octal).text(), "0744");
 
@@ -2257,9 +2257,9 @@ pub fn modeFormKeepsTogglesAndOctalInStepTest(_: std.Io, alloc: std.mem.Allocato
     _ = try f.handleText(alloc, "9");
     try testz.expectTrue(f.form.err != null);
     try testz.expectEqual(f.mode, 0o4755);
-    try testz.expectTrue((try f.handleKey(alloc, "enter", .{})) == null);
+    try testz.expectTrue((try f.handleKey(alloc, .enter, .{})) == null);
 
-    try testz.expectEqual((try f.handleKey(alloc, "escape", .{})).?, attrdialog.Answer.cancel);
+    try testz.expectEqual((try f.handleKey(alloc, .escape, .{})).?, attrdialog.Answer.cancel);
 }
 
 /// The arrows walk the toggle grid as a grid.
@@ -2267,11 +2267,11 @@ pub fn modeFormArrowsWalkTheGridTest(_: std.Io, alloc: std.mem.Allocator) !void 
     var f = try attrdialog.ModeForm.init(alloc, "x", 0o644, true, false);
     defer f.deinit(alloc);
     f.form.focus = f.bits[0];
-    _ = try f.handleKey(alloc, "right", .{});
+    _ = try f.handleKey(alloc, .right, .{});
     try testz.expectEqual(f.form.focus, f.bits[1]);
-    _ = try f.handleKey(alloc, "down", .{});
+    _ = try f.handleKey(alloc, .down, .{});
     try testz.expectEqual(f.form.focus, f.bits[4]);
-    _ = try f.handleKey(alloc, "left", .{});
+    _ = try f.handleKey(alloc, .left, .{});
     try testz.expectEqual(f.form.focus, f.bits[3]);
 
     // The filter's radio buttons: picking one turns the others off.
@@ -2285,16 +2285,16 @@ pub fn modeFormArrowsWalkTheGridTest(_: std.Io, alloc: std.mem.Allocator) !void 
 pub fn ownerFormValidatesNamesTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var f = try attrdialog.OwnerForm.init(alloc, "x", "no-such-user-here", "", false, false);
     defer f.deinit(alloc);
-    try testz.expectTrue((try f.handleKey(alloc, "enter", .{})) == null);
+    try testz.expectTrue((try f.handleKey(alloc, .enter, .{})) == null);
     try testz.expectTrue(f.form.err != null);
 
     try f.form.field(f.user).setText(alloc, "");
-    try testz.expectTrue((try f.handleKey(alloc, "enter", .{})) == null);
+    try testz.expectTrue((try f.handleKey(alloc, .enter, .{})) == null);
     try testz.expectTrue(f.form.err != null);
 
     try f.form.field(f.user).setText(alloc, "root");
     try f.form.field(f.group).setText(alloc, "0");
-    try testz.expectEqual((try f.handleKey(alloc, "enter", .{})).?, attrdialog.Answer.set);
+    try testz.expectEqual((try f.handleKey(alloc, .enter, .{})).?, attrdialog.Answer.set);
     try testz.expectEqual(f.owner.uid.?, 0);
     try testz.expectEqual(f.owner.gid.?, 0);
 }
@@ -2317,11 +2317,11 @@ pub fn fileOpsMenuPicksByHeldModifiersTest(_: std.Io, alloc: std.mem.Allocator) 
     try testz.expectTrue(menu.asRoot(.{ .super = true }));
     try testz.expectFalse(menu.asRoot(.{}));
 
-    try testz.expectEqual(menu.handleKey("o", .{}).?.run, actions.Action.chown);
-    try testz.expectTrue(menu.handleKey("down", .{}) == null);
-    try testz.expectEqual(menu.handleKey("enter", .{ .super = true }).?.run, actions.Action.sudoChown);
+    try testz.expectEqual(menu.handleKey(.o, .{}).?.run, actions.Action.chown);
+    try testz.expectTrue(menu.handleKey(.down, .{}) == null);
+    try testz.expectEqual(menu.handleKey(.enter, .{ .super = true }).?.run, actions.Action.sudoChown);
     try testz.expectEqual(menu.click(0, .{ .super = true }).?.run, actions.Action.sudoChmod);
-    try testz.expectTrue(menu.handleKey("escape", .{}).? == .cancel);
+    try testz.expectTrue(menu.handleKey(.escape, .{}).? == .cancel);
 }
 
 /// Ctrl+arrow toward the other side points that pane at this one's
@@ -2329,18 +2329,18 @@ pub fn fileOpsMenuPicksByHeldModifiersTest(_: std.Io, alloc: std.mem.Allocator) 
 pub fn ctrlArrowsSendTheDirectoryAcrossTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(km.lookup("right", .{ .ctrl = true }).?, actions.Action.rightPaneToSameDir);
-    try testz.expectEqual(km.lookup("left", .{ .ctrl = true }).?, actions.Action.leftPaneToSameDir);
+    try testz.expectEqual(km.lookup(.right, .{ .ctrl = true }).?, actions.Action.rightPaneToSameDir);
+    try testz.expectEqual(km.lookup(.left, .{ .ctrl = true }).?, actions.Action.leftPaneToSameDir);
 }
 
 /// With Ctrl held the bar lists Ctrl+H as `H Hidden`, Ctrl+1 as `1`, and
 /// so on: the modifiers are said once in front.
 pub fn modifiedBarKeyTextTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [24]u8 = undefined;
-    try testz.expectEqualStr(sala.ui.barKeyText(&buf, "h"), "H");
-    try testz.expectEqualStr(sala.ui.barKeyText(&buf, "one"), "1");
-    try testz.expectEqualStr(sala.ui.barKeyText(&buf, "grave_accent"), "`");
-    try testz.expectEqualStr(sala.ui.barKeyText(&buf, "page_down"), "Page down");
+    try testz.expectEqualStr(sala.ui.barKeyText(&buf, .h), "H");
+    try testz.expectEqualStr(sala.ui.barKeyText(&buf, .one), "1");
+    try testz.expectEqualStr(sala.ui.barKeyText(&buf, .grave_accent), "`");
+    try testz.expectEqualStr(sala.ui.barKeyText(&buf, .page_down), "Page down");
 }
 
 /// `menu_keys` rebinds the menu the way `keys` rebinds the panes: here

@@ -663,8 +663,8 @@ pub const Selection = struct {
             const vo = self.rootViewScroll();
             if (!self.over_report) {
                 if (server.focusedCell(cell)) |pane_cell| {
-                    server.reportMouseButton(self.app.alloc, "left", true, .{ .x = pos.x, .y = pos.y }, pane_cell, vo, 1) catch {};
-                    server.reportMouseButton(self.app.alloc, "left", false, .{ .x = pos.x, .y = pos.y }, pane_cell, vo, 1) catch {};
+                    server.reportMouseButton(self.app.alloc, .left, true, .{ .x = pos.x, .y = pos.y }, pane_cell, vo, 1) catch {};
+                    server.reportMouseButton(self.app.alloc, .left, false, .{ .x = pos.x, .y = pos.y }, pane_cell, vo, 1) catch {};
                 }
             }
             // Whatever was selected, wherever it was: a plain click

@@ -53,19 +53,18 @@ pub const Menu = struct {
         return actions.isRoot(self.shown(self.focus, held));
     }
 
-    pub fn handleKey(self: *Menu, key: []const u8, mods: glyphwire.Mods) ?Pick {
-        const eq = std.mem.eql;
-        if (eq(u8, key, "escape")) return .cancel;
+    pub fn handleKey(self: *Menu, key: glyphwire.Key, mods: glyphwire.Mods) ?Pick {
+        if (key == .escape) return .cancel;
         if (self.entries.len == 0) return null;
-        if (eq(u8, key, "up")) {
+        if (key == .up) {
             self.focus = (self.focus + self.entries.len - 1) % self.entries.len;
             return null;
         }
-        if (eq(u8, key, "down")) {
+        if (key == .down) {
             self.focus = (self.focus + 1) % self.entries.len;
             return null;
         }
-        if (eq(u8, key, "enter") or eq(u8, key, "kp_enter")) return .{ .run = self.shown(self.focus, mods) };
+        if (key == .enter or key == .kp_enter) return .{ .run = self.shown(self.focus, mods) };
         if (self.keymap.lookup(key, mods)) |a| return .{ .run = a };
         return null;
     }
@@ -190,7 +189,7 @@ pub const ModeForm = struct {
         return s.filter(&self.form);
     }
 
-    pub fn handleKey(self: *ModeForm, alloc: std.mem.Allocator, key: []const u8, mods: glyphwire.Mods) !?Answer {
+    pub fn handleKey(self: *ModeForm, alloc: std.mem.Allocator, key: glyphwire.Key, mods: glyphwire.Mods) !?Answer {
         return self.react(alloc, self.form.handleKey(key, mods));
     }
 
@@ -295,7 +294,7 @@ pub const OwnerForm = struct {
         return s.filter(&self.form);
     }
 
-    pub fn handleKey(self: *OwnerForm, _: std.mem.Allocator, key: []const u8, mods: glyphwire.Mods) !?Answer {
+    pub fn handleKey(self: *OwnerForm, _: std.mem.Allocator, key: glyphwire.Key, mods: glyphwire.Mods) !?Answer {
         return self.react(self.form.handleKey(key, mods));
     }
 

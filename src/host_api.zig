@@ -490,7 +490,7 @@ pub fn reportRemoteExit(self: *Server, alloc: std.mem.Allocator, session: u64, s
 /// socket. Updates the session's down-set and, if that's a real
 /// change, broadcasts `key_down`/`key_up` to every subscribed
 /// connection.
-pub fn reportKey(self: *Server, alloc: std.mem.Allocator, key: []const u8, pressed: bool) !void {
+pub fn reportKey(self: *Server, alloc: std.mem.Allocator, key: core.Key, pressed: bool) !void {
     const decision = decision: {
         const session_lock = self.lockSession();
         defer session_lock.unlock();
@@ -499,7 +499,7 @@ pub fn reportKey(self: *Server, alloc: std.mem.Allocator, key: []const u8, press
         // see the real keyboard, and a release must find the press it
         // pairs with whichever context has focus by then (see
         // `core.InputState`). The prefix itself matches `Session.mods`.
-        const changed = try self.session.input.setKey(key, pressed);
+        const changed = self.session.input.setKey(key, pressed);
         const route = self.session.routeKey(key, pressed);
         // Read after `routeKey` has folded this key in, so a
         // modifier's own event reports itself.
@@ -530,7 +530,7 @@ pub fn reportKey(self: *Server, alloc: std.mem.Allocator, key: []const u8, press
 /// pane, so a wheel over htop moved the cursor in the salacommander
 /// next to it. Bypasses the prefix and `Session.input`: no physical
 /// key went down, so there is nothing to route or to keep pressed.
-pub fn reportKeyTapIn(self: *Server, alloc: std.mem.Allocator, context: core.ContextHandle, key: []const u8) !void {
+pub fn reportKeyTapIn(self: *Server, alloc: std.mem.Allocator, context: core.ContextHandle, key: core.Key) !void {
     const down = try rpc.keyNotification(alloc, key, true, .{});
     defer alloc.free(down);
     const up = try rpc.keyNotification(alloc, key, false, .{});
@@ -549,7 +549,7 @@ pub fn reportWheelTapIn(
     self: *Server,
     alloc: std.mem.Allocator,
     context: core.ContextHandle,
-    button: []const u8,
+    button: core.MouseButton,
     px: core.PxPos,
     cell: core.CellPos,
 ) !void {
@@ -592,7 +592,7 @@ fn sendTapToContext(self: *Server, context: core.ContextHandle, event: dispatch.
 /// subscriber just sees another `key_down` for the same key, same as
 /// `reportKey`'s -- no separate "this was a repeat" signal, since
 /// nothing here needs to tell the difference from a fresh press.
-pub fn reportKeyRepeat(self: *Server, alloc: std.mem.Allocator, key: []const u8) !void {
+pub fn reportKeyRepeat(self: *Server, alloc: std.mem.Allocator, key: core.Key) !void {
     // A held key while the prefix is armed must not repeat-fire a
     // window command, and must not reach the program either. Dropping
     // the repeat is the whole handling needed: prefix commands are
@@ -645,13 +645,13 @@ pub fn reportText(self: *Server, alloc: std.mem.Allocator, text: []const u8) !vo
 /// so a subscriber (glyphwire-shell) can resolve `cell` against the
 /// same scrolled-back row the user actually clicked. `clicks` is the
 /// press's count from the host's `core.ClickCounter` (1 = single).
-pub fn reportMouseButton(self: *Server, alloc: std.mem.Allocator, button: []const u8, pressed: bool, px: core.PxPos, cell: core.CellPos, view_offset: usize, clicks: u8) !void {
+pub fn reportMouseButton(self: *Server, alloc: std.mem.Allocator, button: core.MouseButton, pressed: bool, px: core.PxPos, cell: core.CellPos, view_offset: usize, clicks: u8) !void {
     const changed, const mods = changed: {
         const session_lock = self.lockSession();
         defer session_lock.unlock();
         self.ctx.pointer.cursor_px = px;
         self.ctx.pointer.cursor_cell = cell;
-        break :changed .{ try self.session.input.setMouseButton(button, pressed), self.session.mods };
+        break :changed .{ self.session.input.setMouseButton(button, pressed), self.session.mods };
     };
     if (!changed) return;
 

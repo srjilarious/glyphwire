@@ -176,15 +176,14 @@ pub const Dialog = struct {
 
     /// A key press. Returns the button it pressed, if any. `key` is a
     /// glyphwire key name.
-    pub fn handleKey(self: *Dialog, key: []const u8, mods: glyphwire.Mods) ?Button {
-        const eq = std.mem.eql;
+    pub fn handleKey(self: *Dialog, key: glyphwire.Key, mods: glyphwire.Mods) ?Button {
         // Enter and Escape are the dialog's before they are the field's:
         // they answer it rather than edit the text, which is why they are
         // tested here instead of being read off `LineEdit.handleKey`'s
         // `.submit` / `.cancel`.
-        if (eq(u8, key, "enter") or eq(u8, key, "kp_enter")) return self.buttons[self.focus];
-        if (eq(u8, key, "escape")) return self.escapeButton();
-        if (eq(u8, key, "tab")) {
+        if (key == .enter or key == .kp_enter) return self.buttons[self.focus];
+        if (key == .escape) return self.escapeButton();
+        if (key == .tab) {
             self.cycleFocus(mods.shift);
             return null;
         }
@@ -194,13 +193,13 @@ pub const Dialog = struct {
             // one would say where its punctuation is: the word keys move
             // and delete to the field's ends instead.
             if (self.masked and mods.ctrl and !mods.alt and !mods.super) {
-                const whole: ?bool = if (eq(u8, key, "left"))
+                const whole: ?bool = if (key == .left)
                     in.home()
-                else if (eq(u8, key, "right"))
+                else if (key == .right)
                     in.end()
-                else if (eq(u8, key, "backspace"))
+                else if (key == .backspace)
                     in.killToStart()
-                else if (eq(u8, key, "delete"))
+                else if (key == .delete)
                     in.killToEnd()
                 else
                     null;
@@ -212,16 +211,16 @@ pub const Dialog = struct {
             return null;
         }
 
-        if (eq(u8, key, "left")) {
+        if (key == .left) {
             self.cycleFocus(true);
             return null;
         }
-        if (eq(u8, key, "right")) {
+        if (key == .right) {
             self.cycleFocus(false);
             return null;
         }
-        if (key.len == 1 and !mods.ctrl) {
-            const c = std.ascii.toLower(key[0]);
+        if (mods.ctrl) return null;
+        if (key.letter()) |c| {
             for (self.buttons) |b| {
                 if (b.hotkey() == c) return b;
             }

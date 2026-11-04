@@ -46,8 +46,8 @@ pub fn keymapDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     try testz.expectEqual(km.lookupText("%").?, actions.Action.splitRight);
     try testz.expectEqual(km.lookupText("\"").?, actions.Action.splitBelow);
     try testz.expectEqual(km.lookupText("H").?, actions.Action.resizeLeft);
-    try testz.expectEqual(km.lookup("x", .{}).?, actions.Action.killPane);
-    try testz.expectEqual(km.lookup("left", .{}).?, actions.Action.focusLeft);
+    try testz.expectEqual(km.lookup(.x, .{}).?, actions.Action.killPane);
+    try testz.expectEqual(km.lookup(.left, .{}).?, actions.Action.focusLeft);
     try testz.expectTrue(actions.Action.zoom.keepsZoom());
     try testz.expectTrue(!actions.Action.splitRight.keepsZoom());
     try testz.expectTrue(actions.Action.sendPrefix.keepsZoom());
@@ -63,9 +63,9 @@ pub fn sendPrefixFollowsThePrefixKeyTest(_: std.Io, alloc: std.mem.Allocator) !v
     var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
     defer km.deinit(alloc);
     try km.bind(alloc, actions.sendPrefixChord('a'), .sendPrefix);
-    try testz.expectEqual(km.lookup("a", .{ .ctrl = true }).?, actions.Action.sendPrefix);
-    try testz.expectEqual(km.lookup("b", .{ .ctrl = true }), null);
-    try testz.expectEqual(km.lookup("a", .{}), null);
+    try testz.expectEqual(km.lookup(.a, .{ .ctrl = true }).?, actions.Action.sendPrefix);
+    try testz.expectEqual(km.lookup(.b, .{ .ctrl = true }), null);
+    try testz.expectEqual(km.lookup(.a, .{}), null);
 }
 
 /// Ctrl+B P and Ctrl+B m; the palette never lists itself, and opening it
@@ -75,7 +75,7 @@ pub fn paletteAndLayoutModeKeysTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymap.initDefaults(alloc, &actions.defaults);
     defer km.deinit(alloc);
     try testz.expectEqual(km.lookupText("P").?, actions.Action.commandPalette);
-    try testz.expectEqual(km.lookup("m", .{}).?, actions.Action.layoutMode);
+    try testz.expectEqual(km.lookup(.m, .{}).?, actions.Action.layoutMode);
     try testz.expectFalse(actions.inPalette(.commandPalette));
     try testz.expectTrue(actions.inPalette(.layoutMode));
     try testz.expectTrue(actions.Action.commandPalette.keepsZoom());

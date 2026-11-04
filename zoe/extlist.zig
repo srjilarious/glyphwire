@@ -361,28 +361,27 @@ pub const Popup = struct {
     /// Takes every key: the popup is modal, like the palette.
     pub fn key(self: *Popup, k: glyphwire.KeyEvent) Outcome {
         const l = if (self.list) |*open_l| open_l else return .handled;
-        const eq = std.mem.eql;
         const page: isize = @intCast(@max(self.chrome.list_rows, 1));
         const many: isize = @intCast(l.entries.items.len);
 
-        if (eq(u8, k.key, "escape") or (k.mods.ctrl and eq(u8, k.key, "c"))) {
+        if (k.key == .escape or (k.mods.ctrl and k.key == .c)) {
             self.close();
             return .closed;
         }
-        if (eq(u8, k.key, "enter") or eq(u8, k.key, "kp_enter")) {
+        if (k.key == .enter or k.key == .kp_enter) {
             return if (self.selectedPath() != null) .accept else .handled;
         }
-        const step: ?isize = if (eq(u8, k.key, "up") or (k.mods.ctrl and eq(u8, k.key, "p")))
+        const step: ?isize = if (k.key == .up or (k.mods.ctrl and k.key == .p))
             -1
-        else if (eq(u8, k.key, "down") or (k.mods.ctrl and eq(u8, k.key, "n")))
+        else if (k.key == .down or (k.mods.ctrl and k.key == .n))
             1
-        else if (eq(u8, k.key, "page_up"))
+        else if (k.key == .page_up)
             -page
-        else if (eq(u8, k.key, "page_down"))
+        else if (k.key == .page_down)
             page
-        else if (eq(u8, k.key, "home"))
+        else if (k.key == .home)
             -many
-        else if (eq(u8, k.key, "end"))
+        else if (k.key == .end)
             many
         else
             null;

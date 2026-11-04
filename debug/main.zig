@@ -95,13 +95,14 @@ fn runLine(client: *glyphwire.Client, alloc: std.mem.Allocator, io: std.Io, out:
     } else if (eq(cmd, "key")) {
         const k = splitFirst(rest);
         const mode = if (k.rest.len > 0) k.rest else "tap";
+        const key = glyphwire.Key.fromName(k.word);
         if (eq(mode, "down")) {
-            try client.reportKey(k.word, true);
+            try client.reportKey(key, true);
         } else if (eq(mode, "up")) {
-            try client.reportKey(k.word, false);
+            try client.reportKey(key, false);
         } else {
-            try client.reportKey(k.word, true);
-            try client.reportKey(k.word, false);
+            try client.reportKey(key, true);
+            try client.reportKey(key, false);
         }
     } else if (eq(cmd, "cells")) {
         const layer = try std.fmt.parseInt(u32, std.mem.trim(u8, rest, " "), 10);

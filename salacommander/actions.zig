@@ -364,7 +364,7 @@ pub const bar_actions = [_]Action{ .fileOpsMenu, .rename, .find, .edit, .copy, .
 /// while pressing Enter on "Change mode" is chmod as root.
 pub fn menuPick(menu: *const Keymap, entry: Action, held: keybind.Mods) Action {
     const chord = menu.chordFor(entry) orelse return entry;
-    return menu.lookup(chord.key(), held) orelse entry;
+    return menu.lookup(chord.key, held) orelse entry;
 }
 
 /// The F1 menu's entries: the actions the menu keymap binds to a chord

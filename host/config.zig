@@ -212,23 +212,13 @@ pub const theme_switcher_default: Chord = .{ .key = .F10, .super = true };
 pub fn parseChord(text: []const u8) ?Chord {
     const parsed = keybind.Chord.parse(text) catch return null;
     return .{
-        .key = keyFromName(parsed.key()) orelse return null,
+        // `Chord.parse` already refused a name that is no key.
+        .key = parsed.key,
         .ctrl = parsed.mods.ctrl,
         .alt = parsed.mods.alt,
         .shift = parsed.mods.shift,
         .super = parsed.mods.super,
     };
-}
-
-/// `host_eng.input.Key` by name, ignoring case (`f12` finds `F12`).
-fn keyFromName(name: []const u8) ?host_eng.input.Key {
-    inline for (@typeInfo(host_eng.input.Key).@"enum".field_names) |field| {
-        if (std.ascii.eqlIgnoreCase(name, field)) {
-            const key = @field(host_eng.input.Key, field);
-            return if (key == .unknown) null else key;
-        }
-    }
-    return null;
 }
 
 /// Everything `config_load.loadConfig` resolves from `host.conf.lua`.

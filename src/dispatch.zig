@@ -2504,14 +2504,16 @@ pub const Dispatcher = struct {
         const p = parsed.value;
 
         if (p.key) |k| {
-            session.window_prefix = core.WindowPrefix.init(k, p.ctrl, p.alt, p.shift);
+            // A name this build doesn't know decodes to `unknown`, which
+            // `WindowPrefix.matches` never matches: an inert prefix.
+            session.window_prefix = .{ .key = core.Key.fromName(k), .ctrl = p.ctrl, .alt = p.alt, .shift = p.shift };
         } else {
             session.window_prefix = null;
         }
         // Clearing or re-registering resets the one-shot, so a chord that
         // was armed when the binding changed can't fire the new one.
         session.prefix_armed = false;
-        session.swallowed_key_len = 0;
+        session.swallowed_key = null;
     }
 
     /// `send_window_prefix`: hands the registered prefix chord itself to
@@ -2531,9 +2533,9 @@ pub const Dispatcher = struct {
         const session = try self.requireManager();
         const prefix = session.window_prefix orelse return .{};
         const mods: core.Mods = .{ .ctrl = prefix.ctrl, .alt = prefix.alt, .shift = prefix.shift };
-        const down = try rpc.keyNotification(alloc, prefix.key(), true, mods);
+        const down = try rpc.keyNotification(alloc, prefix.key, true, mods);
         errdefer alloc.free(down);
-        const up = try rpc.keyNotification(alloc, prefix.key(), false, mods);
+        const up = try rpc.keyNotification(alloc, prefix.key, false, mods);
         return .{
             .broadcast = .{ .event = .key, .body = down },
             .broadcast_after = .{ .event = .key, .body = up },
@@ -3002,8 +3004,10 @@ pub const Dispatcher = struct {
         const parsed = try codec.parseParams(protocol.ReportKeyParams, alloc, params_value);
         defer parsed.deinit();
         const p = parsed.value;
+        // Decoded once, here: everything past this compares enums.
+        const key = core.Key.fromName(p.key);
 
-        const changed = if (self.inputState()) |in| try in.setKey(p.key, p.pressed) else true;
+        const changed = if (self.inputState()) |in| in.setKey(key, p.pressed) else true;
 
         // The same routing the in-process path does (`Server.reportKey`):
         // a window manager's prefix has to work regardless of who injected
@@ -3011,11 +3015,11 @@ pub const Dispatcher = struct {
         // from a real keyboard. The modifiers come from the session too
         // (see `Session.mods`).
         if (self.session) |session| {
-            const route = session.routeKey(p.key, p.pressed);
+            const route = session.routeKey(key, p.pressed);
             switch (route) {
                 .swallow => return .{},
                 .manager => {
-                    const body = try rpc.windowKeyNotification(alloc, p.key, p.pressed, session.mods);
+                    const body = try rpc.windowKeyNotification(alloc, key, p.pressed, session.mods);
                     return .{ .broadcast = .{
                         .event = if (p.pressed) .window_key_down else .window_key_up,
                         .body = body,
@@ -3026,7 +3030,7 @@ pub const Dispatcher = struct {
         }
         if (!changed) return .{};
 
-        const notif_body = try rpc.keyNotification(alloc, p.key, p.pressed, self.currentMods());
+        const notif_body = try rpc.keyNotification(alloc, key, p.pressed, self.currentMods());
         return .{ .broadcast = .{ .event = .key, .body = notif_body } };
     }
 
@@ -3061,10 +3065,11 @@ pub const Dispatcher = struct {
 
         self.ctx.pointer.cursor_px = .{ .x = p.px.x, .y = p.px.y };
         self.ctx.pointer.cursor_cell = .{ .row = p.cell.row, .col = p.cell.col };
-        const changed = if (self.inputState()) |in| try in.setMouseButton(p.button, p.pressed) else true;
+        const button = core.MouseButton.fromName(p.button);
+        const changed = if (self.inputState()) |in| in.setMouseButton(button, p.pressed) else true;
         if (!changed) return .{};
 
-        const notif_body = try rpc.mouseButtonNotification(alloc, p.button, p.pressed, p.px, p.cell, p.view_offset, self.currentMods(), p.clicks);
+        const notif_body = try rpc.mouseButtonNotification(alloc, button, p.pressed, p.px, p.cell, p.view_offset, self.currentMods(), p.clicks);
         return .{ .broadcast = .{ .event = .mouse_button, .body = notif_body } };
     }
 
@@ -3118,10 +3123,10 @@ pub const Dispatcher = struct {
         var buttons = std.ArrayList([]const u8).empty;
         defer buttons.deinit(alloc);
         if (self.inputState()) |in| {
-            var kit = in.keys_down.keyIterator();
-            while (kit.next()) |k| try keys.append(alloc, k.*);
-            var bit = in.mouse_buttons_down.keyIterator();
-            while (bit.next()) |k| try buttons.append(alloc, k.*);
+            var kit = in.keys_down.iterator();
+            while (kit.next()) |k| try keys.append(alloc, k.name());
+            var bit = in.mouse_buttons_down.iterator();
+            while (bit.next()) |b| try buttons.append(alloc, b.name());
         }
 
         return try self.respond(alloc, id, protocol.InputStateResult{

@@ -205,7 +205,8 @@ pub const Ui = struct {
         // The prefix chord the session will enforce for us. From here on
         // every `window_key` / `window_text` we receive is a command, and
         // nothing else reaches us at all -- see `core.WindowPrefix`.
-        try client.setWindowPrefix(&.{cfg.prefix_key}, true, false, false);
+        // `prefix_key` is a lowercase letter (`config.readPrefixKey`).
+        try client.setWindowPrefix(keybind.keyFromName(&.{cfg.prefix_key}) orelse .b, true, false, false);
 
         const first = try client.createPane(cfg.scrollback_rows);
         self.tree = try layout.Tree.init(alloc, first.pane);
@@ -332,7 +333,7 @@ pub const Ui = struct {
     /// keyboard layout and doesn't run twice.
     fn keyAction(self: *const Ui, k: glyphwire.KeyEvent) ?actions.Action {
         const typing = !k.mods.ctrl and !k.mods.alt and !k.mods.super;
-        if (typing and (k.key.len == 1 or isDigitName(k.key))) return null;
+        if (typing and (k.key.isLetter() or k.key.isDigit())) return null;
         return self.keymap.lookup(k.key, k.mods);
     }
 
@@ -341,14 +342,8 @@ pub const Ui = struct {
     fn textAction(self: *const Ui, text: []const u8) ?actions.Action {
         if (self.keymap.lookupText(text)) |a| return a;
         if (text.len != 1 or !std.ascii.isAlphanumeric(text[0])) return null;
-        var lower: [1]u8 = .{std.ascii.toLower(text[0])};
-        return self.keymap.lookup(keybind.normalizeKey(&lower), .{});
-    }
-
-    fn isDigitName(key: []const u8) bool {
-        const names = [_][]const u8{ "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine" };
-        for (names) |n| if (std.mem.eql(u8, key, n)) return true;
-        return false;
+        const key = keybind.keyFromName(text) orelse return null;
+        return self.keymap.lookup(key, .{});
     }
 
     /// One prefix command. A failed command is logged, not propagated:
@@ -735,7 +730,7 @@ pub const Ui = struct {
                 .closed => self.endMode(),
                 .handled => if (self.palette.dirty) self.redraw(),
             },
-            .layout => if (std.mem.eql(u8, k.key, "escape") or std.mem.eql(u8, k.key, "enter")) self.endMode(),
+            .layout => if (k.key == .escape or k.key == .enter) self.endMode(),
         }
     }
 
@@ -746,7 +741,7 @@ pub const Ui = struct {
     }
 
     fn modeMouseButton(self: *Ui, m: glyphwire.MouseButtonEvent) void {
-        if (!std.mem.eql(u8, m.button, "left")) return;
+        if (m.button != .left) return;
         switch (self.mode) {
             .none => {},
             .palette => if (m.pressed) switch (self.palette.click(m.cell)) {

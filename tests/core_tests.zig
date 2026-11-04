@@ -376,26 +376,43 @@ pub fn manyLinesPastBottomCursorCappedAtHeightLeavesNoBlankRowsTest(io: std.Io, 
     try testz.expectEqualStr("1", layer.cell(3, 2).grapheme());
 }
 
-pub fn inputStateTracksKeyAndMouseButtonDownSetsTest(io: std.Io, alloc: std.mem.Allocator) !void {
-    _ = io;
-    var input = glyphwire.InputState.init(alloc);
-    defer input.deinit();
+pub fn keyFromNameDecodesWireNamesTest(_: std.Io, _: std.mem.Allocator) !void {
+    const Key = glyphwire.Key;
+    try testz.expectEqual(Key.fromName("page_up"), .page_up);
+    try testz.expectEqual(Key.fromName("F5"), .F5);
+    // Exact names only, and a name this build doesn't have (a newer
+    // host's) is `unknown` rather than an error.
+    try testz.expectEqual(Key.fromName("f5"), .unknown);
+    try testz.expectEqual(Key.fromName("hyper_launch"), .unknown);
+    try testz.expectEqual(glyphwire.MouseButton.fromName("wheel_up"), .wheel_up);
+    try testz.expectEqual(glyphwire.MouseButton.fromName("x3"), .unknown);
 
-    try testz.expectTrue(!input.isKeyDown("a"));
+    try testz.expectEqual(Key.seven.digit().?, 7);
+    try testz.expectTrue(Key.kp_7.digit() == null);
+    try testz.expectEqual(Key.q.letter().?, 'q');
+    try testz.expectEqual(Key.F12.functionNumber().?, 12);
+    try testz.expectTrue(Key.right_super.isModifier());
+    try testz.expectFalse(Key.menu.isModifier());
+}
 
-    try testz.expectTrue(try input.setKey("a", true));
-    try testz.expectTrue(input.isKeyDown("a"));
+pub fn inputStateTracksKeyAndMouseButtonDownSetsTest(_: std.Io, _: std.mem.Allocator) !void {
+    var input: glyphwire.InputState = .{};
+
+    try testz.expectTrue(!input.isKeyDown(.a));
+
+    try testz.expectTrue(input.setKey(.a, true));
+    try testz.expectTrue(input.isKeyDown(.a));
     // Redundant press-while-down reports no change.
-    try testz.expectTrue(!try input.setKey("a", true));
+    try testz.expectTrue(!input.setKey(.a, true));
 
-    try testz.expectTrue(try input.setKey("a", false));
-    try testz.expectTrue(!input.isKeyDown("a"));
+    try testz.expectTrue(input.setKey(.a, false));
+    try testz.expectTrue(!input.isKeyDown(.a));
     // Redundant release-while-up reports no change.
-    try testz.expectTrue(!try input.setKey("a", false));
+    try testz.expectTrue(!input.setKey(.a, false));
 
-    try testz.expectTrue(!input.isMouseButtonDown("left"));
-    try testz.expectTrue(try input.setMouseButton("left", true));
-    try testz.expectTrue(input.isMouseButtonDown("left"));
+    try testz.expectTrue(!input.isMouseButtonDown(.left));
+    try testz.expectTrue(input.setMouseButton(.left, true));
+    try testz.expectTrue(input.isMouseButtonDown(.left));
 }
 
 pub fn scrollingWithNoScrollbackKeepsNoHistoryTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5565,7 +5582,7 @@ pub fn routeKeyWithoutAPrefixPassesEverythingThroughTest(io: std.Io, alloc: std.
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
 
-    try testz.expectEqual(session.routeKey("b", true), .pass);
+    try testz.expectEqual(session.routeKey(.b, true), .pass);
     try testz.expectEqual(session.routeText(), .pass);
 }
 
@@ -5575,16 +5592,16 @@ pub fn routeKeySwallowsThePrefixAndSendsTheNextToTheManagerTest(io: std.Io, allo
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
     // Ctrl down first -- the session learns the modifier from the key
     // events themselves, so a test that skipped this would be testing a
     // keyboard nobody has (see `Session.mods`).
-    try testz.expectEqual(session.routeKey("left_control", true), .pass);
+    try testz.expectEqual(session.routeKey(.left_control, true), .pass);
     // Ctrl-B is withheld from the program entirely.
-    try testz.expectEqual(session.routeKey("b", true), .swallow);
+    try testz.expectEqual(session.routeKey(.b, true), .swallow);
     // Its release goes with it, so the program never sees half a keystroke.
-    try testz.expectEqual(session.routeKey("b", false), .swallow);
+    try testz.expectEqual(session.routeKey(.b, false), .swallow);
     // The next keystroke is a window command. `q` arrives as text, which is
     // how most prefix commands come in.
     try testz.expectEqual(session.routeText(), .manager);
@@ -5598,17 +5615,17 @@ pub fn routeKeyRequiresTheExactModifiersTest(io: std.Io, alloc: std.mem.Allocato
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
     // A bare `b` is just a letter.
-    try testz.expectEqual(session.routeKey("b", true), .pass);
+    try testz.expectEqual(session.routeKey(.b, true), .pass);
     try testz.expectTrue(!session.prefix_armed);
-    try testz.expectEqual(session.routeKey("b", false), .pass);
+    try testz.expectEqual(session.routeKey(.b, false), .pass);
 
     // And Ctrl-Alt-B isn't the chord either: the chord is exact.
-    try testz.expectEqual(session.routeKey("left_control", true), .pass);
-    try testz.expectEqual(session.routeKey("left_alt", true), .pass);
-    try testz.expectEqual(session.routeKey("b", true), .pass);
+    try testz.expectEqual(session.routeKey(.left_control, true), .pass);
+    try testz.expectEqual(session.routeKey(.left_alt, true), .pass);
+    try testz.expectEqual(session.routeKey(.b, true), .pass);
     try testz.expectTrue(!session.prefix_armed);
 }
 
@@ -5618,15 +5635,15 @@ pub fn routeKeyDeliversANamedKeyCommandToTheManagerTest(io: std.Io, alloc: std.m
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
-    try testz.expectEqual(session.routeKey("left_control", true), .pass);
-    try testz.expectEqual(session.routeKey("b", true), .swallow);
+    try testz.expectEqual(session.routeKey(.left_control, true), .pass);
+    try testz.expectEqual(session.routeKey(.b, true), .swallow);
     // An arrow (a named key, not text) after the prefix: also a command,
     // and its release is swallowed rather than reaching the program.
-    try testz.expectEqual(session.routeKey("left", true), .manager);
-    try testz.expectEqual(session.routeKey("left", false), .swallow);
-    try testz.expectEqual(session.routeKey("left", true), .pass);
+    try testz.expectEqual(session.routeKey(.left, true), .manager);
+    try testz.expectEqual(session.routeKey(.left, false), .swallow);
+    try testz.expectEqual(session.routeKey(.left, true), .pass);
 }
 
 pub fn releaseManagerClearsThePrefixSoNoKeysVanishTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5636,16 +5653,16 @@ pub fn releaseManagerClearsThePrefixSoNoKeysVanishTest(io: std.Io, alloc: std.me
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
     _ = session.claimManager(1, 0);
-    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
-    try testz.expectEqual(session.routeKey("left_control", true), .pass);
-    try testz.expectEqual(session.routeKey("b", true), .swallow);
+    session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
+    try testz.expectEqual(session.routeKey(.left_control, true), .pass);
+    try testz.expectEqual(session.routeKey(.b, true), .swallow);
 
     // The multiplexer dies mid-sequence. A prefix with nobody to deliver to
     // would swallow keystrokes into nothing.
     session.releaseManager(1);
     try testz.expectTrue(session.window_prefix == null);
     try testz.expectTrue(!session.prefix_armed);
-    try testz.expectEqual(session.routeKey("b", true), .pass);
+    try testz.expectEqual(session.routeKey(.b, true), .pass);
     try testz.expectEqual(session.routeText(), .pass);
 }
 
@@ -5661,29 +5678,29 @@ pub fn routeKeyKeepsThePrefixArmedAcrossAShiftedKeystrokeTest(io: std.Io, alloc:
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
     // Ctrl down, then Ctrl-B, then both up -- exactly what the host sends.
-    try testz.expectEqual(session.routeKey("left_control", true), .pass);
-    try testz.expectEqual(session.routeKey("b", true), .swallow);
-    try testz.expectEqual(session.routeKey("b", false), .swallow);
-    try testz.expectEqual(session.routeKey("left_control", false), .pass);
+    try testz.expectEqual(session.routeKey(.left_control, true), .pass);
+    try testz.expectEqual(session.routeKey(.b, true), .swallow);
+    try testz.expectEqual(session.routeKey(.b, false), .swallow);
+    try testz.expectEqual(session.routeKey(.left_control, false), .pass);
     try testz.expectTrue(session.prefix_armed);
 
     // Shift down for the `"`. A modifier is never the command.
-    try testz.expectEqual(session.routeKey("left_shift", true), .pass);
+    try testz.expectEqual(session.routeKey(.left_shift, true), .pass);
     try testz.expectTrue(session.prefix_armed);
 
     // The key event for the keystroke is withheld: the text is the command.
-    try testz.expectEqual(session.routeKey("apostrophe", true), .swallow);
+    try testz.expectEqual(session.routeKey(.apostrophe, true), .swallow);
     try testz.expectTrue(session.prefix_armed);
     try testz.expectEqual(session.routeText(), .manager);
     try testz.expectTrue(!session.prefix_armed);
 
     // The withheld press's release goes with it, and the modifier's
     // release is ordinary input.
-    try testz.expectEqual(session.routeKey("apostrophe", false), .swallow);
-    try testz.expectEqual(session.routeKey("left_shift", false), .pass);
+    try testz.expectEqual(session.routeKey(.apostrophe, false), .swallow);
+    try testz.expectEqual(session.routeKey(.left_shift, false), .pass);
 }
 
 /// The same for an unshifted letter command (`x`, `z`, `q`): the key event
@@ -5694,20 +5711,20 @@ pub fn routeKeyWithholdsAPrintableKeyAndLetsItsTextBeTheCommandTest(io: std.Io, 
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
-    try testz.expectEqual(session.routeKey("left_control", true), .pass);
-    try testz.expectEqual(session.routeKey("b", true), .swallow);
-    try testz.expectEqual(session.routeKey("b", false), .swallow);
-    try testz.expectEqual(session.routeKey("left_control", false), .pass);
+    try testz.expectEqual(session.routeKey(.left_control, true), .pass);
+    try testz.expectEqual(session.routeKey(.b, true), .swallow);
+    try testz.expectEqual(session.routeKey(.b, false), .swallow);
+    try testz.expectEqual(session.routeKey(.left_control, false), .pass);
 
-    try testz.expectEqual(session.routeKey("x", true), .swallow);
+    try testz.expectEqual(session.routeKey(.x, true), .swallow);
     try testz.expectTrue(session.prefix_armed);
     try testz.expectEqual(session.routeText(), .manager);
-    try testz.expectEqual(session.routeKey("x", false), .swallow);
+    try testz.expectEqual(session.routeKey(.x, false), .swallow);
 
     // And once disarmed, the same key is ordinary input again.
-    try testz.expectEqual(session.routeKey("x", true), .pass);
+    try testz.expectEqual(session.routeKey(.x, true), .pass);
     try testz.expectEqual(session.routeText(), .pass);
 }
 
@@ -5719,13 +5736,13 @@ pub fn routeKeySendsAPrintableKeyToTheManagerWhenCtrlIsHeldTest(io: std.Io, allo
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
-    try testz.expectEqual(session.routeKey("left_control", true), .pass);
-    try testz.expectEqual(session.routeKey("b", true), .swallow);
-    try testz.expectEqual(session.routeKey("b", false), .swallow);
+    try testz.expectEqual(session.routeKey(.left_control, true), .pass);
+    try testz.expectEqual(session.routeKey(.b, true), .swallow);
+    try testz.expectEqual(session.routeKey(.b, false), .swallow);
     // Ctrl never released: Ctrl-B Ctrl-X.
-    try testz.expectEqual(session.routeKey("x", true), .manager);
+    try testz.expectEqual(session.routeKey(.x, true), .manager);
     try testz.expectTrue(!session.prefix_armed);
 }
 
@@ -5738,19 +5755,19 @@ pub fn isSwallowedKeyTracksTheKeyWhoseReleaseIsStillOwedTest(io: std.Io, alloc: 
     defer root.deinit();
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
-    session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
-    try testz.expectTrue(!session.isSwallowedKey("up"));
-    try testz.expectEqual(session.routeKey("left_control", true), .pass);
-    try testz.expectEqual(session.routeKey("b", true), .swallow);
-    try testz.expectEqual(session.routeKey("b", false), .swallow);
+    try testz.expectTrue(!session.isSwallowedKey(.up));
+    try testz.expectEqual(session.routeKey(.left_control, true), .pass);
+    try testz.expectEqual(session.routeKey(.b, true), .swallow);
+    try testz.expectEqual(session.routeKey(.b, false), .swallow);
     // A named key command: delivered, and still held.
-    try testz.expectEqual(session.routeKey("up", true), .manager);
-    try testz.expectTrue(session.isSwallowedKey("up"));
-    try testz.expectTrue(!session.isSwallowedKey("down"));
+    try testz.expectEqual(session.routeKey(.up, true), .manager);
+    try testz.expectTrue(session.isSwallowedKey(.up));
+    try testz.expectTrue(!session.isSwallowedKey(.down));
     // Released: the repeat guard lifts with it.
-    try testz.expectEqual(session.routeKey("up", false), .swallow);
-    try testz.expectTrue(!session.isSwallowedKey("up"));
+    try testz.expectEqual(session.routeKey(.up, false), .swallow);
+    try testz.expectTrue(!session.isSwallowedKey(.up));
 }
 
 // ── Image lifecycle: destroy / update / scrollback sweep ─────────────

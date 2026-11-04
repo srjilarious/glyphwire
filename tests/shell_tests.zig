@@ -613,22 +613,22 @@ pub fn historyMultiLineEntryStaysOneFileLineTest(_: std.Io, alloc: std.mem.Alloc
 
 pub fn keyencodePlainAndShiftedCharsTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [8]u8 = undefined;
-    try testz.expectEqualStr("a", keyencode.toPtyBytes("a", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("A", keyencode.toPtyBytes("a", .{ .shift = true }, .normal, &buf).?);
-    try testz.expectEqualStr("7", keyencode.toPtyBytes("seven", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("&", keyencode.toPtyBytes("seven", .{ .shift = true }, .normal, &buf).?);
-    try testz.expectEqualStr(" ", keyencode.toPtyBytes("space", .{}, .normal, &buf).?);
+    try testz.expectEqualStr("a", keyencode.toPtyBytes(.a, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("A", keyencode.toPtyBytes(.a, .{ .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr("7", keyencode.toPtyBytes(.seven, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("&", keyencode.toPtyBytes(.seven, .{ .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr(" ", keyencode.toPtyBytes(.space, .{}, .normal, &buf).?);
 }
 
 pub fn keyencodeNamedKeysMapToSequencesTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [8]u8 = undefined;
-    try testz.expectEqualStr("\r", keyencode.toPtyBytes("enter", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("\x7f", keyencode.toPtyBytes("backspace", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("\t", keyencode.toPtyBytes("tab", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b", keyencode.toPtyBytes("escape", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[A", keyencode.toPtyBytes("up", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[D", keyencode.toPtyBytes("left", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[3~", keyencode.toPtyBytes("delete", .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\r", keyencode.toPtyBytes(.enter, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x7f", keyencode.toPtyBytes(.backspace, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\t", keyencode.toPtyBytes(.tab, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b", keyencode.toPtyBytes(.escape, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[A", keyencode.toPtyBytes(.up, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[D", keyencode.toPtyBytes(.left, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[3~", keyencode.toPtyBytes(.delete, .{}, .normal, &buf).?);
 }
 
 /// `F1`-`F4` are SS3, unaffected by DECCKM (that only retimes the arrows/
@@ -637,78 +637,78 @@ pub fn keyencodeNamedKeysMapToSequencesTest(_: std.Io, _: std.mem.Allocator) !vo
 /// quit key (`F10`) is the motivating case.
 pub fn keyencodeFunctionKeysMapToXtermSequencesTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [8]u8 = undefined;
-    try testz.expectEqualStr("\x1bOP", keyencode.toPtyBytes("F1", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("\x1bOS", keyencode.toPtyBytes("F4", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[15~", keyencode.toPtyBytes("F5", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[21~", keyencode.toPtyBytes("F10", .{}, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[24~", keyencode.toPtyBytes("F12", .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1bOP", keyencode.toPtyBytes(.F1, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1bOS", keyencode.toPtyBytes(.F4, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[15~", keyencode.toPtyBytes(.F5, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[21~", keyencode.toPtyBytes(.F10, .{}, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[24~", keyencode.toPtyBytes(.F12, .{}, .normal, &buf).?);
     // Application cursor-key mode doesn't affect function keys.
-    try testz.expectEqualStr("\x1b[21~", keyencode.toPtyBytes("F10", .{}, .application, &buf).?);
+    try testz.expectEqualStr("\x1b[21~", keyencode.toPtyBytes(.F10, .{}, .application, &buf).?);
     // F13 and up are still out of scope.
-    try testz.expectTrue(keyencode.toPtyBytes("F13", .{}, .normal, &buf) == null);
+    try testz.expectTrue(keyencode.toPtyBytes(.F13, .{}, .normal, &buf) == null);
 }
 
 /// DECCKM (`ESC [ ? 1 h`): the arrows and Home/End switch to the `ESC O x`
 /// (SS3) form; the `~`-terminated keys don't.
 pub fn keyencodeApplicationCursorKeysTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [8]u8 = undefined;
-    try testz.expectEqualStr("\x1bOA", keyencode.toPtyBytes("up", .{}, .application, &buf).?);
-    try testz.expectEqualStr("\x1bOB", keyencode.toPtyBytes("down", .{}, .application, &buf).?);
-    try testz.expectEqualStr("\x1bOC", keyencode.toPtyBytes("right", .{}, .application, &buf).?);
-    try testz.expectEqualStr("\x1bOD", keyencode.toPtyBytes("left", .{}, .application, &buf).?);
-    try testz.expectEqualStr("\x1bOH", keyencode.toPtyBytes("home", .{}, .application, &buf).?);
-    try testz.expectEqualStr("\x1bOF", keyencode.toPtyBytes("end", .{}, .application, &buf).?);
+    try testz.expectEqualStr("\x1bOA", keyencode.toPtyBytes(.up, .{}, .application, &buf).?);
+    try testz.expectEqualStr("\x1bOB", keyencode.toPtyBytes(.down, .{}, .application, &buf).?);
+    try testz.expectEqualStr("\x1bOC", keyencode.toPtyBytes(.right, .{}, .application, &buf).?);
+    try testz.expectEqualStr("\x1bOD", keyencode.toPtyBytes(.left, .{}, .application, &buf).?);
+    try testz.expectEqualStr("\x1bOH", keyencode.toPtyBytes(.home, .{}, .application, &buf).?);
+    try testz.expectEqualStr("\x1bOF", keyencode.toPtyBytes(.end, .{}, .application, &buf).?);
     // PageUp and friends are unchanged by cursor-key mode.
-    try testz.expectEqualStr("\x1b[5~", keyencode.toPtyBytes("page_up", .{}, .application, &buf).?);
+    try testz.expectEqualStr("\x1b[5~", keyencode.toPtyBytes(.page_up, .{}, .application, &buf).?);
 }
 
 pub fn keyencodeCtrlAndAltTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [8]u8 = undefined;
     // Ctrl-C / Ctrl-D / Ctrl-Z as their C0 control bytes.
-    try testz.expectEqualStr("\x03", keyencode.toPtyBytes("c", .{ .ctrl = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x04", keyencode.toPtyBytes("d", .{ .ctrl = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1a", keyencode.toPtyBytes("z", .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x03", keyencode.toPtyBytes(.c, .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x04", keyencode.toPtyBytes(.d, .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1a", keyencode.toPtyBytes(.z, .{ .ctrl = true }, .normal, &buf).?);
     // Alt-x = ESC prefix + the char.
-    try testz.expectEqualStr("\x1bx", keyencode.toPtyBytes("x", .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1bx", keyencode.toPtyBytes(.x, .{ .alt = true }, .normal, &buf).?);
 }
 
 pub fn keyencodeReturnsNullForNonPrintableTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [8]u8 = undefined;
     // Bare modifiers / unknown function keys -- nothing to send.
-    try testz.expectEqual(keyencode.toPtyBytes("left_shift", .{}, .normal, &buf), null);
-    try testz.expectEqual(keyencode.toPtyBytes("f5", .{}, .normal, &buf), null);
+    try testz.expectEqual(keyencode.toPtyBytes(.left_shift, .{}, .normal, &buf), null);
+    try testz.expectEqual(keyencode.toPtyBytes(.unknown, .{}, .normal, &buf), null);
     // Ctrl with a key that has no control-byte mapping is swallowed.
-    try testz.expectEqual(keyencode.toPtyBytes("f5", .{ .ctrl = true }, .normal, &buf), null);
+    try testz.expectEqual(keyencode.toPtyBytes(.unknown, .{ .ctrl = true }, .normal, &buf), null);
 }
 
 /// xterm's modifier forms: what vim / nvim / readline bind word motion
 /// and Shift+Tab to. Always `CSI`, even in application-cursor mode.
 pub fn keyencodeXtermModifierFormsTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [32]u8 = undefined;
-    try testz.expectEqualStr("\x1b[1;5D", keyencode.toPtyBytes("left", .{ .ctrl = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[1;2A", keyencode.toPtyBytes("up", .{ .shift = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[1;5A", keyencode.toPtyBytes("up", .{ .ctrl = true }, .application, &buf).?);
-    try testz.expectEqualStr("\x1b[1;3H", keyencode.toPtyBytes("home", .{ .alt = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[3;3~", keyencode.toPtyBytes("delete", .{ .alt = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[6;5~", keyencode.toPtyBytes("page_down", .{ .ctrl = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[1;2P", keyencode.toPtyBytes("F1", .{ .shift = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[15;5~", keyencode.toPtyBytes("F5", .{ .ctrl = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b[1;8C", keyencode.toPtyBytes("right", .{ .ctrl = true, .alt = true, .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[1;5D", keyencode.toPtyBytes(.left, .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[1;2A", keyencode.toPtyBytes(.up, .{ .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[1;5A", keyencode.toPtyBytes(.up, .{ .ctrl = true }, .application, &buf).?);
+    try testz.expectEqualStr("\x1b[1;3H", keyencode.toPtyBytes(.home, .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[3;3~", keyencode.toPtyBytes(.delete, .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[6;5~", keyencode.toPtyBytes(.page_down, .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[1;2P", keyencode.toPtyBytes(.F1, .{ .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[15;5~", keyencode.toPtyBytes(.F5, .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[1;8C", keyencode.toPtyBytes(.right, .{ .ctrl = true, .alt = true, .shift = true }, .normal, &buf).?);
 }
 
 /// Enter / Tab / Backspace / Escape with modifiers in the legacy
 /// encoding, plus Ctrl+Alt on a letter.
 pub fn keyencodeLegacyControlKeyChordsTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [32]u8 = undefined;
-    try testz.expectEqualStr("\x1b[Z", keyencode.toPtyBytes("tab", .{ .shift = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b\t", keyencode.toPtyBytes("tab", .{ .alt = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x08", keyencode.toPtyBytes("backspace", .{ .ctrl = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b\x7f", keyencode.toPtyBytes("backspace", .{ .alt = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b\r", keyencode.toPtyBytes("enter", .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b[Z", keyencode.toPtyBytes(.tab, .{ .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b\t", keyencode.toPtyBytes(.tab, .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x08", keyencode.toPtyBytes(.backspace, .{ .ctrl = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b\x7f", keyencode.toPtyBytes(.backspace, .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b\r", keyencode.toPtyBytes(.enter, .{ .alt = true }, .normal, &buf).?);
     // No legacy spelling for Shift+Enter: it is just Enter.
-    try testz.expectEqualStr("\r", keyencode.toPtyBytes("enter", .{ .shift = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b\x1b", keyencode.toPtyBytes("escape", .{ .alt = true }, .normal, &buf).?);
-    try testz.expectEqualStr("\x1b\x18", keyencode.toPtyBytes("x", .{ .ctrl = true, .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\r", keyencode.toPtyBytes(.enter, .{ .shift = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b\x1b", keyencode.toPtyBytes(.escape, .{ .alt = true }, .normal, &buf).?);
+    try testz.expectEqualStr("\x1b\x18", keyencode.toPtyBytes(.x, .{ .ctrl = true, .alt = true }, .normal, &buf).?);
 }
 
 /// Kitty flag 1: Escape and the ambiguous chords become `CSI u`;
@@ -716,23 +716,23 @@ pub fn keyencodeLegacyControlKeyChordsTest(_: std.Io, _: std.mem.Allocator) !voi
 pub fn keyencodeKittyDisambiguateTest(_: std.Io, _: std.mem.Allocator) !void {
     var buf: [32]u8 = undefined;
     const k: keyencode.EncodeOpts = .{ .kitty_flags = 1 };
-    try testz.expectEqualStr("\x1b[27u", keyencode.toPtyBytesOpts("escape", .{}, k, &buf).?);
-    try testz.expectEqualStr("\x1b[13;2u", keyencode.toPtyBytesOpts("enter", .{ .shift = true }, k, &buf).?);
-    try testz.expectEqualStr("\x1b[9;2u", keyencode.toPtyBytesOpts("tab", .{ .shift = true }, k, &buf).?);
-    try testz.expectEqualStr("\x1b[127;5u", keyencode.toPtyBytesOpts("backspace", .{ .ctrl = true }, k, &buf).?);
-    try testz.expectEqualStr("\r", keyencode.toPtyBytesOpts("enter", .{}, k, &buf).?);
-    try testz.expectEqualStr("\t", keyencode.toPtyBytesOpts("tab", .{}, k, &buf).?);
-    try testz.expectEqualStr("\x7f", keyencode.toPtyBytesOpts("backspace", .{}, k, &buf).?);
+    try testz.expectEqualStr("\x1b[27u", keyencode.toPtyBytesOpts(.escape, .{}, k, &buf).?);
+    try testz.expectEqualStr("\x1b[13;2u", keyencode.toPtyBytesOpts(.enter, .{ .shift = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[9;2u", keyencode.toPtyBytesOpts(.tab, .{ .shift = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[127;5u", keyencode.toPtyBytesOpts(.backspace, .{ .ctrl = true }, k, &buf).?);
+    try testz.expectEqualStr("\r", keyencode.toPtyBytesOpts(.enter, .{}, k, &buf).?);
+    try testz.expectEqualStr("\t", keyencode.toPtyBytesOpts(.tab, .{}, k, &buf).?);
+    try testz.expectEqualStr("\x7f", keyencode.toPtyBytesOpts(.backspace, .{}, k, &buf).?);
     // Text with Ctrl/Alt: the unshifted key, shift in the modifier.
-    try testz.expectEqualStr("\x1b[99;5u", keyencode.toPtyBytesOpts("c", .{ .ctrl = true }, k, &buf).?);
-    try testz.expectEqualStr("\x1b[97;6u", keyencode.toPtyBytesOpts("a", .{ .ctrl = true, .shift = true }, k, &buf).?);
-    try testz.expectEqualStr("\x1b[49;3u", keyencode.toPtyBytesOpts("one", .{ .alt = true }, k, &buf).?);
-    try testz.expectEqualStr("a", keyencode.toPtyBytesOpts("a", .{}, k, &buf).?);
-    try testz.expectEqualStr("A", keyencode.toPtyBytesOpts("a", .{ .shift = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[99;5u", keyencode.toPtyBytesOpts(.c, .{ .ctrl = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[97;6u", keyencode.toPtyBytesOpts(.a, .{ .ctrl = true, .shift = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[49;3u", keyencode.toPtyBytesOpts(.one, .{ .alt = true }, k, &buf).?);
+    try testz.expectEqualStr("a", keyencode.toPtyBytesOpts(.a, .{}, k, &buf).?);
+    try testz.expectEqualStr("A", keyencode.toPtyBytesOpts(.a, .{ .shift = true }, k, &buf).?);
     // Navigation keys keep their legacy form; F3 moves off `CSI R`.
-    try testz.expectEqualStr("\x1b[1;5D", keyencode.toPtyBytesOpts("left", .{ .ctrl = true }, k, &buf).?);
-    try testz.expectEqualStr("\x1b[13;2~", keyencode.toPtyBytesOpts("F3", .{ .shift = true }, k, &buf).?);
-    try testz.expectEqualStr("\x1bOR", keyencode.toPtyBytesOpts("F3", .{}, k, &buf).?);
+    try testz.expectEqualStr("\x1b[1;5D", keyencode.toPtyBytesOpts(.left, .{ .ctrl = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1b[13;2~", keyencode.toPtyBytesOpts(.F3, .{ .shift = true }, k, &buf).?);
+    try testz.expectEqualStr("\x1bOR", keyencode.toPtyBytesOpts(.F3, .{}, k, &buf).?);
 }
 
 // ─── keyencode.encodeMouse ────────────────────────────────────────────
@@ -753,12 +753,13 @@ pub fn encodeMouseSgrFormTest(_: std.Io, _: std.mem.Allocator) !void {
     try testz.expectEqualStr("\x1b[<64;5;5M", keyencode.encodeMouse(.sgr, .wheel_up, .press, 4, 4, .{}, &buf).?);
 }
 
-pub fn mouseButtonFromNameMapsWheelTest(_: std.Io, _: std.mem.Allocator) !void {
-    // The host's wheel notches over a mouse-mode program arrive under
-    // these names and must encode as xterm buttons 64/65.
-    try testz.expectTrue(keyencode.mouseButtonFromName("wheel_up").? == .wheel_up);
-    try testz.expectTrue(keyencode.mouseButtonFromName("wheel_down").? == .wheel_down);
-    try testz.expectTrue(keyencode.mouseButtonFromName("four") == null);
+pub fn reportButtonMapsWheelTest(_: std.Io, _: std.mem.Allocator) !void {
+    // The host's wheel notches over a mouse-mode program arrive as these
+    // buttons and must encode as xterm buttons 64/65.
+    try testz.expectTrue(keyencode.reportButton(.wheel_up).? == .wheel_up);
+    try testz.expectTrue(keyencode.reportButton(.wheel_down).? == .wheel_down);
+    try testz.expectTrue(keyencode.reportButton(.x1) == null);
+    try testz.expectTrue(keyencode.reportButton(glyphwire.MouseButton.fromName("four")) == null);
     var buf: [16]u8 = undefined;
     try testz.expectEqualStr("\x1b[<65;2;3M", keyencode.encodeMouse(.sgr, .wheel_down, .press, 1, 2, .{}, &buf).?);
 }

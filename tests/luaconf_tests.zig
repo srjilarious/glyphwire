@@ -161,9 +161,9 @@ pub fn keysReadsChordsAndActionsTest(_: std.Io, alloc: std.mem.Allocator) !void 
     try testz.expectTrue(err == null);
     defer alloc.free(out.keys);
     try testz.expectEqual(out.keys.len, 3);
-    try testz.expectEqualStr(out.keys[0].chord.key(), "?");
+    try testz.expectEqualStr(out.keys[0].chord.typed(), "?");
     try testz.expectTrue(out.keys[0].chord.text);
-    try testz.expectEqualStr(out.keys[1].chord.key(), "f10");
+    try testz.expectEqual(out.keys[1].chord.key, .F10);
     try testz.expectTrue(out.keys[1].action == null);
     try testz.expectEqual(out.keys[2].action.?, .up);
 }

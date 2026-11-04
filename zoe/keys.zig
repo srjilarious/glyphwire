@@ -17,6 +17,8 @@
 //! later needs no change here.
 
 const std = @import("std");
+const glyphwire = @import("glyphwire");
+const keybind = @import("applib").keybind;
 const editor = @import("editor.zig");
 
 const Editor = editor.Editor;
@@ -56,7 +58,7 @@ pub fn feed(ed: *Editor, script: []const u8) !Outcome {
                             else => break,
                         }
                     }
-                    switch (try ed.feedKey(keyName(bare), mods)) {
+                    switch (try ed.feedKey(keyFor(bare), mods)) {
                         .none => {},
                         else => |o| return o,
                     }
@@ -84,10 +86,16 @@ fn literalFor(name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// vim's short names mapped onto glyphwire's key names, which come from
-/// the engine backend's SDL3 keycode enum (`@tagName`) and so are the
-/// protocol -- see decisions.md's Input model. An unlisted name passes
-/// through, which is how `<f1>` or `<page_up>` work with no entry here.
+/// The key a `<name>` spells: vim's short names first (`keyName`), then
+/// any `glyphwire.Key` or chord alias, case-insensitively (`<f1>`,
+/// `<page_up>`, `<pgdn>`). `unknown` for a name that is none of those,
+/// which then binds nothing.
+fn keyFor(name: []const u8) glyphwire.Key {
+    return keybind.keyFromName(keyName(name)) orelse .unknown;
+}
+
+/// vim's short names mapped onto glyphwire's key names. An unlisted name
+/// passes through for `keyFor` to look up.
 fn keyName(name: []const u8) []const u8 {
     const aliases = [_]struct { short: []const u8, full: []const u8 }{
         .{ .short = "esc", .full = "escape" },

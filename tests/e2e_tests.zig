@@ -230,8 +230,8 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     // notification (what the host sends after resolving the OS layout);
     // Enter is still a key event.
     try reporter.reportText("nosuchcmd");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // The failed-command report lands on row 1 (always at col 0 -- it's
     // written before any prompt prefix). It has no trailing newline, so
@@ -248,8 +248,8 @@ pub fn shellPromptEchoesTypedInputTest(_: std.Io, alloc: std.mem.Allocator) !voi
     // asynchronous hop through the real shell process at all -- it was
     // passing on stale state.)
     try reporter.reportText("bye");
-    try reporter.reportKey("backspace", true);
-    try reporter.reportKey("backspace", false);
+    try reporter.reportKey(.backspace, true);
+    try reporter.reportKey(.backspace, false);
     try reporter.reportText("z");
 
     try waitForCell(&reporter, 3, text_col + 2, "z");
@@ -407,8 +407,8 @@ pub fn shellTabCompletesUniqueFilenameTest(_: std.Io, alloc: std.mem.Allocator) 
     // the completion acts on the full word rather than a partial one.
     try waitForCell(&reporter, 0, text_col + 4, "r");
 
-    try reporter.reportKey("tab", true);
-    try reporter.reportKey("tab", false);
+    try reporter.reportKey(.tab, true);
+    try reporter.reportKey(.tab, false);
 
     // "ls sr" + Tab -> "ls src/": the "c" and "/" are what completion
     // added; waiting on the "/" proves the directory suffix ran.
@@ -499,8 +499,8 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     try testz.expectEqual(cur.row, @as(usize, 0));
     try testz.expectEqual(cur.col, text_col + 5);
 
-    try reporter.reportKey("left", true);
-    try reporter.reportKey("left", false);
+    try reporter.reportKey(.left, true);
+    try reporter.reportKey(.left, false);
     try waitForCursorCol(&reporter, text_col + 4);
 
     var left_snapshot = try reporter.getCells(.{});
@@ -512,8 +512,8 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     try testz.expectEqual(left_c.fg.r, suggestionFg().r);
     try testz.expectEqual(left_slash.fg.r, suggestionFg().r);
 
-    try reporter.reportKey("right", true);
-    try reporter.reportKey("right", false);
+    try reporter.reportKey(.right, true);
+    try reporter.reportKey(.right, false);
     try waitForCursorCol(&reporter, text_col + 5);
 
     var right_snapshot = try reporter.getCells(.{});
@@ -525,8 +525,8 @@ pub fn shellShowsInlineCompletionHintAfterIdleTest(_: std.Io, alloc: std.mem.All
     try testz.expectEqual(right_c.fg.r, suggestionFg().r);
     try testz.expectEqual(right_slash.fg.r, suggestionFg().r);
 
-    try reporter.reportKey("right", true);
-    try reporter.reportKey("right", false);
+    try reporter.reportKey(.right, true);
+    try reporter.reportKey(.right, false);
     try waitForCursorCol(&reporter, text_col + 7);
 
     var accepted = try reporter.getCells(.{});
@@ -585,8 +585,8 @@ pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: st
     try typeText(&reporter, "cd d");
     try waitForCell(&reporter, 0, text_col + 3, "d");
 
-    try reporter.reportKey("tab", true);
-    try reporter.reportKey("tab", false);
+    try reporter.reportKey(.tab, true);
+    try reporter.reportKey(.tab, false);
 
     // Sorted candidates: debug, demo, docker, docs -- row 1 (right below
     // the input line) is "debug", the initial selection.
@@ -604,8 +604,8 @@ pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: st
     try testz.expectEqual(demo_row.fg.g, suggestionFg().g);
     try testz.expectEqual(demo_row.fg.b, suggestionFg().b);
 
-    try reporter.reportKey("down", true);
-    try reporter.reportKey("down", false);
+    try reporter.reportKey(.down, true);
+    try reporter.reportKey(.down, false);
     try waitForCell(&reporter, 2, 0, ">");
 
     var moved = try reporter.getCells(.{});
@@ -613,8 +613,8 @@ pub fn shellTabOpensPickerAndDownSelectsSecondCandidateTest(_: std.Io, alloc: st
     try testz.expectEqualStr(" ", moved.cellAt(1, 0).grapheme); // debug: no longer selected
     try testz.expectEqualStr(">", moved.cellAt(2, 0).grapheme); // demo: now selected
 
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // "cd d" + "emo/" -> "cd demo/"; also proves the picker's rows were
     // cleared (Enter doesn't submit the line -- see `acceptCompletionPicker`).
@@ -677,10 +677,10 @@ pub fn shellCtrlBackspaceAndDeleteRemoveWholeWordsTest(_: std.Io, alloc: std.mem
     try typeText(&reporter, "echo foo bar");
     try waitForCell(&reporter, 0, text_col + 11, "r");
 
-    try reporter.reportKey("left_control", true);
-    try reporter.reportKey("backspace", true);
-    try reporter.reportKey("backspace", false);
-    try reporter.reportKey("left_control", false);
+    try reporter.reportKey(.left_control, true);
+    try reporter.reportKey(.backspace, true);
+    try reporter.reportKey(.backspace, false);
+    try reporter.reportKey(.left_control, false);
 
     // "echo foo bar" -> "echo foo " (the trailing space Ctrl+Left would
     // have stopped just past is kept; only "bar" itself is deleted).
@@ -690,14 +690,14 @@ pub fn shellCtrlBackspaceAndDeleteRemoveWholeWordsTest(_: std.Io, alloc: std.mem
     try testz.expectEqualStr(" ", after_backspace.cellAt(0, text_col + 8).grapheme);
     try testz.expectEqualStr(" ", after_backspace.cellAt(0, text_col + 9).grapheme);
 
-    try reporter.reportKey("home", true);
-    try reporter.reportKey("home", false);
+    try reporter.reportKey(.home, true);
+    try reporter.reportKey(.home, false);
     try waitForCursorCol(&reporter, text_col);
 
-    try reporter.reportKey("left_control", true);
-    try reporter.reportKey("delete", true);
-    try reporter.reportKey("delete", false);
-    try reporter.reportKey("left_control", false);
+    try reporter.reportKey(.left_control, true);
+    try reporter.reportKey(.delete, true);
+    try reporter.reportKey(.delete, false);
+    try reporter.reportKey(.left_control, false);
 
     // "echo foo " -> " foo " ("echo" deleted, cursor stays at column 0).
     try waitForCell(&reporter, 0, text_col, " ");
@@ -799,10 +799,10 @@ pub fn shellCtrlRLoadsResultFdLineIntoPromptTest(_: std.Io, alloc: std.mem.Alloc
     const text_col = cwd_len + 3;
     try waitForCell(&reporter, 0, arrow_col, ">");
 
-    try reporter.reportKey("left_control", true);
-    try reporter.reportKey("r", true);
-    try reporter.reportKey("r", false);
-    try reporter.reportKey("left_control", false);
+    try reporter.reportKey(.left_control, true);
+    try reporter.reportKey(.r, true);
+    try reporter.reportKey(.r, false);
+    try reporter.reportKey(.left_control, false);
 
     // Back on the same prompt row (nothing ran to advance it) -- now
     // loaded with the picked line instead of an empty one. Checked at
@@ -892,10 +892,10 @@ pub fn shellCtrlRSeedsGwHistWithTypedLineTest(_: std.Io, alloc: std.mem.Allocato
     // the line the shell is supposed to pass on.
     try waitForCell(&reporter, 0, text_col + "git com".len - 1, "m");
 
-    try reporter.reportKey("left_control", true);
-    try reporter.reportKey("r", true);
-    try reporter.reportKey("r", false);
-    try reporter.reportKey("left_control", false);
+    try reporter.reportKey(.left_control, true);
+    try reporter.reportKey(.r, true);
+    try reporter.reportKey(.r, false);
+    try reporter.reportKey(.left_control, false);
 
     const line = "echo seed=[git com]";
     try waitForCell(&reporter, 0, text_col + line.len - 1, "]");
@@ -962,8 +962,8 @@ pub fn shellExpandsStarGlobInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator
     try waitForCell(&reporter, 0, arrow_col, ">");
 
     try typeText(&reporter, "echo *.zon");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // Expanded stdout is "build.zig.zon\n" on row 1 from col 0. The final
     // "n" landing proves the whole expanded name made it across.
@@ -1051,8 +1051,8 @@ pub fn shellCapturesPlainCommandStdoutTest(_: std.Io, alloc: std.mem.Allocator) 
     try waitForCell(&reporter, 0, arrow_col, ">");
 
     try typeText(&reporter, "echo hello");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // "echo hello"'s stdout ("hello\n") lands on row 1 starting at col 0,
     // same placement `runCommand`'s "command not found" report uses for
@@ -1132,8 +1132,8 @@ pub fn shellRunsATwoStagePipelineTest(_: std.Io, alloc: std.mem.Allocator) !void
     const cmd = "echo hello | tr a-z A-Z";
     const out_row = 1 + wrapRows(arrow_col, cmd);
     try typeText(&reporter, cmd);
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // Wait for the last "O" of "HELLO" so the whole word is proven across.
     try waitForCell(&reporter, out_row, 4, "O");
@@ -1203,8 +1203,8 @@ pub fn shellRedirectsStdoutToAFileTest(_: std.Io, alloc: std.mem.Allocator) !voi
     const line = try std.fmt.allocPrint(alloc, "echo saved-line > {s}", .{out_path});
     defer alloc.free(line);
     try typeText(&reporter, line);
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // Poll for the file: the redirect means no grid output to wait on.
     var attempts: usize = 0;
@@ -1302,8 +1302,8 @@ pub fn shellPowerlinePromptStableAfterOutputScrollTest(_: std.Io, alloc: std.mem
 
     var cmd_buf: [256]u8 = undefined;
     try typeText(&reporter, try std.fmt.bufPrint(&cmd_buf, "cat {s}", .{file_path}));
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // Give `cat` time to run and the next prompt to be drawn. 40 lines of
     // output through a 24-row grid pushes the new prompt to the bottom.
@@ -1440,8 +1440,8 @@ pub fn shellExpandsTildeInCommandArgsTest(_: std.Io, alloc: std.mem.Allocator) !
     const cmd = try std.fmt.bufPrint(&cmd_buf, "gw-ls ~/{s}", .{dir_name});
     const extra = wrapRows(arrow_col, cmd);
     try typeText(&reporter, cmd);
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // If ~/ expanded correctly, gw-ls lists the marker directory
     // and "marker.txt" lands on row 2 starting at ls/main.zig's
@@ -1595,8 +1595,8 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     // checkout path wraps the echoed command and moves it all down.
     const extra = wrapRows(arrow_col, cmd);
     try typeText(&reporter, cmd);
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // "target"'s row/col per lsClientWritesEntriesOverRealSocketTest's
     // formula (default 12x12 cell metrics, one entry -> row 2 after
@@ -1612,18 +1612,18 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     // prompt line (row 6 -> row 5). Gate the modifier release on the
     // cursor actually having moved so the shell's key loop sees `up` with
     // ctrl still held (isKeyDown is a level cache, not queue-ordered).
-    try reporter.reportKey("left_control", true);
-    try reporter.reportKey("up", true);
-    try reporter.reportKey("up", false);
+    try reporter.reportKey(.left_control, true);
+    try reporter.reportKey(.up, true);
+    try reporter.reportKey(.up, false);
     try waitForCursorRow(&reporter, 5 + extra);
-    try reporter.reportKey("left_control", false);
+    try reporter.reportKey(.left_control, false);
 
     // Three more plain Up presses walk the browse cursor from row 5 up to
     // the entry's row (2).
     var row_presses: usize = 0;
     while (row_presses < 3) : (row_presses += 1) {
-        try reporter.reportKey("up", true);
-        try reporter.reportKey("up", false);
+        try reporter.reportKey(.up, true);
+        try reporter.reportKey(.up, false);
     }
     try waitForCursorRow(&reporter, 2 + extra);
 
@@ -1637,13 +1637,13 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoDirectoryTest(_: std.Io, alloc: std.mem.A
     const icon_col_width = 4;
     var col_presses: usize = 0;
     while (col_presses < line_start_col - icon_col_width) : (col_presses += 1) {
-        try reporter.reportKey("left", true);
-        try reporter.reportKey("left", false);
+        try reporter.reportKey(.left, true);
+        try reporter.reportKey(.left, false);
     }
     try waitForCursorCol(&reporter, icon_col_width);
 
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // A real `cd` ran: the next prompt's cwd echo includes "target". Row
     // 8 -- `doCd` writes nothing to the grid on success, so `submitLine`'s
@@ -1756,22 +1756,22 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
     // checkout path wraps the echoed command and moves it all down.
     const extra = wrapRows(arrow_col, cmd);
     try typeText(&reporter, cmd);
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     try waitForCell(&reporter, 2 + extra, 4, "t");
     try waitForCell(&reporter, 6 + extra, arrow_col, ">");
 
-    try reporter.reportKey("left_control", true);
-    try reporter.reportKey("up", true);
-    try reporter.reportKey("up", false);
+    try reporter.reportKey(.left_control, true);
+    try reporter.reportKey(.up, true);
+    try reporter.reportKey(.up, false);
     try waitForCursorRow(&reporter, 5 + extra);
-    try reporter.reportKey("left_control", false);
+    try reporter.reportKey(.left_control, false);
 
     var row_presses: usize = 0;
     while (row_presses < 3) : (row_presses += 1) {
-        try reporter.reportKey("up", true);
-        try reporter.reportKey("up", false);
+        try reporter.reportKey(.up, true);
+        try reporter.reportKey(.up, false);
     }
     try waitForCursorRow(&reporter, 2 + extra);
 
@@ -1779,13 +1779,13 @@ pub fn shellBrowseUpAndEnterAutoCdsIntoSymlinkedDirectoryTest(_: std.Io, alloc: 
     const icon_col_width = 4;
     var col_presses: usize = 0;
     while (col_presses < line_start_col - icon_col_width) : (col_presses += 1) {
-        try reporter.reportKey("left", true);
-        try reporter.reportKey("left", false);
+        try reporter.reportKey(.left, true);
+        try reporter.reportKey(.left, false);
     }
     try waitForCursorCol(&reporter, icon_col_width);
 
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // Proves the click resolved the symlink to a directory action, not to
     // nothing: the next prompt's cwd echo names the *symlink's* path
@@ -1900,8 +1900,8 @@ pub fn shellCdDotDotAfterSymlinkStaysPhysicallyInSyncTest(_: std.Io, alloc: std.
     var cmd_buf: [512]u8 = undefined;
     const cd_temp = try std.fmt.bufPrint(&cmd_buf, "cd {s}", .{temp_dir});
     try typeText(&reporter, cd_temp);
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
     // `cd`'s own success writes nothing to the grid -- wait for `link`'s
     // prompt (identifiable by its now-longer cwd echo) before typing the
     // next command, so keystrokes land at the live prompt rather than
@@ -1909,18 +1909,18 @@ pub fn shellCdDotDotAfterSymlinkStaysPhysicallyInSyncTest(_: std.Io, alloc: std.
     try waitForTextInRows(&reporter, alloc, 4, temp_dir);
 
     try typeText(&reporter, "cd link");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
     try waitForTextInRows(&reporter, alloc, 6, link_path);
 
     try typeText(&reporter, "cd ..");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
     try waitForTextInRows(&reporter, alloc, 8, temp_dir);
 
     try typeText(&reporter, "pwd");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     // The real, physical process cwd -- if `cd ..` chdir'd using the raw
     // ".." (the pre-fix bug), this prints `otherreal`'s physical parent
@@ -2368,16 +2368,16 @@ pub fn embeddedShellPromptStaysPutAfterFullScreenProgramTest(_: std.Io, alloc: s
     // Two failed commands walk the prompt down off the panel's top row.
     for (0..2) |_| {
         try reporter.reportText("nosuchcmd");
-        try reporter.reportKey("enter", true);
-        try reporter.reportKey("enter", false);
+        try reporter.reportKey(.enter, true);
+        try reporter.reportKey(.enter, false);
     }
     try waitForPanelCell(&reporter, panel, 6, arrow_col, ">");
 
     const command = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/gwmd README.md", .{cwd});
     defer alloc.free(command);
     try reporter.reportText(command);
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     try waitForContextCount(&reporter, 2);
     // What a multiplexer's pane-tree edit sends every program: a
@@ -2385,8 +2385,8 @@ pub fn embeddedShellPromptStaysPutAfterFullScreenProgramTest(_: std.Io, alloc: s
     // is the whole window rather than the panel.
     try srv.applyPaneLayout(alloc);
     std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
-    try reporter.reportKey("q", true);
-    try reporter.reportKey("q", false);
+    try reporter.reportKey(.q, true);
+    try reporter.reportKey(.q, false);
     try waitForContextCount(&reporter, 1);
 
     // The command line on row 6 (and whatever rows it wrapped onto),
@@ -2482,8 +2482,8 @@ pub fn embeddedShellSizesPlainChildToThePanelTest(_: std.Io, alloc: std.mem.Allo
 
     // Reads its terminal's size only after the panel has changed.
     try reporter.reportText("/bin/sh -c '/usr/bin/sleep 1.5; /usr/bin/stty size'");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
     std.Io.sleep(io, .fromMilliseconds(400), .awake) catch {};
 
     try reporter.setLayerSize(panel, 80, 6);
@@ -2574,28 +2574,28 @@ pub fn embeddedShellJobIgnoresInputWhileBlurredTest(_: std.Io, alloc: std.mem.Al
     try waitForPanelCell(&reporter, panel, 0, cwd_len + 1, ">");
 
     try reporter.reportText("/bin/sh -c 'read a; echo \"got:$a\"'");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
     std.Io.sleep(io, .fromMilliseconds(400), .awake) catch {};
 
     // Typed into the host while it has the keyboard.
     _ = std.c.write(fds[1], "blur\n", 5);
     std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
     try reporter.reportText("host");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
     std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
 
     // Back to the panel, and the toggle key pressed on the way.
     _ = std.c.write(fds[1], "focus\n", 6);
     std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
-    try reporter.reportKey("left_control", true);
-    try reporter.reportKey("grave_accent", true);
-    try reporter.reportKey("grave_accent", false);
-    try reporter.reportKey("left_control", false);
+    try reporter.reportKey(.left_control, true);
+    try reporter.reportKey(.grave_accent, true);
+    try reporter.reportKey(.grave_accent, false);
+    try reporter.reportKey(.left_control, false);
     try reporter.reportText("ok");
-    try reporter.reportKey("enter", true);
-    try reporter.reportKey("enter", false);
+    try reporter.reportKey(.enter, true);
+    try reporter.reportKey(.enter, false);
 
     try waitForPanelText(&reporter, panel, "got:ok");
     try testz.expectTrue(!try panelHasText(&reporter, panel, "host"));

@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Pure key/mouse-event -> byte encoders for the B0 "dumb PTY" fallback
-//! (`pty.zig`). `charFromKeyName` turns a wire key name (`"a"`, `"three"`,
-//! `"slash"`, ...) plus shift into the character the prompt's line editor
-//! inserts; `toPtyBytes` turns a key event into the bytes a terminal
+//! (`pty.zig`). `charFromKey` turns a key (`.a`, `.three`, `.slash`, ...)
+//! plus shift into the character the prompt's line editor inserts; `toPtyBytes` turns a key event into the bytes a terminal
 //! would send down a pty's stdin; `encodeMouse` turns a mouse event into
 //! an xterm mouse report. All pure -- no libc, no IO -- so
 //! `tests/shell_tests.zig` can `@import` them.
@@ -13,46 +12,40 @@
 //! re-exported from `glyphwire.zig` as `key_encode`.
 
 const std = @import("std");
+const Key = @import("keys.zig").Key;
+const MouseButton = @import("keys.zig").MouseButton;
 
-/// The character a printable key produces, honouring shift. Digit and
-/// punctuation keys arrive by name (`"zero"`, `"slash"`); letter keys
-/// arrive as the single lowercase byte. Returns null for any key that
-/// isn't a plain printable (arrows, `"enter"`, `"f1"`, modifiers, ...).
-pub fn charFromKeyName(key: []const u8, shift: bool) ?u8 {
-    if (key.len == 1) {
-        const ch = key[0];
-        if (ch >= 'a' and ch <= 'z') return if (shift) ch - 32 else ch;
-    }
-
-    const Entry = struct { name: []const u8, plain: u8, shifted: u8 };
-    const table = [_]Entry{
-        .{ .name = "zero", .plain = '0', .shifted = ')' },
-        .{ .name = "one", .plain = '1', .shifted = '!' },
-        .{ .name = "two", .plain = '2', .shifted = '@' },
-        .{ .name = "three", .plain = '3', .shifted = '#' },
-        .{ .name = "four", .plain = '4', .shifted = '$' },
-        .{ .name = "five", .plain = '5', .shifted = '%' },
-        .{ .name = "six", .plain = '6', .shifted = '^' },
-        .{ .name = "seven", .plain = '7', .shifted = '&' },
-        .{ .name = "eight", .plain = '8', .shifted = '*' },
-        .{ .name = "nine", .plain = '9', .shifted = '(' },
-        .{ .name = "space", .plain = ' ', .shifted = ' ' },
-        .{ .name = "apostrophe", .plain = '\'', .shifted = '"' },
-        .{ .name = "comma", .plain = ',', .shifted = '<' },
-        .{ .name = "minus", .plain = '-', .shifted = '_' },
-        .{ .name = "period", .plain = '.', .shifted = '>' },
-        .{ .name = "slash", .plain = '/', .shifted = '?' },
-        .{ .name = "semicolon", .plain = ';', .shifted = ':' },
-        .{ .name = "equal", .plain = '=', .shifted = '+' },
-        .{ .name = "left_bracket", .plain = '[', .shifted = '{' },
-        .{ .name = "backslash", .plain = '\\', .shifted = '|' },
-        .{ .name = "right_bracket", .plain = ']', .shifted = '}' },
-        .{ .name = "grave_accent", .plain = '`', .shifted = '~' },
+/// The character a printable key produces, honouring shift. Returns null
+/// for any key that isn't a plain printable (arrows, `.enter`, `.F1`,
+/// modifiers, the keypad, ...).
+pub fn charFromKey(key: Key, shift: bool) ?u8 {
+    if (key.letter()) |ch| return if (shift) ch - 32 else ch;
+    const plain: u8, const shifted: u8 = switch (key) {
+        .zero => .{ '0', ')' },
+        .one => .{ '1', '!' },
+        .two => .{ '2', '@' },
+        .three => .{ '3', '#' },
+        .four => .{ '4', '$' },
+        .five => .{ '5', '%' },
+        .six => .{ '6', '^' },
+        .seven => .{ '7', '&' },
+        .eight => .{ '8', '*' },
+        .nine => .{ '9', '(' },
+        .space => .{ ' ', ' ' },
+        .apostrophe => .{ '\'', '"' },
+        .comma => .{ ',', '<' },
+        .minus => .{ '-', '_' },
+        .period => .{ '.', '>' },
+        .slash => .{ '/', '?' },
+        .semicolon => .{ ';', ':' },
+        .equal => .{ '=', '+' },
+        .left_bracket => .{ '[', '{' },
+        .backslash => .{ '\\', '|' },
+        .right_bracket => .{ ']', '}' },
+        .grave_accent => .{ '`', '~' },
+        else => return null,
     };
-    for (table) |e| {
-        if (std.mem.eql(u8, key, e.name)) return if (shift) e.shifted else e.plain;
-    }
-    return null;
+    return if (shift) shifted else plain;
 }
 
 pub const Mods = struct { ctrl: bool = false, shift: bool = false, alt: bool = false };
@@ -81,7 +74,7 @@ fn modParam(mods: Mods) u8 {
 
 /// Same as `toPtyBytesOpts` with only a cursor-key mode -- the legacy
 /// encoding, no kitty keyboard protocol.
-pub fn toPtyBytes(key: []const u8, mods: Mods, cursor_mode: CursorKeyMode, buf: []u8) ?[]const u8 {
+pub fn toPtyBytes(key: Key, mods: Mods, cursor_mode: CursorKeyMode, buf: []u8) ?[]const u8 {
     return toPtyBytesOpts(key, mods, .{ .cursor_mode = cursor_mode }, buf);
 }
 
@@ -106,23 +99,22 @@ pub fn toPtyBytes(key: []const u8, mods: Mods, cursor_mode: CursorKeyMode, buf: 
 /// gives a program `Shift+Enter`. Unmodified Enter/Tab/Backspace and
 /// plain or shifted text stay legacy, as the protocol requires, so a
 /// shell is still usable if a program dies without popping its flags.
-pub fn toPtyBytesOpts(key: []const u8, mods: Mods, opts: EncodeOpts, buf: []u8) ?[]const u8 {
-    const eql = std.mem.eql;
+pub fn toPtyBytesOpts(key: Key, mods: Mods, opts: EncodeOpts, buf: []u8) ?[]const u8 {
     const kitty = opts.kitty_flags & KittyKeyboard.disambiguate != 0;
     const m = modParam(mods);
 
     // Enter / Tab / Backspace / Escape: the keys whose legacy byte is
     // also a control character, which is why they lose their modifiers
     // there and why the kitty protocol has codes for them.
-    const Control = struct { name: []const u8, code: u8 };
+    const Control = struct { key: Key, code: u8 };
     const controls = [_]Control{
-        .{ .name = "enter", .code = '\r' },
-        .{ .name = "tab", .code = '\t' },
-        .{ .name = "backspace", .code = 0x7f },
-        .{ .name = "escape", .code = 0x1b },
+        .{ .key = .enter, .code = '\r' },
+        .{ .key = .tab, .code = '\t' },
+        .{ .key = .backspace, .code = 0x7f },
+        .{ .key = .escape, .code = 0x1b },
     };
     for (controls) |ctl| {
-        if (!eql(u8, key, ctl.name)) continue;
+        if (key != ctl.key) continue;
         if (kitty and (m != 1 or ctl.code == 0x1b)) return csiU(ctl.code, m, buf);
         return legacyControl(ctl.code, mods, buf);
     }
@@ -132,39 +124,38 @@ pub fn toPtyBytesOpts(key: []const u8, mods: Mods, opts: EncodeOpts, buf: []u8) 
     // m final`. F3's modified form is `CSI 13 ; m ~` under the kitty
     // protocol, because xterm's `CSI 1 ; m R` collides with a cursor
     // position report.
-    const Named = struct { name: []const u8, seq: []const u8, ss3: ?[]const u8 = null, num: u8, final: u8 };
+    const Named = struct { key: Key, seq: []const u8, ss3: ?[]const u8 = null, num: u8, final: u8 };
     const named = [_]Named{
-        .{ .name = "up", .seq = "\x1b[A", .ss3 = "\x1bOA", .num = 1, .final = 'A' },
-        .{ .name = "down", .seq = "\x1b[B", .ss3 = "\x1bOB", .num = 1, .final = 'B' },
-        .{ .name = "right", .seq = "\x1b[C", .ss3 = "\x1bOC", .num = 1, .final = 'C' },
-        .{ .name = "left", .seq = "\x1b[D", .ss3 = "\x1bOD", .num = 1, .final = 'D' },
-        .{ .name = "home", .seq = "\x1b[H", .ss3 = "\x1bOH", .num = 1, .final = 'H' },
-        .{ .name = "end", .seq = "\x1b[F", .ss3 = "\x1bOF", .num = 1, .final = 'F' },
-        .{ .name = "insert", .seq = "\x1b[2~", .num = 2, .final = '~' },
-        .{ .name = "delete", .seq = "\x1b[3~", .num = 3, .final = '~' },
-        .{ .name = "page_up", .seq = "\x1b[5~", .num = 5, .final = '~' },
-        .{ .name = "page_down", .seq = "\x1b[6~", .num = 6, .final = '~' },
+        .{ .key = .up, .seq = "\x1b[A", .ss3 = "\x1bOA", .num = 1, .final = 'A' },
+        .{ .key = .down, .seq = "\x1b[B", .ss3 = "\x1bOB", .num = 1, .final = 'B' },
+        .{ .key = .right, .seq = "\x1b[C", .ss3 = "\x1bOC", .num = 1, .final = 'C' },
+        .{ .key = .left, .seq = "\x1b[D", .ss3 = "\x1bOD", .num = 1, .final = 'D' },
+        .{ .key = .home, .seq = "\x1b[H", .ss3 = "\x1bOH", .num = 1, .final = 'H' },
+        .{ .key = .end, .seq = "\x1b[F", .ss3 = "\x1bOF", .num = 1, .final = 'F' },
+        .{ .key = .insert, .seq = "\x1b[2~", .num = 2, .final = '~' },
+        .{ .key = .delete, .seq = "\x1b[3~", .num = 3, .final = '~' },
+        .{ .key = .page_up, .seq = "\x1b[5~", .num = 5, .final = '~' },
+        .{ .key = .page_down, .seq = "\x1b[6~", .num = 6, .final = '~' },
         // Function keys: the classic xterm/VT220 mapping every terminfo
         // entry's `kf1`..`kf12` expects. `F1`-`F4` are SS3 (unaffected by
         // cursor-key mode -- that only applies to the arrows/Home/End
         // above); `F5` and up are `CSI n ~`, skipping 16 and 22 for the
-        // same historical VT220 reasons xterm does. Named in uppercase
-        // (`"F1"`, not `"f1"`) to match the host's key names.
-        .{ .name = "F1", .seq = "\x1bOP", .num = 1, .final = 'P' },
-        .{ .name = "F2", .seq = "\x1bOQ", .num = 1, .final = 'Q' },
-        .{ .name = "F3", .seq = "\x1bOR", .num = 1, .final = 'R' },
-        .{ .name = "F4", .seq = "\x1bOS", .num = 1, .final = 'S' },
-        .{ .name = "F5", .seq = "\x1b[15~", .num = 15, .final = '~' },
-        .{ .name = "F6", .seq = "\x1b[17~", .num = 17, .final = '~' },
-        .{ .name = "F7", .seq = "\x1b[18~", .num = 18, .final = '~' },
-        .{ .name = "F8", .seq = "\x1b[19~", .num = 19, .final = '~' },
-        .{ .name = "F9", .seq = "\x1b[20~", .num = 20, .final = '~' },
-        .{ .name = "F10", .seq = "\x1b[21~", .num = 21, .final = '~' },
-        .{ .name = "F11", .seq = "\x1b[23~", .num = 23, .final = '~' },
-        .{ .name = "F12", .seq = "\x1b[24~", .num = 24, .final = '~' },
+        // same historical VT220 reasons xterm does.
+        .{ .key = .F1, .seq = "\x1bOP", .num = 1, .final = 'P' },
+        .{ .key = .F2, .seq = "\x1bOQ", .num = 1, .final = 'Q' },
+        .{ .key = .F3, .seq = "\x1bOR", .num = 1, .final = 'R' },
+        .{ .key = .F4, .seq = "\x1bOS", .num = 1, .final = 'S' },
+        .{ .key = .F5, .seq = "\x1b[15~", .num = 15, .final = '~' },
+        .{ .key = .F6, .seq = "\x1b[17~", .num = 17, .final = '~' },
+        .{ .key = .F7, .seq = "\x1b[18~", .num = 18, .final = '~' },
+        .{ .key = .F8, .seq = "\x1b[19~", .num = 19, .final = '~' },
+        .{ .key = .F9, .seq = "\x1b[20~", .num = 20, .final = '~' },
+        .{ .key = .F10, .seq = "\x1b[21~", .num = 21, .final = '~' },
+        .{ .key = .F11, .seq = "\x1b[23~", .num = 23, .final = '~' },
+        .{ .key = .F12, .seq = "\x1b[24~", .num = 24, .final = '~' },
     };
     for (named) |n| {
-        if (!eql(u8, key, n.name)) continue;
+        if (key != n.key) continue;
         if (m == 1) {
             const seq = if (opts.cursor_mode == .application) (n.ss3 orelse n.seq) else n.seq;
             @memcpy(buf[0..seq.len], seq);
@@ -174,14 +165,14 @@ pub fn toPtyBytesOpts(key: []const u8, mods: Mods, opts: EncodeOpts, buf: []u8) 
         return std.fmt.bufPrint(buf, "\x1b[{d};{d}{c}", .{ num, m, final }) catch null;
     }
 
-    const base = charFromKeyName(key, mods.shift) orelse return null;
+    const base = charFromKey(key, mods.shift) orelse return null;
 
     // Kitty: a text key with Ctrl or Alt held is `CSI code ; m u`, the
     // code being the *unshifted* key (shift rides in `m`). Plain and
     // shifted text are left to the legacy path -- they arrive as `text`
     // events in practice anyway.
     if (kitty and (mods.ctrl or mods.alt)) {
-        const unshifted = charFromKeyName(key, false) orelse base;
+        const unshifted = charFromKey(key, false) orelse base;
         return csiU(unshifted, m, buf);
     }
 
@@ -348,22 +339,25 @@ pub const KittyKeyboard = struct {
 
 // ─── Mouse reporting ────────────────────────────────────────────────────
 
-/// `none` is "no button" -- used for a bare pointer-motion report under
-/// `?1003` (xterm button code 3 + the motion bit).
-pub const MouseButton = enum { left, middle, right, wheel_up, wheel_down, none };
+/// The buttons an xterm mouse report can name. `none` is "no button" --
+/// used for a bare pointer-motion report under `?1003` (xterm button
+/// code 3 + the motion bit).
+pub const ReportButton = enum { left, middle, right, wheel_up, wheel_down, none };
 
-/// Maps a wire mouse-button name (glyphwire-host sends the glfw
-/// `MouseButton` enum field names) to a `MouseButton`, or null for one
-/// with no xterm encoding (`four`..`eight`). `wheel_up` / `wheel_down`
-/// are what glyphwire-host sends, one press+release per notch, over a
-/// layer whose program asked for the mouse (`core.Layer.mouse_report`).
-pub fn mouseButtonFromName(name: []const u8) ?MouseButton {
-    if (std.mem.eql(u8, name, "left")) return .left;
-    if (std.mem.eql(u8, name, "middle")) return .middle;
-    if (std.mem.eql(u8, name, "right")) return .right;
-    if (std.mem.eql(u8, name, "wheel_up")) return .wheel_up;
-    if (std.mem.eql(u8, name, "wheel_down")) return .wheel_down;
-    return null;
+/// The report button for a glyphwire mouse button, or null for one with
+/// no xterm encoding (the side buttons, `unknown`). `wheel_up` /
+/// `wheel_down` are what glyphwire-host sends, one press+release per
+/// notch, over a layer whose program asked for the mouse
+/// (`core.Layer.mouse_report`).
+pub fn reportButton(button: MouseButton) ?ReportButton {
+    return switch (button) {
+        .left => .left,
+        .middle => .middle,
+        .right => .right,
+        .wheel_up => .wheel_up,
+        .wheel_down => .wheel_down,
+        .x1, .x2, .unknown => null,
+    };
 }
 
 pub const MouseAction = enum { press, release, motion };
@@ -383,7 +377,7 @@ pub const MouseEncoding = enum { legacy, sgr };
 /// bits: +4 shift, +8 alt/meta, +16 ctrl.
 pub fn encodeMouse(
     enc: MouseEncoding,
-    button: MouseButton,
+    button: ReportButton,
     action: MouseAction,
     col: usize,
     row: usize,

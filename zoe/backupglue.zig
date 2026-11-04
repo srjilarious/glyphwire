@@ -280,8 +280,8 @@ pub fn recoverKey(self: *Ui, k: glyphwire.KeyEvent) !void {
     self.status_dirty = true;
     // The same key comes again as `text`, which must not reach the
     // editor once the question is gone.
-    if (!k.ctrl() and k.key.len == 1) self.swallow_text = .any;
-    const answer: u8 = if (k.ctrl() or k.alt() or k.key.len != 1) 0 else k.key[0];
+    if (!k.ctrl() and k.key.isLetter()) self.swallow_text = .any;
+    const answer: u8 = if (k.ctrl() or k.alt()) 0 else k.key.letter() orelse 0;
     switch (answer) {
         'r' => {
             const text = slot.doc.pending_backup.?;

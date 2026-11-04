@@ -198,15 +198,15 @@ pub fn applyKeyMovesThroughCommandsTest(_: std.Io, alloc: std.mem.Allocator) !vo
     var l = try sampleList(alloc);
     defer l.deinit();
     try l.refilter();
-    try testz.expectEqual(try popupframe.applyKey(&l, "down", .{}, 2), .changed);
+    try testz.expectEqual(try popupframe.applyKey(&l, .down, .{}, 2), .changed);
     try testz.expectEqual(selectedId(&l).?, 1);
-    _ = try popupframe.applyKey(&l, "page_down", .{}, 2);
+    _ = try popupframe.applyKey(&l, .page_down, .{}, 2);
     try testz.expectEqual(selectedId(&l).?, 3);
     try testz.expectEqual(l.list.top, 2);
-    _ = try popupframe.applyKey(&l, "up", .{}, 2);
+    _ = try popupframe.applyKey(&l, .up, .{}, 2);
     try testz.expectEqual(selectedId(&l).?, 2);
-    try testz.expectEqual(try popupframe.applyKey(&l, "enter", .{}, 2), .accept);
-    try testz.expectEqual(try popupframe.applyKey(&l, "escape", .{}, 2), .cancel);
+    try testz.expectEqual(try popupframe.applyKey(&l, .enter, .{}, 2), .accept);
+    try testz.expectEqual(try popupframe.applyKey(&l, .escape, .{}, 2), .cancel);
 }
 
 pub fn placeRectTopAnchorsBelowTheEdgeTest(_: std.Io, _: std.mem.Allocator) !void {

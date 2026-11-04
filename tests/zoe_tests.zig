@@ -362,9 +362,9 @@ pub fn ctrlBackspaceDeletesAWordPartTest(_: std.Io, alloc: std.mem.Allocator) !v
     var ed = try Editor.initFromText(alloc, "let fooBarBaz", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "A");
-    _ = try ed.feedKey("backspace", .{ .ctrl = true });
+    _ = try ed.feedKey(.backspace, .{ .ctrl = true });
     try expectText(alloc, ed.buf, "let fooBar");
-    _ = try ed.feedKey("backspace", .{ .ctrl = true });
+    _ = try ed.feedKey(.backspace, .{ .ctrl = true });
     try expectText(alloc, ed.buf, "let foo");
     // The whole-word action is still there for `keys` to bind.
     _ = try ed.runAction(.deleteWordBack);
@@ -375,7 +375,7 @@ pub fn ctrlDeleteDeletesAWordPartTest(_: std.Io, alloc: std.mem.Allocator) !void
     var ed = try Editor.initFromText(alloc, "foo_bar", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "i");
-    _ = try ed.feedKey("delete", .{ .ctrl = true });
+    _ = try ed.feedKey(.delete, .{ .ctrl = true });
     try expectText(alloc, ed.buf, "bar");
 }
 
@@ -383,14 +383,14 @@ pub fn ctrlArrowsMoveByWordPartAltByWordTest(_: std.Io, alloc: std.mem.Allocator
     var ed = try Editor.initFromText(alloc, "fooBar baz", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "i");
-    _ = try ed.feedKey("right", .{ .ctrl = true });
+    _ = try ed.feedKey(.right, .{ .ctrl = true });
     try testz.expectEqual(ed.cursor, 3);
-    _ = try ed.feedKey("right", .{ .alt = true });
+    _ = try ed.feedKey(.right, .{ .alt = true });
     try testz.expectEqual(ed.cursor, 7);
-    _ = try ed.feedKey("left", .{ .alt = true });
+    _ = try ed.feedKey(.left, .{ .alt = true });
     try testz.expectEqual(ed.cursor, 0);
     // Ctrl+Shift selects by part.
-    _ = try ed.feedKey("right", .{ .ctrl = true, .shift = true });
+    _ = try ed.feedKey(.right, .{ .ctrl = true, .shift = true });
     try testz.expectEqual(ed.mode, .select);
     try testz.expectEqual(ed.selectionSpan().?.hi, 3);
 }
@@ -399,7 +399,7 @@ pub fn toggleWordWrapFlipsWrapTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
     try testz.expectFalse(ed.wrap);
-    _ = try ed.feedKey("z", .{ .alt = true });
+    _ = try ed.feedKey(.z, .{ .alt = true });
     try testz.expectTrue(ed.wrap);
     _ = try ed.runAction(.toggleWordWrap);
     try testz.expectFalse(ed.wrap);
@@ -652,9 +652,9 @@ pub fn editorCtrlDAndCtrlUPageInNormalModeTest(_: std.Io, alloc: std.mem.Allocat
     var ed = try Editor.initFromText(alloc, text, null);
     defer ed.deinit();
     // Ctrl carries no character, so these arrive as named keys.
-    _ = try ed.feedKey("d", .{ .ctrl = true });
+    _ = try ed.feedKey(.d, .{ .ctrl = true });
     try testz.expectEqual(ed.pos().line, 10);
-    _ = try ed.feedKey("u", .{ .ctrl = true });
+    _ = try ed.feedKey(.u, .{ .ctrl = true });
     try testz.expectEqual(ed.pos().line, 0);
     // Plain `d` (via the text stream) is still the delete operator.
     _ = try keys.feed(&ed, "d");
@@ -666,17 +666,17 @@ pub fn editorInsertCtrlArrowsJumpByWordTest(_: std.Io, alloc: std.mem.Allocator)
     var ed = try Editor.initFromText(alloc, "foo.bar baz\nqux", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "i");
-    _ = try ed.feedKey("right", .{ .ctrl = true });
+    _ = try ed.feedKey(.right, .{ .ctrl = true });
     try testz.expectEqual(ed.cursor, 3);
-    _ = try ed.feedKey("right", .{ .ctrl = true });
+    _ = try ed.feedKey(.right, .{ .ctrl = true });
     try testz.expectEqual(ed.cursor, 4);
-    _ = try ed.feedKey("right", .{ .ctrl = true });
+    _ = try ed.feedKey(.right, .{ .ctrl = true });
     try testz.expectEqual(ed.cursor, 8);
-    _ = try ed.feedKey("right", .{ .ctrl = true });
+    _ = try ed.feedKey(.right, .{ .ctrl = true });
     try testz.expectEqual(ed.cursor, 12);
-    _ = try ed.feedKey("left", .{ .ctrl = true });
+    _ = try ed.feedKey(.left, .{ .ctrl = true });
     try testz.expectEqual(ed.cursor, 8);
-    _ = try ed.feedKey("left", .{ .ctrl = true });
+    _ = try ed.feedKey(.left, .{ .ctrl = true });
     try testz.expectEqual(ed.cursor, 4);
     try testz.expectEqual(ed.mode, .insert);
 }
@@ -685,17 +685,17 @@ pub fn editorInsertCtrlHomeEndGoToFileEndsTest(_: std.Io, alloc: std.mem.Allocat
     var ed = try Editor.initFromText(alloc, "one\ntwo\nthree", null);
     defer ed.deinit();
     _ = try keys.feed(&ed, "ji");
-    _ = try ed.feedKey("end", .{ .ctrl = true });
+    _ = try ed.feedKey(.end, .{ .ctrl = true });
     // Past the last character, so typing appends to the file.
     try testz.expectEqual(ed.cursor, 13);
     _ = try ed.feedText("!");
     const tail = try ed.buf.read(alloc, 8, 14);
     defer alloc.free(tail);
     try testz.expectEqualStr(tail, "three!");
-    _ = try ed.feedKey("home", .{ .ctrl = true });
+    _ = try ed.feedKey(.home, .{ .ctrl = true });
     try testz.expectEqual(ed.cursor, 0);
     // Plain Home / End stay line-local.
-    _ = try ed.feedKey("end", .{});
+    _ = try ed.feedKey(.end, .{});
     try testz.expectEqual(ed.cursor, 3);
 }
 
@@ -1555,13 +1555,13 @@ pub fn commandLineIsARealEditableFieldTest(_: std.Io, alloc: std.mem.Allocator) 
     _ = try ed.feedText("e /home/me/notes.md");
 
     // Ctrl+Backspace drops one path segment, not the whole argument.
-    _ = try ed.feedKey("backspace", .{ .ctrl = true });
+    _ = try ed.feedKey(.backspace, .{ .ctrl = true });
     try testz.expectEqualStr(ed.cmdline.text(), "e /home/me/notes.");
     // Home, then a word jump over the `e`, then more typing: movement
     // the old append-only line simply had no key for.
-    _ = try ed.feedKey("home", .{});
+    _ = try ed.feedKey(.home, .{});
     try testz.expectEqual(ed.cmdline.caret, @as(usize, 0));
-    _ = try ed.feedKey("right", .{ .ctrl = true });
+    _ = try ed.feedKey(.right, .{ .ctrl = true });
     _ = try ed.feedText("dit");
     try testz.expectEqualStr(ed.cmdline.text(), "edit /home/me/notes.");
 }
@@ -1573,8 +1573,8 @@ pub fn commandLineBackspaceInTheMiddleDoesNotLeaveTest(_: std.Io, alloc: std.mem
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
     _ = try ed.feedText(":wq");
-    _ = try ed.feedKey("home", .{});
-    _ = try ed.feedKey("backspace", .{});
+    _ = try ed.feedKey(.home, .{});
+    _ = try ed.feedKey(.backspace, .{});
     try testz.expectEqual(ed.mode, .command);
     try testz.expectEqualStr(ed.cmdline.text(), "wq");
 }
@@ -1585,8 +1585,8 @@ pub fn commandLineRunsTheWholeLineWhereverTheCaretIsTest(_: std.Io, alloc: std.m
     var ed = try Editor.initFromText(alloc, "x", null);
     defer ed.deinit();
     _ = try ed.feedText(":q");
-    _ = try ed.feedKey("home", .{});
-    const out = try ed.feedKey("enter", .{});
+    _ = try ed.feedKey(.home, .{});
+    const out = try ed.feedKey(.enter, .{});
     try testz.expectTrue(out == .quit);
     try testz.expectEqual(ed.mode, .normal);
 }
@@ -1798,22 +1798,22 @@ pub fn treeSearchSurvivesThePrintableKeyEdgeTest(_: std.Io, _: std.mem.Allocator
     // search; a letter must not, or the `key` half of a keystroke kills
     // the search the `text` half was about to extend -- which is exactly
     // what made typing in the tree search nothing.
-    try testz.expectFalse(zoe.Ui.endsTreeSearch("s"));
-    try testz.expectFalse(zoe.Ui.endsTreeSearch("f"));
-    try testz.expectFalse(zoe.Ui.endsTreeSearch("slash"));
-    try testz.expectFalse(zoe.Ui.endsTreeSearch("tab"));
-    try testz.expectFalse(zoe.Ui.endsTreeSearch("backspace"));
+    try testz.expectFalse(zoe.Ui.endsTreeSearch(.s));
+    try testz.expectFalse(zoe.Ui.endsTreeSearch(.f));
+    try testz.expectFalse(zoe.Ui.endsTreeSearch(.slash));
+    try testz.expectFalse(zoe.Ui.endsTreeSearch(.tab));
+    try testz.expectFalse(zoe.Ui.endsTreeSearch(.backspace));
     // Escape belongs to the search itself while one is up, and has
     // nothing to cancel when none is.
-    try testz.expectFalse(zoe.Ui.endsTreeSearch("escape"));
+    try testz.expectFalse(zoe.Ui.endsTreeSearch(.escape));
 
-    try testz.expectTrue(zoe.Ui.endsTreeSearch("down"));
-    try testz.expectTrue(zoe.Ui.endsTreeSearch("up"));
-    try testz.expectTrue(zoe.Ui.endsTreeSearch("page_up"));
-    try testz.expectTrue(zoe.Ui.endsTreeSearch("page_down"));
-    try testz.expectTrue(zoe.Ui.endsTreeSearch("home"));
-    try testz.expectTrue(zoe.Ui.endsTreeSearch("end"));
-    try testz.expectTrue(zoe.Ui.endsTreeSearch("enter"));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch(.down));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch(.up));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch(.page_up));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch(.page_down));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch(.home));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch(.end));
+    try testz.expectTrue(zoe.Ui.endsTreeSearch(.enter));
 }
 
 pub fn treeScrollKeepsTheCursorClearOfBothEdgesTest(_: std.Io, _: std.mem.Allocator) !void {
@@ -2173,22 +2173,22 @@ pub fn focusDirectionReadsHjklAndArrowsTest(_: std.Io, _: std.mem.Allocator) !vo
     // `h` is *not* a focus chord: Ctrl+H toggles hidden files, the
     // binding every file manager uses for it. Focusing left is Ctrl+Left
     // (and Ctrl+W cycles), so nothing was lost that had no other key.
-    try testz.expectTrue(zoe.ui.focusDirection("h") == null);
-    try testz.expectEqual(zoe.ui.focusDirection("left").?, .left);
-    try testz.expectEqual(zoe.ui.focusDirection("l").?, .right);
-    try testz.expectEqual(zoe.ui.focusDirection("right").?, .right);
-    try testz.expectEqual(zoe.ui.focusDirection("k").?, .up);
-    try testz.expectEqual(zoe.ui.focusDirection("up").?, .up);
-    try testz.expectEqual(zoe.ui.focusDirection("j").?, .down);
-    try testz.expectEqual(zoe.ui.focusDirection("down").?, .down);
+    try testz.expectTrue(zoe.ui.focusDirection(.h) == null);
+    try testz.expectEqual(zoe.ui.focusDirection(.left).?, .left);
+    try testz.expectEqual(zoe.ui.focusDirection(.l).?, .right);
+    try testz.expectEqual(zoe.ui.focusDirection(.right).?, .right);
+    try testz.expectEqual(zoe.ui.focusDirection(.k).?, .up);
+    try testz.expectEqual(zoe.ui.focusDirection(.up).?, .up);
+    try testz.expectEqual(zoe.ui.focusDirection(.j).?, .down);
+    try testz.expectEqual(zoe.ui.focusDirection(.down).?, .down);
 
     // Everything else is not a focus chord, which is what keeps Ctrl+W,
     // Ctrl+Tab and the Ctrl+D / Ctrl+U page keys reaching their own
     // handlers.
-    try testz.expectTrue(zoe.ui.focusDirection("w") == null);
-    try testz.expectTrue(zoe.ui.focusDirection("tab") == null);
-    try testz.expectTrue(zoe.ui.focusDirection("d") == null);
-    try testz.expectTrue(zoe.ui.focusDirection("u") == null);
+    try testz.expectTrue(zoe.ui.focusDirection(.w) == null);
+    try testz.expectTrue(zoe.ui.focusDirection(.tab) == null);
+    try testz.expectTrue(zoe.ui.focusDirection(.d) == null);
+    try testz.expectTrue(zoe.ui.focusDirection(.u) == null);
 }
 
 // ─── Line-number gutter ────────────────────────────────────────────────
@@ -4986,11 +4986,11 @@ pub fn keymapsLookInTheModeTableFirstTest(_: std.Io, alloc: std.mem.Allocator) !
     defer km.deinit(alloc);
     // Ctrl+Left moves focus everywhere but insert mode, where it is a
     // word-part jump.
-    try testz.expectEqual(km.lookup(.normal, "left", .{ .ctrl = true }).?, .focusLeft);
-    try testz.expectEqual(km.lookup(.insert, "left", .{ .ctrl = true }).?, .subwordLeft);
-    try testz.expectEqual(km.lookup(.global, "s", .{ .ctrl = true }).?, .save);
+    try testz.expectEqual(km.lookup(.normal, .left, .{ .ctrl = true }).?, .focusLeft);
+    try testz.expectEqual(km.lookup(.insert, .left, .{ .ctrl = true }).?, .subwordLeft);
+    try testz.expectEqual(km.lookup(.global, .s, .{ .ctrl = true }).?, .save);
     // Modifiers match exactly.
-    try testz.expectEqual(km.lookup(.normal, "s", .{ .ctrl = true, .shift = true }), null);
+    try testz.expectEqual(km.lookup(.normal, .s, .{ .ctrl = true, .shift = true }), null);
     // Every default chord parses, and the UI/editor split is what
     // `isUi` says.
     try testz.expectTrue(actions.Action.save.isUi());
@@ -5004,13 +5004,13 @@ pub fn keymapsLookInTheModeTableFirstTest(_: std.Io, alloc: std.mem.Allocator) !
 pub fn keymapsWordPartsOnCtrlWholeWordsOnAltTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(km.lookup(.insert, "right", .{ .ctrl = true }).?, .subwordRight);
-    try testz.expectEqual(km.lookup(.insert, "backspace", .{ .ctrl = true }).?, .deleteSubwordBack);
-    try testz.expectEqual(km.lookup(.insert, "delete", .{ .ctrl = true }).?, .deleteSubwordForward);
-    try testz.expectEqual(km.lookup(.normal, "left", .{ .ctrl = true, .shift = true }).?, .selectSubwordLeft);
-    try testz.expectEqual(km.lookup(.normal, "left", .{ .alt = true }).?, .wordLeft);
-    try testz.expectEqual(km.lookup(.insert, "right", .{ .alt = true }).?, .wordRight);
-    try testz.expectEqual(km.lookup(.insert, "left", .{ .alt = true, .shift = true }).?, .selectWordLeft);
+    try testz.expectEqual(km.lookup(.insert, .right, .{ .ctrl = true }).?, .subwordRight);
+    try testz.expectEqual(km.lookup(.insert, .backspace, .{ .ctrl = true }).?, .deleteSubwordBack);
+    try testz.expectEqual(km.lookup(.insert, .delete, .{ .ctrl = true }).?, .deleteSubwordForward);
+    try testz.expectEqual(km.lookup(.normal, .left, .{ .ctrl = true, .shift = true }).?, .selectSubwordLeft);
+    try testz.expectEqual(km.lookup(.normal, .left, .{ .alt = true }).?, .wordLeft);
+    try testz.expectEqual(km.lookup(.insert, .right, .{ .alt = true }).?, .wordRight);
+    try testz.expectEqual(km.lookup(.insert, .left, .{ .alt = true, .shift = true }).?, .selectWordLeft);
 }
 
 /// Shift+Enter is the jump in every mode, insert's included, and Alt+Z
@@ -5018,10 +5018,10 @@ pub fn keymapsWordPartsOnCtrlWholeWordsOnAltTest(_: std.Io, alloc: std.mem.Alloc
 pub fn keymapsJumpAndWordWrapChordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(km.lookup(.normal, "enter", .{ .shift = true }).?, .jump);
-    try testz.expectEqual(km.lookup(.insert, "enter", .{ .shift = true }).?, .jump);
-    try testz.expectEqual(km.lookup(.visual, "enter", .{ .shift = true }).?, .jump);
-    try testz.expectEqual(km.lookup(.normal, "z", .{ .alt = true }).?, .toggleWordWrap);
+    try testz.expectEqual(km.lookup(.normal, .enter, .{ .shift = true }).?, .jump);
+    try testz.expectEqual(km.lookup(.insert, .enter, .{ .shift = true }).?, .jump);
+    try testz.expectEqual(km.lookup(.visual, .enter, .{ .shift = true }).?, .jump);
+    try testz.expectEqual(km.lookup(.normal, .z, .{ .alt = true }).?, .toggleWordWrap);
     try testz.expectTrue(actions.Action.jump.isUi());
     try testz.expectTrue(actions.Action.jump.inPalette());
     try testz.expectTrue(actions.Action.toggleWordWrap.inPalette());
@@ -5035,14 +5035,14 @@ pub fn keymapsVsCodeClipboardChordsTest(_: std.Io, alloc: std.mem.Allocator) !vo
     defer km.deinit(alloc);
     const ctrl: zoe.editor.Mods = .{ .ctrl = true };
     for ([_]actions.Scope{ .normal, .visual, .insert, .global }) |scope| {
-        try testz.expectEqual(km.lookup(scope, "c", ctrl).?, .copy);
-        try testz.expectEqual(km.lookup(scope, "x", ctrl).?, .cut);
-        try testz.expectEqual(km.lookup(scope, "v", ctrl).?, .paste);
-        try testz.expectEqual(km.lookup(scope, "a", ctrl).?, .selectAll);
-        try testz.expectEqual(km.lookup(scope, "g", ctrl).?, .gotoLine);
+        try testz.expectEqual(km.lookup(scope, .c, ctrl).?, .copy);
+        try testz.expectEqual(km.lookup(scope, .x, ctrl).?, .cut);
+        try testz.expectEqual(km.lookup(scope, .v, ctrl).?, .paste);
+        try testz.expectEqual(km.lookup(scope, .a, ctrl).?, .selectAll);
+        try testz.expectEqual(km.lookup(scope, .g, ctrl).?, .gotoLine);
     }
     // The shifted cut stays.
-    try testz.expectEqual(km.lookup(.normal, "x", .{ .ctrl = true, .shift = true }).?, .cut);
+    try testz.expectEqual(km.lookup(.normal, .x, .{ .ctrl = true, .shift = true }).?, .cut);
     try testz.expectTrue(actions.Action.copy.isUi());
     try testz.expectFalse(actions.Action.selectAll.isUi());
     try testz.expectFalse(actions.Action.gotoLine.isUi());
@@ -5136,9 +5136,9 @@ pub fn openCommandLineLeavesInsertModeWithTheTextUpTest(_: std.Io, alloc: std.me
 pub fn sidebarToggleHasBothChordsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(km.lookup(.normal, "b", .{ .ctrl = true }).?, .toggleTree);
-    try testz.expectEqual(km.lookup(.normal, "n", .{ .ctrl = true }).?, .toggleTree);
-    try testz.expectEqual(km.lookup(.global, "b", .{ .ctrl = true }).?, .toggleTree);
+    try testz.expectEqual(km.lookup(.normal, .b, .{ .ctrl = true }).?, .toggleTree);
+    try testz.expectEqual(km.lookup(.normal, .n, .{ .ctrl = true }).?, .toggleTree);
+    try testz.expectEqual(km.lookup(.global, .b, .{ .ctrl = true }).?, .toggleTree);
 }
 
 /// Ctrl+W is the window prefix, so closing a tab is Ctrl+F4; both it and
@@ -5147,10 +5147,10 @@ pub fn sidebarToggleHasBothChordsTest(_: std.Io, alloc: std.mem.Allocator) !void
 pub fn tabChordsCloseAndOpenTabsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(km.lookup(.normal, "F4", .{ .ctrl = true }).?, .closeTab);
-    try testz.expectEqual(km.lookup(.insert, "F4", .{ .ctrl = true }).?, .closeTab);
-    try testz.expectEqual(km.lookup(.normal, "n", .{ .ctrl = true, .shift = true }).?, .newBuffer);
-    try testz.expectEqual(km.lookup(.insert, "n", .{ .ctrl = true, .shift = true }).?, .newBuffer);
+    try testz.expectEqual(km.lookup(.normal, .F4, .{ .ctrl = true }).?, .closeTab);
+    try testz.expectEqual(km.lookup(.insert, .F4, .{ .ctrl = true }).?, .closeTab);
+    try testz.expectEqual(km.lookup(.normal, .n, .{ .ctrl = true, .shift = true }).?, .newBuffer);
+    try testz.expectEqual(km.lookup(.insert, .n, .{ .ctrl = true, .shift = true }).?, .newBuffer);
     try testz.expectTrue(actions.Action.closeTab.isUi());
     try testz.expectTrue(actions.Action.newBuffer.isUi());
     try testz.expectTrue(actions.Action.closeTab.inPalette());
@@ -5212,11 +5212,11 @@ pub fn keysConfigRebindsAndUnbindsTest(_: std.Io, alloc: std.mem.Allocator) !voi
     var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
     defer km.deinit(alloc);
     try km.apply(alloc, cfg.keys);
-    try testz.expectEqual(km.lookup(.normal, "h", .{ .ctrl = true }).?, .none);
-    try testz.expectEqual(km.lookup(.normal, "h", .{ .alt = true }).?, .toggleHidden);
+    try testz.expectEqual(km.lookup(.normal, .h, .{ .ctrl = true }).?, .none);
+    try testz.expectEqual(km.lookup(.normal, .h, .{ .alt = true }).?, .toggleHidden);
     // `false` in a mode table hides the global binding there.
-    try testz.expectEqual(km.lookup(.insert, "left", .{ .ctrl = true }).?, .none);
-    try testz.expectEqual(km.lookup(.normal, "left", .{ .ctrl = true }).?, .focusLeft);
+    try testz.expectEqual(km.lookup(.insert, .left, .{ .ctrl = true }).?, .none);
+    try testz.expectEqual(km.lookup(.normal, .left, .{ .ctrl = true }).?, .focusLeft);
 
     // And the editor runs what the table says.
     var ed = try Editor.initFromText(alloc, "foo bar", null);
@@ -7352,9 +7352,9 @@ pub fn findBarFieldScrollsToTheCaretTest(_: std.Io, _: std.mem.Allocator) !void 
 pub fn keymapCtrlHIsReplaceAndAltHIsHiddenTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try actions.Keymaps.initDefaults(alloc, actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(km.lookup(.normal, "h", .{ .ctrl = true }).?, .replace);
-    try testz.expectEqual(km.lookup(.insert, "f", .{ .ctrl = true }).?, .find);
-    try testz.expectEqual(km.lookup(.normal, "h", .{ .alt = true }).?, .toggleHidden);
+    try testz.expectEqual(km.lookup(.normal, .h, .{ .ctrl = true }).?, .replace);
+    try testz.expectEqual(km.lookup(.insert, .f, .{ .ctrl = true }).?, .find);
+    try testz.expectEqual(km.lookup(.normal, .h, .{ .alt = true }).?, .toggleHidden);
 }
 
 // ── Opening a file in the zoe whose shell panel this is ─────────────────

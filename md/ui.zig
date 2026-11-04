@@ -846,7 +846,7 @@ pub const Ui = struct {
     }
 
     fn handleMouseButton(self: *Ui, ev: glyphwire.MouseButtonEvent) !void {
-        if (!ev.pressed or !std.mem.eql(u8, ev.button, "left")) return;
+        if (!ev.pressed or ev.button != .left) return;
         if (ev.cell.row >= self.viewRows()) {
             if (ev.clicks == 2 and self.onStatusName(ev.cell.col)) try self.copyPath();
             return;

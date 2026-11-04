@@ -463,8 +463,7 @@ pub fn waitOutRemote(self: *Prompt, listener: *glyphwire.InputListener, session:
 
         switch (ev) {
             .key => |kev| {
-                defer alloc.free(kev.key);
-                if (kev.pressed and kev.ctrl() and std.mem.eql(u8, kev.key, "c")) {
+                if (kev.pressed and kev.ctrl() and kev.key == .c) {
                     self.client.stopRemote(session) catch {};
                 }
             },
@@ -483,7 +482,7 @@ pub fn waitOutRemote(self: *Prompt, listener: *glyphwire.InputListener, session:
             },
             // A window manager's own commands (see
             // `Event.window_key`). Never delivered here.
-            .window_key => |kev| alloc.free(kev.key),
+            .window_key => {},
             .window_text => |tev| alloc.free(tev.text),
             // Not input (`Event.isInput`): filtered out before this.
             else => {},

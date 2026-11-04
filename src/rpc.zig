@@ -48,15 +48,15 @@ pub fn notification(alloc: std.mem.Allocator, method: []const u8, params: anytyp
 
 /// `key_down` (pressed) or `key_up` (released) for `key`, stamped with
 /// the modifiers held at routing time.
-pub fn keyNotification(alloc: std.mem.Allocator, key: []const u8, pressed: bool, mods: core.Mods) ![]u8 {
-    return notification(alloc, if (pressed) "key_down" else "key_up", protocol.KeyParams{ .key = key, .mods = mods });
+pub fn keyNotification(alloc: std.mem.Allocator, key: core.Key, pressed: bool, mods: core.Mods) ![]u8 {
+    return notification(alloc, if (pressed) "key_down" else "key_up", protocol.KeyParams{ .key = key.name(), .mods = mods });
 }
 
 /// `key_down` for an already-held `key` -- a typematic repeat. Same shape
 /// as a fresh press; nothing downstream needs to tell them apart (see
 /// `Server.reportKeyRepeat`).
-pub fn keyRepeatNotification(alloc: std.mem.Allocator, key: []const u8, mods: core.Mods) ![]u8 {
-    return notification(alloc, "key_down", protocol.KeyParams{ .key = key, .mods = mods });
+pub fn keyRepeatNotification(alloc: std.mem.Allocator, key: core.Key, mods: core.Mods) ![]u8 {
+    return notification(alloc, "key_down", protocol.KeyParams{ .key = key.name(), .mods = mods });
 }
 
 /// `text` -- committed text input (`text` is a UTF-8 string of one or
@@ -69,7 +69,7 @@ pub fn textNotification(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
 /// scrollback `view_offset` and the press's click count (`clicks`).
 pub fn mouseButtonNotification(
     alloc: std.mem.Allocator,
-    button: []const u8,
+    button: core.MouseButton,
     pressed: bool,
     px: protocol.PxPos,
     cell: protocol.CellPos,
@@ -78,7 +78,7 @@ pub fn mouseButtonNotification(
     clicks: u8,
 ) ![]u8 {
     return notification(alloc, "mouse_button", protocol.MouseButtonParams{
-        .button = button,
+        .button = button.name(),
         .pressed = pressed,
         .px = px,
         .cell = cell,
@@ -161,11 +161,11 @@ pub fn paneLayoutNotification(alloc: std.mem.Allocator, panes: []const protocol.
 /// registered prefix. Addressed to the manager alone, never broadcast,
 /// because a window command has exactly one recipient by definition.
 /// Press/release is in the method name, matching `key_down`/`key_up`.
-pub fn windowKeyNotification(alloc: std.mem.Allocator, key: []const u8, pressed: bool, mods: core.Mods) ![]u8 {
+pub fn windowKeyNotification(alloc: std.mem.Allocator, key: core.Key, pressed: bool, mods: core.Mods) ![]u8 {
     return notification(
         alloc,
         if (pressed) "window_key_down" else "window_key_up",
-        protocol.KeyParams{ .key = key, .mods = mods },
+        protocol.KeyParams{ .key = key.name(), .mods = mods },
     );
 }
 

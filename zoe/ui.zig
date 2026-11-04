@@ -574,13 +574,8 @@ pub const Direction = groups.Direction;
 
 /// A key that only modifies others. The host reports each one as a key
 /// of its own, under its `left_*` / `right_*` name.
-pub fn isModifierKey(key: []const u8) bool {
-    const names = [_][]const u8{ "control", "alt", "shift", "super" };
-    for (names) |n| {
-        if (std.mem.endsWith(u8, key, n) and
-            (std.mem.startsWith(u8, key, "left_") or std.mem.startsWith(u8, key, "right_"))) return true;
-    }
-    return false;
+pub fn isModifierKey(key: glyphwire.Key) bool {
+    return key.isModifier();
 }
 
 /// The direction a key names under Ctrl, for the focus chords: vim's
@@ -589,15 +584,14 @@ pub fn isModifierKey(key: []const u8) bool {
 /// use this as the test for "is this a focus chord at all".
 ///
 /// The vertical pair moves between editor groups stacked by `:split`.
-pub fn focusDirection(key: []const u8) ?Direction {
-    const eq = std.mem.eql;
+pub fn focusDirection(key: glyphwire.Key) ?Direction {
     // `h` is deliberately absent: Ctrl+H toggles hidden files, the
     // binding every file manager uses for it, and focusing left is
     // already Ctrl+Left and Ctrl+W. `l` stays -- nothing wants Ctrl+L.
-    if (eq(u8, key, "left")) return .left;
-    if (eq(u8, key, "l") or eq(u8, key, "right")) return .right;
-    if (eq(u8, key, "k") or eq(u8, key, "up")) return .up;
-    if (eq(u8, key, "j") or eq(u8, key, "down")) return .down;
+    if (key == .left) return .left;
+    if (key == .l or key == .right) return .right;
+    if (key == .k or key == .up) return .up;
+    if (key == .j or key == .down) return .down;
     return null;
 }
 
@@ -2641,31 +2635,30 @@ pub const Ui = struct {
     /// a key that does something is less surprising than one that
     /// silently vanishes.
     pub fn windowCommand(self: *Ui, k: glyphwire.KeyEvent) !bool {
-        const eq = std.mem.eql;
         const key = k.key;
         // Shift+H/J/K/L (or a Shift+arrow): take the shown tab that way.
         if (k.shift()) {
-            const dir: ?groups.Direction = if (eq(u8, key, "h")) .left else focusDirection(key);
+            const dir: ?groups.Direction = if (key == .h) .left else focusDirection(key);
             if (dir) |d| {
                 try self.moveTabToward(d);
                 return true;
             }
         }
-        if (eq(u8, key, "v")) {
+        if (key == .v) {
             try self.splitGroup(.vertical, .after, null);
-        } else if (eq(u8, key, "s")) {
+        } else if (key == .s) {
             try self.splitGroup(.horizontal, .after, null);
-        } else if (eq(u8, key, "q") or eq(u8, key, "c")) {
+        } else if (key == .q or key == .c) {
             try self.closeGroup();
-        } else if (eq(u8, key, "x")) {
+        } else if (key == .x) {
             // The tab, not the group: vim's Ctrl+W x swaps windows, which
             // zoe's tab moves already cover.
             try self.closeBuffer(self.grp.active, false);
-        } else if (eq(u8, key, "w")) {
+        } else if (key == .w) {
             try self.cycleFocus();
-        } else if (eq(u8, key, "z")) {
+        } else if (key == .z) {
             try self.zoomToggle();
-        } else if (eq(u8, key, "h")) {
+        } else if (key == .h) {
             // Plain `h` here, not Ctrl+H (hidden files), so the whole of
             // vim's hjkl is available behind the prefix.
             self.focusToward(.left);
@@ -3087,7 +3080,7 @@ pub const Ui = struct {
                 // context, one input stream), so the only one taken here
                 // is the key that closes it.
                 if (self.shell.isFocused()) {
-                    if (k.ctrl() and std.mem.eql(u8, k.key, "grave_accent")) self.toggleShell();
+                    if (k.ctrl() and k.key == .grave_accent) self.toggleShell();
                     return;
                 }
 
@@ -3108,11 +3101,11 @@ pub const Ui = struct {
                 if (self.window_prefix and !isModifierKey(k.key)) {
                     self.window_prefix = false;
                     self.status_dirty = true;
-                    if (std.mem.eql(u8, k.key, "escape")) return;
+                    if (k.key == .escape) return;
                     // With or without Ctrl still held: Ctrl+W Ctrl+W is
                     // vim's cycle, the same as Ctrl+W w.
                     if (try self.windowCommand(k)) {
-                        if (!k.ctrl() and k.key.len == 1) self.swallow_text = .any;
+                        if (!k.ctrl() and k.key.isLetter()) self.swallow_text = .any;
                         return;
                     }
                 }
@@ -3133,7 +3126,7 @@ pub const Ui = struct {
                 self.dismissTabTip();
                 if (self.hover != null) {
                     _ = self.closeHover();
-                    if (std.mem.eql(u8, k.key, "escape")) return;
+                    if (k.key == .escape) return;
                 }
                 self.swallow_text = .none;
                 // The completion popup reads its keys before the bindings
@@ -3420,17 +3413,17 @@ pub const Ui = struct {
             self.closeCompletion();
             self.dismissTabTip();
         }
-        const middle = std.mem.eql(u8, ev.button, "middle");
+        const middle = ev.button == .middle;
         // A right click on a tab copies its file's path; it does nothing
         // anywhere else (there is no context menu).
-        if (std.mem.eql(u8, ev.button, "right")) {
+        if (ev.button == .right) {
             if (!ev.pressed) return;
             const g = self.groupAt(ev.cell) orelse return;
             const h = tabAt(g, ev.cell) orelse return;
             self.copySlotPath(g.buffers.items[h.index]);
             return;
         }
-        if (!middle and !std.mem.eql(u8, ev.button, "left")) return;
+        if (!middle and ev.button != .left) return;
 
         // While the finder is up it owns the pointer too: a result row
         // opens that file, anywhere outside the popup dismisses it, and
@@ -4860,7 +4853,7 @@ pub const Ui = struct {
     /// and built-in ones together, so a mode can still take a chord back
     /// from a global command. Never in the `:` or `/` line, which own
     /// their keys.
-    fn extCommandFor(self: *Ui, scope: actions.Scope, key: []const u8, mods: glyphwire.Mods) ?u32 {
+    fn extCommandFor(self: *Ui, scope: actions.Scope, key: glyphwire.Key, mods: glyphwire.Mods) ?u32 {
         const rt = self.extensions orelse return null;
         if (self.focus == .buffer and self.buf.ed.inPrompt()) return null;
         if (rt.lookup(scope, key, mods)) |cmd| return cmd;

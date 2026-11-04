@@ -144,20 +144,19 @@ pub const KeyEffect = enum { none, cancel, accept, changed };
 /// page keys move the highlight, and everything else is the query
 /// field's. Takes every key it's given: the popup is modal, and a stray
 /// chord reaching the program behind it is worse than nothing happening.
-pub fn applyKey(list: anytype, key: []const u8, mods: glyphwire.Mods, rows: usize) !KeyEffect {
-    const eq = std.mem.eql;
+pub fn applyKey(list: anytype, key: glyphwire.Key, mods: glyphwire.Mods, rows: usize) !KeyEffect {
     const page = @max(rows, 1);
 
-    if (eq(u8, key, "escape") or (mods.ctrl and eq(u8, key, "c"))) return .cancel;
-    if (eq(u8, key, "enter") or eq(u8, key, "kp_enter")) return .accept;
+    if (key == .escape or (mods.ctrl and key == .c)) return .cancel;
+    if (key == .enter or key == .kp_enter) return .accept;
 
-    const step: ?isize = if (eq(u8, key, "up") or (mods.ctrl and eq(u8, key, "p")))
+    const step: ?isize = if (key == .up or (mods.ctrl and key == .p))
         -1
-    else if (eq(u8, key, "down") or (mods.ctrl and eq(u8, key, "n")))
+    else if (key == .down or (mods.ctrl and key == .n))
         1
-    else if (eq(u8, key, "page_up"))
+    else if (key == .page_up)
         -@as(isize, @intCast(page))
-    else if (eq(u8, key, "page_down"))
+    else if (key == .page_down)
         @as(isize, @intCast(page))
     else
         null;

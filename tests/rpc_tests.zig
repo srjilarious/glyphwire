@@ -43,7 +43,7 @@ pub fn notificationWrapsParamsInEnvelopeTest(io: std.Io, alloc: std.mem.Allocato
 /// back as the params it was built from.
 pub fn notificationIsMsgpackWithoutJsonrpcTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    const body = try rpc.keyNotification(alloc, "a", true, .{ .ctrl = true });
+    const body = try rpc.keyNotification(alloc, .a, true, .{ .ctrl = true });
     defer alloc.free(body);
 
     const env = try codec.parseEnvelope(.msgpack, alloc, body);
@@ -62,13 +62,13 @@ pub fn notificationIsMsgpackWithoutJsonrpcTest(io: std.Io, alloc: std.mem.Alloca
 
 pub fn keyNotificationPicksMethodFromPressedTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    const down = try rpc.keyNotification(alloc, "space", true, .{});
+    const down = try rpc.keyNotification(alloc, .space, true, .{});
     defer alloc.free(down);
     try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"space","mods":{"ctrl":false,"alt":false,"shift":false,"super":false}}}
     , down);
 
-    const up = try rpc.keyNotification(alloc, "space", false, .{});
+    const up = try rpc.keyNotification(alloc, .space, false, .{});
     defer alloc.free(up);
     try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"key_up","params":{"key":"space","mods":{"ctrl":false,"alt":false,"shift":false,"super":false}}}
@@ -79,7 +79,7 @@ pub fn keyNotificationPicksMethodFromPressedTest(io: std.Io, alloc: std.mem.Allo
 /// behind still sees the chord as it was pressed.
 pub fn keyNotificationCarriesModsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    const body = try rpc.keyNotification(alloc, "w", true, .{ .ctrl = true });
+    const body = try rpc.keyNotification(alloc, .w, true, .{ .ctrl = true });
     defer alloc.free(body);
     try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"w","mods":{"ctrl":true,"alt":false,"shift":false,"super":false}}}
@@ -88,7 +88,7 @@ pub fn keyNotificationCarriesModsTest(io: std.Io, alloc: std.mem.Allocator) !voi
 
 pub fn keyRepeatNotificationIsAlwaysKeyDownTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    const body = try rpc.keyRepeatNotification(alloc, "left", .{});
+    const body = try rpc.keyRepeatNotification(alloc, .left, .{});
     defer alloc.free(body);
     try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"key_down","params":{"key":"left","mods":{"ctrl":false,"alt":false,"shift":false,"super":false}}}
@@ -99,7 +99,7 @@ pub fn mouseButtonNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !v
     _ = io;
     const body = try rpc.mouseButtonNotification(
         alloc,
-        "left",
+        .left,
         true,
         .{ .x = 12.5, .y = 30 },
         .{ .row = 2, .col = 1 },

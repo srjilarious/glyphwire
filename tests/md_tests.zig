@@ -481,9 +481,9 @@ pub fn resolveIsRelativeToThePagesDirectoryTest(_: std.Io, alloc: std.mem.Alloca
 pub fn mdKeymapDefaultsTest(_: std.Io, alloc: std.mem.Allocator) !void {
     var km = try md.actions.Keymap.initDefaults(alloc, &md.actions.defaults);
     defer km.deinit(alloc);
-    try testz.expectEqual(km.lookup("left", .{ .alt = true }).?, md.actions.Action.historyBack);
-    try testz.expectEqual(km.lookup("g", .{ .shift = true }).?, md.actions.Action.bottom);
-    try testz.expectEqual(km.lookup("tab", .{ .shift = true }).?, md.actions.Action.prevLink);
+    try testz.expectEqual(km.lookup(.left, .{ .alt = true }).?, md.actions.Action.historyBack);
+    try testz.expectEqual(km.lookup(.g, .{ .shift = true }).?, md.actions.Action.bottom);
+    try testz.expectEqual(km.lookup(.tab, .{ .shift = true }).?, md.actions.Action.prevLink);
 }
 
 // ─── Copying ────────────────────────────────────────────────────────────

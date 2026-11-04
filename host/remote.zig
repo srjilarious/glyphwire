@@ -767,12 +767,12 @@ const AuthClient = struct {
                 },
                 .key => |k| {
                     if (!k.pressed) continue;
-                    if (eqIgnoreCase(k.key, "enter") or eqIgnoreCase(k.key, "return") or eqIgnoreCase(k.key, "kp_enter")) {
+                    if (k.key == .enter or k.key == .kp_enter) {
                         break;
-                    } else if (eqIgnoreCase(k.key, "backspace")) {
+                    } else if (k.key == .backspace) {
                         if (line.items.len != 0) line.items.len -= 1;
                         try self.redrawInput(line.items, masked);
-                    } else if (eqIgnoreCase(k.key, "escape")) {
+                    } else if (k.key == .escape) {
                         return error.PromptCanceled;
                     }
                 },

@@ -894,11 +894,10 @@ pub const Ui = struct {
     /// count the key itself yet. True when `held` changed.
     fn noteKey(self: *Ui, k: glyphwire.KeyEvent) bool {
         var m = k.mods;
-        const eq = std.mem.eql;
-        if (eq(u8, k.key, "left_shift") or eq(u8, k.key, "right_shift")) m.shift = k.pressed;
-        if (eq(u8, k.key, "left_control") or eq(u8, k.key, "right_control")) m.ctrl = k.pressed;
-        if (eq(u8, k.key, "left_alt") or eq(u8, k.key, "right_alt")) m.alt = k.pressed;
-        if (eq(u8, k.key, "left_super") or eq(u8, k.key, "right_super")) m.super = k.pressed;
+        if (k.key == .left_shift or k.key == .right_shift) m.shift = k.pressed;
+        if (k.key == .left_control or k.key == .right_control) m.ctrl = k.pressed;
+        if (k.key == .left_alt or k.key == .right_alt) m.alt = k.pressed;
+        if (k.key == .left_super or k.key == .right_super) m.super = k.pressed;
         return self.noteMods(m);
     }
 
@@ -931,8 +930,8 @@ pub const Ui = struct {
         // Editing the find prefix comes before the keymap: with one up,
         // Backspace takes a character back off it and Escape drops it.
         if (self.find_len > 0) {
-            if (std.mem.eql(u8, k.key, "escape")) return self.clearFind();
-            if (std.mem.eql(u8, k.key, "backspace")) return self.findBackspace();
+            if (k.key == .escape) return self.clearFind();
+            if (k.key == .backspace) return self.findBackspace();
         }
 
         // An unbound key leaves the prefix alone -- only something that
@@ -1953,20 +1952,20 @@ pub const Ui = struct {
         // The popup owns the pointer while it's up: a click picks a row
         // or dismisses it, and never reaches a pane behind it.
         if (self.palette.isOpen()) {
-            if (std.mem.eql(u8, m.button, "left") and self.palette.click(m.cell) == .accept) try self.acceptPalette();
+            if (m.button == .left and self.palette.click(m.cell) == .accept) try self.acceptPalette();
             return;
         }
         if (self.history_popup.isOpen()) {
-            if (std.mem.eql(u8, m.button, "left") and self.history_popup.click(m.cell) == .accept) try self.acceptHistory();
+            if (m.button == .left and self.history_popup.click(m.cell) == .accept) try self.acceptHistory();
             return;
         }
         if (self.finder.isOpen()) {
-            if (std.mem.eql(u8, m.button, "left") and self.finder.click(m.cell) == .accept) try self.acceptFinder();
+            if (m.button == .left and self.finder.click(m.cell) == .accept) try self.acceptFinder();
             return;
         }
-        const left = std.mem.eql(u8, m.button, "left");
-        const right = std.mem.eql(u8, m.button, "right");
-        const middle = std.mem.eql(u8, m.button, "middle");
+        const left = m.button == .left;
+        const right = m.button == .right;
+        const middle = m.button == .middle;
         if (!left and !right and !middle) return;
         if (m.cell.row >= self.paneHeight()) return;
 
@@ -2074,7 +2073,7 @@ pub const Ui = struct {
 
     /// A button event while `press` or `drag` is live.
     fn dragButton(self: *Ui, m: glyphwire.MouseButtonEvent) !void {
-        const left = std.mem.eql(u8, m.button, "left");
+        const left = m.button == .left;
         if (self.drag != null) {
             // Letting go drops; any other button pressed meanwhile
             // (the right one, say) calls the whole thing off.
@@ -2126,12 +2125,12 @@ pub const Ui = struct {
     /// up flips the drop between copy and move. Everything else waits.
     fn dragKey(self: *Ui, k: glyphwire.KeyEvent) !void {
         const d = &self.drag.?;
-        if (std.mem.eql(u8, k.key, "left_control") or std.mem.eql(u8, k.key, "right_control")) {
+        if (k.key == .left_control or k.key == .right_control) {
             if (d.copy == k.pressed) return;
             d.copy = k.pressed;
             return self.updateDrag();
         }
-        if (k.pressed and std.mem.eql(u8, k.key, "escape")) self.endDrag();
+        if (k.pressed and k.key == .escape) self.endDrag();
     }
 
     /// What's under window cell `cell` for a drop: a pane, and the
@@ -2768,7 +2767,7 @@ pub const Ui = struct {
                     try d.handleText(self.alloc, t.text);
                     try self.renderDialog();
                 },
-                .mouse_button => |m| if (m.pressed and std.mem.eql(u8, m.button, "left")) {
+                .mouse_button => |m| if (m.pressed and m.button == .left) {
                     if (self.buttonAt(m.cell)) |b| return b;
                 },
                 .resize => |r| {
@@ -2778,7 +2777,7 @@ pub const Ui = struct {
                 },
                 .shutdown => {
                     self.quit = true;
-                    return d.handleKey("escape", .{}).?;
+                    return d.handleKey(.escape, .{}).?;
                 },
                 else => {},
             }
@@ -2929,7 +2928,7 @@ pub const Ui = struct {
                 },
                 .mouse_button => |m| {
                     _ = self.noteMods(m.mods);
-                    if (m.pressed and std.mem.eql(u8, m.button, "left")) {
+                    if (m.pressed and m.button == .left) {
                         if (self.dialogCell(m.cell)) |c| {
                             if (try modal.click(c, m.mods)) |r| return r;
                         }
@@ -3661,17 +3660,16 @@ pub const Ui = struct {
         try b.writeText(prefix, .{ .layer = layer, .row = 0, .col = 0, .fg = fg_bar_key, .bg = bg_bar });
         var col: usize = prefix.len + 1;
         var shown: std.EnumSet(Action) = .empty;
-        for (1..13) |n| {
-            var kbuf: [4]u8 = undefined;
-            const key = std.fmt.bufPrint(&kbuf, "F{d}", .{n}) catch unreachable;
-            const action = self.keymap.lookup(key, m) orelse continue;
-            if (!try self.writeBarEntry(b, &col, key, action)) return;
+        for (0..12) |n| {
+            const fkey: glyphwire.Key = @enumFromInt(@intFromEnum(glyphwire.Key.F1) + n);
+            const action = self.keymap.lookup(fkey, m) orelse continue;
+            if (!try self.writeBarEntry(b, &col, fkey.name(), action)) return;
             shown.insert(action);
         }
         for (self.keymap.bindings.items) |bnd| {
             if (bnd.chord.text or !std.meta.eql(bnd.chord.mods, m) or shown.contains(bnd.action)) continue;
             var kbuf: [24]u8 = undefined;
-            if (!try self.writeBarEntry(b, &col, barKeyText(&kbuf, bnd.chord.key()), bnd.action)) return;
+            if (!try self.writeBarEntry(b, &col, barKeyText(&kbuf, bnd.chord.key), bnd.action)) return;
             shown.insert(bnd.action);
         }
     }
@@ -3820,28 +3818,21 @@ fn FormModal(comptime T: type) type {
 /// once in front: `one` is `1`, `grave_accent` is the backtick, and
 /// anything else is spelled the way `Chord.format` does (`H`, `Up`,
 /// `Page down`). Borrows `buf`.
-pub fn barKeyText(buf: []u8, key: []const u8) []const u8 {
-    const digits = [_][]const u8{ "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine" };
-    for (digits, 0..) |d, i| {
-        if (std.mem.eql(u8, key, d)) return std.fmt.bufPrint(buf, "{d}", .{i}) catch key;
-    }
-    if (std.mem.eql(u8, key, "grave_accent")) return "`";
-    const n = @min(key.len, buf.len);
-    for (key[0..n], buf[0..n], 0..) |c, *out, i| {
+pub fn barKeyText(buf: []u8, key: glyphwire.Key) []const u8 {
+    if (key.digit()) |d| return std.fmt.bufPrint(buf, "{d}", .{d}) catch key.name();
+    if (key == .grave_accent) return "`";
+    const name = key.name();
+    const n = @min(name.len, buf.len);
+    for (name[0..n], buf[0..n], 0..) |c, *out, i| {
         out.* = if (c == '_') ' ' else if (i == 0) std.ascii.toUpper(c) else c;
     }
     return buf[0..n];
 }
 
-const modifier_keys = [_][]const u8{ "left_shift", "right_shift", "left_control", "right_control", "left_alt", "right_alt", "left_super", "right_super" };
-
 /// Whether `key` is a modifier on its own: it changes what the bar and
 /// the F1 menu show, and is never a command.
-fn isModifierKey(key: []const u8) bool {
-    for (modifier_keys) |m| {
-        if (std.mem.eql(u8, key, m)) return true;
-    }
-    return false;
+fn isModifierKey(key: glyphwire.Key) bool {
+    return key.isModifier();
 }
 
 /// The line under the F1 menu's entries: the focused entry's first
@@ -3852,7 +3843,7 @@ fn menuHint(buf: []u8, menu: *const attrdialog.Menu) []const u8 {
     const plain = menu.keymap.chordFor(menu.entries[menu.focus]) orelse return "";
     for (menu.keymap.bindings.items) |bnd| {
         if (std.meta.eql(bnd.chord.mods, glyphwire.Mods{})) continue;
-        if (!std.ascii.eqlIgnoreCase(bnd.chord.key(), plain.key())) continue;
+        if (bnd.chord.text or bnd.chord.key != plain.key) continue;
         var kbuf: [48]u8 = undefined;
         return std.fmt.bufPrint(buf, "{s}  {s}", .{ bnd.chord.format(&kbuf), actions.menuLabel(bnd.action) }) catch "";
     }
@@ -3945,11 +3936,14 @@ pub const renameCaret = @import("applib").fsops.renameCaret;
 /// separately on the `text` stream -- a letter, Space, a keypad digit or
 /// operator -- as opposed to a command key. The F2 field lets these
 /// through untouched rather than reading Space as "mark" and giving up.
-pub fn typesText(key: []const u8, mods: glyphwire.Mods) bool {
+pub fn typesText(key: glyphwire.Key, mods: glyphwire.Mods) bool {
     if (mods.ctrl or mods.alt or mods.super) return false;
-    if ((std.unicode.utf8CountCodepoints(key) catch 0) == 1) return true;
-    if (std.mem.eql(u8, key, "space")) return true;
-    return std.mem.startsWith(u8, key, "kp_") and !std.mem.eql(u8, key, "kp_enter");
+    if (key.isLetter() or key == .space) return true;
+    return switch (key) {
+        .kp_0, .kp_1, .kp_2, .kp_3, .kp_4, .kp_5, .kp_6, .kp_7, .kp_8, .kp_9 => true,
+        .kp_decimal, .kp_divide, .kp_multiply, .kp_subtract, .kp_add, .kp_equal => true,
+        else => false,
+    };
 }
 
 /// Which part of a text field's contents to show so the caret stays in a

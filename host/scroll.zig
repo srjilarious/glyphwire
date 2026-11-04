@@ -377,7 +377,7 @@ pub const Scroll = struct {
         if (hit_target.root_owned) {
             // Addressed to the pane under the pointer, same as every other
             // wheel path here -- not to whichever pane has focus.
-            const key: []const u8 = if (delta > 0) "up" else "down";
+            const key: glyphwire.Key = if (delta > 0) .up else .down;
             var n: i64 = @intCast(@abs(delta));
             while (n > 0) : (n -= 1) {
                 self.app.server.reportKeyTapIn(self.app.alloc, hit_target.context, key) catch break;
@@ -402,10 +402,10 @@ pub const Scroll = struct {
     fn reportWheel(self: *Scroll, eng: *Engine, context: glyphwire.ContextHandle, cell: glyphwire.CellPos, wheel_y: f32) void {
         const server = self.app.server;
         const pos = eng.inputs.mouse.pos();
-        const name: []const u8 = if (wheel_y > 0) "wheel_up" else "wheel_down";
+        const button: glyphwire.MouseButton = if (wheel_y > 0) .wheel_up else .wheel_down;
         const notches: usize = @max(1, @as(usize, @intFromFloat(@round(@abs(wheel_y)))));
         for (0..notches) |_| {
-            server.reportWheelTapIn(self.app.alloc, context, name, .{ .x = pos.x, .y = pos.y }, cell) catch return;
+            server.reportWheelTapIn(self.app.alloc, context, button, .{ .x = pos.x, .y = pos.y }, cell) catch return;
         }
     }
 

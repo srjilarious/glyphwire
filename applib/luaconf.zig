@@ -395,8 +395,8 @@ fn sortOverrides(comptime T: type, items: []T) void {
     std.mem.sort(T, items, {}, struct {
         fn lessThan(_: void, a: T, b: T) bool {
             if (@hasField(T, "scope") and a.scope != b.scope) return @intFromEnum(a.scope) < @intFromEnum(b.scope);
-            const ka = a.chord.key();
-            const kb = b.chord.key();
+            const ka = a.chord.name();
+            const kb = b.chord.name();
             if (!std.mem.eql(u8, ka, kb)) return std.mem.lessThan(u8, ka, kb);
             const ma: u4 = @bitCast(modBits(a.chord));
             const mb: u4 = @bitCast(modBits(b.chord));

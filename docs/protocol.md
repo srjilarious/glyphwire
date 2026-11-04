@@ -1964,11 +1964,15 @@ Two things to know:
   modifier is down" rather than as a physical side.
 
 Names are the reference host's; another host **MAY** report others, and a
-client **SHOULD** ignore a name it does not recognise.
+client **SHOULD** ignore a name it does not recognise. The reference client
+decodes such a name to `unknown`, and the server records and re-broadcasts
+an unrecognised `report_key` name as `unknown` too.
 
 ### 8.2 Mouse buttons
 
-`left`, `right`, `middle`, `x1`, `x2`.
+`left`, `right`, `middle`, `x1`, `x2`, and `wheel_up` / `wheel_down`, which
+are only ever a press and release per wheel notch over a program that asked
+for the mouse. An unrecognised name decodes to `unknown`, as for keys.
 
 ### 8.3 Image formats
 

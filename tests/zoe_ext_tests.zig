@@ -377,10 +377,10 @@ pub fn configKeysBindOverAnExtensionsOwnTest(io: std.Io, alloc: std.mem.Allocato
     rt.resolveKeys(&named, &plain);
 
     const ca: keybind.Mods = .{ .ctrl = true, .alt = true };
-    try testz.expectTrue(rt.lookup(.global, "a", ca) == null);
-    try testz.expectEqual(rt.lookup(.global, "b", ca).?, rt.find("second").?);
-    try testz.expectEqual(rt.lookup(.normal, "c", ca).?, rt.find("second").?);
-    try testz.expectTrue(rt.lookup(.global, "c", ca) == null);
+    try testz.expectTrue(rt.lookup(.global, .a, ca) == null);
+    try testz.expectEqual(rt.lookup(.global, .b, ca).?, rt.find("second").?);
+    try testz.expectEqual(rt.lookup(.normal, .c, ca).?, rt.find("second").?);
+    try testz.expectTrue(rt.lookup(.global, .c, ca) == null);
     try expectProblem(rt, "\"nothing\": unknown action or command");
 }
 
@@ -502,8 +502,8 @@ pub fn taskJournalDefaultKeysAreOptionalTest(io: std.Io, alloc: std.mem.Allocato
     defer fake.deinit();
     const on = try journal(io, alloc, &fake, "");
     defer on.deinit();
-    try testz.expectEqual(on.lookup(.global, "t", mods).?, on.find("journalToday").?);
-    try testz.expectEqual(on.lookup(.global, "backslash", mods).?, on.find("taskToggle").?);
+    try testz.expectEqual(on.lookup(.global, .t, mods).?, on.find("journalToday").?);
+    try testz.expectEqual(on.lookup(.global, .backslash, mods).?, on.find("taskToggle").?);
 
     const off = try journal(io, alloc, &fake, "default_keys = false");
     defer off.deinit();

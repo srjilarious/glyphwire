@@ -320,31 +320,30 @@ pub const LineEdit = struct {
     /// program around the field (salacommander's Alt+D, a pane switch),
     /// and swallowing them here would make a field that traps its
     /// application's own shortcuts.
-    pub fn handleKey(self: *LineEdit, key: []const u8, mods: glyphwire.Mods) Outcome {
+    pub fn handleKey(self: *LineEdit, key: glyphwire.Key, mods: glyphwire.Mods) Outcome {
         if (mods.alt or mods.super) return .ignored;
-        const eq = std.mem.eql;
         const ctrl = mods.ctrl;
 
-        if (eq(u8, key, "enter") or eq(u8, key, "kp_enter")) return .submit;
-        if (eq(u8, key, "escape")) return .cancel;
+        if (key == .enter or key == .kp_enter) return .submit;
+        if (key == .escape) return .cancel;
 
         // Editing first: Ctrl+Backspace and Ctrl+Delete are the word
         // forms of keys that also exist bare, so the modified spellings
         // have to be tested before the plain ones.
         const edited = blk: {
-            if (eq(u8, key, "backspace")) break :blk if (ctrl) self.deleteWordBackward() else self.deleteBackward();
-            if (eq(u8, key, "delete")) break :blk if (ctrl) self.deleteWordForward() else self.deleteForward();
-            if (ctrl and eq(u8, key, "u")) break :blk self.killToStart();
-            if (ctrl and eq(u8, key, "k")) break :blk self.killToEnd();
+            if (key == .backspace) break :blk if (ctrl) self.deleteWordBackward() else self.deleteBackward();
+            if (key == .delete) break :blk if (ctrl) self.deleteWordForward() else self.deleteForward();
+            if (ctrl and key == .u) break :blk self.killToStart();
+            if (ctrl and key == .k) break :blk self.killToEnd();
             break :blk null;
         };
         if (edited) |changed| return if (changed) .edited else .ignored;
 
         const moved = blk: {
-            if (eq(u8, key, "left")) break :blk if (ctrl) self.wordLeft() else self.left();
-            if (eq(u8, key, "right")) break :blk if (ctrl) self.wordRight() else self.right();
-            if (eq(u8, key, "home") or (ctrl and eq(u8, key, "a"))) break :blk self.home();
-            if (eq(u8, key, "end") or (ctrl and eq(u8, key, "e"))) break :blk self.end();
+            if (key == .left) break :blk if (ctrl) self.wordLeft() else self.left();
+            if (key == .right) break :blk if (ctrl) self.wordRight() else self.right();
+            if (key == .home or (ctrl and key == .a)) break :blk self.home();
+            if (key == .end or (ctrl and key == .e)) break :blk self.end();
             break :blk null;
         };
         if (moved) |changed| return if (changed) .moved else .ignored;

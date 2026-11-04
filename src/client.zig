@@ -756,12 +756,10 @@ pub const Client = struct {
         return .{ .offset = parsed.value.result.offset, .max = parsed.value.result.max };
     }
 
-    /// `report_key(key, pressed)` -- a notification. `key` is expected to
-    /// be a stable, portable name (glyphwire-host uses `@tagName` of its
-    /// engine's `Key` enum, e.g. "a", "left_shift", "escape"); this type
-    /// doesn't enforce a closed set.
-    pub fn reportKey(self: *Client, key: []const u8, pressed: bool) !void {
-        try self.notify("report_key", .{ .key = key, .pressed = pressed });
+    /// `report_key(key, pressed)` -- a notification, carrying the key's
+    /// wire name (`core.Key.name`).
+    pub fn reportKey(self: *Client, key: core.Key, pressed: bool) !void {
+        try self.notify("report_key", .{ .key = key.name(), .pressed = pressed });
     }
 
     /// `report_text(text)` -- a notification. `text` is committed text
@@ -778,9 +776,9 @@ pub const Client = struct {
     /// offset at click time (see `core.Layer.view_scroll`); pass 0 from a
     /// reporter that isn't tracking scrollback. `clicks` is the press's
     /// click count (1 = single, 2 = double, 3 = triple).
-    pub fn reportMouseButton(self: *Client, button: []const u8, pressed: bool, px: PxPos, cell: CellPos, view_offset: usize, clicks: u8) !void {
+    pub fn reportMouseButton(self: *Client, button: core.MouseButton, pressed: bool, px: PxPos, cell: CellPos, view_offset: usize, clicks: u8) !void {
         try self.notify("report_mouse_button", .{
-            .button = button,
+            .button = button.name(),
             .pressed = pressed,
             .px = px,
             .cell = cell,
@@ -2573,16 +2571,16 @@ pub const InputStateSnapshot = struct {
         return self.parsed.value.result.mouse_buttons_down;
     }
 
-    pub fn isKeyDown(self: *const InputStateSnapshot, key: []const u8) bool {
+    pub fn isKeyDown(self: *const InputStateSnapshot, key: core.Key) bool {
         for (self.keysDown()) |k| {
-            if (std.mem.eql(u8, k, key)) return true;
+            if (std.mem.eql(u8, k, key.name())) return true;
         }
         return false;
     }
 
-    pub fn isMouseButtonDown(self: *const InputStateSnapshot, button: []const u8) bool {
+    pub fn isMouseButtonDown(self: *const InputStateSnapshot, button: core.MouseButton) bool {
         for (self.mouseButtonsDown()) |b| {
-            if (std.mem.eql(u8, b, button)) return true;
+            if (std.mem.eql(u8, b, button.name())) return true;
         }
         return false;
     }
@@ -2599,15 +2597,16 @@ pub const InputStateSnapshot = struct {
 /// One queued, discrete key press/release, in arrival order -- unlike
 /// `InputState`'s down-set (a live cache, good for "is X held right
 /// now"), this is what a line editor needs ("the user just pressed
-/// enter", exactly once). `key` is owned; free it with the same allocator
-/// passed to `InputListener.connect`.
+/// enter", exactly once). Owns no memory.
 ///
 /// `mods` is the modifier state *when the host generated the event*, not
 /// when it is consumed -- use it rather than `InputListener.isKeyDown`
 /// for chords, or a program that falls behind reads a quick Ctrl+W as a
 /// plain `w` because Ctrl was released by the time it got there.
 pub const KeyEvent = struct {
-    key: []const u8,
+    /// Decoded from the wire name once; `.unknown` for a key this build
+    /// doesn't have (a newer host's). Nothing to free.
+    key: core.Key,
     pressed: bool,
     mods: core.Mods = .{},
 
@@ -2633,7 +2632,8 @@ pub const KeyEvent = struct {
 /// or CJK IME composition.
 pub const TextEvent = struct { text: []const u8 };
 pub const MouseButtonEvent = struct {
-    button: []const u8,
+    /// Decoded like `KeyEvent.key`; nothing to free.
+    button: core.MouseButton,
     pressed: bool,
     px: PxPos,
     cell: CellPos,
@@ -2647,14 +2647,6 @@ pub const MouseButtonEvent = struct {
     /// 1 for a single click, 2 for a double, 3 for a triple (see
     /// `protocol.MouseButtonParams.clicks`). A release carries its press's.
     clicks: u8 = 1,
-
-    /// Frees the owned `.button` string, like `Event.deinit`. Every
-    /// drained event owns its own copy (the listener dupes it per
-    /// notification), so a consumer that pops without freeing leaks one
-    /// string per press *and* release.
-    pub fn deinit(self: MouseButtonEvent, alloc: std.mem.Allocator) void {
-        alloc.free(self.button);
-    }
 };
 /// One `mouse_move` notification: the pointer's new pixel + cell
 /// position. No owned memory -- handed back by value like `ResizeEvent`.
@@ -2857,7 +2849,7 @@ pub const Event = union(enum) {
     /// command rather than input for any program. Only a window manager
     /// ever receives these, and a window manager receives *nothing else* --
     /// it is never in the focused pane, so no program's keystrokes reach it
-    /// at all. `key` owned, freed like `key`.
+    /// at all. Owns no memory, like `key`.
     ///
     /// A separate variant from `key` on purpose: a manager must never be
     /// able to confuse a command for its own with input meant for a pane,
@@ -2888,13 +2880,11 @@ pub const Event = union(enum) {
 
     pub fn deinit(self: Event, alloc: std.mem.Allocator) void {
         switch (self) {
-            .key, .window_key => |k| alloc.free(k.key),
             .text, .paste, .window_text => |t| alloc.free(t.text),
-            .mouse_button => |m| m.deinit(alloc),
             .terminal_reply => |b| alloc.free(b),
             .layout => |l| l.deinit(alloc),
             .pane_layout => |l| l.deinit(alloc),
-            .copy_request, .shutdown, .focus, .mouse_move, .resize, .scroll, .scroll_offset, .layer_resize, .pane_exit, .pane_focus, .remote_exit, .context, .theme => {},
+            .key, .window_key, .mouse_button, .copy_request, .shutdown, .focus, .mouse_move, .resize, .scroll, .scroll_offset, .layer_resize, .pane_exit, .pane_focus, .remote_exit, .context, .theme => {},
         }
     }
 
@@ -3027,9 +3017,8 @@ pub const InputListener = struct {
             .stream = stream,
             .format = process_wire_format,
             .listen_thread = undefined,
-            .state = core.InputState.init(alloc),
+            .state = .{},
         };
-        errdefer self.state.deinit();
 
         try self.sendSubscribeAndWaitForAck(streams, seat);
 
@@ -3063,7 +3052,6 @@ pub const InputListener = struct {
         self.stream.shutdown(self.io, .both) catch {};
         self.listen_thread.join();
         self.stream.close(self.io);
-        self.state.deinit();
         for (self.events.items) |ev| ev.deinit(self.alloc);
         self.events.deinit(self.alloc);
         self.alloc.destroy(self);
@@ -3219,13 +3207,13 @@ pub const InputListener = struct {
         self.sem.post(self.io);
     }
 
-    pub fn isKeyDown(self: *InputListener, key: []const u8) bool {
+    pub fn isKeyDown(self: *InputListener, key: core.Key) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.state.isKeyDown(key);
     }
 
-    pub fn isMouseButtonDown(self: *InputListener, button: []const u8) bool {
+    pub fn isMouseButtonDown(self: *InputListener, button: core.MouseButton) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.state.isMouseButtonDown(button);
@@ -3409,9 +3397,8 @@ pub const InputListener = struct {
                 defer p.deinit();
                 const window = event != .key;
                 const pressed = std.mem.endsWith(u8, method, "_down");
-                const owned_key = try self.alloc.dupe(u8, p.value.key);
-                errdefer self.alloc.free(owned_key);
-                const ev: KeyEvent = .{ .key = owned_key, .pressed = pressed, .mods = p.value.mods };
+                const key = core.Key.fromName(p.value.key);
+                const ev: KeyEvent = .{ .key = key, .pressed = pressed, .mods = p.value.mods };
                 if (window) {
                     // Deliberately *not* folded into `state`'s down-set: this
                     // key never reached any program, so reporting it as held
@@ -3422,7 +3409,7 @@ pub const InputListener = struct {
                     {
                         self.mutex.lockUncancelable(self.io);
                         defer self.mutex.unlock(self.io);
-                        _ = try self.state.setKey(p.value.key, pressed);
+                        _ = self.state.setKey(key, pressed);
                     }
                     try self.enqueue(.{ .key = ev });
                 }
@@ -3448,17 +3435,16 @@ pub const InputListener = struct {
             .mouse_button => {
                 const p = try self.parseParams(protocol.MouseButtonParams, params);
                 defer p.deinit();
-                const owned_button = try self.alloc.dupe(u8, p.value.button);
-                errdefer self.alloc.free(owned_button);
+                const button = core.MouseButton.fromName(p.value.button);
                 {
                     self.mutex.lockUncancelable(self.io);
                     defer self.mutex.unlock(self.io);
                     self.pointer.cursor_px = .{ .x = p.value.px.x, .y = p.value.px.y };
                     self.pointer.cursor_cell = .{ .row = p.value.cell.row, .col = p.value.cell.col };
-                    _ = try self.state.setMouseButton(p.value.button, p.value.pressed);
+                    _ = self.state.setMouseButton(button, p.value.pressed);
                 }
                 try self.enqueue(.{ .mouse_button = .{
-                    .button = owned_button,
+                    .button = button,
                     .pressed = p.value.pressed,
                     .px = p.value.px,
                     .cell = p.value.cell,

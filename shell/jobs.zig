@@ -399,10 +399,9 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
                 // SIGINT -- see `applib.interrupt` -- and still gets
                 // the key on its own listener. Ctrl+Shift+C is copy.
                 .key => |kev| {
-                    defer alloc.free(kev.key);
                     if (self.isKillJobKey(kev)) {
                         if (job.stop.press(jobMs(self, job))) |sig| pty.signalGroup(jobstop.posixSignal(sig));
-                    } else if (kev.pressed and kev.ctrl() and !kev.shift() and std.mem.eql(u8, kev.key, "c"))
+                    } else if (kev.pressed and kev.ctrl() and !kev.shift() and kev.key == .c)
                         pty.signalGroup(std.posix.SIG.INT);
                 },
                 .copy_request => {},
@@ -455,8 +454,7 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
             },
             // A window manager's own commands (see
             // `Event.window_key`). Never delivered here.
-            .window_key => |kev| {
-                alloc.free(kev.key);
+            .window_key => {
                 continue;
             },
             .window_text => |tev| {
@@ -467,7 +465,6 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
             // Not input (`Event.isInput`): filtered out before this.
             else => continue,
         };
-        defer alloc.free(ev.key);
         if (!ev.pressed) continue;
         // The shell's own key, never the child's: not forwarded.
         if (self.isKillJobKey(ev)) {
@@ -479,7 +476,7 @@ pub fn foregroundJob(self: *Prompt, job: *Job) ForegroundEnd {
         // event, not re-encoded here -- otherwise the child sees it
         // twice. `toPtyBytes` still handles the named keys (Enter,
         // arrows, ...) and ctrl/alt combos, which produce no `text`.
-        if (!mods.ctrl and !mods.alt and keyencode.charFromKeyName(ev.key, false) != null) continue;
+        if (!mods.ctrl and !mods.alt and keyencode.charFromKey(ev.key, false) != null) continue;
         var kb: [32]u8 = undefined;
         if (keyencode.toPtyBytesOpts(ev.key, mods, modes.encodeOpts(), &kb)) |seq| pty.writeAll(seq);
     }
@@ -536,7 +533,7 @@ fn dropForHost(self: *const Prompt, ev: glyphwire.Event) bool {
     if (self.layer == null) return false;
     const has_keyboard = self.pending_focus orelse self.focused;
     return switch (ev) {
-        .key => |k| !has_keyboard or (k.ctrl() and std.mem.eql(u8, k.key, "grave_accent")),
+        .key => |k| !has_keyboard or (k.ctrl() and k.key == .grave_accent),
         .text, .paste, .copy_request, .mouse_button, .mouse_move => !has_keyboard,
         else => false,
     };

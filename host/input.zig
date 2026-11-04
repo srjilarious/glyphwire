@@ -86,10 +86,10 @@ pub const KeyInput = struct {
     pub fn reportKeyEvents(self: *KeyInput, eng: *Engine) bool {
         const kb = &eng.inputs.keyboard;
 
-        self.reportModifier(0, "left_control", kb.ctrl());
-        self.reportModifier(1, "left_alt", kb.alt());
-        self.reportModifier(2, "left_shift", kb.shift());
-        self.reportModifier(3, "left_super", kb.super());
+        self.reportModifier(0, .left_control, kb.ctrl());
+        self.reportModifier(1, .left_alt, kb.alt());
+        self.reportModifier(2, .left_shift, kb.shift());
+        self.reportModifier(3, .left_super, kb.super());
 
         // Ctrl+Alt+Shift+P toggles the profiler HUD and Ctrl+Alt+Shift+R
         // toggles forced every-frame redraw, but only when `host.conf.lua`
@@ -124,20 +124,20 @@ pub const KeyInput = struct {
                 const pressed = kb.pressed(key) and !switcher_took;
                 const released = kb.released(key);
                 const pressed_last = kb.down(key);
-                if (released and pressed_last) self.reportKeyEdge(field_name, false);
+                if (released and pressed_last) self.reportKeyEdge(key, false);
                 if (pressed) {
                     any_pressed = true;
-                    self.reportKeyEdge(field_name, true);
+                    self.reportKeyEdge(key, true);
                 }
-                if (released and !pressed_last) self.reportKeyEdge(field_name, false);
+                if (released and !pressed_last) self.reportKeyEdge(key, false);
             }
         }
         return any_pressed;
     }
 
-    fn reportKeyEdge(self: *KeyInput, field_name: []const u8, down: bool) void {
-        self.app.server.reportKey(self.app.alloc, field_name, down) catch |err| {
-            std.log.err("reportKey({s}, {}) failed: {t}", .{ field_name, down, err });
+    fn reportKeyEdge(self: *KeyInput, key: app_mod.Key, down: bool) void {
+        self.app.server.reportKey(self.app.alloc, key, down) catch |err| {
+            std.log.err("reportKey({t}, {}) failed: {t}", .{ key, down, err });
         };
     }
 
@@ -171,15 +171,15 @@ pub const KeyInput = struct {
         return skip_static or self.app.selection.swallows(key, kb);
     }
 
-    /// Forwards one modifier's down/up state under `name`, edge-detected
+    /// Forwards one modifier's down/up state as `key`, edge-detected
     /// against `mod_forwarded[idx]` so the in-process `Server` only sees a
     /// notification when it actually changes. `active` comes from the
     /// engine's logical modifier query (see `reportKeyEvents`).
-    pub fn reportModifier(self: *KeyInput, idx: usize, name: []const u8, active: bool) void {
+    pub fn reportModifier(self: *KeyInput, idx: usize, key: app_mod.Key, active: bool) void {
         if (active == self.mod_forwarded[idx]) return;
         self.mod_forwarded[idx] = active;
-        self.app.server.reportKey(self.app.alloc, name, active) catch |err| {
-            std.log.err("reportKey({s}, {}) failed: {t}", .{ name, active, err });
+        self.app.server.reportKey(self.app.alloc, key, active) catch |err| {
+            std.log.err("reportKey({t}, {}) failed: {t}", .{ key, active, err });
         };
     }
 
@@ -308,7 +308,7 @@ pub const KeyInput = struct {
                 if (!(skip_left and is_left)) {
                     if (cell_in_pane) |cell| {
                         const clicks = self.press_clicks[idx];
-                        server.reportMouseButton(self.app.alloc, field_name, true, .{ .x = pos.x, .y = pos.y }, cell, view_offset, clicks) catch |err| {
+                        server.reportMouseButton(self.app.alloc, btn, true, .{ .x = pos.x, .y = pos.y }, cell, view_offset, clicks) catch |err| {
                             std.log.err("reportMouseButton({s}, true) failed: {t}", .{ field_name, err });
                         };
                         self.mouse_down[idx] = true;
@@ -324,7 +324,7 @@ pub const KeyInput = struct {
                 // deduped away. See `mouse_down`.
                 self.mouse_down[idx] = false;
                 if (cell_in_pane orelse server.focusedCellClamped(window_cell)) |cell| {
-                    server.reportMouseButton(self.app.alloc, field_name, false, .{ .x = pos.x, .y = pos.y }, cell, view_offset, self.down_clicks[idx]) catch |err| {
+                    server.reportMouseButton(self.app.alloc, btn, false, .{ .x = pos.x, .y = pos.y }, cell, view_offset, self.down_clicks[idx]) catch |err| {
                         std.log.err("reportMouseButton({s}, false) failed: {t}", .{ field_name, err });
                     };
                 }
@@ -370,8 +370,8 @@ pub const KeyInput = struct {
                 key_repeat.repeatsKey(key, ctrl, alt) and
                 !self.swallowsKey(key, kb, profile_toggle))
             {
-                self.app.server.reportKeyRepeat(self.app.alloc, field_name) catch |err| {
-                    std.log.err("reportKeyRepeat({s}) failed: {t}", .{ field_name, err });
+                self.app.server.reportKeyRepeat(self.app.alloc, key) catch |err| {
+                    std.log.err("reportKeyRepeat({t}) failed: {t}", .{ key, err });
                 };
             }
         }

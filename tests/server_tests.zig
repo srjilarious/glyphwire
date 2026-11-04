@@ -206,7 +206,7 @@ pub fn subscribedConnectionReceivesBroadcastKeyEventTest(io: std.Io, alloc: std.
 
     try testz.expectEqualStr("key_down", parsed.value.method);
     try testz.expectEqualStr("a", parsed.value.params.key);
-    try testz.expectTrue(srv.session.input.isKeyDown("a"));
+    try testz.expectTrue(srv.session.input.isKeyDown(.a));
 }
 
 /// `Server.reportResize` (the in-process path glyphwire-host calls when
@@ -684,7 +684,7 @@ pub fn inputReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allo
     alloc.free(try readOneFrame(io, alloc, &b, &b_dec));
 
     // Root pane has focus: `a` gets this, `b` must not.
-    try srv.reportKey(alloc, "x", true);
+    try srv.reportKey(alloc, .x, true);
     const a_got = try readOneFrame(io, alloc, &a, &a_dec);
     defer alloc.free(a_got);
     try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"key\":\"x\"") != null);
@@ -692,7 +692,7 @@ pub fn inputReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allo
     // Focus moves to the other pane, and now only `b` hears.
     try srv.session.focusPane(made.pane);
     srv.ctx = srv.session.focusedContext();
-    try srv.reportKey(alloc, "y", true);
+    try srv.reportKey(alloc, .y, true);
 
     const b_got = try readOneFrame(io, alloc, &b, &b_dec);
     defer alloc.free(b_got);
@@ -785,13 +785,13 @@ pub fn thePrefixSequenceNeverReachesTheProgramTest(io: std.Io, alloc: std.mem.Al
     try w.interface.flush();
     alloc.free(try readOneFrame(io, alloc, &stream, &decoder));
 
-    srv.session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    srv.session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
     // Ctrl-B then `q`: the whole sequence is withheld from this program.
-    try srv.reportKey(alloc, "left_control", true);
+    try srv.reportKey(alloc, .left_control, true);
     alloc.free(try readOneFrame(io, alloc, &stream, &decoder)); // the modifier itself passes
-    try srv.reportKey(alloc, "b", true);
-    try srv.reportKey(alloc, "b", false);
+    try srv.reportKey(alloc, .b, true);
+    try srv.reportKey(alloc, .b, false);
     try srv.reportText(alloc, "q");
 
     // An ordinary keystroke afterwards, which must be the next thing the
@@ -850,20 +850,20 @@ pub fn aShiftedPrefixCommandReachesTheManagerInHostOrderTest(io: std.Io, alloc: 
     try w.interface.flush();
     alloc.free(try readOneFrame(io, alloc, &stream, &decoder));
 
-    srv.session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    srv.session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
     // Ctrl-B, released, exactly as the host reports it.
-    try srv.reportKey(alloc, "left_control", true);
-    try srv.reportKey(alloc, "b", true);
-    try srv.reportKey(alloc, "b", false);
-    try srv.reportKey(alloc, "left_control", false);
+    try srv.reportKey(alloc, .left_control, true);
+    try srv.reportKey(alloc, .b, true);
+    try srv.reportKey(alloc, .b, false);
+    try srv.reportKey(alloc, .left_control, false);
 
     // Then Shift + apostrophe: a modifier press, a key press, and the text.
-    try srv.reportKey(alloc, "left_shift", true);
-    try srv.reportKey(alloc, "apostrophe", true);
+    try srv.reportKey(alloc, .left_shift, true);
+    try srv.reportKey(alloc, .apostrophe, true);
     try srv.reportText(alloc, "\"");
-    try srv.reportKey(alloc, "apostrophe", false);
-    try srv.reportKey(alloc, "left_shift", false);
+    try srv.reportKey(alloc, .apostrophe, false);
+    try srv.reportKey(alloc, .left_shift, false);
 
     // The one thing this connection is subscribed to is `window_keys`, so
     // the next frame is the command -- and it is the text, not the key.
@@ -905,25 +905,25 @@ pub fn thePrefixSurvivesAFocusChangeWithAModifierHeldTest(io: std.Io, alloc: std
     try srv.session.setRootPaneSplit(split);
     try srv.session.layoutPanes(null, null);
 
-    srv.session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    srv.session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
     // Ctrl-B, Ctrl *not* released.
-    try srv.reportKey(alloc, "left_control", true);
-    try srv.reportKey(alloc, "b", true);
+    try srv.reportKey(alloc, .left_control, true);
+    try srv.reportKey(alloc, .b, true);
     try testz.expectTrue(srv.session.prefix_armed);
-    try srv.reportKey(alloc, "b", false);
+    try srv.reportKey(alloc, .b, false);
 
     // The arrow is the command; the manager answers it by moving focus,
     // which is what repoints `srv.ctx` at the other pane's context.
-    try srv.reportKey(alloc, "left", true);
+    try srv.reportKey(alloc, .left, true);
     try testz.expectTrue(!srv.session.prefix_armed);
     try srv.focusPane(alloc, made.pane);
     try testz.expectEqual(srv.session.focusedPaneHandle(), made.pane);
-    try srv.reportKey(alloc, "left", false);
+    try srv.reportKey(alloc, .left, false);
 
     // Ctrl-B again, still without ever having released Ctrl. This is the
     // one that used to fall through to the program.
-    try srv.reportKey(alloc, "b", true);
+    try srv.reportKey(alloc, .b, true);
     try testz.expectTrue(srv.session.prefix_armed);
     try testz.expectTrue(srv.session.mods.ctrl);
 }
@@ -957,31 +957,31 @@ pub fn aStaleModifierInAPanesContextDoesNotKillThePrefixTest(io: std.Io, alloc: 
     try srv.session.setRootPaneSplit(split);
     try srv.session.layoutPanes(null, null);
 
-    srv.session.window_prefix = glyphwire.WindowPrefix.init("b", true, false, false);
+    srv.session.window_prefix = .{ .key = .b, .ctrl = true, .alt = false, .shift = false };
 
     // `Ctrl-B %` in the root pane: Ctrl-B, Ctrl up, then Shift plus the
     // key, and the split's own focus change lands between the Shift press
     // and its release.
-    try srv.reportKey(alloc, "left_control", true);
-    try srv.reportKey(alloc, "b", true);
-    try srv.reportKey(alloc, "b", false);
-    try srv.reportKey(alloc, "left_control", false);
+    try srv.reportKey(alloc, .left_control, true);
+    try srv.reportKey(alloc, .b, true);
+    try srv.reportKey(alloc, .b, false);
+    try srv.reportKey(alloc, .left_control, false);
 
-    try srv.reportKey(alloc, "left_shift", true);
-    try srv.reportKey(alloc, "five", true);
+    try srv.reportKey(alloc, .left_shift, true);
+    try srv.reportKey(alloc, .five, true);
     try srv.reportText(alloc, "%");
     try srv.focusPane(alloc, made.pane);
-    try srv.reportKey(alloc, "five", false);
-    try srv.reportKey(alloc, "left_shift", false);
+    try srv.reportKey(alloc, .five, false);
+    try srv.reportKey(alloc, .left_shift, false);
     try testz.expectTrue(!srv.session.mods.shift);
 
     // Back to the pane whose context still has Shift stuck down, and the
     // prefix has to work there.
     try srv.focusPane(alloc, glyphwire.root_pane_handle);
-    try srv.reportKey(alloc, "left_control", true);
-    try srv.reportKey(alloc, "b", true);
+    try srv.reportKey(alloc, .left_control, true);
+    try srv.reportKey(alloc, .b, true);
     try testz.expectTrue(srv.session.prefix_armed);
-    try srv.reportKey(alloc, "left", true);
+    try srv.reportKey(alloc, .left, true);
     try testz.expectTrue(!srv.session.prefix_armed);
 }
 
@@ -1178,7 +1178,7 @@ pub fn copyRequestReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.me
     try srv.session.focusPane(made.pane);
     srv.ctx = srv.session.focusedContext();
     try srv.requestCopy(alloc);
-    try srv.reportKey(alloc, "x", true);
+    try srv.reportKey(alloc, .x, true);
 
     const b_first = try readOneFrame(io, alloc, &b, &b_dec);
     defer alloc.free(b_first);
@@ -1399,13 +1399,13 @@ pub fn aKeyTapReachesOnlyTheNamedContextTest(io: std.Io, alloc: std.mem.Allocato
     defer b.stream.close(io);
 
     // The root pane has focus; the tap names the other pane's context.
-    try srv.reportKeyTapIn(alloc, srv.session.panePtr(other).?.top(), "up");
+    try srv.reportKeyTapIn(alloc, srv.session.panePtr(other).?.top(), .up);
     const b_down = try readOneFrame(io, alloc, &b.stream, &b_dec);
     defer alloc.free(b_down);
     try testz.expectTrue(std.mem.indexOf(u8, b_down, "\"key\":\"up\"") != null);
     try testz.expectTrue(std.mem.indexOf(u8, b_down, "key_down") != null);
 
-    try srv.reportKey(alloc, "x", true);
+    try srv.reportKey(alloc, .x, true);
     const a_got = try readOneFrame(io, alloc, &a.stream, &a_dec);
     defer alloc.free(a_got);
     try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"key\":\"x\"") != null);
@@ -1438,14 +1438,14 @@ pub fn aWheelTapReachesOnlyTheNamedContextTest(io: std.Io, alloc: std.mem.Alloca
     defer b.thread.join();
     defer b.stream.close(io);
 
-    try srv.reportWheelTapIn(alloc, srv.session.panePtr(other).?.top(), "wheel_up", .{ .x = 0, .y = 0 }, .{ .row = 2, .col = 3 });
+    try srv.reportWheelTapIn(alloc, srv.session.panePtr(other).?.top(), .wheel_up, .{ .x = 0, .y = 0 }, .{ .row = 2, .col = 3 });
     const b_got = try readOneFrame(io, alloc, &b.stream, &b_dec);
     defer alloc.free(b_got);
     try testz.expectTrue(std.mem.indexOf(u8, b_got, "\"button\":\"wheel_up\"") != null);
     try testz.expectTrue(std.mem.indexOf(u8, b_got, "\"col\":3") != null);
 
     // The focused client's first read is a real click, never the wheel.
-    try srv.reportMouseButton(alloc, "left", true, .{ .x = 0, .y = 0 }, .{ .row = 0, .col = 0 }, 0, 1);
+    try srv.reportMouseButton(alloc, .left, true, .{ .x = 0, .y = 0 }, .{ .row = 0, .col = 0 }, 0, 1);
     const a_got = try readOneFrame(io, alloc, &a.stream, &a_dec);
     defer alloc.free(a_got);
     try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"button\":\"left\"") != null);
@@ -1486,7 +1486,7 @@ pub fn pasteReachesOnlyTheFocusedPanesClientTest(io: std.Io, alloc: std.mem.Allo
 
     try srv.session.focusPane(other);
     srv.ctx = srv.session.focusedContext();
-    try srv.reportKey(alloc, "x", true);
+    try srv.reportKey(alloc, .x, true);
     const b_got = try readOneFrame(io, alloc, &b.stream, &b_dec);
     defer alloc.free(b_got);
     try testz.expectTrue(std.mem.indexOf(u8, b_got, "\"key\":\"x\"") != null);
@@ -1539,7 +1539,7 @@ pub fn terminalReplyStaysInItsContextTest(io: std.Io, alloc: std.mem.Allocator) 
     defer alloc.free(b_got);
     try testz.expectTrue(std.mem.indexOf(u8, b_got, "terminal_reply") != null);
 
-    try srv.reportKey(alloc, "x", true);
+    try srv.reportKey(alloc, .x, true);
     const a_got = try readOneFrame(io, alloc, &a.stream, &a_dec);
     defer alloc.free(a_got);
     try testz.expectTrue(std.mem.indexOf(u8, a_got, "\"key\":\"x\"") != null);
@@ -1856,10 +1856,10 @@ pub fn aClientThatStopsReadingHoldsNoOneUpTest(io: std.Io, alloc: std.mem.Alloca
     // under the queue's bound.
     const presses = 3000;
     for (0..presses) |_| {
-        try srv.reportKey(alloc, "a", true);
-        try srv.reportKey(alloc, "a", false);
+        try srv.reportKey(alloc, .a, true);
+        try srv.reportKey(alloc, .a, false);
     }
-    try srv.reportKey(alloc, "z", true);
+    try srv.reportKey(alloc, .z, true);
 
     var downs: usize = 0;
     while (true) {
@@ -1899,8 +1899,8 @@ pub fn aClientPastTheQueueBoundIsDisconnectedTest(io: std.Io, alloc: std.mem.All
     // Enough to fill the socket buffer and then the 16 KiB queue.
     var i: usize = 0;
     while (i < 50_000 and connectionCount(&srv) == 1) : (i += 1) {
-        try srv.reportKey(alloc, "a", true);
-        try srv.reportKey(alloc, "a", false);
+        try srv.reportKey(alloc, .a, true);
+        try srv.reportKey(alloc, .a, false);
     }
 
     var waited: usize = 0;

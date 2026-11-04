@@ -40,7 +40,7 @@ pub const header_rows: usize = 2;
 
 /// A keystroke against an open finder whose list shows `rows` rows. See
 /// `popupframe.applyKey`.
-pub fn applyKey(f: *Finder, key: []const u8, mods: glyphwire.Mods, rows: usize) !KeyEffect {
+pub fn applyKey(f: *Finder, key: glyphwire.Key, mods: glyphwire.Mods, rows: usize) !KeyEffect {
     return popupframe.applyKey(f, key, mods, rows);
 }
 

@@ -373,8 +373,9 @@ pub fn Ops(comptime Self: type) type {
         /// The session enforces this, so a manager receives only its own
         /// commands and never a program's keystrokes -- see
         /// `core.WindowPrefix`.
-        pub fn setWindowPrefix(self: *Self, key: ?[]const u8, ctrl: bool, alt: bool, shift: bool) !void {
-            try self.notify("set_window_prefix", .{ .key = key, .ctrl = ctrl, .alt = alt, .shift = shift });
+        pub fn setWindowPrefix(self: *Self, key: ?core.Key, ctrl: bool, alt: bool, shift: bool) !void {
+            const name: ?[]const u8 = if (key) |k| k.name() else null;
+            try self.notify("set_window_prefix", .{ .key = name, .ctrl = ctrl, .alt = alt, .shift = shift });
         }
 
         /// `destroy_pane`: stops whatever is running in the pane and frees it

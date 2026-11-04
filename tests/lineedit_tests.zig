@@ -381,15 +381,15 @@ pub fn handleKeyMapsTheReadlineChordsTest(_: std.Io, alloc: std.mem.Allocator) !
     var e = try LineEdit.init(alloc, "cat /home/jeff");
     defer e.deinit(alloc);
 
-    try testz.expectEqual(e.handleKey("a", ctrl), .moved); // ctrl+a
+    try testz.expectEqual(e.handleKey(.a, ctrl), .moved); // ctrl+a
     try testz.expectEqual(e.caret, @as(usize, 0));
-    try testz.expectEqual(e.handleKey("e", ctrl), .moved); // ctrl+e
+    try testz.expectEqual(e.handleKey(.e, ctrl), .moved); // ctrl+e
     try testz.expectEqual(e.caret, e.text().len);
-    try testz.expectEqual(e.handleKey("left", ctrl), .moved); // word jump
+    try testz.expectEqual(e.handleKey(.left, ctrl), .moved); // word jump
     try testz.expectEqualStr("cat /home/", e.text()[0..e.caret]);
-    try testz.expectEqual(e.handleKey("backspace", ctrl), .edited);
+    try testz.expectEqual(e.handleKey(.backspace, ctrl), .edited);
     try testz.expectEqualStr("cat /homejeff", e.text());
-    try testz.expectEqual(e.handleKey("u", ctrl), .edited); // ctrl+u
+    try testz.expectEqual(e.handleKey(.u, ctrl), .edited); // ctrl+u
     try testz.expectEqualStr("jeff", e.text());
 }
 
@@ -398,9 +398,9 @@ pub fn handleKeyReportsEnterAndEscapeWithoutTouchingTheLineTest(_: std.Io, alloc
     // leave the field. The field only names them.
     var e = try LineEdit.init(alloc, "ls");
     defer e.deinit(alloc);
-    try testz.expectEqual(e.handleKey("enter", .{}), .submit);
-    try testz.expectEqual(e.handleKey("kp_enter", .{}), .submit);
-    try testz.expectEqual(e.handleKey("escape", .{}), .cancel);
+    try testz.expectEqual(e.handleKey(.enter, .{}), .submit);
+    try testz.expectEqual(e.handleKey(.kp_enter, .{}), .submit);
+    try testz.expectEqual(e.handleKey(.escape, .{}), .cancel);
     try testz.expectEqualStr("ls", e.text());
 }
 
@@ -409,9 +409,9 @@ pub fn handleKeyLeavesAltAndSuperChordsToTheApplicationTest(_: std.Io, alloc: st
     // it, and neither should a window-manager super chord.
     var e = try LineEdit.init(alloc, "ls");
     defer e.deinit(alloc);
-    try testz.expectEqual(e.handleKey("d", .{ .alt = true }), .ignored);
-    try testz.expectEqual(e.handleKey("left", .{ .alt = true }), .ignored);
-    try testz.expectEqual(e.handleKey("e", .{ .super = true }), .ignored);
+    try testz.expectEqual(e.handleKey(.d, .{ .alt = true }), .ignored);
+    try testz.expectEqual(e.handleKey(.left, .{ .alt = true }), .ignored);
+    try testz.expectEqual(e.handleKey(.e, .{ .super = true }), .ignored);
 }
 
 pub fn handleKeyIgnoresAKeyThatChangedNothingTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -420,9 +420,9 @@ pub fn handleKeyIgnoresAKeyThatChangedNothingTest(_: std.Io, alloc: std.mem.Allo
     var e = try LineEdit.init(alloc, "ls");
     defer e.deinit(alloc);
     _ = e.home();
-    try testz.expectEqual(e.handleKey("backspace", .{}), .ignored);
-    try testz.expectEqual(e.handleKey("left", .{}), .ignored);
-    try testz.expectEqual(e.handleKey("F5", .{}), .ignored);
+    try testz.expectEqual(e.handleKey(.backspace, .{}), .ignored);
+    try testz.expectEqual(e.handleKey(.left, .{}), .ignored);
+    try testz.expectEqual(e.handleKey(.F5, .{}), .ignored);
     try testz.expectEqualStr("ls", e.text());
 }
 

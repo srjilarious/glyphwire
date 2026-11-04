@@ -238,6 +238,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("host_eng/root.zig"),
     });
     host_eng_mod.addImport("sdl3", sdl_dep.module("sdl3"));
+    host_eng_mod.addImport("glyphwire", glyphwire_mod);
     host_eng_mod.addImport("zopengl", zopengl.module("root"));
     host_eng_mod.addImport("zmath", zmath.module("root"));
     host_eng_mod.addImport("zstbi", zstbi.module("root"));
