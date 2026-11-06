@@ -21,7 +21,7 @@ const core = @import("core.zig");
 
 const Color = core.Color;
 
-pub const RectHandle = u32;
+pub const RectHandle = enum(u32) { _ };
 
 pub const RectError = error{UnknownRect};
 

@@ -48,7 +48,7 @@ const tableMakeRoom = cell_paint.tableMakeRoom;
 /// `ImageHandle`/`MetadataHandle` already use -- even though the `Table`
 /// value itself is stored on whichever `Layer` it was created on, not on
 /// `Context` directly.
-pub const TableHandle = u32;
+pub const TableHandle = enum(u32) { _ };
 
 pub const TableError = error{
     UnknownTable,

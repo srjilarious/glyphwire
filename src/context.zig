@@ -73,7 +73,7 @@ const theme = core.theme;
 // fixed origin, and a full-screen program's panes simply cover it (the
 // alt-screen story, without needing `create_context`).
 
-pub const SplitHandle = u32;
+pub const SplitHandle = enum(u32) { _ };
 
 pub const SplitError = error{
     UnknownSplit,
@@ -172,7 +172,7 @@ pub const Context = struct {
     /// since `AutoHashMap` iteration order is unspecified, not something
     /// a renderer should draw in.
     layer_order: std.ArrayList(LayerHandle) = .empty,
-    next_layer_handle: LayerHandle = 1,
+    next_layer_handle: u32 = 1,
     /// Split containers -- the layer tree (see the Splits section above).
     /// Empty, and its `root` null, for every client that positions its
     /// layers by hand, which is all of them until one asks for a tree.
@@ -239,7 +239,7 @@ pub const Context = struct {
     /// (`Session.input`).
     pointer: PointerState = .{},
     images: std.AutoHashMap(ImageHandle, ImageEntry),
-    next_image_handle: ImageHandle = 1,
+    next_image_handle: u32 = 1,
     /// Sum of every stored `ImageEntry.bytes.len` in this context. What
     /// the scrollback sweep's budget check reads, so deciding whether to
     /// sweep never walks the `images` map.
@@ -265,7 +265,7 @@ pub const Context = struct {
     /// `asset_fallback`.
     nine_patch_styles: std.StringHashMap(NinePatchStyle),
     metadata: std.AutoHashMap(MetadataHandle, Metadata),
-    next_metadata_handle: MetadataHandle = 1,
+    next_metadata_handle: u32 = 1,
     /// The session's fixed cell pixel metrics -- decisions.md's "one
     /// monospace font + size per session" -- needed to translate a
     /// `draw_image` span into per-cell pixel offsets (see
@@ -276,16 +276,16 @@ pub const Context = struct {
     cell_px_h: u32 = 12,
     /// Shared across every layer's `tables` map -- see `TableHandle`'s
     /// doc comment.
-    next_table_handle: TableHandle = 1,
+    next_table_handle: u32 = 1,
     /// Shared across every layer's `rects` map, same reasoning as
     /// `next_table_handle`.
-    next_rect_handle: RectHandle = 1,
+    next_rect_handle: u32 = 1,
     /// Shared across every layer's `nine_patches` map, same reasoning as
     /// `next_table_handle`.
-    next_nine_patch_handle: NinePatchHandle = 1,
+    next_nine_patch_handle: u32 = 1,
     /// Shared across every layer's `outlines` map, same reasoning as
     /// `next_table_handle`.
-    next_outline_handle: OutlineHandle = 1,
+    next_outline_handle: u32 = 1,
     /// The drag a client asked to start with `start_drag`, waiting for
     /// glyphwire-host to pick it up (`takeDragRequest`) on its main
     /// thread, where the OS drag has to begin. A newer request replaces
@@ -477,7 +477,7 @@ pub const Context = struct {
         var payload: ?DragPayload = if (drag) |d| try DragPayload.init(self.alloc, d) else null;
         errdefer if (payload) |*p| p.deinit(self.alloc);
 
-        const handle = self.next_metadata_handle;
+        const handle: MetadataHandle = @enumFromInt(self.next_metadata_handle);
         self.next_metadata_handle += 1;
         try self.metadata.put(handle, .{ .json = owned, .drag = payload });
         return handle;
@@ -523,7 +523,7 @@ pub const Context = struct {
         // order it was drawn in.
         const ids = try alloc.dupe(MetadataHandle, layer.sel.highlighted_ids.items);
         defer alloc.free(ids);
-        std.mem.sort(MetadataHandle, ids, {}, std.sort.asc(MetadataHandle));
+        std.mem.sort(MetadataHandle, ids, {}, core.handleLessThan(MetadataHandle));
 
         var uris: std.ArrayList([]const u8) = .empty;
         defer uris.deinit(alloc);
@@ -565,7 +565,7 @@ pub const Context = struct {
         layer.tracks_context_size = (width == null and height == null);
         errdefer layer.deinit();
 
-        const handle = self.next_layer_handle;
+        const handle: LayerHandle = @enumFromInt(self.next_layer_handle);
         try self.layer_order.append(self.alloc, handle);
         errdefer _ = self.layer_order.pop();
 
@@ -1015,7 +1015,7 @@ pub const Context = struct {
     pub fn createTable(self: *Context, layer_handle: ?LayerHandle, row: usize, col: usize, columns: []TableColumn, style: TableStyle) !TableHandle {
         const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
 
-        const handle = self.next_table_handle;
+        const handle: TableHandle = @enumFromInt(self.next_table_handle);
         try layer.tables.put(handle, Table.init(self.alloc, row, col, columns, style));
         errdefer _ = layer.tables.remove(handle);
         try layer.table_order.append(self.alloc, handle);
@@ -1048,7 +1048,7 @@ pub const Context = struct {
     pub fn createOutline(self: *Context, layer_handle: ?LayerHandle, row: usize, col: usize, width: usize, style: OutlineStyle) !OutlineHandle {
         const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
 
-        const handle = self.next_outline_handle;
+        const handle: OutlineHandle = @enumFromInt(self.next_outline_handle);
         try layer.outlines.put(handle, Outline.init(self.alloc, row, col, width, style));
         errdefer _ = layer.outlines.remove(handle);
         try layer.outline_order.append(self.alloc, handle);
@@ -1098,7 +1098,7 @@ pub const Context = struct {
     pub fn createNinePatch(self: *Context, layer_handle: ?LayerHandle, patch: NinePatch) !NinePatchHandle {
         const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
 
-        const handle = self.next_nine_patch_handle;
+        const handle: NinePatchHandle = @enumFromInt(self.next_nine_patch_handle);
         try layer.nine_patches.put(handle, patch);
         self.next_nine_patch_handle += 1;
         layer.touchRender();
@@ -1135,7 +1135,7 @@ pub const Context = struct {
     pub fn createRect(self: *Context, layer_handle: ?LayerHandle, rect: Rect) !RectHandle {
         const layer = self.layerPtr(layer_handle) orelse return LayerError.UnknownLayer;
 
-        const handle = self.next_rect_handle;
+        const handle: RectHandle = @enumFromInt(self.next_rect_handle);
         try layer.rects.put(handle, rect);
         self.next_rect_handle += 1;
         layer.touchRender();
@@ -1235,7 +1235,7 @@ pub const Context = struct {
         const owned = try self.alloc.dupe(u8, bytes);
         errdefer self.alloc.free(owned);
 
-        const handle = self.next_image_handle;
+        const handle: ImageHandle = @enumFromInt(self.next_image_handle);
         self.next_image_handle += 1;
         try self.images.put(handle, .{
             .bytes = owned,

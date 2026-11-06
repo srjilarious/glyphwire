@@ -307,14 +307,14 @@ pub fn clientBatchResultsSurviveAFailedSubRequestTest(io: std.Io, alloc: std.mem
     var client = try glyphwire.Client.connect(io, alloc, socket_path);
     errdefer client.deinit();
 
-    var a_handle: glyphwire.MetadataHandle = 0;
-    var c_handle: glyphwire.MetadataHandle = 0;
+    var a_handle: glyphwire.MetadataHandle = @enumFromInt(0);
+    var c_handle: glyphwire.MetadataHandle = @enumFromInt(0);
     {
         var b = client.batch();
         defer b.deinit();
         const a = try b.createMetadata("\"a\"");
         // No such layer: fails server-side and leaves no response.
-        const bad = try b.request("get_metadata", .{ .layer = @as(u32, 999), .row = 0, .col = 0 });
+        const bad = try b.request("get_metadata", .{ .layer = @as(glyphwire.LayerHandle, @enumFromInt(999)), .row = 0, .col = 0 });
         const c = try b.createMetadata("\"c\"");
         var results = try b.send();
         defer results.deinit();
@@ -692,7 +692,7 @@ pub fn clientLoadImageDrawImageRoundTripTest(io: std.Io, alloc: std.mem.Allocato
     // 24x12px = exactly a 2x1-cell span at the session's 12px cells.
     const png = fakePngBytes(24, 12);
     const handle = try client.loadImage("png", &png);
-    try testz.expectEqual(handle, 1);
+    try testz.expectEqual(@intFromEnum(handle), 1);
 
     const info = try client.getImageInfo(handle);
     try testz.expectEqual(info.width, 24);
@@ -751,7 +751,7 @@ pub fn clientCreateUpdateDestroyRectRoundTripTest(io: std.Io, alloc: std.mem.All
         .line_width = 2,
         .filled = false,
     });
-    try testz.expectEqual(handle, 1);
+    try testz.expectEqual(@intFromEnum(handle), 1);
 
     try client.updateRect(null, handle, .{ .x = 15 });
     try client.destroyRect(null, handle);
@@ -1065,7 +1065,7 @@ pub fn clientLayerCulledWhenCreatorDisconnectsTest(io: std.Io, alloc: std.mem.Al
         errdefer client.deinit();
 
         const h = try client.createLayer(6, 2, 0);
-        try testz.expectEqual(h, 1);
+        try testz.expectEqual(@intFromEnum(h), 1);
 
         // The program dies without cleaning up after itself.
         client.deinit();
@@ -1074,7 +1074,7 @@ pub fn clientLayerCulledWhenCreatorDisconnectsTest(io: std.Io, alloc: std.mem.Al
     thread.join();
 
     try testz.expectEqual(ctx.layers.count(), 0);
-    try testz.expectTrue(ctx.layerPtr(1) == null);
+    try testz.expectTrue(ctx.layerPtr(@enumFromInt(1)) == null);
 }
 
 fn serveOne(server: *glyphwire.server.Server, alloc: std.mem.Allocator) void {
@@ -1106,7 +1106,7 @@ pub fn clientUpdateImageThenDestroyImageRoundTripTest(io: std.Io, alloc: std.mem
 
     const first = fakePngBytes(24, 12);
     const handle = try client.loadImage("png", &first);
-    try testz.expectEqual(handle, 1);
+    try testz.expectEqual(@intFromEnum(handle), 1);
 
     // A different page, a different size: the handle is kept.
     const second = fakePngBytes(48, 24);
@@ -1148,7 +1148,7 @@ pub fn clientRequestErrorKeepsTheConnectionTest(io: std.Io, alloc: std.mem.Alloc
         var client = try glyphwire.Client.connectAs(io, alloc, socket_path, format);
         defer client.deinit();
 
-        try testz.expectError(client.getImageInfo(9999), error.RemoteError);
+        try testz.expectError(client.getImageInfo(@enumFromInt(9999)), error.RemoteError);
         const e = glyphwire.client.lastRemoteError();
         try testz.expectEqualStr(e.name(), "UnknownImage");
         try testz.expectEqual(e.code, -32000);

@@ -102,7 +102,7 @@ pub const LayerBatches = struct {
     /// the key it is stored under. Kept on the struct because the emit
     /// helpers already take a `*LayerBatches` and need the context to
     /// resolve image/icon handles in the right place (`ImageKey`).
-    context: glyphwire.ContextHandle = 0,
+    context: glyphwire.ContextHandle = glyphwire.root_context_handle,
     /// False until the first successful `rebuildLayer`.
     built: bool = false,
     /// `Layer.renderGeneration()` at the last build.
@@ -1484,7 +1484,7 @@ pub const Renderer = struct {
         if (np.rows == 0 or np.cols == 0) return;
         const entry = self.imageEntryIn(lb.context, np.style.image) orelse return;
         const tex = self.textureForImage(eng, lb.context, np.style.image) orelse return;
-        const batch = self.texBatchFor(&lb.nine_patches, np.style.image, tex) orelse return;
+        const batch = self.texBatchFor(&lb.nine_patches, @intFromEnum(np.style.image), tex) orelse return;
 
         const x0 = origin_x + (@as(i32, @intCast(np.col)) - @as(i32, @intCast(off_col))) * geometry.cell_w;
         const y0 = origin_y + (@as(i32, @intCast(np.row)) - @as(i32, @intCast(off_row))) * geometry.cell_h;
@@ -1606,7 +1606,7 @@ pub const Renderer = struct {
         const py_f: f32 = @floatFromInt(py);
         const dest = host_eng.RectF{ .l = px_f, .t = py_f, .r = px_f + dest_w, .b = py_f + dest_h };
 
-        const batch = self.texBatchFor(&lb.images, img.handle, tex) orelse return;
+        const batch = self.texBatchFor(&lb.images, @intFromEnum(img.handle), tex) orelse return;
         addSprite(batch, dest, src);
     }
 
@@ -1670,7 +1670,7 @@ pub const Renderer = struct {
             addSprite(if (foreground) &lb.icon_fg else &lb.icon_bg, dest, a);
         } else {
             const tex = self.textureForImage(eng, lb.context, icon.handle) orelse return;
-            const batch = self.texBatchFor(&lb.icon_fallback, icon.handle, tex) orelse return;
+            const batch = self.texBatchFor(&lb.icon_fallback, @intFromEnum(icon.handle), tex) orelse return;
             addSprite(batch, dest, host_eng.RectF{ .l = 0, .t = 0, .r = 1, .b = 1 });
         }
     }

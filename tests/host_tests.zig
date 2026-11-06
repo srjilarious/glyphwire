@@ -21,7 +21,7 @@ const modal_list = hs.modal_list;
 
 pub fn modalListLayoutCentresAndFramesTheListTest(_: std.Io, _: std.mem.Allocator) !void {
     const rows = [_]modal_list.Row{ .{ .text = "shell", .tag = "  (current)" }, .{ .text = "zoe main.zig" } };
-    const view: modal_list.View = .{ .pane = 0, .title = "Switch to", .foot = "Enter switch  Esc close", .rows = &rows, .selected = 1 };
+    const view: modal_list.View = .{ .pane = @enumFromInt(0), .title = "Switch to", .foot = "Enter switch  Esc close", .rows = &rows, .selected = 1 };
     const lay = modal_list.layout(.{ .row = 0, .col = 0, .rows = 30, .cols = 80 }, view).?;
     // Title, both rows, footer; the frame one cell out all round.
     try testz.expectEqual(lay.content.rows, 4);
@@ -39,7 +39,7 @@ pub fn modalListLayoutCentresAndFramesTheListTest(_: std.Io, _: std.mem.Allocato
 pub fn modalListLayoutScrollsToTheSelectionTest(_: std.Io, _: std.mem.Allocator) !void {
     var rows: [20]modal_list.Row = undefined;
     for (&rows) |*r| r.* = .{ .text = "theme" };
-    const view: modal_list.View = .{ .pane = 0, .title = "Theme", .foot = "", .rows = &rows, .selected = 15 };
+    const view: modal_list.View = .{ .pane = @enumFromInt(0), .title = "Theme", .foot = "", .rows = &rows, .selected = 15 };
     // A 10-row pane fits 6 entries.
     const lay = modal_list.layout(.{ .row = 5, .col = 40, .rows = 10, .cols = 40 }, view).?;
     try testz.expectEqual(lay.visible, 6);
@@ -527,24 +527,24 @@ pub fn paneFocusPulseMixTest(_: std.Io, _: std.mem.Allocator) !void {
 /// and only while there is a pane divider to colour.
 pub fn paneFocusClockTest(_: std.Io, _: std.mem.Allocator) !void {
     var pf: hs.pane_focus.PaneFocus = .{};
-    _ = pf.tick(1, true, 0);
-    _ = pf.tick(1, true, 1000);
+    _ = pf.tick(@enumFromInt(1), true, 0);
+    _ = pf.tick(@enumFromInt(1), true, 1000);
     try testz.expectEqual(pf.elapsed_ms, 1000);
     // Wraps at a whole period, two legs.
-    _ = pf.tick(1, true, 5500);
+    _ = pf.tick(@enumFromInt(1), true, 5500);
     try testz.expectEqual(pf.elapsed_ms, 500);
-    _ = pf.tick(2, true, 16);
+    _ = pf.tick(@enumFromInt(2), true, 16);
     try testz.expectEqual(pf.elapsed_ms, 0);
 
     try testz.expectEqual(pf.idleTimeoutMs(true).?, hs.pane_focus.pulse_frame_ms);
     try testz.expectTrue(pf.idleTimeoutMs(false) == null);
-    _ = pf.tick(2, false, 16);
+    _ = pf.tick(@enumFromInt(2), false, 16);
     try testz.expectEqual(pf.elapsed_ms, 0);
     try testz.expectTrue(pf.idleTimeoutMs(true) == null);
 
     var solid: hs.pane_focus.PaneFocus = .{ .cfg = .{ .mode = .solid } };
-    _ = solid.tick(1, true, 0);
-    _ = solid.tick(1, true, 1000);
+    _ = solid.tick(@enumFromInt(1), true, 0);
+    _ = solid.tick(@enumFromInt(1), true, 1000);
     try testz.expectEqual(solid.elapsed_ms, 0);
     try testz.expectTrue(solid.idleTimeoutMs(true) == null);
 
@@ -554,19 +554,19 @@ pub fn paneFocusClockTest(_: std.Io, _: std.mem.Allocator) !void {
     // Solid is the highlight colour itself; a pulse at its start too.
     const strong = th.roleColor(.pane_focus);
     try testz.expectEqual(solid.color(&th).?.b, strong.b);
-    _ = pf.tick(2, true, 0);
+    _ = pf.tick(@enumFromInt(2), true, 0);
     try testz.expectEqual(pf.color(&th).?.b, strong.b);
 
     // `tick` reports a change only when the highlight looks different:
     // a focus move, a pulse step, not a steady solid colour.
     var watched: hs.pane_focus.PaneFocus = .{};
-    try testz.expectTrue(watched.tick(1, true, 0));
-    try testz.expectFalse(watched.tick(1, true, 0));
-    try testz.expectTrue(watched.tick(1, true, 750));
-    try testz.expectTrue(watched.tick(3, true, 0));
+    try testz.expectTrue(watched.tick(@enumFromInt(1), true, 0));
+    try testz.expectFalse(watched.tick(@enumFromInt(1), true, 0));
+    try testz.expectTrue(watched.tick(@enumFromInt(1), true, 750));
+    try testz.expectTrue(watched.tick(@enumFromInt(3), true, 0));
     var steady: hs.pane_focus.PaneFocus = .{ .cfg = .{ .mode = .solid } };
-    _ = steady.tick(1, true, 0);
-    try testz.expectFalse(steady.tick(1, true, 1000));
+    _ = steady.tick(@enumFromInt(1), true, 0);
+    try testz.expectFalse(steady.tick(@enumFromInt(1), true, 1000));
 }
 
 /// The cells that border a pane are its one-cell ring, corners included;

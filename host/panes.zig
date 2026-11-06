@@ -104,8 +104,9 @@ pub fn scrollablePaneAt(
 pub const Band = struct {
     /// Which tree this band belongs to.
     level: Level,
-    /// `SplitHandle` for `.layer`, `PaneSplitHandle` for `.pane` -- both
-    /// are `u32`, and the level says which map to look it up in.
+    /// `SplitHandle` for `.layer`, `PaneSplitHandle` for `.pane`, as the
+    /// integer both are: the level says which type to turn it back into
+    /// (`@enumFromInt`) and which map to look it up in.
     split: u32,
     index: usize,
     axis: glyphwire.SplitAxis,
@@ -236,7 +237,7 @@ pub const Panes = struct {
         for (self.pane_scratch.items) |d| {
             self.bands.append(alloc, .{
                 .level = .pane,
-                .split = d.split,
+                .split = @intFromEnum(d.split),
                 .index = d.index,
                 .axis = d.axis,
                 .rect = d.rect,
@@ -255,7 +256,7 @@ pub const Panes = struct {
             for (self.layer_scratch.items) |d| {
                 self.bands.append(alloc, .{
                     .level = .{ .layer = ctx_handle },
-                    .split = d.split,
+                    .split = @intFromEnum(d.split),
                     .index = d.index,
                     .axis = d.axis,
                     // Context-relative -> window cells. This is the only
@@ -469,7 +470,7 @@ pub const Panes = struct {
                 {
                     const session_lock = server.lockSession();
                     defer session_lock.unlock();
-                    server.session.movePaneDivider(drag.split, drag.index, travelled) catch {};
+                    server.session.movePaneDivider(@enumFromInt(drag.split), drag.index, travelled) catch {};
                 }
                 server.applyPaneLayout(self.app.alloc) catch |err| {
                     std.log.err("glyphwire-host: pane divider drag failed: {t}", .{err});
@@ -480,7 +481,7 @@ pub const Panes = struct {
                     const session_lock = server.lockSession();
                     defer session_lock.unlock();
                     const ctx = server.session.contextPtr(ctx_handle) orelse return;
-                    ctx.moveDivider(drag.split, drag.index, travelled) catch {};
+                    ctx.moveDivider(@enumFromInt(drag.split), drag.index, travelled) catch {};
                 }
                 server.reportLayout(self.app.alloc) catch |err| {
                     std.log.err("glyphwire-host: reportLayout(divider) failed: {t}", .{err});

@@ -1349,15 +1349,15 @@ pub fn fuzzyScoreFindsTightestNotFirstSpanTest(_: std.Io, _: std.mem.Allocator) 
 
 pub fn embedParsesItsHandlesTest(_: std.Io, _: std.mem.Allocator) !void {
     const both = try embed.parseOptions("3,7");
-    try testz.expectEqual(both.context, @as(@TypeOf(both.context), 3));
-    try testz.expectEqual(both.layer, @as(@TypeOf(both.layer), 7));
+    try testz.expectEqual(both.context, @as(@TypeOf(both.context), @enumFromInt(3)));
+    try testz.expectEqual(both.layer, @as(@TypeOf(both.layer), @enumFromInt(7)));
     try testz.expectTrue(both.control_fd == null);
 
     const with_fd = try embed.parseOptions("12,4,9");
     try testz.expectEqual(with_fd.control_fd.?, @as(i32, 9));
     // Spaces around a handle are the host's business, not an error.
     const spaced = try embed.parseOptions(" 12 , 4 ");
-    try testz.expectEqual(spaced.layer, @as(@TypeOf(spaced.layer), 4));
+    try testz.expectEqual(spaced.layer, @as(@TypeOf(spaced.layer), @enumFromInt(4)));
 
     try testz.expectError(embed.parseOptions("3"), error.Malformed);
     try testz.expectError(embed.parseOptions("3,x"), error.Malformed);
@@ -1416,45 +1416,45 @@ const ContextEntry = glyphwire.protocol.ContextEntry;
 
 pub fn jobstackClaimsAProgramsScreenTest(_: std.Io, _: std.mem.Allocator) !void {
     const entries = [_]ContextEntry{
-        .{ .context = 3, .title = "zoe", .visible = true },
-        .{ .context = 0, .title = "gw-shell", .visible = false, .shell = true },
+        .{ .context = @enumFromInt(3), .title = "zoe", .visible = true },
+        .{ .context = @enumFromInt(0), .title = "gw-shell", .visible = false, .shell = true },
     };
-    try testz.expectTrue(std.meta.eql(jobstack.read(&entries, 0, null), jobstack.Reading{ .claim = 3 }));
+    try testz.expectTrue(std.meta.eql(jobstack.read(&entries, @enumFromInt(0), null), jobstack.Reading{ .claim = @enumFromInt(3) }));
     // Only the first screen: one already claimed is kept.
-    try testz.expectTrue(std.meta.eql(jobstack.read(&entries, 0, 2), jobstack.Reading.none));
+    try testz.expectTrue(std.meta.eql(jobstack.read(&entries, @enumFromInt(0), @enumFromInt(2)), jobstack.Reading.none));
 }
 
 pub fn jobstackNeverClaimsAnotherShellsScreenTest(_: std.Io, _: std.mem.Allocator) !void {
     // A sibling shell from the context switcher came up over this one,
     // which is still waiting on a plain program (`claude`).
     const entries = [_]ContextEntry{
-        .{ .context = 4, .title = "gw-shell ~/code", .visible = true, .shell = true },
-        .{ .context = 0, .title = "claude", .visible = false, .shell = true },
+        .{ .context = @enumFromInt(4), .title = "gw-shell ~/code", .visible = true, .shell = true },
+        .{ .context = @enumFromInt(0), .title = "claude", .visible = false, .shell = true },
     };
-    try testz.expectTrue(std.meta.eql(jobstack.read(&entries, 0, null), jobstack.Reading.none));
+    try testz.expectTrue(std.meta.eql(jobstack.read(&entries, @enumFromInt(0), null), jobstack.Reading.none));
 
     // And switching back is not the job being backgrounded.
     const back = [_]ContextEntry{
-        .{ .context = 0, .title = "claude", .visible = true, .shell = true },
-        .{ .context = 4, .title = "gw-shell ~/code", .visible = false, .shell = true },
+        .{ .context = @enumFromInt(0), .title = "claude", .visible = true, .shell = true },
+        .{ .context = @enumFromInt(4), .title = "gw-shell ~/code", .visible = false, .shell = true },
     };
-    try testz.expectTrue(std.meta.eql(jobstack.read(&back, 0, null), jobstack.Reading.none));
+    try testz.expectTrue(std.meta.eql(jobstack.read(&back, @enumFromInt(0), null), jobstack.Reading.none));
 }
 
 pub fn jobstackBackOnTopWithTheJobBehindIsBackgroundedTest(_: std.Io, _: std.mem.Allocator) !void {
     const entries = [_]ContextEntry{
-        .{ .context = 0, .title = "gw-shell", .visible = true, .shell = true },
-        .{ .context = 3, .title = "zoe", .visible = false },
+        .{ .context = @enumFromInt(0), .title = "gw-shell", .visible = true, .shell = true },
+        .{ .context = @enumFromInt(3), .title = "zoe", .visible = false },
     };
-    try testz.expectTrue(std.meta.eql(jobstack.read(&entries, 0, 3), jobstack.Reading.backgrounded));
+    try testz.expectTrue(std.meta.eql(jobstack.read(&entries, @enumFromInt(0), @enumFromInt(3)), jobstack.Reading.backgrounded));
 }
 
 pub fn jobstackBackOnTopWithTheJobGoneIsAnExitTest(_: std.Io, _: std.mem.Allocator) !void {
     // The program destroyed its context on the way out: wait for the reap.
     const entries = [_]ContextEntry{
-        .{ .context = 0, .title = "gw-shell", .visible = true, .shell = true },
+        .{ .context = @enumFromInt(0), .title = "gw-shell", .visible = true, .shell = true },
     };
-    try testz.expectTrue(std.meta.eql(jobstack.read(&entries, 0, 3), jobstack.Reading.none));
+    try testz.expectTrue(std.meta.eql(jobstack.read(&entries, @enumFromInt(0), @enumFromInt(3)), jobstack.Reading.none));
 }
 
 // ─── jobstop.JobStop ──────────────────────────────────────────────────

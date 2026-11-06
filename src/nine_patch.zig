@@ -24,7 +24,7 @@ const core = @import("core.zig");
 
 const ImageHandle = core.ImageHandle;
 
-pub const NinePatchHandle = u32;
+pub const NinePatchHandle = enum(u32) { _ };
 
 pub const NinePatchError = error{UnknownNinePatch};
 
@@ -75,7 +75,8 @@ pub fn parseNinePatch(rgba: []const u8, w: u32, h: u32) NinePatchParseError!Nine
     const inner_w = w - 2;
     const inner_h = h - 2;
     return .{
-        .image = 0,
+        // A placeholder: the caller registers the image and fills it in.
+        .image = @enumFromInt(0),
         .width = inner_w,
         .height = inner_h,
         .insets = .{

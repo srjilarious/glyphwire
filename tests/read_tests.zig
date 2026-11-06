@@ -105,7 +105,7 @@ pub fn clampPanStopsAtBothEdgesTest(_: std.Io, _: std.mem.Allocator) !void {
 // ─── cache (the image-handle LRU) ───────────────────────────────────────
 
 fn entry(page_index: usize, handle: u32) cache.Entry {
-    return .{ .page = page_index, .handle = handle, .width = 100, .height = 200 };
+    return .{ .page = page_index, .handle = @enumFromInt(handle), .width = 100, .height = 200 };
 }
 
 pub fn cacheHoldsUpToCapacityWithoutEvictingTest(_: std.Io, alloc: std.mem.Allocator) !void {
@@ -161,9 +161,9 @@ pub fn cacheReinsertReturnsTheOldHandleToDestroyTest(_: std.Io, alloc: std.mem.A
     _ = try c.put(alloc, entry(0, 10));
     const replaced = try c.put(alloc, entry(0, 99));
     try testz.expectTrue(replaced != null);
-    try testz.expectEqual(replaced.?.handle, 10);
+    try testz.expectEqual(@intFromEnum(replaced.?.handle), 10);
     try testz.expectEqual(c.len(), 1);
-    try testz.expectEqual(c.get(0).?.handle, 99);
+    try testz.expectEqual(@intFromEnum(c.get(0).?.handle), 99);
     // Re-putting the identical handle isn't a leak, so nothing comes back.
     try testz.expectTrue(try c.put(alloc, entry(0, 99)) == null);
 }

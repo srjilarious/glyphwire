@@ -115,7 +115,7 @@ pub fn contentExtentAndVirtualOffsetRoundTripOverWireTest(io: std.Io, alloc: std
     defer alloc.free(set_off);
     try testz.expectTrue((try d.handle(alloc, set_off)).response == null);
 
-    const layer = ctx.layerPtr(1).?;
+    const layer = ctx.layerPtr(@enumFromInt(1)).?;
     try testz.expectEqual(layer.content_off.row, 490); // 500 - 10, clamped
     try testz.expectEqual(layer.scroll_off.row, 0); // real grid never moved
 
@@ -379,7 +379,7 @@ pub fn writeTextTransparentBgLeavesExistingBackgroundUntouchedTest(io: std.Io, a
     const png = fakePngBytes(32, 32);
     const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
-    try ctx.registerIcon("panel-fill", 1);
+    try ctx.registerIcon("panel-fill", @enumFromInt(1));
 
     // draw_icon defaults to the cursor, same starting point (0, 0) a fresh
     // context's cursor already sits at -- write_text (cursor-implicit,
@@ -396,7 +396,7 @@ pub fn writeTextTransparentBgLeavesExistingBackgroundUntouchedTest(io: std.Io, a
     try testz.expectTrue((try d.handle(alloc, write_msg)).response == null);
 
     try testz.expectEqualStr("h", ctx.root.cell(0, 0).grapheme());
-    try testz.expectEqual(ctx.root.cell(0, 0).style.bg.icon.handle, 1);
+    try testz.expectEqual(@intFromEnum(ctx.root.cell(0, 0).style.bg.icon.handle), 1);
 }
 
 pub fn reportKeyUpdatesInputStateAndQueuesBroadcastTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -615,7 +615,7 @@ pub fn clearBgAndLayerBackgroundOverWireTest(io: std.Io, alloc: std.mem.Allocato
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"background","color":{"r":20,"g":30,"b":40}}}
     );
-    try testz.expectEqual(ctx.layerPtr(1).?.background.?.g, 30);
+    try testz.expectEqual(ctx.layerPtr(@enumFromInt(1)).?.background.?.g, 30);
 
     const get = try d.handle(alloc,
         \\{"jsonrpc":"2.0","id":2,"method":"get_property","params":{"layer":1,"property":"background"}}
@@ -627,7 +627,7 @@ pub fn clearBgAndLayerBackgroundOverWireTest(io: std.Io, alloc: std.mem.Allocato
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"background"}}
     );
-    try testz.expectTrue(ctx.layerPtr(1).?.background == null);
+    try testz.expectTrue(ctx.layerPtr(@enumFromInt(1)).?.background == null);
 }
 
 /// `shadow` round-trips through `set_property` / `get_property`, fills
@@ -646,7 +646,7 @@ pub fn shadowPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void 
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"shadow","shadow":{"y":6,"blur":500,"radius":6}}}
     );
-    const sh = ctx.layerPtr(1).?.shadow.?;
+    const sh = ctx.layerPtr(@enumFromInt(1)).?.shadow.?;
     try testz.expectEqual(sh.x, 0);
     try testz.expectEqual(sh.y, 6);
     try testz.expectEqual(sh.blur, glyphwire.Shadow.max_blur);
@@ -662,7 +662,7 @@ pub fn shadowPropertyRoundTripsTest(io: std.Io, alloc: std.mem.Allocator) !void 
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"set_property","params":{"layer":1,"property":"shadow"}}
     );
-    try testz.expectTrue(ctx.layerPtr(1).?.shadow == null);
+    try testz.expectTrue(ctx.layerPtr(@enumFromInt(1)).?.shadow == null);
 }
 
 pub fn scrollModeRejectsAnUnknownModeTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1091,7 +1091,7 @@ pub fn drawImageMarksRootLayerCellsTest(io: std.Io, alloc: std.mem.Allocator) !v
     const result = try d.handle(alloc, draw_message);
     try testz.expectTrue(result.response == null);
 
-    try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.handle, 1);
+    try testz.expectEqual(@intFromEnum(ctx.root.cell(0, 0).style.bg.image.handle), 1);
     try testz.expectEqual(ctx.root.cell(0, 1).style.bg.image.offset_x, 12);
     try testz.expectEqual(ctx.root.cell(0, 0).style.bg.image.scale, 1.0);
     switch (ctx.root.cell(1, 0).style.bg) {
@@ -1146,7 +1146,7 @@ pub fn drawImageOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator
     ;
     try testz.expectTrue((try d.handle(alloc, draw_message)).response == null);
 
-    try testz.expectEqual(ctx.root.cell(4, 5).style.bg.image.handle, 1);
+    try testz.expectEqual(@intFromEnum(ctx.root.cell(4, 5).style.bg.image.handle), 1);
 }
 
 /// `draw_image`'s optional source rect (sprite-sheet support): sampling
@@ -1190,7 +1190,7 @@ pub fn createRectReturnsHandleAndStoresItTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectTrue(result.response != null);
     try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"handle\":1") != null);
 
-    const r = ctx.root.rects.get(1) orelse return error.TestUnexpectedResult;
+    const r = ctx.root.rects.get(@enumFromInt(1)) orelse return error.TestUnexpectedResult;
     try testz.expectEqual(r.x, 10);
     try testz.expectEqual(r.y, 20);
     try testz.expectEqual(r.w, 30);
@@ -1221,7 +1221,7 @@ pub fn updateRectMergesOnlyProvidedFieldsTest(io: std.Io, alloc: std.mem.Allocat
     ;
     try testz.expectTrue((try d.handle(alloc, update_message)).response == null);
 
-    const r = ctx.root.rects.get(1) orelse return error.TestUnexpectedResult;
+    const r = ctx.root.rects.get(@enumFromInt(1)) orelse return error.TestUnexpectedResult;
     try testz.expectEqual(r.x, 40);
     try testz.expectEqual(r.y, 50);
     try testz.expectEqual(r.w, 10);
@@ -1248,7 +1248,7 @@ pub fn destroyRectRemovesItAndDoubleDestroyErrorsTest(io: std.Io, alloc: std.mem
         \\{"jsonrpc":"2.0","method":"destroy_rect","params":{"rect":1}}
     ;
     try testz.expectTrue((try d.handle(alloc, destroy_message)).response == null);
-    try testz.expectTrue(ctx.root.rects.get(1) == null);
+    try testz.expectTrue(ctx.root.rects.get(@enumFromInt(1)) == null);
 
     try testz.expectError(d.handle(alloc, destroy_message), dispatch.DispatchError.UnknownRect);
 }
@@ -1319,7 +1319,7 @@ pub fn drawIconAppliesScaleAndAlignParamsTest(io: std.Io, alloc: std.mem.Allocat
     const png = fakePngBytes(32, 32);
     const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
-    try ctx.registerIcon("folder", 1);
+    try ctx.registerIcon("folder", @enumFromInt(1));
 
     const draw_message =
         \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"folder","scale":"natural","h_align":"start","v_align":"end"}}
@@ -1328,7 +1328,7 @@ pub fn drawIconAppliesScaleAndAlignParamsTest(io: std.Io, alloc: std.mem.Allocat
     try testz.expectTrue(result.response == null);
 
     const icon = ctx.root.cell(2, 3).style.bg.icon;
-    try testz.expectEqual(icon.handle, 1);
+    try testz.expectEqual(@intFromEnum(icon.handle), 1);
     try testz.expectEqual(icon.scale, .natural);
     try testz.expectEqual(icon.h_align, .start);
     try testz.expectEqual(icon.v_align, .end);
@@ -1343,7 +1343,7 @@ pub fn drawIconAppliesMaxWidthAndHeightParamsTest(io: std.Io, alloc: std.mem.All
     const png = fakePngBytes(32, 32);
     const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
-    try ctx.registerIcon("folder", 1);
+    try ctx.registerIcon("folder", @enumFromInt(1));
 
     const draw_message =
         \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"folder","scale":"natural","max_w":40,"max_h":60}}
@@ -1365,7 +1365,7 @@ pub fn drawIconStretchScaleParsesTest(io: std.Io, alloc: std.mem.Allocator) !voi
     const png = fakePngBytes(32, 32);
     const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
-    try ctx.registerIcon("folder", 1);
+    try ctx.registerIcon("folder", @enumFromInt(1));
 
     const draw_message =
         \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"folder","scale":"stretch"}}
@@ -1609,7 +1609,7 @@ pub fn drawIconUnknownMetadataIdErrorsTest(io: std.Io, alloc: std.mem.Allocator)
     const png = fakePngBytes(32, 32);
     const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
-    try ctx.registerIcon("folder", 1);
+    try ctx.registerIcon("folder", @enumFromInt(1));
 
     const message =
         \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":0,"col":0,"name":"folder","metadata_id":99}}
@@ -1668,7 +1668,7 @@ pub fn tagMetadataSetsCellIdOverWireTest(io: std.Io, alloc: std.mem.Allocator) !
     ;
     try testz.expectTrue((try d.handle(alloc, tag_message)).response == null);
 
-    try testz.expectEqual(ctx.root.cell(2, 3).metadata_id.?, 1);
+    try testz.expectEqual(@intFromEnum(ctx.root.cell(2, 3).metadata_id.?), 1);
     // No grapheme/bg touched -- tag_metadata only ever sets the id.
     switch (ctx.root.cell(2, 3).style.bg) {
         .color => {},
@@ -1714,7 +1714,7 @@ pub fn drawIconInvalidScaleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !voi
     const png = fakePngBytes(32, 32);
     const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
-    try ctx.registerIcon("folder", 1);
+    try ctx.registerIcon("folder", @enumFromInt(1));
 
     const draw_message =
         \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"folder","scale":"huge"}}
@@ -1731,7 +1731,7 @@ pub fn drawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !vo
     const png = fakePngBytes(32, 32);
     const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
-    try ctx.registerIcon("folder", 1);
+    try ctx.registerIcon("folder", @enumFromInt(1));
 
     const draw_message =
         \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"folder"}}
@@ -1739,7 +1739,7 @@ pub fn drawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator) !vo
     const result = try d.handle(alloc, draw_message);
     try testz.expectTrue(result.response == null);
 
-    try testz.expectEqual(ctx.root.cell(2, 3).style.bg.icon.handle, 1);
+    try testz.expectEqual(@intFromEnum(ctx.root.cell(2, 3).style.bg.icon.handle), 1);
     // Confirm the neighboring cell wasn't touched -- draw_icon always
     // scopes to exactly one cell.
     switch (ctx.root.cell(2, 4).style.bg) {
@@ -1760,7 +1760,7 @@ pub fn drawIconForegroundSetsFgIconOverExistingBgTest(io: std.Io, alloc: std.mem
     const bg_png = fakePngBytes(32, 32);
     const bg_load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = bg_png.len }, &bg_png);
     alloc.free(bg_load_resp);
-    try ctx.registerIcon("panel-fill", 1);
+    try ctx.registerIcon("panel-fill", @enumFromInt(1));
 
     const bg_message =
         \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"panel-fill"}}
@@ -1770,15 +1770,15 @@ pub fn drawIconForegroundSetsFgIconOverExistingBgTest(io: std.Io, alloc: std.mem
     const fg_png = fakePngBytes(32, 32);
     const fg_load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 2 }, .format = .png, .bytes = fg_png.len }, &fg_png);
     alloc.free(fg_load_resp);
-    try ctx.registerIcon("badge", 2);
+    try ctx.registerIcon("badge", @enumFromInt(2));
 
     const fg_message =
         \\{"jsonrpc":"2.0","method":"draw_icon","params":{"row":2,"col":3,"name":"badge","foreground":true}}
     ;
     try testz.expectTrue((try d.handle(alloc, fg_message)).response == null);
 
-    try testz.expectEqual(ctx.root.cell(2, 3).style.bg.icon.handle, 1);
-    try testz.expectEqual(ctx.root.cell(2, 3).fg_icon.?.handle, 2);
+    try testz.expectEqual(@intFromEnum(ctx.root.cell(2, 3).style.bg.icon.handle), 1);
+    try testz.expectEqual(@intFromEnum(ctx.root.cell(2, 3).fg_icon.?.handle), 2);
 }
 
 /// Reproduces the actual glyphwire-ls regression end to end at the
@@ -1799,7 +1799,7 @@ pub fn drawIconKeepsLandingAcrossAScrollBoundaryTest(io: std.Io, alloc: std.mem.
     const png = fakePngBytes(32, 32);
     const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
-    try ctx.registerIcon("folder", 1);
+    try ctx.registerIcon("folder", @enumFromInt(1));
 
     var name_buf: [128]u8 = undefined;
     var i: usize = 0;
@@ -1812,7 +1812,7 @@ pub fn drawIconKeepsLandingAcrossAScrollBoundaryTest(io: std.Io, alloc: std.mem.
         // Every entry lands on the *current* cursor row, same as
         // glyphwire-ls's writeGrid -- confirms the icon actually marked
         // whatever row write_text is about to use, not a stale one.
-        try testz.expectEqual(ctx.root.cell(row, 0).style.bg.icon.handle, 1);
+        try testz.expectEqual(@intFromEnum(ctx.root.cell(row, 0).style.bg.icon.handle), 1);
 
         const set_msg = try std.fmt.bufPrint(&name_buf, "{{\"jsonrpc\":\"2.0\",\"method\":\"set_property\",\"params\":{{\"property\":\"cursor\",\"row\":{d},\"col\":0}}}}", .{row + 1});
         try testz.expectTrue((try d.handle(alloc, set_msg)).response == null);
@@ -1841,20 +1841,20 @@ pub fn drawIconOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator)
     const png = fakePngBytes(32, 32);
     const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     alloc.free(load_resp);
-    try ctx.registerIcon("folder", 1);
+    try ctx.registerIcon("folder", @enumFromInt(1));
 
     const draw_message =
         \\{"jsonrpc":"2.0","method":"draw_icon","params":{"name":"folder"}}
     ;
     try testz.expectTrue((try d.handle(alloc, draw_message)).response == null);
 
-    try testz.expectEqual(ctx.root.cell(2, 6).style.bg.icon.handle, 1);
+    try testz.expectEqual(@intFromEnum(ctx.root.cell(2, 6).style.bg.icon.handle), 1);
 }
 
 /// Registers a `dialog` nine-patch style. The image handle is never
 /// resolved by dispatch, so any number does.
 fn registerTestNinePatch(ctx: *glyphwire.Context) !void {
-    try ctx.registerNinePatchStyle("dialog", .{ .image = 42, .width = 10, .height = 8, .insets = .{ .left = 3, .top = 2, .right = 3, .bottom = 3 } });
+    try ctx.registerNinePatchStyle("dialog", .{ .image = @enumFromInt(42), .width = 10, .height = 8, .insets = .{ .left = 3, .top = 2, .right = 3, .bottom = 3 } });
 }
 
 /// `create_nine_patch` resolves `style` by name and stores the cell rect
@@ -1873,12 +1873,12 @@ pub fn createNinePatchReturnsHandleAndStoresItTest(io: std.Io, alloc: std.mem.Al
     defer if (result.response) |r| alloc.free(r);
     try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"handle\":1") != null);
 
-    const np = ctx.root.nine_patches.get(1) orelse return error.TestUnexpectedResult;
+    const np = ctx.root.nine_patches.get(@enumFromInt(1)) orelse return error.TestUnexpectedResult;
     try testz.expectEqual(np.row, 1);
     try testz.expectEqual(np.col, 2);
     try testz.expectEqual(np.rows, 4);
     try testz.expectEqual(np.cols, 6);
-    try testz.expectEqual(np.style.image, 42);
+    try testz.expectEqual(@intFromEnum(np.style.image), 42);
     // It's a layer object, not cells: nothing in the grid changed.
     switch (ctx.root.cell(1, 2).style.bg) {
         .color => {},
@@ -1917,7 +1917,7 @@ pub fn updateAndDestroyNinePatchTest(io: std.Io, alloc: std.mem.Allocator) !void
         \\{"jsonrpc":"2.0","method":"update_nine_patch","params":{"nine_patch":1,"cols":9}}
     ;
     try testz.expectTrue((try d.handle(alloc, update)).response == null);
-    const np = ctx.root.nine_patches.get(1).?;
+    const np = ctx.root.nine_patches.get(@enumFromInt(1)).?;
     try testz.expectEqual(np.cols, 9);
     try testz.expectEqual(np.rows, 4);
 
@@ -2094,8 +2094,8 @@ pub fn batchRequestFormReturnsResponsesCorrelatedBySubIdTest(io: std.Io, alloc: 
     const h1 = responses[0].result.object.get("handle").?.integer;
     const h2 = responses[1].result.object.get("handle").?.integer;
     try testz.expectTrue(h1 != h2);
-    try testz.expectEqualStr("{\"a\":1}", ctx.metadataJson(@intCast(h1)).?);
-    try testz.expectEqualStr("{\"b\":2}", ctx.metadataJson(@intCast(h2)).?);
+    try testz.expectEqualStr("{\"a\":1}", ctx.metadataJson(@enumFromInt(h1)).?);
+    try testz.expectEqualStr("{\"b\":2}", ctx.metadataJson(@enumFromInt(h2)).?);
 
     // The `write_text` sub-message ran too (cursor advanced), and the
     // trailing `get_property` reports the post-write cursor.
@@ -2304,7 +2304,7 @@ pub fn toggleHighlightFlipsIdAndReturnsStateTest(io: std.Io, alloc: std.mem.Allo
     );
     defer if (on.response) |r| alloc.free(r);
     try testz.expectEqual(ctx.root.sel.highlighted_ids.items.len, 1);
-    try testz.expectEqual(ctx.root.sel.highlighted_ids.items[0], 1);
+    try testz.expectEqual(@intFromEnum(ctx.root.sel.highlighted_ids.items[0]), 1);
     try testz.expectTrue(std.mem.indexOf(u8, on.response.?, "\"id\":1") != null);
     try testz.expectTrue(std.mem.indexOf(u8, on.response.?, "\\\"path\\\":\\\"/tmp/d\\\"") != null);
 
@@ -2963,7 +2963,7 @@ pub fn createMetadataDragAndStartDragTest(io: std.Io, alloc: std.mem.Allocator) 
     const created = try d.handle(alloc, create_msg);
     defer if (created.response) |r| alloc.free(r);
     try testz.expectTrue(std.mem.indexOf(u8, created.response.?, "\"handle\":1") != null);
-    const drag = ctx.metadataDrag(1).?;
+    const drag = ctx.metadataDrag(@enumFromInt(1)).?;
     try testz.expectEqualStr(drag.uris[0], "file:///tmp/x.txt");
     try testz.expectEqualStr(drag.label.?, "x.txt");
 
@@ -3130,10 +3130,10 @@ pub fn setCaretLayerRejectsUnknownHandleTest(io: std.Io, alloc: std.mem.Allocato
     );
     defer alloc.free(decoded);
     try testz.expectError(d.handle(alloc, decoded), dispatch.DispatchError.UnknownLayer);
-    try testz.expectEqual(ctx.caret_layer.?, @as(glyphwire.LayerHandle, 1));
+    try testz.expectEqual(ctx.caret_layer.?, @as(glyphwire.LayerHandle, @enumFromInt(1)));
 
     // Destroying the tracked layer drops the dangling handle.
-    try ctx.destroyLayer(1);
+    try ctx.destroyLayer(@enumFromInt(1));
     try testz.expectEqual(ctx.caret_layer, null);
 }
 
@@ -3320,8 +3320,8 @@ pub fn createSplitReturnsAHandleTest(io: std.Io, alloc: std.mem.Allocator) !void
         .ignore_unknown_fields = true,
     });
     defer parsed.deinit();
-    try testz.expectEqual(parsed.value.result.handle, 1);
-    try testz.expectEqual(ctx.split_tree.node(1).?.axis, .row);
+    try testz.expectEqual(@intFromEnum(parsed.value.result.handle), 1);
+    try testz.expectEqual(ctx.split_tree.node(@enumFromInt(1)).?.axis, .row);
 }
 
 pub fn createSplitCarriesTheResizableFlagTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3339,7 +3339,7 @@ pub fn createSplitCarriesTheResizableFlagTest(io: std.Io, alloc: std.mem.Allocat
         const body = (try d.handle(alloc, decoded)).response.?;
         defer alloc.free(body);
     }
-    try testz.expectTrue(ctx.split_tree.node(1).?.resizable);
+    try testz.expectTrue(ctx.split_tree.node(@enumFromInt(1)).?.resizable);
 
     // Explicit false lands on the split.
     {
@@ -3350,7 +3350,7 @@ pub fn createSplitCarriesTheResizableFlagTest(io: std.Io, alloc: std.mem.Allocat
         const body = (try d.handle(alloc, decoded)).response.?;
         defer alloc.free(body);
     }
-    try testz.expectTrue(!ctx.split_tree.node(2).?.resizable);
+    try testz.expectTrue(!ctx.split_tree.node(@enumFromInt(2)).?.resizable);
 }
 
 pub fn createSplitRejectsABadAxisTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3441,8 +3441,8 @@ pub fn moveDividerOverTheWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = try ctx.createLayer(200, 500, 0);
     const split = try ctx.createSplit(.row);
     try ctx.setSplitChildren(split, &.{
-        .{ .target = .{ .layer = 1 }, .size = .{ .fixed = 20 } },
-        .{ .target = .{ .layer = 2 }, .size = .{ .weight = 1 } },
+        .{ .target = .{ .layer = @enumFromInt(1) }, .size = .{ .fixed = 20 } },
+        .{ .target = .{ .layer = @enumFromInt(2) }, .size = .{ .weight = 1 } },
     });
     try ctx.setRootSplit(split);
     try ctx.layoutSplits(null, null);
@@ -3506,8 +3506,8 @@ pub fn createLayerOverConnectionRecordsOwnerTest(io: std.Io, alloc: std.mem.Allo
     defer if (result.response) |r| alloc.free(r);
     try testz.expectTrue(std.mem.indexOf(u8, result.response.?, "\"handle\":1") != null);
 
-    try testz.expectTrue(ctx.layerHasOwner(1, 7));
-    try testz.expectTrue(!ctx.layerHasOwner(1, 8));
+    try testz.expectTrue(ctx.layerHasOwner(@enumFromInt(1), 7));
+    try testz.expectTrue(!ctx.layerHasOwner(@enumFromInt(1), 8));
 }
 
 pub fn destroyLayerFromNonOwnerConnectionIsRejectedTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3529,7 +3529,7 @@ pub fn destroyLayerFromNonOwnerConnectionIsRejectedTest(io: std.Io, alloc: std.m
         \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
     ;
     try testz.expectError(other.handle(alloc, destroy), dispatch.DispatchError.LayerPermissionDenied);
-    try testz.expectTrue(ctx.layerPtr(1) != null);
+    try testz.expectTrue(ctx.layerPtr(@enumFromInt(1)) != null);
 }
 
 pub fn destroyLayerFromOwnerConnectionSucceedsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3550,7 +3550,7 @@ pub fn destroyLayerFromOwnerConnectionSucceedsTest(io: std.Io, alloc: std.mem.Al
         \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
     ;
     try testz.expectTrue((try d.handle(alloc, destroy)).response == null);
-    try testz.expectTrue(ctx.layerPtr(1) == null);
+    try testz.expectTrue(ctx.layerPtr(@enumFromInt(1)) == null);
 }
 
 pub fn adoptLayerLetsSecondConnectionDestroyItTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3572,14 +3572,14 @@ pub fn adoptLayerLetsSecondConnectionDestroyItTest(io: std.Io, alloc: std.mem.Al
         \\{"jsonrpc":"2.0","method":"adopt_layer","params":{"layer":1}}
     ;
     try testz.expectTrue((try adopter.handle(alloc, adopt)).response == null);
-    try testz.expectTrue(ctx.layerHasOwner(1, 7));
-    try testz.expectTrue(ctx.layerHasOwner(1, 8));
+    try testz.expectTrue(ctx.layerHasOwner(@enumFromInt(1), 7));
+    try testz.expectTrue(ctx.layerHasOwner(@enumFromInt(1), 8));
 
     const destroy =
         \\{"jsonrpc":"2.0","method":"destroy_layer","params":{"layer":1}}
     ;
     try testz.expectTrue((try adopter.handle(alloc, destroy)).response == null);
-    try testz.expectTrue(ctx.layerPtr(1) == null);
+    try testz.expectTrue(ctx.layerPtr(@enumFromInt(1)) == null);
 }
 
 pub fn adoptLayerUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3621,7 +3621,7 @@ pub fn inProcessDispatcherBypassesLayerOwnershipTest(io: std.Io, alloc: std.mem.
 
     // ...but the in-process dispatcher itself still can.
     try testz.expectTrue((try in_process.handle(alloc, destroy)).response == null);
-    try testz.expectTrue(ctx.layerPtr(1) == null);
+    try testz.expectTrue(ctx.layerPtr(@enumFromInt(1)) == null);
 }
 
 // ── Error ring: a client subscribes to "error", then pulls the failed ───
@@ -3781,9 +3781,9 @@ pub fn createContextRetargetsTheConnectionAndBroadcastsTest(io: std.Io, alloc: s
     try expectPushHas(alloc, result.broadcast.?.body, "\"context\":1");
 
     // The dispatcher now points at the new context, and it's visible.
-    try testz.expectEqual(d.active_ctx, @as(glyphwire.ContextHandle, 1));
-    try testz.expectEqual(session.focusedContextHandle(), @as(glyphwire.ContextHandle, 1));
-    try testz.expectEqual(session.contextPtr(1).?, d.ctx);
+    try testz.expectEqual(d.active_ctx, @as(glyphwire.ContextHandle, @enumFromInt(1)));
+    try testz.expectEqual(session.focusedContextHandle(), @as(glyphwire.ContextHandle, @enumFromInt(1)));
+    try testz.expectEqual(session.contextPtr(@enumFromInt(1)).?, d.ctx);
 }
 
 /// The shell's Enter launches a full-screen program, whose context takes
@@ -3814,7 +3814,7 @@ pub fn keyReleasedAfterAContextSwitchDoesNotSwallowTheNextPressTest(io: std.Io, 
     );
     if (created.response) |r| alloc.free(r);
     if (created.broadcast) |b| alloc.free(b.body);
-    try testz.expectEqual(session.focusedContextHandle(), @as(glyphwire.ContextHandle, 1));
+    try testz.expectEqual(session.focusedContextHandle(), @as(glyphwire.ContextHandle, @enumFromInt(1)));
 
     const first_release = try d.handle(alloc, release);
     try testz.expectTrue(first_release.broadcast != null);
@@ -3847,7 +3847,7 @@ pub fn createContextAndSetWindowScrollbarToggleTheFlagTest(io: std.Io, alloc: st
     );
     if (created.response) |r| alloc.free(r);
     if (created.broadcast) |b| alloc.free(b.body);
-    try testz.expectTrue(!session.contextPtr(1).?.window_scrollbar);
+    try testz.expectTrue(!session.contextPtr(@enumFromInt(1)).?.window_scrollbar);
     // The root context keeps its default.
     try testz.expectTrue(root.window_scrollbar);
 
@@ -3855,7 +3855,7 @@ pub fn createContextAndSetWindowScrollbarToggleTheFlagTest(io: std.Io, alloc: st
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"set_window_scrollbar","params":{"visible":true}}
     );
-    try testz.expectTrue(session.contextPtr(1).?.window_scrollbar);
+    try testz.expectTrue(session.contextPtr(@enumFromInt(1)).?.window_scrollbar);
 }
 
 pub fn writeTextAfterCreateContextLandsOnTheNewContextNotRootTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3878,7 +3878,7 @@ pub fn writeTextAfterCreateContextLandsOnTheNewContextNotRootTest(io: std.Io, al
 
     // The shell's root context is untouched; the new context has it.
     try testz.expectEqual(root.root.cell(0, 0).grapheme_len, @as(u8, 0));
-    try testz.expectTrue(std.mem.eql(u8, session.contextPtr(1).?.root.cell(0, 0).grapheme(), "h"));
+    try testz.expectTrue(std.mem.eql(u8, session.contextPtr(@enumFromInt(1)).?.root.cell(0, 0).grapheme(), "h"));
 }
 
 pub fn destroyContextFromNonOwnerIsRejectedTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3899,7 +3899,7 @@ pub fn destroyContextFromNonOwnerIsRejectedTest(io: std.Io, alloc: std.mem.Alloc
     try testz.expectError(other.handle(alloc,
         \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
     ), dispatch.DispatchError.ContextPermissionDenied);
-    try testz.expectTrue(session.contextPtr(1) != null);
+    try testz.expectTrue(session.contextPtr(@enumFromInt(1)) != null);
 }
 
 pub fn destroyContextFromOwnerRestoresThePreviousVisibleTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3951,12 +3951,12 @@ pub fn activateContextChangesVisibilityNotWhichContextTheConnectionDrawsOnTest(i
     );
     if (bg.broadcast) |b| alloc.free(b.body);
     try testz.expectEqual(session.focusedContextHandle(), glyphwire.root_context_handle);
-    try testz.expectEqual(d.active_ctx, @as(glyphwire.ContextHandle, 1));
+    try testz.expectEqual(d.active_ctx, @as(glyphwire.ContextHandle, @enumFromInt(1)));
 
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"x"}}
     );
-    try testz.expectTrue(std.mem.eql(u8, session.contextPtr(1).?.root.cell(0, 0).grapheme(), "x"));
+    try testz.expectTrue(std.mem.eql(u8, session.contextPtr(@enumFromInt(1)).?.root.cell(0, 0).grapheme(), "x"));
     try testz.expectEqual(root.root.cell(0, 0).grapheme_len, @as(u8, 0));
 
     // Restore self.
@@ -3964,7 +3964,7 @@ pub fn activateContextChangesVisibilityNotWhichContextTheConnectionDrawsOnTest(i
         \\{"jsonrpc":"2.0","method":"activate_context","params":{"context":1}}
     );
     if (fg.broadcast) |b| alloc.free(b.body);
-    try testz.expectEqual(session.focusedContextHandle(), @as(glyphwire.ContextHandle, 1));
+    try testz.expectEqual(session.focusedContextHandle(), @as(glyphwire.ContextHandle, @enumFromInt(1)));
 }
 
 pub fn attachContextRetargetsWithoutOwningTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -3987,8 +3987,8 @@ pub fn attachContextRetargetsWithoutOwningTest(io: std.Io, alloc: std.mem.Alloca
     _ = try listener.handle(alloc,
         \\{"jsonrpc":"2.0","method":"attach_context","params":{"context":1}}
     );
-    try testz.expectEqual(listener.active_ctx, @as(glyphwire.ContextHandle, 1));
-    try testz.expectTrue(!session.contextHasOwner(1, 8));
+    try testz.expectEqual(listener.active_ctx, @as(glyphwire.ContextHandle, @enumFromInt(1)));
+    try testz.expectTrue(!session.contextHasOwner(@enumFromInt(1), 8));
 
     try testz.expectError(listener.handle(alloc,
         \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
@@ -4025,7 +4025,7 @@ pub fn attachLayerMakesAnOmittedLayerMeanTheSurfaceTest(io: std.Io, alloc: std.m
         \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"panel"}}
     );
 
-    const panel = root.layerPtr(1).?;
+    const panel = root.layerPtr(@enumFromInt(1)).?;
     try testz.expectEqualStr(panel.cell(1, 0).grapheme(), "p");
     // ...and the root layer underneath it was never touched, which is
     // the bug this exists to stop.
@@ -4116,9 +4116,9 @@ pub fn surfaceDoesNotFollowCreateContextTest(io: std.Io, alloc: std.mem.Allocato
     _ = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"full"}}
     );
-    const full = session.contextPtr(1).?;
+    const full = session.contextPtr(@enumFromInt(1)).?;
     try testz.expectEqualStr(full.layerPtr(null).?.cell(0, 0).grapheme(), "f");
-    try testz.expectEqualStr(full.layerPtr(1).?.cell(0, 0).grapheme(), "");
+    try testz.expectEqualStr(full.layerPtr(@enumFromInt(1)).?.cell(0, 0).grapheme(), "");
 
     const gone = try d.handle(alloc,
         \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
@@ -4130,7 +4130,7 @@ pub fn surfaceDoesNotFollowCreateContextTest(io: std.Io, alloc: std.mem.Allocato
         \\{"jsonrpc":"2.0","method":"write_text","params":{"text":"back"}}
     );
     try testz.expectEqualStr(root.layerPtr(null).?.cell(0, 0).grapheme(), "b");
-    try testz.expectEqualStr(root.layerPtr(1).?.cell(0, 0).grapheme(), "");
+    try testz.expectEqualStr(root.layerPtr(@enumFromInt(1)).?.cell(0, 0).grapheme(), "");
 }
 
 pub fn adoptContextLetsASecondConnectionDestroyItTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -4151,14 +4151,14 @@ pub fn adoptContextLetsASecondConnectionDestroyItTest(io: std.Io, alloc: std.mem
     _ = try adopter.handle(alloc,
         \\{"jsonrpc":"2.0","method":"adopt_context","params":{"context":1}}
     );
-    try testz.expectTrue(session.contextHasOwner(1, 7));
-    try testz.expectTrue(session.contextHasOwner(1, 8));
+    try testz.expectTrue(session.contextHasOwner(@enumFromInt(1), 7));
+    try testz.expectTrue(session.contextHasOwner(@enumFromInt(1), 8));
 
     const gone = try adopter.handle(alloc,
         \\{"jsonrpc":"2.0","method":"destroy_context","params":{"context":1}}
     );
     if (gone.broadcast) |b| alloc.free(b.body);
-    try testz.expectTrue(session.contextPtr(1) == null);
+    try testz.expectTrue(session.contextPtr(@enumFromInt(1)) == null);
 }
 
 const ListContextsResponse = struct { result: glyphwire.protocol.ListContextsResult };
@@ -4204,7 +4204,7 @@ pub fn createContextTitleIsListedTopFirstWithTheCallersOwnContextTest(io: std.Io
     // `current` is the *asking* connection's context, not what's on top.
     try testz.expectEqual(r.current, glyphwire.root_context_handle);
     try testz.expectEqual(r.contexts.len, 2);
-    try testz.expectEqual(r.contexts[0].context, 1);
+    try testz.expectEqual(@intFromEnum(r.contexts[0].context), 1);
     try testz.expectEqualStr(r.contexts[0].title, "zoe main.zig");
     try testz.expectTrue(r.contexts[0].visible);
     try testz.expectEqual(r.contexts[1].context, glyphwire.root_context_handle);
@@ -4239,10 +4239,10 @@ pub fn activateContextReordersListContextsTest(io: std.Io, alloc: std.mem.Alloca
     var list = try listContexts(&b, alloc);
     defer list.deinit();
     const r = list.value.result;
-    try testz.expectEqual(r.current, 2);
+    try testz.expectEqual(@intFromEnum(r.current), 2);
     try testz.expectEqual(r.contexts.len, 3);
-    try testz.expectEqual(r.contexts[0].context, 1);
-    try testz.expectEqual(r.contexts[1].context, 2);
+    try testz.expectEqual(@intFromEnum(r.contexts[0].context), 1);
+    try testz.expectEqual(@intFromEnum(r.contexts[1].context), 2);
     try testz.expectEqual(r.contexts[2].context, glyphwire.root_context_handle);
     // Nobody named these.
     try testz.expectEqualStr(r.contexts[0].title, "");
@@ -4683,7 +4683,7 @@ pub fn spawnInPanePassesTheStartDirectoryTest(io: std.Io, alloc: std.mem.Allocat
     if (placed.response) |r| alloc.free(r);
     try testz.expectEqual(fake.calls, 2);
     try testz.expectEqualStr(fake.path[0..fake.path_len.?], "/srv/work");
-    try testz.expectEqual(fake.from.?, 1);
+    try testz.expectEqual(@intFromEnum(fake.from.?), 1);
 }
 
 // ─── start_remote / stop_remote ──────────────────────────────────────
@@ -4696,8 +4696,8 @@ const FakeRemotes = struct {
     stopped_pane: ?glyphwire.PaneHandle = null,
     last_dest: [64]u8 = undefined,
     last_dest_len: usize = 0,
-    last_pane: glyphwire.PaneHandle = 0,
-    last_ctx: glyphwire.ContextHandle = 0,
+    last_pane: glyphwire.PaneHandle = @enumFromInt(0),
+    last_ctx: glyphwire.ContextHandle = @enumFromInt(0),
     last_ssh_args: usize = 0,
     last_remote_command_given: bool = false,
     fail: bool = false,
@@ -4989,7 +4989,7 @@ pub fn peekImagePayloadRecognizesUpdateImageTest(io: std.Io, alloc: std.mem.Allo
     try testz.expectEqual(hdr.bytes, 24);
     try testz.expectEqual(hdr.id.integer, 9);
     try testz.expectEqual(hdr.format, .png);
-    try testz.expectEqual(hdr.target.?, 3);
+    try testz.expectEqual(@intFromEnum(hdr.target.?), 3);
 }
 
 /// `load_image` allocates a handle, so it must not come back with a target
@@ -5027,13 +5027,13 @@ pub fn updateImageKeepsHandleAndRemeasuresTest(io: std.Io, alloc: std.mem.Alloca
     const second = fakePngBytes(10, 20);
     const update_resp = try d.handleLoadImage(
         alloc,
-        .{ .id = .{ .integer = 2 }, .format = .png, .bytes = second.len, .target = 1 },
+        .{ .id = .{ .integer = 2 }, .format = .png, .bytes = second.len, .target = @enumFromInt(1) },
         &second,
     );
     defer alloc.free(update_resp);
     try testz.expectTrue(std.mem.indexOf(u8, update_resp, "\"handle\":1") != null);
 
-    const info = ctx.imageInfo(1).?;
+    const info = ctx.imageInfo(@enumFromInt(1)).?;
     try testz.expectEqual(info.width, 10);
     try testz.expectEqual(info.height, 20);
 }
@@ -5047,14 +5047,14 @@ pub fn destroyImageReleasesHandleTest(io: std.Io, alloc: std.mem.Allocator) !voi
     const png = fakePngBytes(64, 32);
     const load_resp = try d.handleLoadImage(alloc, .{ .id = .{ .integer = 1 }, .format = .png, .bytes = png.len }, &png);
     defer alloc.free(load_resp);
-    try testz.expectTrue(ctx.imageInfo(1) != null);
+    try testz.expectTrue(ctx.imageInfo(@enumFromInt(1)) != null);
 
     const message =
         \\{"jsonrpc":"2.0","method":"destroy_image","params":{"handle":1}}
     ;
     const result = try d.handle(alloc, message);
     defer if (result.response) |r| alloc.free(r);
-    try testz.expectTrue(ctx.imageInfo(1) == null);
+    try testz.expectTrue(ctx.imageInfo(@enumFromInt(1)) == null);
 }
 
 pub fn destroyImageUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5090,7 +5090,7 @@ pub fn destroyImageIsAllowedInBatchTest(io: std.Io, alloc: std.mem.Allocator) !v
     ;
     const result = try d.handle(alloc, message);
     defer if (result.response) |r| alloc.free(r);
-    try testz.expectTrue(ctx.imageInfo(1) == null);
+    try testz.expectTrue(ctx.imageInfo(@enumFromInt(1)) == null);
 }
 
 pub fn opacityPropertyRoundTripsOverTheWireTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5466,7 +5466,7 @@ pub fn replaceSplitChildKeepsTheSlotsSizeOverTheWireTest(io: std.Io, alloc: std.
     try notifyThrough(alloc, &d,
         \\{"jsonrpc":"2.0","method":"replace_split_child","params":{"split":1,"index":0,"child":{"layer":3}}}
     );
-    const children = ctx.split_tree.node(1).?.children.items;
+    const children = ctx.split_tree.node(@enumFromInt(1)).?.children.items;
     try testz.expectEqual(children[0].target.layer, third);
     try testz.expectEqual(children[0].size.weight, 3);
     try testz.expectEqual(children[1].size.fixed, 20);
@@ -5512,8 +5512,8 @@ pub fn getSplitReportsDraggedWeightsAndExtentsTest(io: std.Io, alloc: std.mem.Al
     try testz.expectEqualStr(v.axis, "row");
     try testz.expectTrue(v.resizable);
     try testz.expectEqual(v.children.len, 2);
-    try testz.expectEqual(v.children[0].layer.?, 1);
-    try testz.expectEqual(v.children[1].layer.?, 2);
+    try testz.expectEqual(@intFromEnum(v.children[0].layer.?), 1);
+    try testz.expectEqual(@intFromEnum(v.children[1].layer.?), 2);
     try testz.expectEqual(v.children[0].extent, 69);
     try testz.expectEqual(v.children[1].extent, 30);
     // A drag keeps the pair's combined weight and re-splits it.
@@ -5609,7 +5609,7 @@ pub fn listContextsFlagsEveryShellsContextTest(io: std.Io, alloc: std.mem.Alloca
     try testz.expectEqual(r.contexts.len, 3);
     try testz.expectEqual(r.contexts[0].context, spawned);
     try testz.expectTrue(r.contexts[0].shell);
-    try testz.expectEqual(r.contexts[1].context, 1);
+    try testz.expectEqual(@intFromEnum(r.contexts[1].context), 1);
     try testz.expectFalse(r.contexts[1].shell);
     // The pane's base is a shell's too, flagged or not.
     try testz.expectEqual(r.contexts[2].context, glyphwire.root_context_handle);
@@ -5664,12 +5664,12 @@ pub fn attachContextNeedsTheRightTokenTest(io: std.Io, alloc: std.mem.Allocator)
         \\{"jsonrpc":"2.0","method":"attach_context","params":{"context":0}}
     ), dispatch.DispatchError.ContextAccessDenied);
 
-    const wrong = try attachContextMsg(alloc, 0, "00000000000000000000000000000000");
+    const wrong = try attachContextMsg(alloc, @enumFromInt(0), "00000000000000000000000000000000");
     defer alloc.free(wrong);
     try testz.expectError(d.handle(alloc, wrong), dispatch.DispatchError.ContextAccessDenied);
     try testz.expectFalse(d.attached());
 
-    const right = try attachContextMsg(alloc, 0, &root.token);
+    const right = try attachContextMsg(alloc, @enumFromInt(0), &root.token);
     defer alloc.free(right);
     _ = try d.handle(alloc, right);
     try testz.expectTrue(d.attached());
@@ -5978,7 +5978,7 @@ pub fn tableCellSpansSurviveWrapAndCarryTheirOwnMetadataTest(io: std.Io, alloc: 
     try testz.expectTrue(layer.cell(1, 0).metadata_id == null);
     try testz.expectEqualStr("b", layer.cell(2, 0).grapheme());
     try testz.expectTrue(layer.cell(2, 1).style.strike);
-    try testz.expectEqual(layer.cell(2, 1).metadata_id.?, 1);
+    try testz.expectEqual(@intFromEnum(layer.cell(2, 1).metadata_id.?), 1);
     // The padding after "bb" is the cell's: no line, no link.
     try testz.expectFalse(layer.cell(2, 2).style.strike);
     try testz.expectTrue(layer.cell(2, 2).metadata_id == null);

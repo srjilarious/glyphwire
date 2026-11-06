@@ -7567,7 +7567,7 @@ pub fn timersFoldToTheSoonestDeadlineTest(_: std.Io, _: std.mem.Allocator) !void
 /// `Popups.anyDirty` and `clearDirty` cover every popup in the set.
 pub fn popupsDirtyCoversEveryPopupTest(_: std.Io, _: std.mem.Allocator) !void {
     const P = zoe.popup;
-    const one: P.Popup = .{ .layer = 1, .look = .flat, .init_rows = 1, .init_cols = 1, .what = "x" };
+    const one: P.Popup = .{ .layer = @enumFromInt(1), .look = .flat, .init_rows = 1, .init_cols = 1, .what = "x" };
     var set: P.Popups = .{ .hover = one, .completion = one, .path_menu = one, .find_bar = one, .tab_tip = one };
     try testz.expectFalse(set.anyDirty());
     inline for (@typeInfo(P.Popups).@"struct".field_names) |name| {

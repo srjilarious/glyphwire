@@ -85,8 +85,8 @@ pub fn parseOptions(value: []const u8) ParseError!Options {
         std.fmt.parseInt(i32, fd_text, 10) catch return error.Malformed;
     if (it.next() != null) return error.Malformed;
     return .{
-        .context = @intCast(context),
-        .layer = @intCast(layer),
+        .context = @enumFromInt(context),
+        .layer = @enumFromInt(layer),
         .control_fd = control_fd,
     };
 }

@@ -68,14 +68,14 @@ pub fn contextSig(ctx: *const glyphwire.Context) ContextSig {
 
     var topo: u64 = mix(0xcbf29ce484222325, ctx.layers.count());
     for (ctx.layer_order.items) |handle| {
-        topo = mix(topo, handle);
+        topo = mix(topo, @intFromEnum(handle));
         const visible: u64 = if (ctx.layers.getPtr(handle)) |l| @intFromBool(l.visible) else 0;
         topo = mix(topo, visible);
     }
     // Which layer the caret tracks (`set_caret_layer`): the tracked
     // layer's cursor moves already show up in `gen_sum`, but the handle
     // switching between panes on a focus change does not.
-    topo = mix(topo, ctx.caret_layer orelse 0);
+    topo = mix(topo, if (ctx.caret_layer) |l| @as(u64, @intFromEnum(l)) + 1 else 0);
     // The caret's shape changes what is drawn without touching a cell.
     topo = mix(topo, if (ctx.caret_shape) |shape| @as(u64, @intFromEnum(shape)) + 1 else 0);
     // So does `set_divider_style`: it restyles the split bands only.
@@ -108,12 +108,12 @@ pub fn hashContextSig(sig: ContextSig) u64 {
 /// move, from a click or a client's `focus_pane`, relights the dividers
 /// without touching a cell. Caller holds `ctx_mutex`.
 pub fn panesSig(session: *glyphwire.Session) u64 {
-    var sum: u64 = mix(session.pane_layout_gen.load(.monotonic), session.focused_pane.load(.monotonic));
+    var sum: u64 = mix(session.pane_layout_gen.load(.monotonic), @intFromEnum(session.focused_pane.load(.monotonic)));
     var it = session.panes.iterator();
     while (it.next()) |e| {
         if (!e.value_ptr.mapped) continue;
         const ctx = session.contextPtr(e.value_ptr.top()) orelse continue;
-        sum +%= mix(hashContextSig(contextSig(ctx)), e.key_ptr.*);
+        sum +%= mix(hashContextSig(contextSig(ctx)), @intFromEnum(e.key_ptr.*));
     }
     return sum;
 }

@@ -39,7 +39,7 @@ const setCellText = cell_paint.setCellText;
 const setCellWide = cell_paint.setCellWide;
 const tableMakeRoom = cell_paint.tableMakeRoom;
 
-pub const OutlineHandle = u32;
+pub const OutlineHandle = enum(u32) { _ };
 
 pub const OutlineError = error{
     UnknownOutline,

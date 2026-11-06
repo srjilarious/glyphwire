@@ -285,7 +285,9 @@ const Tagger = struct {
         }, .{});
         errdefer self.alloc.free(json);
         try self.blobs.append(self.alloc, json);
-        return @intCast(self.blobs.items.len - 1);
+        // Not a handle yet: the blob's index, typed as one only so the
+        // nodes can hold it until `resolve` swaps the real one in.
+        return @enumFromInt(self.blobs.items.len - 1);
     }
 
     fn create(self: *Tagger, client: *glyphwire.Client) !void {
@@ -305,7 +307,7 @@ const Tagger = struct {
 
     /// Swaps a placeholder from `tag` for the handle `create` made.
     fn resolve(self: *const Tagger, placeholder: ?glyphwire.MetadataHandle) ?glyphwire.MetadataHandle {
-        return if (placeholder) |p| self.handles[p] else null;
+        return if (placeholder) |p| self.handles[@intFromEnum(p)] else null;
     }
 };
 

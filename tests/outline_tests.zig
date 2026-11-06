@@ -507,7 +507,7 @@ pub fn outlineUnknownHandleAndBadNodeAreReportedTest(io: std.Io, alloc: std.mem.
     // Both are notifications, so they are logged into the error ring
     // rather than severing the connection -- see the protocol's error
     // model. The session stays usable afterwards.
-    try client.outlineSetCollapsed(null, 9999, 0, true);
+    try client.outlineSetCollapsed(null, @enumFromInt(9999), 0, true);
     try client.outlineSetCollapsed(null, outline, 99, true);
 
     var report = try client.getErrors();

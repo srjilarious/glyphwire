@@ -19,7 +19,7 @@ fn expectChildRefPane(ref: layout.ChildRef, want: layout.PaneId) !void {
 
 fn expectChildRefSplit(ref: layout.ChildRef, want: u32) !void {
     switch (ref) {
-        .split => |id| try testz.expectEqual(id, want),
+        .split => |id| try testz.expectEqual(@intFromEnum(id), want),
         .pane => try testz.fail(),
     }
 }
@@ -27,13 +27,13 @@ fn expectChildRefSplit(ref: layout.ChildRef, want: u32) !void {
 /// What `set_pane_split_children` is sent: a pane child by its pane id, a
 /// split child by its wire handle.
 pub fn childRefsReadsCurrentChildrenTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var tree = try layout.Tree.init(alloc, 1);
+    var tree = try layout.Tree.init(alloc, @enumFromInt(1));
     defer tree.deinit();
-    const split = try tree.split(1, 2, .row, 42, .after);
-    _ = try tree.split(2, 3, .column, 43, .after);
+    const split = try tree.split(@enumFromInt(1), @enumFromInt(2), .row, @enumFromInt(42), .after);
+    _ = try tree.split(@enumFromInt(2), @enumFromInt(3), .column, @enumFromInt(43), .after);
 
     const refs = layout.childRefs(split);
-    try expectChildRefPane(refs[0], 1);
+    try expectChildRefPane(refs[0], @enumFromInt(1));
     try expectChildRefSplit(refs[1], 43);
 }
 
@@ -108,29 +108,29 @@ pub fn zoneInPicksTheNearestEdgeTest(_: std.Io, _: std.mem.Allocator) !void {
 pub fn dropAtTakesWindowEdgesAndSkipsTheDraggedPaneTest(_: std.Io, _: std.mem.Allocator) !void {
     const win: arrange.Rect = .{ .cols = 80, .rows = 24 };
     const panes = [_]arrange.PaneRect{
-        .{ .pane = 1, .rect = .{ .cols = 40, .rows = 24 } },
-        .{ .pane = 2, .rect = .{ .col = 41, .cols = 39, .rows = 24 } },
+        .{ .pane = @enumFromInt(1), .rect = .{ .cols = 40, .rows = 24 } },
+        .{ .pane = @enumFromInt(2), .rect = .{ .col = 41, .cols = 39, .rows = 24 } },
     };
-    try testz.expectTrue(arrange.dropAt(&panes, win, 1, 12, 0).?.eql(.{ .window = .left }));
-    try testz.expectTrue(arrange.dropAt(&panes, win, 1, 23, 50).?.eql(.{ .window = .bottom }));
-    try testz.expectTrue(arrange.dropAt(&panes, win, 1, 12, 10) == null);
-    try testz.expectTrue(arrange.dropAt(&panes, win, 1, 12, 40) == null); // the divider
-    try testz.expectTrue(arrange.dropAt(&panes, win, 1, 12, 60).?.eql(.{ .pane = .{ .pane = 2, .zone = .center } }));
+    try testz.expectTrue(arrange.dropAt(&panes, win, @enumFromInt(1), 12, 0).?.eql(.{ .window = .left }));
+    try testz.expectTrue(arrange.dropAt(&panes, win, @enumFromInt(1), 23, 50).?.eql(.{ .window = .bottom }));
+    try testz.expectTrue(arrange.dropAt(&panes, win, @enumFromInt(1), 12, 10) == null);
+    try testz.expectTrue(arrange.dropAt(&panes, win, @enumFromInt(1), 12, 40) == null); // the divider
+    try testz.expectTrue(arrange.dropAt(&panes, win, @enumFromInt(1), 12, 60).?.eql(.{ .pane = .{ .pane = @enumFromInt(2), .zone = .center } }));
     // One pane has nowhere to go.
-    try testz.expectTrue(arrange.dropAt(panes[0..1], win, 1, 12, 0) == null);
+    try testz.expectTrue(arrange.dropAt(panes[0..1], win, @enumFromInt(1), 12, 0) == null);
 }
 
 pub fn highlightIsTheShareTheDropWillTakeTest(_: std.Io, _: std.mem.Allocator) !void {
     const win: arrange.Rect = .{ .cols = 90, .rows = 24 };
     const panes = [_]arrange.PaneRect{
-        .{ .pane = 1, .rect = .{ .cols = 40, .rows = 24 } },
-        .{ .pane = 2, .rect = .{ .col = 41, .cols = 49, .rows = 24 } },
+        .{ .pane = @enumFromInt(1), .rect = .{ .cols = 40, .rows = 24 } },
+        .{ .pane = @enumFromInt(2), .rect = .{ .col = 41, .cols = 49, .rows = 24 } },
     };
-    const half = arrange.highlight(.{ .pane = .{ .pane = 2, .zone = .{ .edge = .bottom } } }, &panes, win, 0);
+    const half = arrange.highlight(.{ .pane = .{ .pane = @enumFromInt(2), .zone = .{ .edge = .bottom } } }, &panes, win, 0);
     try testz.expectEqual(half.row, 12);
     try testz.expectEqual(half.rows, 12);
     try testz.expectEqual(half.col, 41);
-    const whole = arrange.highlight(.{ .pane = .{ .pane = 2, .zone = .center } }, &panes, win, 0);
+    const whole = arrange.highlight(.{ .pane = .{ .pane = @enumFromInt(2), .zone = .center } }, &panes, win, 0);
     try testz.expectEqual(whole.cols, 49);
     // A third column at the right edge of two.
     const strip = arrange.highlight(.{ .window = .right }, &panes, win, 2);
@@ -142,26 +142,26 @@ pub fn highlightIsTheShareTheDropWillTakeTest(_: std.Io, _: std.mem.Allocator) !
 /// lower edge of the column's top pane, makes one column of three even
 /// panes rather than 50/25/25.
 pub fn moveIntoAColumnEvensTheColumnOutTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var tree = try layout.Tree.init(alloc, 1);
+    var tree = try layout.Tree.init(alloc, @enumFromInt(1));
     defer tree.deinit();
-    _ = try tree.split(1, 2, .row, 10, .after);
-    _ = try tree.split(2, 3, .column, 11, .after);
+    _ = try tree.split(@enumFromInt(1), @enumFromInt(2), .row, @enumFromInt(10), .after);
+    _ = try tree.split(@enumFromInt(2), @enumFromInt(3), .column, @enumFromInt(11), .after);
     var bounds = Bounds.init(alloc);
     defer bounds.deinit();
 
-    const moved = try arrange.move(&tree, 1, .{ .pane = .{ .pane = 2, .zone = .{ .edge = .bottom } } }, 12);
-    try testz.expectEqual(moved.removed_handle, 10);
+    const moved = try arrange.move(&tree, @enumFromInt(1), .{ .pane = .{ .pane = @enumFromInt(2), .zone = .{ .edge = .bottom } } }, @enumFromInt(12));
+    try testz.expectEqual(@intFromEnum(moved.removed_handle), 10);
     try testz.expectTrue(moved.runs[1] == null);
 
     const root = tree.root;
     try testz.expectEqual(root.kind.split.axis, .column);
     try testz.expectTrue(moved.made.parent == root);
-    try testz.expectEqual(moved.made.kind.split.first.kind.leaf, 2);
-    try testz.expectEqual(moved.made.kind.split.second.kind.leaf, 1);
-    const w_root = arrange.childWeights(root, &moved.runs, &bounds, 1);
+    try testz.expectEqual(@intFromEnum(moved.made.kind.split.first.kind.leaf), 2);
+    try testz.expectEqual(@intFromEnum(moved.made.kind.split.second.kind.leaf), 1);
+    const w_root = arrange.childWeights(root, &moved.runs, &bounds, @enumFromInt(1));
     try testz.expectEqual(w_root[0], 2);
     try testz.expectEqual(w_root[1], 1);
-    const w_made = arrange.childWeights(moved.made, &moved.runs, &bounds, 1);
+    const w_made = arrange.childWeights(moved.made, &moved.runs, &bounds, @enumFromInt(1));
     try testz.expectEqual(w_made[0], 1);
     try testz.expectEqual(w_made[1], 1);
 }
@@ -169,18 +169,18 @@ pub fn moveIntoAColumnEvensTheColumnOutTest(_: std.Io, alloc: std.mem.Allocator)
 /// Pulling one of four columns out leaves three even columns, not one
 /// that swallowed its neighbour's slot.
 pub fn moveEvensTheRunItLeftTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var tree = try layout.Tree.init(alloc, 1);
+    var tree = try layout.Tree.init(alloc, @enumFromInt(1));
     defer tree.deinit();
-    _ = try tree.split(1, 2, .row, 10, .after);
-    _ = try tree.split(2, 3, .row, 11, .after);
-    _ = try tree.split(3, 4, .row, 12, .after);
+    _ = try tree.split(@enumFromInt(1), @enumFromInt(2), .row, @enumFromInt(10), .after);
+    _ = try tree.split(@enumFromInt(2), @enumFromInt(3), .row, @enumFromInt(11), .after);
+    _ = try tree.split(@enumFromInt(3), @enumFromInt(4), .row, @enumFromInt(12), .after);
     var bounds = Bounds.init(alloc);
     defer bounds.deinit();
 
-    const moved = try arrange.move(&tree, 4, .{ .pane = .{ .pane = 1, .zone = .{ .edge = .bottom } } }, 13);
-    try testz.expectEqual(moved.removed_handle, 12);
+    const moved = try arrange.move(&tree, @enumFromInt(4), .{ .pane = .{ .pane = @enumFromInt(1), .zone = .{ .edge = .bottom } } }, @enumFromInt(13));
+    try testz.expectEqual(@intFromEnum(moved.removed_handle), 12);
     try testz.expectTrue(moved.runs[1].?.top == tree.root);
-    const w = arrange.childWeights(tree.root, &moved.runs, &bounds, 4);
+    const w = arrange.childWeights(tree.root, &moved.runs, &bounds, @enumFromInt(4));
     try testz.expectEqual(w[0], 1);
     try testz.expectEqual(w[1], 2);
 }
@@ -188,34 +188,34 @@ pub fn moveEvensTheRunItLeftTest(_: std.Io, alloc: std.mem.Allocator) !void {
 /// A window-edge drop evens the root's run, and a split nobody touched
 /// keeps the ratio its panes had on screen.
 pub fn moveToAWindowEdgeKeepsUntouchedRatiosTest(_: std.Io, alloc: std.mem.Allocator) !void {
-    var tree = try layout.Tree.init(alloc, 1);
+    var tree = try layout.Tree.init(alloc, @enumFromInt(1));
     defer tree.deinit();
-    _ = try tree.split(1, 2, .row, 10, .after);
-    _ = try tree.split(2, 3, .column, 11, .after);
-    _ = try tree.split(1, 4, .column, 12, .after);
+    _ = try tree.split(@enumFromInt(1), @enumFromInt(2), .row, @enumFromInt(10), .after);
+    _ = try tree.split(@enumFromInt(2), @enumFromInt(3), .column, @enumFromInt(11), .after);
+    _ = try tree.split(@enumFromInt(1), @enumFromInt(4), .column, @enumFromInt(12), .after);
     var bounds = Bounds.init(alloc);
     defer bounds.deinit();
-    try bounds.put(1, .{ .cols = 40, .rows = 12 });
-    try bounds.put(4, .{ .row = 13, .cols = 40, .rows = 11 });
-    try bounds.put(2, .{ .col = 41, .cols = 39, .rows = 16 });
-    try bounds.put(3, .{ .row = 17, .col = 41, .cols = 39, .rows = 7 });
+    try bounds.put(@enumFromInt(1), .{ .cols = 40, .rows = 12 });
+    try bounds.put(@enumFromInt(4), .{ .row = 13, .cols = 40, .rows = 11 });
+    try bounds.put(@enumFromInt(2), .{ .col = 41, .cols = 39, .rows = 16 });
+    try bounds.put(@enumFromInt(3), .{ .row = 17, .col = 41, .cols = 39, .rows = 7 });
 
-    try testz.expectEqual(arrange.windowRun(&tree, 4, .row), 2);
-    const moved = try arrange.move(&tree, 4, .{ .window = .left }, 13);
+    try testz.expectEqual(arrange.windowRun(&tree, @enumFromInt(4), .row), 2);
+    const moved = try arrange.move(&tree, @enumFromInt(4), .{ .window = .left }, @enumFromInt(13));
     try testz.expectTrue(moved.made == tree.root);
-    try testz.expectEqual(tree.root.kind.split.first.kind.leaf, 4);
+    try testz.expectEqual(@intFromEnum(tree.root.kind.split.first.kind.leaf), 4);
 
     var splits: std.ArrayList(*layout.Node) = .empty;
     defer splits.deinit(alloc);
     try arrange.splitNodes(alloc, tree.root, &splits);
     try testz.expectEqual(splits.items.len, 3);
-    const w_root = arrange.childWeights(splits.items[0], &moved.runs, &bounds, 4);
+    const w_root = arrange.childWeights(splits.items[0], &moved.runs, &bounds, @enumFromInt(4));
     try testz.expectEqual(w_root[0], 1);
     try testz.expectEqual(w_root[1], 2);
-    const w_inner = arrange.childWeights(splits.items[1], &moved.runs, &bounds, 4);
+    const w_inner = arrange.childWeights(splits.items[1], &moved.runs, &bounds, @enumFromInt(4));
     try testz.expectEqual(w_inner[0], 1);
     try testz.expectEqual(w_inner[1], 1);
-    const w_col = arrange.childWeights(splits.items[2], &moved.runs, &bounds, 4);
+    const w_col = arrange.childWeights(splits.items[2], &moved.runs, &bounds, @enumFromInt(4));
     try testz.expectEqual(w_col[0], 16);
     try testz.expectEqual(w_col[1], 7);
 }

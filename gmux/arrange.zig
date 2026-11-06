@@ -23,6 +23,7 @@
 //! (`childWeights`), since a resync re-sends every split's children.
 
 const std = @import("std");
+const glyphwire = @import("glyphwire");
 const splittree = @import("applib").splittree;
 const layout = @import("layout.zig");
 
@@ -168,7 +169,7 @@ pub const Moved = struct {
     /// The split the drop created (its handle is the one passed in).
     made: *Node,
     /// The split the dragged pane left, now gone: destroy it on the host.
-    removed_handle: u32,
+    removed_handle: glyphwire.PaneSplitHandle,
     /// The runs to even out (`evenedTop`): the one the pane landed in,
     /// and the one it left, if that still exists.
     runs: [2]?Run,
@@ -181,7 +182,7 @@ pub const Run = struct { top: *Node, axis: layout.Axis };
 /// `Tree.swapLeaves`), under the host split `handle` already created for
 /// it. The tree must hold at least two panes and `dragged` must not be
 /// the drop's target.
-pub fn move(tree: *Tree, dragged: PaneId, drop: Drop, handle: u32) !Moved {
+pub fn move(tree: *Tree, dragged: PaneId, drop: Drop, handle: glyphwire.PaneSplitHandle) !Moved {
     const leaf = tree.find(dragged) orelse return error.UnknownLeaf;
     const left_axis = (leaf.parent orelse return error.LastLeaf).kind.split.axis;
     const removal = try tree.remove(dragged);

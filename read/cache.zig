@@ -21,6 +21,7 @@
 //! also what makes it testable with plain integers.
 
 const std = @import("std");
+const glyphwire = @import("glyphwire");
 
 /// One cached page: the handle the server knows it by, plus the natural
 /// pixel size `get_image_info` reported. The size is cached alongside
@@ -28,7 +29,7 @@ const std = @import("std");
 /// and it would otherwise be a round trip each time.
 pub const Entry = struct {
     page: usize,
-    handle: u32,
+    handle: glyphwire.ImageHandle,
     width: u32,
     height: u32,
 };

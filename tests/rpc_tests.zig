@@ -124,7 +124,7 @@ pub fn resizeNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !void {
 
 pub fn layerResizeNotificationShapeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
-    const body = try rpc.layerResizeNotification(alloc, 2, 5, 40, 14);
+    const body = try rpc.layerResizeNotification(alloc, @enumFromInt(2), @enumFromInt(5), 40, 14);
     defer alloc.free(body);
     try expectJson(alloc,
         \\{"jsonrpc":"2.0","method":"layer_resize","params":{"context":2,"layer":5,"rows":14,"cols":40}}

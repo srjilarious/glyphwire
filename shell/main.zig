@@ -352,7 +352,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("gw-shell: --context needs a context handle\n", .{});
             return error.ContextArgMissing;
         };
-        const handle = std.fmt.parseInt(glyphwire.ContextHandle, value, 10) catch {
+        const handle = glyphwire.parseHandle(glyphwire.ContextHandle, value) orelse {
             std.debug.print("gw-shell: --context '{s}' isn't a context handle\n", .{value});
             return error.ContextArgMalformed;
         };

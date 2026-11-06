@@ -62,8 +62,10 @@ pub fn SplitTree(comptime Child: type, comptime limits: Limits) type {
     return struct {
         const Self = @This();
 
-        pub const Handle = u32;
         pub const Target = @FieldType(Child, "target");
+        /// The owner's typed handle (`SplitHandle`, `PaneSplitHandle`):
+        /// whatever `Target`'s `split` variant holds.
+        pub const Handle = @FieldType(Target, "split");
 
         /// One split: its axis and children, and where it was last laid
         /// out.
@@ -103,7 +105,7 @@ pub fn SplitTree(comptime Child: type, comptime limits: Limits) type {
         };
 
         splits: std.AutoHashMap(Handle, Node),
-        next_handle: Handle = 1,
+        next_handle: u32 = 1,
         /// Which split fills the area, or null for no layout.
         root: ?Handle = null,
 
@@ -120,7 +122,7 @@ pub fn SplitTree(comptime Child: type, comptime limits: Limits) type {
         /// An empty split. It lays out nothing until it has children and
         /// is reached from `root`.
         pub fn create(self: *Self, axis: SplitAxis, resizable: bool) !Handle {
-            const handle = self.next_handle;
+            const handle: Handle = @enumFromInt(self.next_handle);
             try self.splits.put(handle, .{ .axis = axis, .resizable = resizable });
             self.next_handle += 1;
             return handle;

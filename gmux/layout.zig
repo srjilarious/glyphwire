@@ -15,19 +15,19 @@
 const splittree = @import("applib").splittree;
 
 pub const Axis = enum { row, column };
-pub const PaneId = u32;
+pub const PaneId = @import("glyphwire").PaneHandle;
 
 /// A split's `handle` is the `create_pane_split` handle it maps to on the
 /// wire. A single pane is a bare leaf root: `ui.zig` wraps one in a wire
 /// split only when it needs an actual root, since `set_root_pane_split`
 /// takes a split handle even for one pane.
-pub const Tree = splittree.SplitTree(PaneId, Axis, u32);
+pub const Tree = splittree.SplitTree(PaneId, Axis, @import("glyphwire").PaneSplitHandle);
 pub const Node = Tree.Node;
 
 /// A pane leaf, or a live split, described by whatever it currently is --
 /// what `set_pane_split_children` / `replace_pane_split_child` want for
 /// one child slot.
-pub const ChildRef = union(enum) { pane: PaneId, split: u32 };
+pub const ChildRef = union(enum) { pane: PaneId, split: @import("glyphwire").PaneSplitHandle };
 
 pub fn childRef(node: *const Node) ChildRef {
     return switch (node.kind) {

@@ -56,14 +56,14 @@ pub fn writeTextNullBgLeavesExistingBackgroundUntouchedTest(io: std.Io, alloc: s
     // `transparent_bg: true` (a `null` `bg` at this layer) has to survive
     // it, not reset it to `default_style.bg` the way omitting `bg`
     // otherwise does (`writeTextAppliesStyleTest`'s sibling case).
-    layer.drawIcon(9, 0, 0, .{});
+    layer.drawIcon(@enumFromInt(9), 0, 0, .{});
 
     try layer.writeText("h", .{ .r = 10, .g = 20, .b = 30 }, null);
 
     const c = layer.cell(0, 0);
     try testz.expectEqualStr("h", c.grapheme());
     try testz.expectEqual(c.style.fg.r, 10);
-    try testz.expectEqual(c.style.bg.icon.handle, 9);
+    try testz.expectEqual(@intFromEnum(c.style.bg.icon.handle), 9);
 }
 
 pub fn writeTextWrapsAtLayerEdgeTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -727,7 +727,7 @@ pub fn contextLoadImageParsesDimensionsTest(io: std.Io, alloc: std.mem.Allocator
     const info = ctx.imageInfo(handle).?;
     try testz.expectEqual(info.width, 48);
     try testz.expectEqual(info.height, 24);
-    try testz.expectTrue(ctx.imageInfo(handle + 1) == null);
+    try testz.expectTrue(ctx.imageInfo(@enumFromInt(@intFromEnum(handle) + 1)) == null);
 }
 
 /// A minimal JPEG byte stream `jpegDimensions` can walk: SOI, a stub APP0
@@ -876,14 +876,14 @@ pub fn layerDrawImageMarksCoveredCellsWithOffsetsTest(io: std.Io, alloc: std.mem
     defer layer.deinit();
 
     // A 2x2-cell span at 12px cells covers a 24x24px image exactly.
-    layer.drawImage(1, 1, 1, 2, 2, 24, 24, 12, 12, 1.0, .{});
+    layer.drawImage(@enumFromInt(1), 1, 1, 2, 2, 24, 24, 12, 12, 1.0, .{});
 
     const c00 = layer.cell(1, 1).style.bg;
     const c01 = layer.cell(1, 2).style.bg;
     const c10 = layer.cell(2, 1).style.bg;
     const c11 = layer.cell(2, 2).style.bg;
 
-    try testz.expectEqual(c00.image.handle, 1);
+    try testz.expectEqual(@intFromEnum(c00.image.handle), 1);
     try testz.expectEqual(c00.image.offset_x, 0);
     try testz.expectEqual(c00.image.offset_y, 0);
     try testz.expectEqual(c01.image.offset_x, 12);
@@ -912,9 +912,9 @@ pub fn layerDrawImageLeavesCellsBeyondImageBoundsUntouchedTest(io: std.Io, alloc
     // A 12x12px image (one cell) drawn into a 2x2-cell span: only the
     // top-left cell is actually covered -- the other three cells the
     // image doesn't reach should be left as they were.
-    layer.drawImage(1, 0, 2, 2, 2, 12, 12, 12, 12, 1.0, .{});
+    layer.drawImage(@enumFromInt(1), 0, 2, 2, 2, 12, 12, 12, 12, 1.0, .{});
 
-    try testz.expectEqual(layer.cell(0, 2).style.bg.image.handle, 1);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 2).style.bg.image.handle), 1);
     switch (layer.cell(0, 3).style.bg) {
         .color => |c| try testz.expectEqual(c.r, 9),
         .image, .icon => return error.TestUnexpectedResult,
@@ -940,7 +940,7 @@ pub fn layerDrawImageScrollsInsteadOfClippingRowSpanPastBottomTest(io: std.Io, a
     // place (which would mean nothing actually scrolled).
     layer.cell(0, 0).style.bg = .{ .color = .{ .r = 9, .g = 9, .b = 9 } };
 
-    layer.drawImage(1, 1, 0, 3, 1, 10, 30, 10, 10, 1.0, .{});
+    layer.drawImage(@enumFromInt(1), 1, 0, 3, 1, 10, 30, 10, 10, 1.0, .{});
 
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_y, 0);
     try testz.expectEqual(layer.cell(1, 0).style.bg.image.offset_y, 10);
@@ -962,7 +962,7 @@ pub fn layerDrawImageScaledStepsSourceOffsetsByCellOverScaleTest(io: std.Io, all
     // Each cell samples cell_px / scale = 24 source pixels, so the stored
     // per-cell offsets step by 24, not 12, and every cell records the
     // scale for the renderer.
-    layer.drawImage(1, 0, 0, 2, 4, 96, 48, 12, 12, 0.5, .{});
+    layer.drawImage(@enumFromInt(1), 0, 0, 2, 4, 96, 48, 12, 12, 0.5, .{});
 
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_x, 0);
     try testz.expectEqual(layer.cell(0, 1).style.bg.image.offset_x, 24);
@@ -984,7 +984,7 @@ pub fn layerDrawImageScaledStopsAtImageEdgeInSourceSpaceTest(io: std.Io, alloc: 
     // col_span of 5 leaves cells 3 and 4 (offset 96, past width 60)
     // untouched -- the same "cell past the image's edge is left as it was"
     // contract the unscaled path has.
-    layer.drawImage(1, 0, 0, 1, 5, 60, 12, 12, 12, 0.5, .{});
+    layer.drawImage(@enumFromInt(1), 0, 0, 1, 5, 60, 12, 12, 12, 0.5, .{});
 
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_x, 0);
     try testz.expectEqual(layer.cell(0, 1).style.bg.image.offset_x, 24);
@@ -1006,7 +1006,7 @@ pub fn layerDrawImageScaleOfOneMatchesUnscaledOffsetsTest(io: std.Io, alloc: std
 
     // scale 1.0 must be byte-identical to the pre-scale behavior: a 2x2
     // span over a 24x24px image at 12px cells still steps offsets by 12.
-    layer.drawImage(1, 1, 1, 2, 2, 24, 24, 12, 12, 1.0, .{});
+    layer.drawImage(@enumFromInt(1), 1, 1, 2, 2, 24, 24, 12, 12, 1.0, .{});
 
     try testz.expectEqual(layer.cell(1, 1).style.bg.image.offset_x, 0);
     try testz.expectEqual(layer.cell(1, 2).style.bg.image.offset_x, 12);
@@ -1022,7 +1022,7 @@ pub fn layerDrawImageSourceRectOffsetsSamplingIntoTheSheetTest(io: std.Io, alloc
     // A 48x48px sheet, sampling the 24x24px sprite starting at (24, 24) --
     // the bottom-right quadrant. Every stored offset should be shifted by
     // the source rect's own origin, not measured from the sheet's (0, 0).
-    layer.drawImage(1, 0, 0, 2, 2, 48, 48, 12, 12, 1.0, .{ .x = 24, .y = 24, .w = 24, .h = 24 });
+    layer.drawImage(@enumFromInt(1), 0, 0, 2, 2, 48, 48, 12, 12, 1.0, .{ .x = 24, .y = 24, .w = 24, .h = 24 });
 
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_x, 24);
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.offset_y, 24);
@@ -1040,10 +1040,10 @@ pub fn layerDrawImageSourceRectClipsAtItsOwnEdgeNotTheImagesTest(io: std.Io, all
     // cells is past the *sprite's* edge even though the *sheet* still has
     // plenty of room there, so those cells must be left untouched rather
     // than sampling into the neighbouring sprite.
-    layer.drawImage(1, 0, 0, 3, 3, 96, 96, 12, 12, 1.0, .{ .x = 0, .y = 0, .w = 24, .h = 24 });
+    layer.drawImage(@enumFromInt(1), 0, 0, 3, 3, 96, 96, 12, 12, 1.0, .{ .x = 0, .y = 0, .w = 24, .h = 24 });
 
-    try testz.expectEqual(layer.cell(0, 0).style.bg.image.handle, 1);
-    try testz.expectEqual(layer.cell(1, 1).style.bg.image.handle, 1);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 0).style.bg.image.handle), 1);
+    try testz.expectEqual(@intFromEnum(layer.cell(1, 1).style.bg.image.handle), 1);
     switch (layer.cell(0, 2).style.bg) {
         .color => {},
         .image, .icon => return error.TestUnexpectedResult,
@@ -1062,7 +1062,7 @@ pub fn layerDrawImageSourceRectRecordsClipBoundsOnEveryCoveredCellTest(io: std.I
     // The stored `src_right`/`src_bottom` are what host/render.zig clips
     // sampling to at the sprite's own partial edge cell -- confirm they
     // land on the sprite's bound (48), not the sheet's (96).
-    layer.drawImage(1, 0, 0, 2, 2, 96, 96, 12, 12, 1.0, .{ .x = 12, .y = 12, .w = 36, .h = 36 });
+    layer.drawImage(@enumFromInt(1), 0, 0, 2, 2, 96, 96, 12, 12, 1.0, .{ .x = 12, .y = 12, .w = 36, .h = 36 });
 
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.src_right, 48);
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.src_bottom, 48);
@@ -1075,7 +1075,7 @@ pub fn layerDrawImageDefaultSourceRectMatchesWholeImageBoundsTest(io: std.Io, al
 
     // `.{}` (no source rect) must be byte-identical to the pre-source-rect
     // behavior -- `src_right`/`src_bottom` land on the image's own edge.
-    layer.drawImage(1, 0, 0, 2, 2, 24, 24, 12, 12, 1.0, .{});
+    layer.drawImage(@enumFromInt(1), 0, 0, 2, 2, 24, 24, 12, 12, 1.0, .{});
 
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.src_right, 24);
     try testz.expectEqual(layer.cell(0, 0).style.bg.image.src_bottom, 24);
@@ -1090,7 +1090,7 @@ pub fn layerDrawImageSourceRectPastImageEdgeDrawsNothingTest(io: std.Io, alloc: 
 
     // A source rect starting at or past the image's own edge is empty
     // after clamping, so it must draw nothing rather than underflowing.
-    layer.drawImage(1, 0, 0, 1, 1, 24, 24, 12, 12, 1.0, .{ .x = 24, .y = 0, .w = 12, .h = 12 });
+    layer.drawImage(@enumFromInt(1), 0, 0, 1, 1, 24, 24, 12, 12, 1.0, .{ .x = 24, .y = 0, .w = 12, .h = 12 });
 
     switch (layer.cell(0, 0).style.bg) {
         .color => |c| try testz.expectEqual(c.r, 9),
@@ -1103,9 +1103,9 @@ pub fn layerDrawIconMarksExactlyOneCellTest(io: std.Io, alloc: std.mem.Allocator
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    layer.drawIcon(7, 1, 2, .{});
+    layer.drawIcon(@enumFromInt(7), 1, 2, .{});
 
-    try testz.expectEqual(layer.cell(1, 2).style.bg.icon.handle, 7);
+    try testz.expectEqual(@intFromEnum(layer.cell(1, 2).style.bg.icon.handle), 7);
     switch (layer.cell(1, 3).style.bg) {
         .color => {},
         .image, .icon => return error.TestUnexpectedResult,
@@ -1120,11 +1120,11 @@ pub fn layerDrawIconOverSetsFgIconWithoutTouchingBgTest(io: std.Io, alloc: std.m
     // An existing background (as `drawIcon` would leave) survives a
     // `drawIconOver` call on top of it -- the whole point of `fg_icon`
     // over `draw_icon`'s ordinary background-replacing behavior.
-    layer.drawIcon(3, 1, 2, .{});
-    layer.drawIconOver(7, 1, 2, .{});
+    layer.drawIcon(@enumFromInt(3), 1, 2, .{});
+    layer.drawIconOver(@enumFromInt(7), 1, 2, .{});
 
-    try testz.expectEqual(layer.cell(1, 2).style.bg.icon.handle, 3);
-    try testz.expectEqual(layer.cell(1, 2).fg_icon.?.handle, 7);
+    try testz.expectEqual(@intFromEnum(layer.cell(1, 2).style.bg.icon.handle), 3);
+    try testz.expectEqual(@intFromEnum(layer.cell(1, 2).fg_icon.?.handle), 7);
 }
 
 pub fn layerDrawIconOverPastEdgeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1132,7 +1132,7 @@ pub fn layerDrawIconOverPastEdgeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator)
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    layer.drawIconOver(7, 1, 10, .{});
+    layer.drawIconOver(@enumFromInt(7), 1, 10, .{});
 
     try testz.expectTrue(layer.cell(1, 4).fg_icon == null);
 }
@@ -1142,7 +1142,7 @@ pub fn layerDrawIconDefaultsToFitAndCenterTest(io: std.Io, alloc: std.mem.Alloca
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    layer.drawIcon(7, 1, 2, .{});
+    layer.drawIcon(@enumFromInt(7), 1, 2, .{});
 
     const icon = layer.cell(1, 2).style.bg.icon;
     try testz.expectEqual(icon.scale, .fit);
@@ -1155,10 +1155,10 @@ pub fn layerDrawIconAppliesScaleAndAlignOptsTest(io: std.Io, alloc: std.mem.Allo
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    layer.drawIcon(7, 1, 2, .{ .scale = .natural, .h_align = .start, .v_align = .end });
+    layer.drawIcon(@enumFromInt(7), 1, 2, .{ .scale = .natural, .h_align = .start, .v_align = .end });
 
     const icon = layer.cell(1, 2).style.bg.icon;
-    try testz.expectEqual(icon.handle, 7);
+    try testz.expectEqual(@intFromEnum(icon.handle), 7);
     try testz.expectEqual(icon.scale, .natural);
     try testz.expectEqual(icon.h_align, .start);
     try testz.expectEqual(icon.v_align, .end);
@@ -1169,7 +1169,7 @@ pub fn layerDrawIconAppliesMaxWidthAndHeightTest(io: std.Io, alloc: std.mem.Allo
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    layer.drawIcon(7, 1, 2, .{ .scale = .natural, .max_w = 40, .max_h = 60 });
+    layer.drawIcon(@enumFromInt(7), 1, 2, .{ .scale = .natural, .max_w = 40, .max_h = 60 });
 
     const icon = layer.cell(1, 2).style.bg.icon;
     try testz.expectEqual(icon.max_w, 40);
@@ -1181,11 +1181,11 @@ pub fn layerDrawIconTaggedSetsMetadataIdTest(io: std.Io, alloc: std.mem.Allocato
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    layer.drawIcon(7, 1, 2, .{ .metadata_id = 42 });
+    layer.drawIcon(@enumFromInt(7), 1, 2, .{ .metadata_id = @enumFromInt(42) });
 
-    try testz.expectEqual(layer.cell(1, 2).metadata_id.?, 42);
+    try testz.expectEqual(@intFromEnum(layer.cell(1, 2).metadata_id.?), 42);
     // A sibling of style.bg, not part of the icon variant itself.
-    try testz.expectEqual(layer.cell(1, 2).style.bg.icon.handle, 7);
+    try testz.expectEqual(@intFromEnum(layer.cell(1, 2).style.bg.icon.handle), 7);
 }
 
 pub fn layerTagMetadataSetsIdWithoutTouchingBgOrGraphemeTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1193,13 +1193,13 @@ pub fn layerTagMetadataSetsIdWithoutTouchingBgOrGraphemeTest(io: std.Io, alloc: 
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    layer.drawIcon(7, 1, 2, .{ .metadata_id = 42 });
-    layer.tagMetadata(1, 3, 42, false);
+    layer.drawIcon(@enumFromInt(7), 1, 2, .{ .metadata_id = @enumFromInt(42) });
+    layer.tagMetadata(1, 3, @enumFromInt(42), false);
 
     // The neighboring cell got tagged with the same id as the icon's
     // anchor, but its background/grapheme are untouched -- still whatever
     // the layer's default is, not a copy of the icon.
-    try testz.expectEqual(layer.cell(1, 3).metadata_id.?, 42);
+    try testz.expectEqual(@intFromEnum(layer.cell(1, 3).metadata_id.?), 42);
     switch (layer.cell(1, 3).style.bg) {
         .color => {},
         .image, .icon => return error.TestUnexpectedResult,
@@ -1212,10 +1212,10 @@ pub fn layerTagMetadataOverwritesExistingTagTest(io: std.Io, alloc: std.mem.Allo
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
 
-    try layer.writeTextTagged("a", glyphwire.default_style.fg, glyphwire.default_style.bg, 1);
-    layer.tagMetadata(0, 0, 2, false);
+    try layer.writeTextTagged("a", glyphwire.default_style.fg, glyphwire.default_style.bg, @enumFromInt(1));
+    layer.tagMetadata(0, 0, @enumFromInt(2), false);
 
-    try testz.expectEqual(layer.cell(0, 0).metadata_id.?, 2);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 0).metadata_id.?), 2);
     // The grapheme write_text put there is still untouched.
     try testz.expectEqualStr(layer.cell(0, 0).grapheme(), "a");
 }
@@ -1225,11 +1225,11 @@ pub fn layerWriteTextTaggedMarksEveryCellTest(io: std.Io, alloc: std.mem.Allocat
     var layer = try glyphwire.Layer.init(alloc, 10, 5, 0);
     defer layer.deinit();
 
-    try layer.writeTextTagged("abc", glyphwire.default_style.fg, glyphwire.default_style.bg, 7);
+    try layer.writeTextTagged("abc", glyphwire.default_style.fg, glyphwire.default_style.bg, @enumFromInt(7));
 
-    try testz.expectEqual(layer.cell(0, 0).metadata_id.?, 7);
-    try testz.expectEqual(layer.cell(0, 1).metadata_id.?, 7);
-    try testz.expectEqual(layer.cell(0, 2).metadata_id.?, 7);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 0).metadata_id.?), 7);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 1).metadata_id.?), 7);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 2).metadata_id.?), 7);
     // Untouched by this call: no tag.
     try testz.expectTrue(layer.cell(0, 3).metadata_id == null);
 }
@@ -1255,14 +1255,14 @@ pub fn layerDrawIconPastBottomScrollsTest(io: std.Io, alloc: std.mem.Allocator) 
     var layer = try glyphwire.Layer.init(alloc, 5, 3, 10);
     defer layer.deinit();
 
-    layer.drawIcon(1, 2, 0, .{}); // valid, the last row (height=3, rows 0..2)
-    layer.drawIcon(2, 3, 0, .{}); // one past the bottom -- scrolls once, lands on row 2
+    layer.drawIcon(@enumFromInt(1), 2, 0, .{}); // valid, the last row (height=3, rows 0..2)
+    layer.drawIcon(@enumFromInt(2), 3, 0, .{}); // one past the bottom -- scrolls once, lands on row 2
 
     try testz.expectEqual(layer.history_len, 1);
     // The scroll shifted the first icon up into row 1 rather than losing
     // it, and the second landed on the freshly-scrolled-to row 2.
-    try testz.expectEqual(layer.cell(1, 0).style.bg.icon.handle, 1);
-    try testz.expectEqual(layer.cell(2, 0).style.bg.icon.handle, 2);
+    try testz.expectEqual(@intFromEnum(layer.cell(1, 0).style.bg.icon.handle), 1);
+    try testz.expectEqual(@intFromEnum(layer.cell(2, 0).style.bg.icon.handle), 2);
 }
 
 pub fn layerDrawIconColPastEdgeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1271,7 +1271,7 @@ pub fn layerDrawIconColPastEdgeIsNoOpTest(io: std.Io, alloc: std.mem.Allocator) 
     defer layer.deinit();
     const revision_before = layer.revision;
 
-    layer.drawIcon(1, 0, 10, .{});
+    layer.drawIcon(@enumFromInt(1), 0, 10, .{});
 
     try testz.expectEqual(layer.revision, revision_before);
 }
@@ -1325,7 +1325,7 @@ pub fn imageHandlesRestartAtOneInEachContextTest(io: std.Io, alloc: std.mem.Allo
     const in_b = try b.loadImage(.png, &tall);
 
     try testz.expectEqual(in_a, in_b);
-    try testz.expectEqual(in_a, @as(glyphwire.ImageHandle, 1));
+    try testz.expectEqual(in_a, @as(glyphwire.ImageHandle, @enumFromInt(1)));
 
     // Same handle, same generation, different pictures: the two are
     // indistinguishable to a cache that only remembers the handle.
@@ -1537,7 +1537,7 @@ pub fn parseNinePatchRejectsBadGuidesTest(io: std.Io, alloc: std.mem.Allocator) 
 fn testNinePatchStyle() glyphwire.NinePatchStyle {
     // A 10x8 image (12x10 with guides) with 3/2/3/3 corners -- the
     // shape `parseNinePatchReadsInsetsFromGuidesTest` reads.
-    return .{ .image = 7, .width = 10, .height = 8, .insets = .{ .left = 3, .top = 2, .right = 3, .bottom = 3 } };
+    return .{ .image = @enumFromInt(7), .width = 10, .height = 8, .insets = .{ .left = 3, .top = 2, .right = 3, .bottom = 3 } };
 }
 
 pub fn ninePatchQuadsKeepCornersNativeTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1598,7 +1598,7 @@ pub fn contextNinePatchLifecycleTest(io: std.Io, alloc: std.mem.Allocator) !void
     const moved = layer.nine_patches.get(h).?;
     try testz.expectEqual(moved.row, 5);
     try testz.expectEqual(moved.rows, 3);
-    try testz.expectEqual(moved.style.image, 7);
+    try testz.expectEqual(@intFromEnum(moved.style.image), 7);
 
     try ctx.destroyNinePatch(null, h);
     try testz.expectEqual(layer.nine_patches.count(), 0);
@@ -1625,13 +1625,13 @@ pub fn layerClearResetsRegionToBlankTest(io: std.Io, alloc: std.mem.Allocator) !
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
     try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    layer.drawIcon(1, 1, 1, .{});
+    layer.drawIcon(@enumFromInt(1), 1, 1, .{});
 
     layer.clear(0, 0, 1, 5);
 
     try testz.expectEqual(layer.cell(0, 0).grapheme().len, 0);
     // Untouched region keeps its content.
-    try testz.expectEqual(layer.cell(1, 1).style.bg.icon.handle, 1);
+    try testz.expectEqual(@intFromEnum(layer.cell(1, 1).style.bg.icon.handle), 1);
 }
 
 pub fn layerClearWholeLayerViaFullSpanTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -1639,7 +1639,7 @@ pub fn layerClearWholeLayerViaFullSpanTest(io: std.Io, alloc: std.mem.Allocator)
     var layer = try glyphwire.Layer.init(alloc, 5, 5, 0);
     defer layer.deinit();
     try layer.writeText("hello", glyphwire.default_style.fg, glyphwire.default_style.bg);
-    layer.drawIcon(1, 2, 2, .{});
+    layer.drawIcon(@enumFromInt(1), 2, 2, .{});
 
     layer.clear(0, 0, layer.height, layer.width);
 
@@ -2890,11 +2890,11 @@ pub fn writeTextScaledX3AdvancesThreeCellsTest(io: std.Io, alloc: std.mem.Alloca
     var layer = try glyphwire.Layer.init(alloc, 80, 24, 0);
     defer layer.deinit();
 
-    try layer.writeTextTaggedScaled("AB", glyphwire.default_style.fg, glyphwire.default_style.bg, 7, .x3);
+    try layer.writeTextTaggedScaled("AB", glyphwire.default_style.fg, glyphwire.default_style.bg, @enumFromInt(7), .x3);
     try testz.expectEqual(layer.cursor.col, @as(usize, 6));
     try testz.expectEqual(layer.cell(0, 0).text_scale, glyphwire.TextScale.x3);
     try testz.expectEqualStr(" ", layer.cell(0, 1).grapheme());
-    try testz.expectEqual(layer.cell(0, 2).metadata_id, @as(?glyphwire.MetadataHandle, 7));
+    try testz.expectEqual(layer.cell(0, 2).metadata_id, @as(?glyphwire.MetadataHandle, @enumFromInt(7)));
     try testz.expectEqualStr("B", layer.cell(0, 3).grapheme());
 }
 
@@ -3363,19 +3363,19 @@ pub fn highlightToggleAndMembershipTest(io: std.Io, alloc: std.mem.Allocator) !v
     var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
     defer layer.deinit();
 
-    try testz.expectFalse(layer.sel.isHighlighted(7));
+    try testz.expectFalse(layer.sel.isHighlighted(@enumFromInt(7)));
     try testz.expectFalse(layer.sel.isHighlighted(null));
 
-    try layer.sel.toggleHighlight(7);
-    try layer.sel.toggleHighlight(9);
-    try testz.expectTrue(layer.sel.isHighlighted(7));
-    try testz.expectTrue(layer.sel.isHighlighted(9));
-    try testz.expectFalse(layer.sel.isHighlighted(8));
+    try layer.sel.toggleHighlight(@enumFromInt(7));
+    try layer.sel.toggleHighlight(@enumFromInt(9));
+    try testz.expectTrue(layer.sel.isHighlighted(@enumFromInt(7)));
+    try testz.expectTrue(layer.sel.isHighlighted(@enumFromInt(9)));
+    try testz.expectFalse(layer.sel.isHighlighted(@enumFromInt(8)));
     try testz.expectEqual(layer.sel.highlighted_ids.items.len, 2);
 
-    try layer.sel.toggleHighlight(7); // off again
-    try testz.expectFalse(layer.sel.isHighlighted(7));
-    try testz.expectTrue(layer.sel.isHighlighted(9));
+    try layer.sel.toggleHighlight(@enumFromInt(7)); // off again
+    try testz.expectFalse(layer.sel.isHighlighted(@enumFromInt(7)));
+    try testz.expectTrue(layer.sel.isHighlighted(@enumFromInt(9)));
     try testz.expectEqual(layer.sel.highlighted_ids.items.len, 1);
 }
 
@@ -3385,11 +3385,11 @@ pub fn highlightSetAndClearIdsTest(io: std.Io, alloc: std.mem.Allocator) !void {
     var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
     defer layer.deinit();
 
-    try layer.sel.toggleHighlight(1);
-    try layer.sel.setHighlights(&.{ 4, 5, 6 });
+    try layer.sel.toggleHighlight(@enumFromInt(1));
+    try layer.sel.setHighlights(&.{ @enumFromInt(4), @enumFromInt(5), @enumFromInt(6) });
     try testz.expectEqual(layer.sel.highlighted_ids.items.len, 3);
-    try testz.expectFalse(layer.sel.isHighlighted(1));
-    try testz.expectTrue(layer.sel.isHighlighted(5));
+    try testz.expectFalse(layer.sel.isHighlighted(@enumFromInt(1)));
+    try testz.expectTrue(layer.sel.isHighlighted(@enumFromInt(5)));
 
     layer.sel.clearHighlights();
     try testz.expectEqual(layer.sel.highlighted_ids.items.len, 0);
@@ -3401,10 +3401,10 @@ pub fn highlightSurvivesResizeTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var layer = try glyphwire.Layer.init(alloc, 10, 3, 0);
     defer layer.deinit();
-    try layer.sel.setHighlights(&.{ 2, 3 });
+    try layer.sel.setHighlights(&.{ @enumFromInt(2), @enumFromInt(3) });
     try layer.resize(12, 4);
     try testz.expectEqual(layer.sel.highlighted_ids.items.len, 2);
-    try testz.expectTrue(layer.sel.isHighlighted(3));
+    try testz.expectTrue(layer.sel.isHighlighted(@enumFromInt(3)));
 }
 
 /// `setClipboard` replaces the buffer and bumps the serial each call;
@@ -3494,11 +3494,11 @@ pub fn renderGenBumpsOnSelectionAndHighlightTest(io: std.Io, alloc: std.mem.Allo
     try testz.expectTrue(layer.renderGeneration() != g2);
 
     const g3 = layer.renderGeneration();
-    try layer.sel.setHighlights(&.{ 1, 2 });
+    try layer.sel.setHighlights(&.{ @enumFromInt(1), @enumFromInt(2) });
     try testz.expectTrue(layer.renderGeneration() != g3);
 
     const g4 = layer.renderGeneration();
-    try layer.sel.toggleHighlight(1);
+    try layer.sel.toggleHighlight(@enumFromInt(1));
     try testz.expectTrue(layer.renderGeneration() != g4);
 
     const g5 = layer.renderGeneration();
@@ -3667,7 +3667,7 @@ pub fn restackingRejectsUnknownHandlesIntactTest(io: std.Io, alloc: std.mem.Allo
 
     // The root is never in the stacking order, so it's unknown here.
     try testz.expectError(ctx.raiseLayer(glyphwire.root_layer_handle, null), error.UnknownLayer);
-    try testz.expectError(ctx.raiseLayer(a, 999), error.UnknownLayer);
+    try testz.expectError(ctx.raiseLayer(a, @enumFromInt(999)), error.UnknownLayer);
 
     // A rejected restack leaves the order exactly as it was.
     try testz.expectEqual(ctx.layer_order.items.len, 2);
@@ -3916,12 +3916,12 @@ pub fn writeRunsStylesEachRunAndClipsTheWholeWriteTest(io: std.Io, alloc: std.me
 
     try layer.writeRuns(&.{
         .{ .text = "ab", .fg = glyphwire.default_style.fg, .bg = bar },
-        .{ .text = "cd", .fg = red, .bg = bar, .metadata_id = 7 },
+        .{ .text = "cd", .fg = red, .bg = bar, .metadata_id = @enumFromInt(7) },
         .{ .text = "efgh", .fg = glyphwire.default_style.fg, .bg = bar },
     }, .{ .max_cols = 5, .pad = false });
     try testz.expectEqualStr("b", layer.cell(0, 1).grapheme());
     try testz.expectEqual(layer.cell(0, 2).style.fg.r, 200);
-    try testz.expectEqual(layer.cell(0, 3).metadata_id.?, 7);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 3).metadata_id.?), 7);
     try testz.expectTrue(layer.cell(0, 1).metadata_id == null);
     // Clipped at five columns across all runs, not per run.
     try testz.expectEqualStr("e", layer.cell(0, 4).grapheme());
@@ -3949,14 +3949,14 @@ pub fn scaledTextAdvancesByItsScaledWidthTest(io: std.Io, alloc: std.mem.Allocat
 
     // Two cells per column at 2x: "a" at 0, a filler at 1, "日" (two
     // columns) at 2 with its spacer at 3 and fillers at 4-5.
-    try layer.writeRuns(&.{.{ .text = "a日", .fg = glyphwire.default_style.fg, .bg = bg, .metadata_id = 3, .scale = .x2 }}, .{});
+    try layer.writeRuns(&.{.{ .text = "a日", .fg = glyphwire.default_style.fg, .bg = bg, .metadata_id = @enumFromInt(3), .scale = .x2 }}, .{});
     try testz.expectEqualStr("a", layer.cell(0, 0).grapheme());
     try testz.expectTrue(layer.cell(0, 0).text_scale == .x2);
     try testz.expectEqual(layer.cell(0, 1).style.bg.color.r, 9);
-    try testz.expectEqual(layer.cell(0, 1).metadata_id.?, 3);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 1).metadata_id.?), 3);
     try testz.expectTrue(layer.cell(0, 1).text_scale == .x1);
     try testz.expectEqualStr("日", layer.cell(0, 2).grapheme());
-    try testz.expectEqual(layer.cell(0, 5).metadata_id.?, 3);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 5).metadata_id.?), 3);
     try testz.expectEqual(layer.cursor.col, 6);
 
     // A scaled glyph that doesn't fit before the edge wraps whole.
@@ -3985,7 +3985,7 @@ pub fn scaledTextFillsRowsBelowItsGlyphTest(io: std.Io, alloc: std.mem.Allocator
     layer.cursor = .{ .row = 1, .col = 0 };
     try layer.writeText("zzzz", glyphwire.default_style.fg, glyphwire.default_style.bg);
     layer.cursor = .{ .row = 0, .col = 0 };
-    try layer.writeRuns(&.{.{ .text = "a", .fg = glyphwire.default_style.fg, .bg = bg, .metadata_id = 4, .scale = .x3 }}, .{});
+    try layer.writeRuns(&.{.{ .text = "a", .fg = glyphwire.default_style.fg, .bg = bg, .metadata_id = @enumFromInt(4), .scale = .x3 }}, .{});
 
     try testz.expectEqual(layer.cursor.row, 0);
     try testz.expectEqual(layer.cursor.col, 3);
@@ -3995,7 +3995,7 @@ pub fn scaledTextFillsRowsBelowItsGlyphTest(io: std.Io, alloc: std.mem.Allocator
         while (c < 3) : (c += 1) {
             try testz.expectEqualStr(" ", layer.cell(r, c).grapheme());
             try testz.expectEqual(layer.cell(r, c).style.bg.color.r, 9);
-            try testz.expectEqual(layer.cell(r, c).metadata_id.?, 4);
+            try testz.expectEqual(@intFromEnum(layer.cell(r, c).metadata_id.?), 4);
         }
     }
     // Outside the footprint: the column past it and the row past it.
@@ -4012,8 +4012,8 @@ pub fn scaledTextRowsBelowClipAndKeepTransparentBgTest(io: std.Io, alloc: std.me
     defer layer.deinit();
 
     layer.clearFill(0, 0, 2, 10, .{ .r = 5, .g = 5, .b = 5 });
-    try layer.writeRuns(&.{.{ .text = "a", .fg = glyphwire.default_style.fg, .bg = null, .metadata_id = 2, .scale = .x2 }}, .{});
-    try testz.expectEqual(layer.cell(1, 1).metadata_id.?, 2);
+    try layer.writeRuns(&.{.{ .text = "a", .fg = glyphwire.default_style.fg, .bg = null, .metadata_id = @enumFromInt(2), .scale = .x2 }}, .{});
+    try testz.expectEqual(@intFromEnum(layer.cell(1, 1).metadata_id.?), 2);
     try testz.expectEqual(layer.cell(1, 1).style.bg.color.r, 5);
 
     // A 3x glyph on the last row: nothing below it to fill, no scroll.
@@ -4055,9 +4055,9 @@ pub fn fillBgRepaintsOnlyTheBackgroundTest(io: std.Io, alloc: std.mem.Allocator)
         .text = "hello",
         .fg = .{ .r = 7, .g = 8, .b = 9 },
         .bg = .{ .color = .{ .r = 1, .g = 1, .b = 1 } },
-        .metadata_id = 3,
+        .metadata_id = @enumFromInt(3),
     }}, .{ .selectable = false });
-    layer.drawIconOver(1, 0, 0, .{});
+    layer.drawIconOver(@enumFromInt(1), 0, 0, .{});
 
     layer.fillBg(0, 0, 1, 5, .{ .r = 30, .g = 40, .b = 50 });
     try testz.expectEqual(layer.cell(0, 0).style.bg.color.g, 40);
@@ -4067,9 +4067,9 @@ pub fn fillBgRepaintsOnlyTheBackgroundTest(io: std.Io, alloc: std.mem.Allocator)
     try testz.expectEqualStr("h", layer.cell(0, 0).grapheme());
     try testz.expectEqualStr("o", layer.cell(0, 4).grapheme());
     try testz.expectEqual(layer.cell(0, 2).style.fg.r, 7);
-    try testz.expectEqual(layer.cell(0, 2).metadata_id.?, 3);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 2).metadata_id.?), 3);
     try testz.expectFalse(layer.cell(0, 2).selectable);
-    try testz.expectEqual(layer.cell(0, 0).fg_icon.?.handle, 1);
+    try testz.expectEqual(@intFromEnum(layer.cell(0, 0).fg_icon.?.handle), 1);
 
     // Clamped and bounds-checked exactly like `clearFill`: a region past
     // an edge is trimmed, one wholly past it (or empty) is a no-op.
@@ -4290,7 +4290,8 @@ const TestChild = struct {
     target: Target,
     size: glyphwire.split_tree.Size = .{ .weight = 1 },
 
-    const Target = union(enum) { leaf: u8, split: u32 };
+    const Target = union(enum) { leaf: u8, split: TestSplit };
+    const TestSplit = enum(u32) { _ };
 };
 const TestTree = glyphwire.split_tree.SplitTree(TestChild, .{ .max_depth = 4, .min_extent = 3 });
 
@@ -4665,7 +4666,7 @@ pub fn replaceSplitChildRejectsAMissingSlotTest(io: std.Io, alloc: std.mem.Alloc
     try ctx.setSplitChildren(split, &.{.{ .target = .{ .layer = layer } }});
 
     try testz.expectError(ctx.replaceSplitChild(split, 1, .{ .layer = layer }, null), error.SplitChildOutOfRange);
-    try testz.expectError(ctx.replaceSplitChild(77, 0, .{ .layer = layer }, null), error.UnknownSplit);
+    try testz.expectError(ctx.replaceSplitChild(@enumFromInt(77), 0, .{ .layer = layer }, null), error.UnknownSplit);
 }
 
 /// Extents are what the last layout gave each child, and nothing before
@@ -4722,9 +4723,9 @@ pub fn splitRejectsUnknownHandlesTest(io: std.Io, alloc: std.mem.Allocator) !voi
     var ctx = try glyphwire.Context.init(alloc, 100, 40, 0);
     defer ctx.deinit();
 
-    try testz.expectError(ctx.setRootSplit(77), error.UnknownSplit);
-    try testz.expectError(ctx.destroySplit(77), error.UnknownSplit);
-    try testz.expectError(ctx.setSplitChildren(77, &.{}), error.UnknownSplit);
+    try testz.expectError(ctx.setRootSplit(@enumFromInt(77)), error.UnknownSplit);
+    try testz.expectError(ctx.destroySplit(@enumFromInt(77)), error.UnknownSplit);
+    try testz.expectError(ctx.setSplitChildren(@enumFromInt(77), &.{}), error.UnknownSplit);
     try testz.expectTrue(ctx.split_tree.root == null);
 }
 
@@ -4810,7 +4811,7 @@ pub fn addLayerOwnerThenHasOwnerTest(io: std.Io, alloc: std.mem.Allocator) !void
     // The root handle is never connection-owned.
     try testz.expectTrue(!ctx.layerHasOwner(glyphwire.root_layer_handle, 1));
     // Neither is an unknown handle.
-    try testz.expectTrue(!ctx.layerHasOwner(999, 1));
+    try testz.expectTrue(!ctx.layerHasOwner(@enumFromInt(999), 1));
 }
 
 pub fn addLayerOwnerUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -4818,7 +4819,7 @@ pub fn addLayerOwnerUnknownHandleErrorsTest(io: std.Io, alloc: std.mem.Allocator
     var ctx = try glyphwire.Context.init(alloc, 20, 5, 0);
     defer ctx.deinit();
 
-    try testz.expectError(ctx.addLayerOwner(999, 1), error.UnknownLayer);
+    try testz.expectError(ctx.addLayerOwner(@enumFromInt(999), 1), error.UnknownLayer);
     // The root layer has no lifecycle and can't be owned.
     try testz.expectError(ctx.addLayerOwner(glyphwire.root_layer_handle, 1), error.UnknownLayer);
 }
@@ -4921,16 +4922,16 @@ pub fn sessionCreatedContextInheritsRootIconCatalogViaFallbackTest(io: std.Io, a
     _ = io;
     var root = try glyphwire.Context.init(alloc, 20, 5, 0);
     defer root.deinit();
-    try root.images.put(7, .{ .bytes = try alloc.dupe(u8, "x"), .format = .png, .width = 1, .height = 1 });
-    try root.registerIcon("folder", 7);
+    try root.images.put(@enumFromInt(7), .{ .bytes = try alloc.dupe(u8, "x"), .format = .png, .width = 1, .height = 1 });
+    try root.registerIcon("folder", @enumFromInt(7));
 
     var session = try glyphwire.Session.init(alloc, &root);
     defer session.deinit();
     const h = try session.createContext(glyphwire.root_pane_handle, null, null, 0);
     const ctx = session.contextPtr(h).?;
 
-    try testz.expectEqual(ctx.iconHandle("folder").?, @as(glyphwire.ImageHandle, 7));
-    try testz.expectEqual(ctx.imageEntry(7).?.width, @as(u32, 1));
+    try testz.expectEqual(ctx.iconHandle("folder").?, @as(glyphwire.ImageHandle, @enumFromInt(7)));
+    try testz.expectEqual(ctx.imageEntry(@enumFromInt(7)).?.width, @as(u32, 1));
     try testz.expectTrue(ctx.iconHandle("missing") == null);
 }
 
@@ -4952,7 +4953,7 @@ pub fn sessionActivateMovesAnExistingContextToTheTopTest(io: std.Io, alloc: std.
     try session.activateContext(a); // already visible: no-op, not an error
     try testz.expectEqual(session.focusedContextHandle(), a);
 
-    try testz.expectError(session.activateContext(999), glyphwire.ContextError.UnknownContext);
+    try testz.expectError(session.activateContext(@enumFromInt(999)), glyphwire.ContextError.UnknownContext);
 }
 
 fn expectStack(got: []const glyphwire.ContextHandle, want: []const glyphwire.ContextHandle) !void {
@@ -4974,7 +4975,7 @@ pub fn sessionPaneStackRunsBaseToTopAndFollowsActivateTest(io: std.Io, alloc: st
     try session.activateContext(glyphwire.root_context_handle);
     try expectStack(session.paneStack(glyphwire.root_pane_handle).?, &.{ a, b, glyphwire.root_context_handle });
 
-    try testz.expectTrue(session.paneStack(999) == null);
+    try testz.expectTrue(session.paneStack(@enumFromInt(999)) == null);
 }
 
 pub fn contextSetTitleReplacesAndCutsOnACodepointBoundaryTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5024,7 +5025,7 @@ pub fn sessionDestroyRootContextIsRefusedTest(io: std.Io, alloc: std.mem.Allocat
     defer session.deinit();
 
     try testz.expectError(session.destroyContext(glyphwire.root_context_handle), glyphwire.ContextError.RootContextImmutable);
-    try testz.expectError(session.destroyContext(999), glyphwire.ContextError.UnknownContext);
+    try testz.expectError(session.destroyContext(@enumFromInt(999)), glyphwire.ContextError.UnknownContext);
 }
 
 pub fn sessionReapConnectionCullsContextsThatConnectionSolelyOwnedTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5103,13 +5104,13 @@ pub fn adjacentMetadataSpanNextSkipsCurrentSpanToNextIdTest(io: std.Io, alloc: s
 
     // Row 0: cols 0-3 tagged 1 ("aaa " -- trailing space still id 1), cols
     // 4-6 tagged 2 ("bbb").
-    try layer.writeTextTagged("aaa ", fg, null, 1);
-    try layer.writeTextTagged("bbb", fg, null, 2);
+    try layer.writeTextTagged("aaa ", fg, null, @enumFromInt(1));
+    try layer.writeTextTagged("bbb", fg, null, @enumFromInt(2));
 
     const hit = layer.adjacentMetadataSpan(0, 0, .next).?;
     try testz.expectEqual(hit.above, @as(i64, 0));
     try testz.expectEqual(hit.col, @as(usize, 4));
-    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, 2));
+    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, @enumFromInt(2)));
 
     // Nothing tagged past span 2.
     try testz.expectTrue(layer.adjacentMetadataSpan(0, 5, .next) == null);
@@ -5121,15 +5122,15 @@ pub fn adjacentMetadataSpanPrevLandsOnSpanFirstCharacterTest(io: std.Io, alloc: 
     defer layer.deinit();
     const fg = glyphwire.default_style.fg;
 
-    try layer.writeTextTagged("aaa ", fg, null, 1);
-    try layer.writeTextTagged("bbb", fg, null, 2);
+    try layer.writeTextTagged("aaa ", fg, null, @enumFromInt(1));
+    try layer.writeTextTagged("bbb", fg, null, @enumFromInt(2));
 
     // From the middle of span 2, `.prev` walks back over span 2 to the
     // first cell of span 1.
     const hit = layer.adjacentMetadataSpan(0, 6, .prev).?;
     try testz.expectEqual(hit.above, @as(i64, 0));
     try testz.expectEqual(hit.col, @as(usize, 0));
-    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, 1));
+    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, @enumFromInt(1)));
 
     try testz.expectTrue(layer.adjacentMetadataSpan(0, 0, .prev) == null);
 }
@@ -5142,12 +5143,12 @@ pub fn adjacentMetadataSpanSkipsLeadingIconAndPaddingCellsTest(io: std.Io, alloc
 
     // Span 1 is a single "x"; span 2 leads with two blank cells (an icon /
     // padding stand-in) before its first real character at col 3.
-    try layer.writeTextTagged("x", fg, null, 1);
-    try layer.writeTextTagged("  y", fg, null, 2);
+    try layer.writeTextTagged("x", fg, null, @enumFromInt(1));
+    try layer.writeTextTagged("  y", fg, null, @enumFromInt(2));
 
     const hit = layer.adjacentMetadataSpan(0, 0, .next).?;
     try testz.expectEqual(hit.col, @as(usize, 3));
-    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, 2));
+    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, @enumFromInt(2)));
 }
 
 pub fn adjacentMetadataSpanTreatsGappedSameIdRunAsOneSpanTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5158,23 +5159,23 @@ pub fn adjacentMetadataSpanTreatsGappedSameIdRunAsOneSpanTest(io: std.Io, alloc:
 
     // A `gw-ls -l` style row: one id spread across two runs ("drwx" then
     // "file") with an untagged separator cell between, then a second entry.
-    try layer.writeTextTagged("drwx", fg, null, 1);
+    try layer.writeTextTagged("drwx", fg, null, @enumFromInt(1));
     try layer.writeTextTagged(" ", fg, null, null); // col 4, untagged gap
-    try layer.writeTextTagged("file", fg, null, 1); // cols 5-8, still id 1
+    try layer.writeTextTagged("file", fg, null, @enumFromInt(1)); // cols 5-8, still id 1
     try layer.writeTextTagged(" ", fg, null, null); // col 9, untagged gap
-    try layer.writeTextTagged("next", fg, null, 2); // cols 10-13
+    try layer.writeTextTagged("next", fg, null, @enumFromInt(2)); // cols 10-13
 
     // From inside the "file" run, `.next` steps over the whole id-1 group
     // (gap included) to id 2.
     const fwd = layer.adjacentMetadataSpan(0, 6, .next).?;
     try testz.expectEqual(fwd.col, @as(usize, 10));
-    try testz.expectEqual(fwd.id, @as(glyphwire.MetadataHandle, 2));
+    try testz.expectEqual(fwd.id, @as(glyphwire.MetadataHandle, @enumFromInt(2)));
 
     // From span 2, `.prev` walks back across the gap to the very first
     // cell of the id-1 group.
     const back = layer.adjacentMetadataSpan(0, 12, .prev).?;
     try testz.expectEqual(back.col, @as(usize, 0));
-    try testz.expectEqual(back.id, @as(glyphwire.MetadataHandle, 1));
+    try testz.expectEqual(back.id, @as(glyphwire.MetadataHandle, @enumFromInt(1)));
 }
 
 pub fn adjacentMetadataSpanPrefersFocusCellOverFirstCharacterTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5185,16 +5186,16 @@ pub fn adjacentMetadataSpanPrefersFocusCellOverFirstCharacterTest(io: std.Io, al
 
     // The `gw-ls -l` shape: one id across a permissions run and a name
     // run, with the name's first cell marked as the span's focus cell.
-    try layer.writeTextTagged("x", fg, null, 1);
-    try layer.writeTextTagged("drwx", fg, null, 2); // cols 1-4
+    try layer.writeTextTagged("x", fg, null, @enumFromInt(1));
+    try layer.writeTextTagged("drwx", fg, null, @enumFromInt(2)); // cols 1-4
     try layer.writeTextTagged(" ", fg, null, null); // col 5, untagged gap
-    try layer.writeTextTagged("file", fg, null, 2); // cols 6-9
-    layer.tagMetadata(0, 6, 2, true);
+    try layer.writeTextTagged("file", fg, null, @enumFromInt(2)); // cols 6-9
+    layer.tagMetadata(0, 6, @enumFromInt(2), true);
 
     // Without the focus cell this would land on col 1 (the "d").
     const hit = layer.adjacentMetadataSpan(0, 0, .next).?;
     try testz.expectEqual(hit.col, @as(usize, 6));
-    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, 2));
+    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, @enumFromInt(2)));
 }
 
 pub fn adjacentMetadataSpanPrevFindsFocusCellTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5203,16 +5204,16 @@ pub fn adjacentMetadataSpanPrevFindsFocusCellTest(io: std.Io, alloc: std.mem.All
     defer layer.deinit();
     const fg = glyphwire.default_style.fg;
 
-    try layer.writeTextTagged("drwx", fg, null, 1); // cols 0-3
-    try layer.writeTextTagged("file", fg, null, 1); // cols 4-7
-    layer.tagMetadata(0, 4, 1, true);
-    try layer.writeTextTagged("next", fg, null, 2); // cols 8-11
+    try layer.writeTextTagged("drwx", fg, null, @enumFromInt(1)); // cols 0-3
+    try layer.writeTextTagged("file", fg, null, @enumFromInt(1)); // cols 4-7
+    layer.tagMetadata(0, 4, @enumFromInt(1), true);
+    try layer.writeTextTagged("next", fg, null, @enumFromInt(2)); // cols 8-11
 
     // Walking back out of span 2 lands on span 1's focus cell, not its
     // leftmost character.
     const hit = layer.adjacentMetadataSpan(0, 9, .prev).?;
     try testz.expectEqual(hit.col, @as(usize, 4));
-    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, 1));
+    try testz.expectEqual(hit.id, @as(glyphwire.MetadataHandle, @enumFromInt(1)));
 }
 
 pub fn writeTextClearsAStaleFocusMarkTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5221,15 +5222,15 @@ pub fn writeTextClearsAStaleFocusMarkTest(io: std.Io, alloc: std.mem.Allocator) 
     defer layer.deinit();
     const fg = glyphwire.default_style.fg;
 
-    try layer.writeTextTagged("ab", fg, null, 1);
-    layer.tagMetadata(0, 1, 1, true);
+    try layer.writeTextTagged("ab", fg, null, @enumFromInt(1));
+    layer.tagMetadata(0, 1, @enumFromInt(1), true);
     try testz.expectTrue(layer.cell(0, 1).meta_focus);
 
     // Redrawing over the cell wipes the mark, the same way it wipes the
     // grapheme and the tag -- a repaint must not leave a focus cell
     // pointing at content that is no longer there.
     layer.setProperty(.{ .cursor = .{ .row = 0, .col = 0 } });
-    try layer.writeTextTagged("cd", fg, null, 2);
+    try layer.writeTextTagged("cd", fg, null, @enumFromInt(2));
     try testz.expectTrue(!layer.cell(0, 1).meta_focus);
 }
 
@@ -5243,25 +5244,25 @@ pub fn adjacentMetadataSpanWalksIntoRetainedScrollbackTest(io: std.Io, alloc: st
     // scrolls the oldest row into history. End state: viewport row 0 =
     // "ccc" (id 3), row 1 = "ddd" (id 4); history "bbb" (id 2) one row
     // above the viewport, "aaa" (id 1) two rows above.
-    try layer.writeTextTagged("aaa", fg, null, 1);
-    try layer.writeTextTagged("bbb", fg, null, 2);
-    try layer.writeTextTagged("ccc", fg, null, 3);
-    try layer.writeTextTagged("ddd", fg, null, 4);
+    try layer.writeTextTagged("aaa", fg, null, @enumFromInt(1));
+    try layer.writeTextTagged("bbb", fg, null, @enumFromInt(2));
+    try layer.writeTextTagged("ccc", fg, null, @enumFromInt(3));
+    try layer.writeTextTagged("ddd", fg, null, @enumFromInt(4));
 
     // `.prev` from the bottom viewport row steps up one span at a time,
     // crossing from the viewport into retained scrollback. `above` is the
     // scroll-stable coordinate: 0 in the viewport, positive into history.
     const s3 = layer.adjacentMetadataSpan(-1, 0, .prev).?;
     try testz.expectEqual(s3.above, @as(i64, 0));
-    try testz.expectEqual(s3.id, @as(glyphwire.MetadataHandle, 3));
+    try testz.expectEqual(s3.id, @as(glyphwire.MetadataHandle, @enumFromInt(3)));
 
     const s2 = layer.adjacentMetadataSpan(0, 0, .prev).?;
     try testz.expectEqual(s2.above, @as(i64, 1));
-    try testz.expectEqual(s2.id, @as(glyphwire.MetadataHandle, 2));
+    try testz.expectEqual(s2.id, @as(glyphwire.MetadataHandle, @enumFromInt(2)));
 
     const s1 = layer.adjacentMetadataSpan(1, 0, .prev).?;
     try testz.expectEqual(s1.above, @as(i64, 2));
-    try testz.expectEqual(s1.id, @as(glyphwire.MetadataHandle, 1));
+    try testz.expectEqual(s1.id, @as(glyphwire.MetadataHandle, @enumFromInt(1)));
 
     // Oldest retained span -- nothing further back.
     try testz.expectTrue(layer.adjacentMetadataSpan(2, 0, .prev) == null);
@@ -5269,7 +5270,7 @@ pub fn adjacentMetadataSpanWalksIntoRetainedScrollbackTest(io: std.Io, alloc: st
     // And `.next` climbs back down out of history.
     const down = layer.adjacentMetadataSpan(2, 0, .next).?;
     try testz.expectEqual(down.above, @as(i64, 1));
-    try testz.expectEqual(down.id, @as(glyphwire.MetadataHandle, 2));
+    try testz.expectEqual(down.id, @as(glyphwire.MetadataHandle, @enumFromInt(2)));
 }
 
 pub fn adjacentMetadataSpanReturnsNullWhenNothingTaggedTest(io: std.Io, alloc: std.mem.Allocator) !void {
@@ -5865,7 +5866,7 @@ pub fn contextUpdateImageUnknownHandleTest(io: std.Io, alloc: std.mem.Allocator)
     defer ctx.deinit();
 
     const bytes = fakePngBytes(48, 24);
-    try testz.expectError(ctx.updateImage(99, .png, &bytes), glyphwire.ImageResourceError.UnknownImage);
+    try testz.expectError(ctx.updateImage(@enumFromInt(99), .png, &bytes), glyphwire.ImageResourceError.UnknownImage);
 }
 
 /// An image whose loading connection is still alive is pinned, even with

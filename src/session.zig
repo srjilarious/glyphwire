@@ -35,14 +35,14 @@ const theme = core.theme;
 // destroys a context, so a shell's prompt and scrollback are still
 // there, untouched, when a full-screen editor's context is dismissed.
 
-pub const ContextHandle = u32;
+pub const ContextHandle = enum(u32) { _ };
 
 /// Handle of the session's root context -- the one the server starts
 /// with (the shell's). Always exists, is never culled, and can't be
 /// destroyed; it sits permanently at the bottom of the visibility stack
 /// so there is always something to fall back to. Exactly
 /// `root_layer_handle`'s role, one level up.
-pub const root_context_handle: ContextHandle = 0;
+pub const root_context_handle: ContextHandle = @enumFromInt(0);
 
 pub const ContextError = error{
     UnknownContext,
@@ -141,13 +141,13 @@ pub const ProfileSnapshot = struct {
 // `Session` lays out panes), and two short concrete walks read better
 // than one parameterised one.
 
-pub const PaneHandle = u32;
+pub const PaneHandle = enum(u32) { _ };
 
 /// The pane that always exists: the whole window when no pane split tree
 /// has been installed, and a leaf of that tree once one has. Holds the
 /// session's root context, can't be destroyed, and is what focus falls
 /// back to. Exactly `root_context_handle`'s role, one level up.
-pub const root_pane_handle: PaneHandle = 0;
+pub const root_pane_handle: PaneHandle = @enumFromInt(0);
 
 pub const PaneError = error{
     UnknownPane,
@@ -158,7 +158,7 @@ pub const PaneError = error{
     NotWindowManager,
 };
 
-pub const PaneSplitHandle = u32;
+pub const PaneSplitHandle = enum(u32) { _ };
 
 pub const PaneSplitError = error{
     UnknownPaneSplit,
@@ -291,12 +291,12 @@ pub const Session = struct {
     /// hold a `*Context` across a later `createContext` that rehashes
     /// this map.
     contexts: std.AutoHashMap(ContextHandle, *Context),
-    next_context_handle: ContextHandle = 1,
+    next_context_handle: u32 = 1,
 
     /// Every pane, keyed by handle. Key 0 (`root_pane_handle`) always
     /// exists and holds the root context.
     panes: std.AutoHashMap(PaneHandle, Pane),
-    next_pane_handle: PaneHandle = 1,
+    next_pane_handle: u32 = 1,
     /// Pane split containers. Empty, and its `root` null, for every
     /// session that never installs a window layout -- which is all of
     /// them until a multiplexer runs. A null `root` means the root pane
@@ -842,7 +842,7 @@ pub const Session = struct {
         pane: PaneHandle,
         context: ContextHandle,
     } {
-        const handle = self.next_pane_handle;
+        const handle: PaneHandle = @enumFromInt(self.next_pane_handle);
 
         var pane: Pane = .{ .owner = owner, .rect = .{ .cols = self.window_cols, .rows = self.window_rows } };
         errdefer pane.deinit(self.alloc);
@@ -863,7 +863,7 @@ pub const Session = struct {
         // no window-wide scrollbar of its own to draw.
         ctx.window_scrollbar = false;
 
-        const ctx_handle = self.next_context_handle;
+        const ctx_handle: ContextHandle = @enumFromInt(self.next_context_handle);
         try self.contexts.put(ctx_handle, ctx);
         errdefer _ = self.contexts.remove(ctx_handle);
 
@@ -1175,7 +1175,7 @@ pub const Session = struct {
         ctx.origin_row = pane.rect.row;
         ctx.origin_col = pane.rect.col;
 
-        const handle = self.next_context_handle;
+        const handle: ContextHandle = @enumFromInt(self.next_context_handle);
         try self.contexts.put(handle, ctx);
         errdefer _ = self.contexts.remove(handle);
         // `panes` isn't rehashed here, so `pane` is still valid.

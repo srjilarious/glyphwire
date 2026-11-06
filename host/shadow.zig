@@ -30,7 +30,8 @@ pub const Geometry = struct {
     /// The nine-patch description `ninePatchQuads` splits the texture by.
     pub fn style(self: Geometry) glyphwire.NinePatchStyle {
         return .{
-            .image = 0,
+            // A placeholder, as in `parseNinePatch`.
+            .image = @enumFromInt(0),
             .width = self.art(),
             .height = self.art(),
             .insets = .{ .left = self.corner, .top = self.corner, .right = self.corner, .bottom = self.corner },

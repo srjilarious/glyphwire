@@ -88,7 +88,7 @@ pub fn notePaneFromEnviron(environ_map: *const std.process.Environ.Map) void {
     noteWireFormatFromEnviron(environ_map);
     noteContextFromEnviron(environ_map);
     const raw = environ_map.get("GLYPHWIRE_PANE") orelse return;
-    process_pane = std.fmt.parseInt(core.PaneHandle, raw, 10) catch null;
+    process_pane = core.parseHandle(core.PaneHandle, raw);
 }
 
 /// The layer this process was told to draw on (`GLYPHWIRE_LAYER`), or
@@ -106,7 +106,7 @@ var process_surface: ?core.LayerHandle = null;
 /// `notePaneFromEnviron`, so `connectFromEnv` picks it up too.
 pub fn noteSurfaceFromEnviron(environ_map: *const std.process.Environ.Map) void {
     const raw = environ_map.get("GLYPHWIRE_LAYER") orelse return;
-    noteSurface(std.fmt.parseInt(core.LayerHandle, raw, 10) catch null);
+    noteSurface(core.parseHandle(core.LayerHandle, raw));
 }
 
 /// Sets the layer every later `connect` declares as its surface, for a
@@ -146,7 +146,7 @@ var process_token: ?core.AccessToken = null;
 /// too. A token of the wrong length is ignored, as if it were unset.
 pub fn noteContextFromEnviron(environ_map: *const std.process.Environ.Map) void {
     if (environ_map.get("GLYPHWIRE_CTX")) |raw| {
-        process_context = std.fmt.parseInt(core.ContextHandle, raw, 10) catch null;
+        process_context = core.parseHandle(core.ContextHandle, raw);
     }
     if (environ_map.get("GLYPHWIRE_TOKEN")) |raw| {
         if (raw.len == @sizeOf(core.AccessToken)) process_token = raw[0..@sizeOf(core.AccessToken)].*;
@@ -1688,7 +1688,7 @@ pub const Client = struct {
         defer parsed.deinit();
         const r = parsed.value.result;
         if (!r.found) return null;
-        return .{ .above = r.above, .col = r.col, .id = r.id orelse 0 };
+        return .{ .above = r.above, .col = r.col, .id = r.id orelse return null };
     }
 
     /// `get_input_state` -- a request returning which keys/mouse buttons

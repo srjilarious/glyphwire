@@ -88,7 +88,7 @@ pub const Ui = struct {
     /// Whichever split is *currently* the wire root -- the tree's own root
     /// split, the single-pane synthetic wrapper, or a zoom wrapper. Always
     /// valid once `init` returns.
-    current_root_wire: glyphwire.PaneSplitHandle = 0,
+    current_root_wire: glyphwire.PaneSplitHandle = @enumFromInt(0),
     /// The synthetic 1-child split installed while the tree has exactly one
     /// pane (`set_root_pane_split` needs a real split even for one pane).
     /// Null once a second pane exists.
@@ -123,7 +123,7 @@ pub const Ui = struct {
 
     /// gmux's own pane, never in the tree: raised over the window while a
     /// mode is up, lowered otherwise (see the module doc comment).
-    overlay: PaneId = 0,
+    overlay: PaneId = glyphwire.root_pane_handle,
     mode: Mode = .none,
     /// The overlay's size in cells, i.e. the window's, as of the last
     /// raise or `resize`.
@@ -131,10 +131,10 @@ pub const Ui = struct {
     /// Ctrl+B P. Its layers are on the overlay.
     palette: palette.Popup = undefined,
     /// Layout mode's one-line note (`layout_hint`), on the overlay.
-    hint_layer: glyphwire.LayerHandle = 0,
+    hint_layer: glyphwire.LayerHandle = glyphwire.root_layer_handle,
     /// Layout mode's darkening over the pane being dragged (`showShade`),
     /// on the overlay.
-    shade_layer: glyphwire.LayerHandle = 0,
+    shade_layer: glyphwire.LayerHandle = glyphwire.root_layer_handle,
     /// The pane being dragged in layout mode, and where it would land.
     drag: ?struct { pane: PaneId, drop: ?arrange.Drop = null } = null,
 
@@ -166,7 +166,7 @@ pub const Ui = struct {
             .listener = listener,
             .tree = undefined,
             .bounds = std.AutoHashMap(PaneId, Bounds).init(alloc),
-            .focused = 0,
+            .focused = glyphwire.root_pane_handle,
             .scrollback_rows = cfg.scrollback_rows,
             .shell_cmd = config.shellCommand(cfg),
             .start_cwd = currentDir(alloc, io),

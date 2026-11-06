@@ -1898,7 +1898,7 @@ pub const FocusParams = struct { focused: bool };
 /// its root layer (in cells). A client that manages its own context
 /// (zoe) uses the handle to tell "I'm the one on screen now" from "I've
 /// been backgrounded"; `cols`/`rows` save it a follow-up `get_property`.
-pub const ContextParams = struct { context: u32, cols: usize, rows: usize };
+pub const ContextParams = struct { context: core.ContextHandle, cols: usize, rows: usize };
 
 /// `theme` params: the window theme changed (glyphwire-host's theme
 /// switcher). Sent only to connections whose context follows the window

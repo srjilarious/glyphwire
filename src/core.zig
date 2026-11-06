@@ -62,9 +62,38 @@ pub const ColorRef = union(enum) {
     role: theme.Role,
 };
 
+// ─── Handles ────────────────────────────────────────────────────────────
+//
+// Every handle kind is its own `enum(u32) { _ }`, so a rect handle can't
+// be passed where a layer is expected: the compiler says so. The enums
+// have no named members on purpose -- `std.json` and `msgpack.zig` write
+// an unnamed non-exhaustive value as its integer, and a named one as its
+// tag string, so a member would change the wire. Well-known values are
+// `pub const`s instead (`root_layer_handle`). Allocation counters stay
+// plain `u32` (`Context.next_layer_handle`) and convert where a handle is
+// minted.
+
+/// Parses a handle written as its decimal integer (`GLYPHWIRE_PANE=3`),
+/// for any handle kind. Null when `text` isn't one.
+pub fn parseHandle(comptime H: type, text: []const u8) ?H {
+    const n = std.fmt.parseInt(u32, text, 10) catch return null;
+    return @enumFromInt(n);
+}
+
+/// Creation order for handles of one kind: they are minted from a
+/// counter, so the lower integer is the older one. A `std.mem.sort`
+/// comparator.
+pub fn handleLessThan(comptime H: type) fn (void, H, H) bool {
+    return struct {
+        fn lessThan(_: void, a: H, b: H) bool {
+            return @intFromEnum(a) < @intFromEnum(b);
+        }
+    }.lessThan;
+}
+
 /// Server-generated reference to a loaded image, per the Object Model's
 /// Image section.
-pub const ImageHandle = u32;
+pub const ImageHandle = enum(u32) { _ };
 
 /// Server-generated reference to an opaque, client-defined metadata blob
 /// (`create_metadata`) -- a cell tags itself with one via
@@ -72,7 +101,7 @@ pub const ImageHandle = u32;
 /// `metadata_id` param, rather than embedding the blob directly, so many
 /// cells can share one without copying it (a whole filename written by one
 /// `write_text` call, say, all pointing at the same id).
-pub const MetadataHandle = u32;
+pub const MetadataHandle = enum(u32) { _ };
 
 pub const MetadataError = error{UnknownMetadata};
 
@@ -1017,8 +1046,8 @@ pub const PropertyError = error{
 /// `root_layer_handle` (0) always refers to the context's root layer,
 /// which always exists and isn't itself stored in `Context.layers` --
 /// every other handle (1, 2, ...) is a `Context.layers` entry.
-pub const LayerHandle = u32;
-pub const root_layer_handle: LayerHandle = 0;
+pub const LayerHandle = enum(u32) { _ };
+pub const root_layer_handle: LayerHandle = @enumFromInt(0);
 
 /// Identity of one accepted socket connection, assigned by `server.zig` at
 /// `accept` time (a plain incrementing counter -- see `Server.next_conn_id`).

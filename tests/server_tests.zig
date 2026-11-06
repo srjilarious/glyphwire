@@ -466,7 +466,7 @@ pub fn reportLayerScrollOnUnknownLayerIsANoOpTest(io: std.Io, alloc: std.mem.All
     var srv = try helpers.bindServer(io, &ctx, socket_path);
     defer srv.deinit(alloc);
 
-    try srv.reportLayerScroll(alloc, 99, null, 1);
+    try srv.reportLayerScroll(alloc, @enumFromInt(99), null, 1);
 }
 
 /// A notification whose dispatch fails server-side (here: draw_icon
@@ -1330,7 +1330,7 @@ pub fn layoutReachesOnlyItsOwnContextsClientsTest(io: std.Io, alloc: std.mem.All
     for ([_]glyphwire.PaneHandle{ glyphwire.root_pane_handle, other }) |p| {
         const c = srv.session.contextPtr(srv.session.panePtr(p).?.top()).?;
         const layer = try c.createLayer(null, null, 0);
-        try testz.expectEqual(layer, 1);
+        try testz.expectEqual(@intFromEnum(layer), 1);
         const root = try c.createSplit(.row);
         try c.setSplitChildren(root, &.{.{ .target = .{ .layer = layer } }});
         try c.setRootSplit(root);
@@ -1625,7 +1625,7 @@ pub fn clickToFocusTellsTheManagerTest(io: std.Io, alloc: std.mem.Allocator) !vo
 
     const got = try readOneFrame(io, alloc, &m.stream, &dec);
     defer alloc.free(got);
-    const Notification = struct { method: []const u8, params: struct { pane: u32 } };
+    const Notification = struct { method: []const u8, params: struct { pane: glyphwire.PaneHandle } };
     const parsed = try std.json.parseFromSlice(Notification, alloc, got, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     try testz.expectEqualStr("pane_focus", parsed.value.method);
