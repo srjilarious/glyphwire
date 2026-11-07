@@ -5,8 +5,8 @@ Five smaller programs that mostly work from the shell: two that draw
 interactive output into the scrollback, the history picker behind
 Ctrl+R, an image viewer, and the remote end of an ssh session.
 
-This page covers `gw-ls` 0.9.1, `gw-grep` 0.8.1, `gw-hist` 0.8.2,
-`gw-view` 0.8.2 and `gw-agent` 0.9.0.
+This page covers `gw-ls` 0.9.1, `gw-grep` 0.9.0, `gw-hist` 0.9.0,
+`gw-view` 0.9.0 and `gw-agent` 0.9.0.
 
 ## gw-ls
 

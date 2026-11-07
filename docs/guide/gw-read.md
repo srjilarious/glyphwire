@@ -8,7 +8,7 @@ it shows a speech bubble's text you can click word by word for a
 dictionary entry, asks an AI to translate a bubble, and makes Anki cards
 from what you look up.
 
-This page covers `gw-read` 0.9.2.
+This page covers `gw-read` 0.10.0.
 
 ![gw-read with a word highlighted in a speech bubble and its dictionary entry](../images/gw-read.png)
 

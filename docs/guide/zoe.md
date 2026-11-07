@@ -9,7 +9,7 @@ tabs, split editor groups, multi-folder workspaces, tree-sitter
 highlighting, language servers, a drop-down shell, and unsaved changes
 that survive quitting.
 
-This page covers `zoe` 0.27.0. Every key is in the
+This page covers `zoe` 0.28.0. Every key is in the
 [zoe key reference](../zoe-keys.md).
 
 ![zoe with the file tree and two editor groups side by side](../images/zoe-split.png)

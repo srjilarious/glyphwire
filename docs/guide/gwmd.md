@@ -7,7 +7,7 @@ re-rasterized fonts, GFM tables as real tables, images inline, code
 blocks on their own background, and links you can follow. It is meant
 for reading READMEs and notes without leaving the window.
 
-This page covers `gwmd` 0.11.1.
+This page covers `gwmd` 0.12.0.
 
 ![gwmd reading docs/protocol.md](../images/gwmd.png)
 

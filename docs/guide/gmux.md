@@ -10,7 +10,7 @@ host draws the dividers and gives each pane a real terminal of exactly
 its size, so a program in a pane (zoe, gw-view, plain vim) draws exactly
 as it would full-window, images included.
 
-This page covers `gmux` 0.12.0.
+This page covers `gmux` 0.13.0.
 
 ## Starting it
 

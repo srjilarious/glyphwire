@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 # The glyphwire protocol
 
-**Version 0.14.1 — pre-1.0 draft.**
+**Version 0.15.0 — pre-1.0 draft.**
 Copyright (c) 2026 Jeff DeWall. Licensed
 [CC-BY-4.0](../LICENSES/CC-BY-4.0.txt).
 

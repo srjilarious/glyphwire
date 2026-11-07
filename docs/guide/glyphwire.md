@@ -9,7 +9,7 @@ the window rather than to any one program: switching between programs,
 themes, selection and the clipboard, fonts, and the two config files
 that shape it all.
 
-This page covers `glyphwire` 0.19.6.
+This page covers `glyphwire` 0.20.0.
 
 ![glyphwire-demo: truecolor runs, swatches, an icon panel and multi-script text](../images/demo.png)
 

@@ -8,7 +8,7 @@ like `gw-ls` and `gw-grep` draw tables and outlines into its scrollback
 that stay interactive after they exit. It is configured, and scripted, in
 Lua.
 
-This page covers `gw-shell` 0.13.1.
+This page covers `gw-shell` 0.14.0.
 
 ![gw-shell with the example powerline prompt, a gw-ls listing, git output and a failed command](../images/shell.png)
 

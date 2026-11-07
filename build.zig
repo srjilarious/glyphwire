@@ -14,20 +14,20 @@ const suite_version = @import("build.zig.zon").version;
 /// `build_info` module `addBuildInfo` gives it -- `--version` prints it,
 /// and the host answers `get_version` with its own.
 const program_versions = [_]struct { name: []const u8, version: []const u8 }{
-    .{ .name = "glyphwire", .version = "0.19.6" },
-    .{ .name = "glyphwire-server", .version = "0.15.4" },
-    .{ .name = "gw-shell", .version = "0.13.1" },
+    .{ .name = "glyphwire", .version = "0.20.0" },
+    .{ .name = "glyphwire-server", .version = "0.16.0" },
+    .{ .name = "gw-shell", .version = "0.14.0" },
     .{ .name = "gw-agent", .version = "0.9.0" },
     .{ .name = "gw-ls", .version = "0.9.1" },
-    .{ .name = "gw-hist", .version = "0.8.2" },
-    .{ .name = "gw-grep", .version = "0.8.1" },
-    .{ .name = "gw-read", .version = "0.9.2" },
-    .{ .name = "gw-view", .version = "0.8.2" },
-    .{ .name = "gwmd", .version = "0.11.1" },
+    .{ .name = "gw-hist", .version = "0.9.0" },
+    .{ .name = "gw-grep", .version = "0.9.0" },
+    .{ .name = "gw-read", .version = "0.10.0" },
+    .{ .name = "gw-view", .version = "0.9.0" },
+    .{ .name = "gwmd", .version = "0.12.0" },
     .{ .name = "glyphwire-notify", .version = "0.8.1" },
-    .{ .name = "zoe", .version = "0.27.0" },
-    .{ .name = "gmux", .version = "0.12.0" },
-    .{ .name = "salacommander", .version = "0.12.1" },
+    .{ .name = "zoe", .version = "0.28.0" },
+    .{ .name = "gmux", .version = "0.13.0" },
+    .{ .name = "salacommander", .version = "0.13.0" },
 };
 
 pub fn build(b: *std.Build) void {

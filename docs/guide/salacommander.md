@@ -8,7 +8,7 @@ other one. On glyphwire it also has file-type icons, tabs, real
 scrollbars, drag and drop (including out of the window into other
 programs), and root operations behind a password dialog.
 
-This page covers `salacommander` 0.12.1.
+This page covers `salacommander` 0.13.0.
 
 ![salacommander with the repository on the left and docs/ on the right](../images/salacommander.png)
 
