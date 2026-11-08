@@ -699,6 +699,24 @@ pub fn editorInsertCtrlHomeEndGoToFileEndsTest(_: std.Io, alloc: std.mem.Allocat
     try testz.expectEqual(ed.cursor, 3);
 }
 
+/// Bound globally, so normal mode has them too, not only insert.
+pub fn editorNormalCtrlHomeEndGoToFileEndsTest(_: std.Io, alloc: std.mem.Allocator) !void {
+    var ed = try Editor.initFromText(alloc, "one\ntwo\nthree", null);
+    defer ed.deinit();
+    try testz.expectEqual(ed.mode, .normal);
+    _ = try ed.feedKey(.end, .{ .ctrl = true });
+    // On the last line, and still in normal mode.
+    try testz.expectTrue(ed.cursor >= 8);
+    try testz.expectEqual(ed.mode, .normal);
+    _ = try ed.feedKey(.home, .{ .ctrl = true });
+    try testz.expectEqual(ed.cursor, 0);
+    try testz.expectEqual(ed.mode, .normal);
+    // With Shift, a selection from the cursor to the end of the file.
+    _ = try ed.feedKey(.end, .{ .ctrl = true, .shift = true });
+    try testz.expectEqual(ed.mode, .visual);
+    try testz.expectTrue(ed.cursor >= 8);
+}
+
 // ─── Editor: edits ──────────────────────────────────────────────────────
 
 pub fn editorDeleteCharTest(_: std.Io, alloc: std.mem.Allocator) !void {

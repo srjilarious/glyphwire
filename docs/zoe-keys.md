@@ -74,7 +74,7 @@ Ctrl+= font size, Super+F10 theme switcher, Super+F12 job switcher.
 | `pageUp` / `pageDown` | PageUp / PageDown (also Ctrl+U / Ctrl+D in normal and visual) |
 | `subwordLeft` / `subwordRight` | Ctrl+Left / Ctrl+Right (insert) |
 | `wordLeft` / `wordRight` | Alt+Left / Alt+Right |
-| `fileStart` / `fileEnd` | Ctrl+Home / Ctrl+End (insert); in the palette as Go to Start / End of File |
+| `fileStart` / `fileEnd` | Ctrl+Home / Ctrl+End, in every mode; in the palette as Go to Start / End of File |
 | `selectLeft` `selectRight` `selectUp` `selectDown` | Shift+arrows |
 | `selectLineStart` / `selectLineEnd` | Shift+Home / Shift+End |
 | `selectSubwordLeft` / `selectSubwordRight` | Ctrl+Shift+Left / Right |

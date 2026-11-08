@@ -342,6 +342,10 @@ pub const global_defaults = [_]Default{
     .{ .chord = "alt+right", .action = .wordRight },
     .{ .chord = "shift+alt+left", .action = .selectWordLeft },
     .{ .chord = "shift+alt+right", .action = .selectWordRight },
+    // Every mode, like their Shift forms above: vim's normal mode has
+    // `gg` / `G` too, but these are what an editor user reaches for.
+    .{ .chord = "ctrl+home", .action = .fileStart },
+    .{ .chord = "ctrl+end", .action = .fileEnd },
     .{ .chord = "ctrl+shift+home", .action = .selectFileStart },
     .{ .chord = "ctrl+shift+end", .action = .selectFileEnd },
 
@@ -371,8 +375,8 @@ pub const normal_defaults = [_]Default{
 
 pub const visual_defaults = normal_defaults;
 
-/// Typing keys, plus the word and file jumps insert mode takes back from
-/// the global focus chords.
+/// Typing keys, plus the word jumps insert mode takes back from the
+/// global focus chords.
 pub const insert_defaults = [_]Default{
     .{ .chord = "enter", .action = .newline },
     .{ .chord = "tab", .action = .insertTab },
@@ -386,8 +390,6 @@ pub const insert_defaults = [_]Default{
     .{ .chord = "ctrl+delete", .action = .deleteSubwordForward },
     .{ .chord = "ctrl+left", .action = .subwordLeft },
     .{ .chord = "ctrl+right", .action = .subwordRight },
-    .{ .chord = "ctrl+home", .action = .fileStart },
-    .{ .chord = "ctrl+end", .action = .fileEnd },
     .{ .chord = "ctrl+space", .action = .complete },
 };
 
