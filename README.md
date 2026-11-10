@@ -158,7 +158,7 @@ Each program also has its own run step (`zig build zoe`, `zig build gwmd`,
 Every program answers `--version` (or `-V`) with its own version, the
 glyphwire release and the `git describe` it was built from, e.g. `zoe
 0.28.0 (glyphwire 0.38.0, 1b122a9)`. Each program's number is a line in
-`program_versions` at the top of `build.zig`, bumped when that program
+the `.version` of its row in `build.zig`'s `apps` table, bumped when that program
 changes in a release, and the release's own number is `build.zig.zon`'s
 `version`. The numbers quoted in this README, the website and the spec's
 header are copied from those by `scripts/sync-versions.py`, and CI fails

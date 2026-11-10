@@ -6,7 +6,7 @@
 //!
 //! The values come from the `build_info` module build.zig gives each
 //! program (`addBuildInfo`): its executable name, its own version from
-//! `program_versions`, the suite version from build.zig.zon, and `git
+//! its `apps` row, the suite version from build.zig.zon, and `git
 //! describe` of the tree it was built from. They live in each program,
 //! not here, because each program's are different; this module only
 //! formats them, so every program's `--version` reads the same.

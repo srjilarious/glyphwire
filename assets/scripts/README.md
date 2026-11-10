@@ -112,11 +112,10 @@ you'd notice interactively. Know your fleet is uniform, recent hardware?
 `GW_PROVISION_CPU=native provision_remote ...` (or a specific `-Dcpu`
 value) skips the safety margin.
 
-What goes over is whatever `zig build install-local` installs -- gw-agent,
-gw-shell, gw-ls, gw-hist, gw-view, gw-read, gwmd, zoe, gmux and
-salacommander, plus the shared assets and zoe's tree-sitter grammars --
-so adding a program to that step is all it takes to have it provisioned
-too.
+What goes over is whatever `zig build install-local` installs -- every
+program marked `.shipped` in `build.zig`'s `apps` table, plus the shared
+assets and zoe's tree-sitter grammars -- so marking a program shipped is
+all it takes to have it provisioned too.
 
 It then drops each of those programs' configs (`shell.conf.lua`,
 `zoe.conf.lua`, `ls.conf.lua`, `read.conf.lua`, `gmux.conf.lua`,

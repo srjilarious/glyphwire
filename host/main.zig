@@ -20,7 +20,7 @@ pub const panic = host_eng.system.panic;
 pub const std_options = host_eng.system.std_options;
 
 const app_name: [:0]const u8 = "Glyphwire";
-/// This program's own version (build.zig's `program_versions`), as SDL's
+/// This program's own version (its row in build.zig's `apps` table), as SDL's
 /// app metadata wants it.
 const app_version: [:0]const u8 = std.fmt.comptimePrint("{s}", .{build_info.version});
 const app_id: [:0]const u8 = "dev.glyphwire.term";

@@ -5,30 +5,271 @@ const std = @import("std");
 const testz = @import("testz");
 
 /// The suite's version: what a release (tag, tarball) is called. Each
-/// program has its own on top of it, in `program_versions`.
+/// versioned program has its own on top of it, in its `apps` row.
 const suite_version = @import("build.zig.zon").version;
 
-/// Every versioned program's own version, by executable name. Bump one
-/// when that program changes in a release; the others stay put. A program
-/// reads its line (and the suite version and git revision) from the
-/// `build_info` module `addBuildInfo` gives it -- `--version` prints it,
-/// and the host answers `get_version` with its own.
-const program_versions = [_]struct { name: []const u8, version: []const u8 }{
-    .{ .name = "glyphwire", .version = "0.20.0" },
-    .{ .name = "glyphwire-server", .version = "0.16.0" },
-    .{ .name = "gw-shell", .version = "0.14.0" },
-    .{ .name = "gw-agent", .version = "0.9.0" },
-    .{ .name = "gw-ls", .version = "0.9.1" },
-    .{ .name = "gw-hist", .version = "0.9.0" },
-    .{ .name = "gw-grep", .version = "0.9.0" },
-    .{ .name = "gw-read", .version = "0.10.0" },
-    .{ .name = "gw-view", .version = "0.9.0" },
-    .{ .name = "gwmd", .version = "0.12.0" },
-    .{ .name = "glyphwire-notify", .version = "0.8.1" },
-    .{ .name = "zoe", .version = "0.28.0" },
-    .{ .name = "gmux", .version = "0.13.0" },
-    .{ .name = "salacommander", .version = "0.13.0" },
+/// An environment variable a run step sets, to a path under the build
+/// root's `zig-out/` (the run step's cwd is the build root, and it runs
+/// after the default install step, so the default prefix is where the
+/// just-built files are).
+const RunEnv = struct {
+    name: []const u8,
+    path: []const []const u8,
 };
+
+/// Points a program that spawns its siblings at the just-installed ones.
+const bin_dir_env: RunEnv = .{ .name = "GLYPHWIRE_BIN_DIR", .path = &.{ "zig-out", "bin" } };
+/// Points a program at the tree-sitter grammars this build just installed.
+const grammar_dir_env: RunEnv = .{
+    .name = "GLYPHWIRE_ZOE_GRAMMAR_DIR",
+    .path = &.{ "zig-out", "share", "glyphwire", "grammars" },
+};
+
+/// One executable: what `build` compiles, installs, ships and gives a
+/// `zig build <step>` run step.
+const App = struct {
+    /// The executable's name.
+    name: []const u8,
+    /// The program's own version, or null for the internal tools and
+    /// demos that don't print one. A program with a version gets a
+    /// `build_info` module (see `addBuildInfo`); bump it when that program
+    /// changes in a release, the others stay put. scripts/sync-versions.py
+    /// reads these, so keep `.name` and `.version` the first two fields.
+    version: ?[]const u8 = null,
+    /// The root source file.
+    root: []const u8,
+    /// The modules it imports, by the names `build` registers them under
+    /// (and the name each is imported as). An unknown name stops the build.
+    imports: []const []const u8,
+    /// Links the Lua C library (and so libc): a config loader somewhere
+    /// under the program's imports runs a `*.conf.lua` through ziglua.
+    lua: bool = false,
+    /// Links libc without Lua.
+    libc: bool = false,
+    /// Installed by plain `zig build`. False only for on-demand tools.
+    install: bool = true,
+    /// In the release tarball (`zig build package`) and in
+    /// `zig build install-local`.
+    shipped: bool = false,
+    /// The `zig build <step>` that runs it, and that step's description.
+    step: []const u8,
+    description: []const u8,
+    /// Environment the run step sets.
+    env: []const RunEnv = &.{},
+};
+
+/// Every program the build makes: the one place the list lives.
+const apps = [_]App{
+    .{
+        .name = "glyphwire",
+        .version = "0.20.0",
+        .root = "host/main.zig",
+        // `theme.lua` (themeconf) is the window's theme; `listcursor` and
+        // `keybind` come in on their own rather than through `applib`.
+        .imports = &.{ "glyphwire", "host_eng", "themeconf", "luaconf", "listcursor", "keybind" },
+        .shipped = true,
+        .step = "glyphwire",
+        .description = "Run the SDL3-windowed glyphwire host (spawns gw-shell)",
+        .env = &.{
+            .{ .name = "GLYPHWIRE_ASSET_DIR", .path = &.{ "zig-out", "share", "glyphwire", "assets" } },
+            bin_dir_env,
+        },
+    },
+    .{
+        .name = "glyphwire-server",
+        .version = "0.16.0",
+        .root = "server/main.zig",
+        .imports = &.{"glyphwire"},
+        .step = "server",
+        .description = "Run the glyphwire server",
+    },
+    .{
+        .name = "gw-shell",
+        .version = "0.14.0",
+        .root = "shell/main.zig",
+        .imports = &.{ "glyphwire", "shell_support", "applib", "ziglua", "themeconf" },
+        .lua = true,
+        .shipped = true,
+        .step = "gw-shell",
+        .description = "Run the glyphwire shell launcher",
+        .env = &.{bin_dir_env},
+    },
+    // The remote endpoint of `glyphwire --ssh <dest>`. Runs on the far
+    // host over ssh (`--stdio`), and doubles as the `SSH_ASKPASS` helper
+    // (`--askpass`). Shipped alongside the shell tools; the remote box is
+    // expected to have it on PATH.
+    .{
+        .name = "gw-agent",
+        .version = "0.9.0",
+        .root = "agent/main.zig",
+        .imports = &.{"glyphwire"},
+        .shipped = true,
+        .step = "gw-agent",
+        .description = "Run the glyphwire remote-session agent (gw-agent --stdio)",
+    },
+    .{
+        .name = "gw-ls",
+        .version = "0.9.1",
+        .root = "ls/main.zig",
+        .imports = &.{ "glyphwire", "zargunaught", "ls_support", "applib" },
+        .lua = true,
+        .shipped = true,
+        .step = "gw-ls",
+        .description = "Run the glyphwire ls client (directory listing over the wire)",
+    },
+    // `applib.history` and `applib.fuzzy`: the shell's history file and
+    // matcher, without the shell's Lua-embedding support module behind
+    // them.
+    .{
+        .name = "gw-hist",
+        .version = "0.9.0",
+        .root = "hist/main.zig",
+        .imports = &.{ "glyphwire", "applib" },
+        .libc = true,
+        .shipped = true,
+        .step = "gw-hist",
+        .description = "Run the glyphwire Ctrl+R fuzzy history search standalone",
+    },
+    // applib/syntax.zig -> tree_sitter (the vendored C runtime) and the
+    // `dlopen` of each grammar both need libc.
+    .{
+        .name = "gw-grep",
+        .version = "0.9.0",
+        .root = "grep/main.zig",
+        .imports = &.{ "glyphwire", "zargunaught", "applib" },
+        .libc = true,
+        .shipped = true,
+        .step = "gw-grep",
+        .description = "Run the glyphwire ripgrep browser (gw-grep <pattern> [path...])",
+        .env = &.{grammar_dir_env},
+    },
+    .{
+        .name = "gw-read",
+        .version = "0.10.0",
+        .root = "read/main.zig",
+        .imports = &.{ "glyphwire", "themeconf", "zargunaught", "read_support", "applib" },
+        .lua = true,
+        .shipped = true,
+        .step = "gw-read",
+        .description = "Run the glyphwire comic reader (cbz/cbr/cb7 or a directory of images)",
+    },
+    .{
+        .name = "gw-view",
+        .version = "0.9.0",
+        .root = "view/main.zig",
+        .imports = &.{ "glyphwire", "zargunaught", "applib" },
+        .shipped = true,
+        .step = "gw-view",
+        .description = "Run the glyphwire image-viewer client (gw-view <image.png>)",
+    },
+    .{
+        .name = "gwmd",
+        .version = "0.12.0",
+        .root = "md/main.zig",
+        .imports = &.{ "glyphwire", "zargunaught", "md_support", "applib" },
+        .shipped = true,
+        .step = "gwmd",
+        .description = "Run the glyphwire Markdown reader (gwmd <file.md>)",
+    },
+    .{
+        .name = "glyphwire-notify",
+        .version = "0.8.1",
+        .root = "notify/main.zig",
+        .imports = &.{"glyphwire"},
+        .shipped = true,
+        .step = "notify",
+        .description = "Run the glyphwire notification client (glyphwire-notify <message>)",
+    },
+    // zoe_support -> applib/syntax.zig -> tree_sitter, which links the
+    // vendored libtree-sitter C runtime; libc comes with `lua`.
+    .{
+        .name = "zoe",
+        .version = "0.28.0",
+        .root = "zoe/main.zig",
+        .imports = &.{ "glyphwire", "applib", "zoe_support", "zargunaught" },
+        .lua = true,
+        .shipped = true,
+        .step = "zoe",
+        .description = "Run the zoe editor",
+        .env = &.{grammar_dir_env},
+    },
+    .{
+        .name = "gmux",
+        .version = "0.13.0",
+        .root = "gmux/main.zig",
+        .imports = &.{ "glyphwire", "applib", "gmux_support" },
+        .lua = true,
+        .shipped = true,
+        .step = "gmux",
+        .description = "Run gmux, the glyphwire terminal multiplexer",
+    },
+    // The owner-name lookup it shares with gw-ls needs libc, which comes
+    // with `lua` (salacommander.conf.lua).
+    .{
+        .name = "salacommander",
+        .version = "0.13.0",
+        .root = "salacommander/main.zig",
+        .imports = &.{ "glyphwire", "themeconf", "dividerconf", "applib", "zargunaught", "salacommander_support" },
+        .lua = true,
+        .shipped = true,
+        .step = "salacommander",
+        .description = "Run salacommander, the two-pane file manager (salacommander [LEFT [RIGHT]])",
+    },
+    .{
+        .name = "glyphwire-demo",
+        .root = "demo/main.zig",
+        .imports = &.{"glyphwire"},
+        .shipped = true,
+        .step = "demo",
+        .description = "Run the glyphwire styled-text demo client",
+    },
+    .{
+        .name = "glyphwire-table-demo",
+        .root = "table-demo/main.zig",
+        .imports = &.{"glyphwire"},
+        .step = "table_demo",
+        .description = "Run the glyphwire table widget demo client",
+    },
+    .{
+        .name = "glyphwire-client",
+        .root = "client/main.zig",
+        .imports = &.{"glyphwire"},
+        .step = "client",
+        .description = "Run the glyphwire test client",
+    },
+    .{
+        .name = "glyphwire-probe",
+        .root = "debug/main.zig",
+        .imports = &.{ "glyphwire", "applib" },
+        .step = "probe",
+        .description = "Run glyphwire-probe against GLYPHWIRE_SOCK",
+    },
+    // A measuring tool, run on demand and best optimized
+    // (`zig build bench-wire -Doptimize=ReleaseFast`).
+    .{
+        .name = "gw-wire-bench",
+        .root = "bench/wire.zig",
+        .imports = &.{"glyphwire"},
+        .install = false,
+        .step = "bench-wire",
+        .description = "Benchmark the JSON and MessagePack wire encodings",
+    },
+};
+
+/// A module `build` makes, under the name an `App` row imports it by.
+const NamedModule = struct {
+    name: []const u8,
+    module: *std.Build.Module,
+};
+
+/// The module registered as `name`. A row naming a module `build` never
+/// registered is a mistake in this file, so it stops the build.
+fn moduleNamed(modules: []const NamedModule, name: []const u8) *std.Build.Module {
+    for (modules) |m| {
+        if (std.mem.eql(u8, m.name, name)) return m.module;
+    }
+    std.debug.panic("build.zig: no module named \"{s}\" for an apps row", .{name});
+}
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -370,480 +611,83 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("tests", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
-    const server_exe = b.addExecutable(.{
-        .name = "glyphwire-server",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("server/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    server_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    b.installArtifact(server_exe);
+    const modules = [_]NamedModule{
+        .{ .name = "glyphwire", .module = glyphwire_mod },
+        .{ .name = "applib", .module = applib_mod },
+        .{ .name = "listcursor", .module = listcursor_mod },
+        .{ .name = "keybind", .module = keybind_mod },
+        .{ .name = "themeconf", .module = themeconf_mod },
+        .{ .name = "luaconf", .module = luaconf_mod },
+        .{ .name = "dividerconf", .module = dividerconf_mod },
+        .{ .name = "ziglua", .module = ziglua_mod },
+        .{ .name = "zargunaught", .module = zargunaught_mod },
+        .{ .name = "host_eng", .module = host_eng_mod },
+        .{ .name = "shell_support", .module = shell_support_mod },
+        .{ .name = "ls_support", .module = ls_support_mod },
+        .{ .name = "grep_support", .module = grep_support_mod },
+        .{ .name = "host_support", .module = host_support_mod },
+        .{ .name = "zoe_support", .module = zoe_support_mod },
+        .{ .name = "gmux_support", .module = gmux_support_mod },
+        .{ .name = "read_support", .module = read_support_mod },
+        .{ .name = "md_support", .module = md_support_mod },
+        .{ .name = "salacommander_support", .module = salacommander_support_mod },
+    };
 
-    const run_server = b.addRunArtifact(server_exe);
-    run_server.step.dependOn(b.getInstallStep());
-    run_server.addPassthruArgs();
-
-    const server_step = b.step("server", "Run the glyphwire server");
-    server_step.dependOn(&run_server.step);
-
-    const shell_exe = b.addExecutable(.{
-        .name = "gw-shell",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("shell/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    shell_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    shell_exe.root_module.addImport("shell_support", shell_support_mod);
-    shell_exe.root_module.addImport("applib", applib_mod);
-    shell_exe.root_module.addImport("ziglua", ziglua_mod);
-    shell_exe.root_module.addImport("themeconf", themeconf_mod);
-    shell_exe.root_module.linkLibrary(lua_lib);
-    shell_exe.root_module.link_libc = true;
-    b.installArtifact(shell_exe);
-
-    const run_shell = b.addRunArtifact(shell_exe);
-    run_shell.step.dependOn(b.getInstallStep());
-    // Zig 0.17 removed b.getInstallPath; the run step's cwd is the build root
-    // and it depends on the install step, so the default prefix's bin dir works.
-    run_shell.setEnvironmentVariable("GLYPHWIRE_BIN_DIR", b.pathJoin(&.{ "zig-out", "bin" }));
-    run_shell.addPassthruArgs();
-
-    const shell_step = b.step("gw-shell", "Run the glyphwire shell launcher");
-    shell_step.dependOn(&run_shell.step);
-
-    const client_exe = b.addExecutable(.{
-        .name = "glyphwire-client",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("client/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    client_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    b.installArtifact(client_exe);
-
-    const run_client = b.addRunArtifact(client_exe);
-    run_client.step.dependOn(b.getInstallStep());
-    run_client.addPassthruArgs();
-
-    const client_step = b.step("client", "Run the glyphwire test client");
-    client_step.dependOn(&run_client.step);
-
-    const probe_exe = b.addExecutable(.{
-        .name = "glyphwire-probe",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("debug/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    probe_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    probe_exe.root_module.addImport("applib", applib_mod);
-    b.installArtifact(probe_exe);
-
-    const run_probe = b.addRunArtifact(probe_exe);
-    run_probe.step.dependOn(b.getInstallStep());
-    run_probe.addPassthruArgs();
-
-    const probe_step = b.step("probe", "Run glyphwire-probe against GLYPHWIRE_SOCK");
-    probe_step.dependOn(&run_probe.step);
-
-    // Not installed: a measuring tool, run on demand (optimized, e.g.
-    // `zig build bench-wire -Doptimize=ReleaseFast`).
-    const wire_bench_exe = b.addExecutable(.{
-        .name = "gw-wire-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/wire.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    wire_bench_exe.root_module.addImport("glyphwire", glyphwire_mod);
-
-    const run_wire_bench = b.addRunArtifact(wire_bench_exe);
-    run_wire_bench.addPassthruArgs();
-
-    const wire_bench_step = b.step("bench-wire", "Benchmark the JSON and MessagePack wire encodings");
-    wire_bench_step.dependOn(&run_wire_bench.step);
-
-    const demo_exe = b.addExecutable(.{
-        .name = "glyphwire-demo",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("demo/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    demo_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    b.installArtifact(demo_exe);
-
-    const run_demo = b.addRunArtifact(demo_exe);
-    run_demo.step.dependOn(b.getInstallStep());
-    run_demo.addPassthruArgs();
-
-    const demo_step = b.step("demo", "Run the glyphwire styled-text demo client");
-    demo_step.dependOn(&run_demo.step);
-
-    const table_demo_exe = b.addExecutable(.{
-        .name = "glyphwire-table-demo",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("table-demo/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    table_demo_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    b.installArtifact(table_demo_exe);
-
-    const run_table_demo = b.addRunArtifact(table_demo_exe);
-    run_table_demo.step.dependOn(b.getInstallStep());
-    run_table_demo.addPassthruArgs();
-
-    const table_demo_step = b.step("table_demo", "Run the glyphwire table widget demo client");
-    table_demo_step.dependOn(&run_table_demo.step);
-
-    const host_exe = b.addExecutable(.{
-        .name = "glyphwire",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("host/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    host_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    host_exe.root_module.addImport("host_eng", host_eng_mod);
-    // `theme.lua`: the window's theme.
-    host_exe.root_module.addImport("themeconf", themeconf_mod);
-    host_exe.root_module.addImport("luaconf", luaconf_mod);
-    host_exe.root_module.addImport("listcursor", listcursor_mod);
-    host_exe.root_module.addImport("keybind", keybind_mod);
-    b.installArtifact(host_exe);
-
-    const run_host = b.addRunArtifact(host_exe);
-    run_host.step.dependOn(b.getInstallStep());
-    run_host.setEnvironmentVariable("GLYPHWIRE_ASSET_DIR", b.pathJoin(&.{ "zig-out", "share", "glyphwire", "assets" }));
-    run_host.setEnvironmentVariable("GLYPHWIRE_BIN_DIR", b.pathJoin(&.{ "zig-out", "bin" }));
-    run_host.addPassthruArgs();
-
-    const host_step = b.step("glyphwire", "Run the SDL3-windowed glyphwire host (spawns gw-shell)");
-    host_step.dependOn(&run_host.step);
-
-    const ls_exe = b.addExecutable(.{
-        .name = "gw-ls",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("ls/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    ls_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    ls_exe.root_module.addImport("zargunaught", zargunaught_mod);
-    ls_exe.root_module.addImport("ls_support", ls_support_mod);
-    ls_exe.root_module.addImport("applib", applib_mod);
-    // ls_support -> ls/config.zig -> ziglua: the Lua C library has to be
-    // linked onto the final binary, same as shell_exe does for shell.conf.lua.
-    ls_exe.root_module.linkLibrary(lua_lib);
-    ls_exe.root_module.link_libc = true;
-    b.installArtifact(ls_exe);
-
-    const run_ls = b.addRunArtifact(ls_exe);
-    run_ls.step.dependOn(b.getInstallStep());
-    run_ls.addPassthruArgs();
-
-    const ls_step = b.step("gw-ls", "Run the glyphwire ls client (directory listing over the wire)");
-    ls_step.dependOn(&run_ls.step);
-
-    const hist_exe = b.addExecutable(.{
-        .name = "gw-hist",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("hist/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    hist_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    // `applib.history` and `applib.fuzzy` -- the shell's history file and
-    // matcher, without the shell's Lua-embedding support module behind
-    // them.
-    hist_exe.root_module.addImport("applib", applib_mod);
-    hist_exe.root_module.link_libc = true;
-    b.installArtifact(hist_exe);
-
-    const run_hist = b.addRunArtifact(hist_exe);
-    run_hist.step.dependOn(b.getInstallStep());
-    run_hist.addPassthruArgs();
-
-    const hist_step = b.step("gw-hist", "Run the glyphwire Ctrl+R fuzzy history search standalone");
-    hist_step.dependOn(&run_hist.step);
-
-    const zoe_exe = b.addExecutable(.{
-        .name = "zoe",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("zoe/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    zoe_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    zoe_exe.root_module.addImport("applib", applib_mod);
-    zoe_exe.root_module.addImport("zoe_support", zoe_support_mod);
-    zoe_exe.root_module.addImport("zargunaught", zargunaught_mod);
-    // zoe_support -> langconf.zig -> ziglua, and -> applib/syntax.zig ->
-    // tree_sitter (which links the vendored libtree-sitter C runtime).
-    // Both need libc and the Lua C lib on the final binary, same as
-    // gw-shell / gw-ls do for their own configs.
-    zoe_exe.root_module.linkLibrary(lua_lib);
-    zoe_exe.root_module.link_libc = true;
-    b.installArtifact(zoe_exe);
-
-    const run_zoe = b.addRunArtifact(zoe_exe);
-    run_zoe.step.dependOn(b.getInstallStep());
-    // Point zoe at the grammars this build just installed, the way
-    // `run_host` points the host at the installed asset dir.
-    run_zoe.setEnvironmentVariable(
-        "GLYPHWIRE_ZOE_GRAMMAR_DIR",
-        b.pathJoin(&.{ "zig-out", "share", "glyphwire", "grammars" }),
-    );
-    run_zoe.addPassthruArgs();
-
-    const zoe_step = b.step("zoe", "Run the zoe editor");
-    zoe_step.dependOn(&run_zoe.step);
-
-    const gmux_exe = b.addExecutable(.{
-        .name = "gmux",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("gmux/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    gmux_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    gmux_exe.root_module.addImport("applib", applib_mod);
-    gmux_exe.root_module.addImport("gmux_support", gmux_support_mod);
-    // gmux_support -> config.zig -> ziglua (gmux.conf.lua), so the final
-    // binary needs the Lua C lib and libc, same as gw-shell / gw-ls / zoe.
-    gmux_exe.root_module.linkLibrary(lua_lib);
-    gmux_exe.root_module.link_libc = true;
-    b.installArtifact(gmux_exe);
-
-    const run_gmux = b.addRunArtifact(gmux_exe);
-    run_gmux.step.dependOn(b.getInstallStep());
-    run_gmux.addPassthruArgs();
-
-    const gmux_step = b.step("gmux", "Run gmux, the glyphwire terminal multiplexer");
-    gmux_step.dependOn(&run_gmux.step);
-
-    const read_exe = b.addExecutable(.{
-        .name = "gw-read",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("read/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    read_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    read_exe.root_module.addImport("themeconf", themeconf_mod);
-    read_exe.root_module.addImport("zargunaught", zargunaught_mod);
-    read_exe.root_module.addImport("read_support", read_support_mod);
-    read_exe.root_module.addImport("applib", applib_mod);
-    // read_support -> config.zig -> ziglua (read.conf.lua), so the final
-    // binary needs the Lua C lib and libc, same as gw-shell / gw-ls / zoe
-    // / gmux.
-    read_exe.root_module.linkLibrary(lua_lib);
-    read_exe.root_module.link_libc = true;
-    b.installArtifact(read_exe);
-
-    const run_read = b.addRunArtifact(read_exe);
-    run_read.step.dependOn(b.getInstallStep());
-    run_read.addPassthruArgs();
-
-    const read_step = b.step("gw-read", "Run the glyphwire comic reader (cbz/cbr/cb7 or a directory of images)");
-    read_step.dependOn(&run_read.step);
-
-    const md_exe = b.addExecutable(.{
-        .name = "gwmd",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("md/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    md_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    md_exe.root_module.addImport("zargunaught", zargunaught_mod);
-    md_exe.root_module.addImport("md_support", md_support_mod);
-    md_exe.root_module.addImport("applib", applib_mod);
-    b.installArtifact(md_exe);
-
-    const run_md = b.addRunArtifact(md_exe);
-    run_md.step.dependOn(b.getInstallStep());
-    run_md.addPassthruArgs();
-
-    const md_step = b.step("gwmd", "Run the glyphwire Markdown reader (gwmd <file.md>)");
-    md_step.dependOn(&run_md.step);
-
-    const grep_exe = b.addExecutable(.{
-        .name = "gw-grep",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("grep/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    grep_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    grep_exe.root_module.addImport("zargunaught", zargunaught_mod);
-    grep_exe.root_module.addImport("applib", applib_mod);
-    // applib/syntax.zig -> tree_sitter (the vendored C runtime) and the
-    // `dlopen` of each grammar both need libc.
-    grep_exe.root_module.link_libc = true;
-    b.installArtifact(grep_exe);
-
-    const run_grep = b.addRunArtifact(grep_exe);
-    run_grep.step.dependOn(b.getInstallStep());
-    // Same just-installed grammars `zig build zoe` points zoe at.
-    run_grep.setEnvironmentVariable(
-        "GLYPHWIRE_ZOE_GRAMMAR_DIR",
-        b.pathJoin(&.{ "zig-out", "share", "glyphwire", "grammars" }),
-    );
-    run_grep.addPassthruArgs();
-
-    const grep_step = b.step("gw-grep", "Run the glyphwire ripgrep browser (gw-grep <pattern> [path...])");
-    grep_step.dependOn(&run_grep.step);
-
-    const sala_exe = b.addExecutable(.{
-        .name = "salacommander",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("salacommander/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    sala_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    sala_exe.root_module.addImport("themeconf", themeconf_mod);
-    sala_exe.root_module.addImport("dividerconf", dividerconf_mod);
-    sala_exe.root_module.addImport("applib", applib_mod);
-    sala_exe.root_module.addImport("zargunaught", zargunaught_mod);
-    sala_exe.root_module.addImport("salacommander_support", salacommander_support_mod);
-    // salacommander.conf.lua needs the Lua C lib, and the owner-name lookup
-    // it shares with gw-ls needs libc.
-    sala_exe.root_module.linkLibrary(lua_lib);
-    sala_exe.root_module.link_libc = true;
-    b.installArtifact(sala_exe);
-
-    const run_sala = b.addRunArtifact(sala_exe);
-    run_sala.step.dependOn(b.getInstallStep());
-    run_sala.addPassthruArgs();
-
-    const sala_step = b.step("salacommander", "Run salacommander, the two-pane file manager (salacommander [LEFT [RIGHT]])");
-    sala_step.dependOn(&run_sala.step);
-
-    const view_exe = b.addExecutable(.{
-        .name = "gw-view",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("view/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    view_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    view_exe.root_module.addImport("zargunaught", zargunaught_mod);
-    view_exe.root_module.addImport("applib", applib_mod);
-    b.installArtifact(view_exe);
-
-    const run_view = b.addRunArtifact(view_exe);
-    run_view.step.dependOn(b.getInstallStep());
-    run_view.addPassthruArgs();
-
-    const view_step = b.step("gw-view", "Run the glyphwire image-viewer client (gw-view <image.png>)");
-    view_step.dependOn(&run_view.step);
-
-    const notify_exe = b.addExecutable(.{
-        .name = "glyphwire-notify",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("notify/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    notify_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    b.installArtifact(notify_exe);
-
-    const run_notify = b.addRunArtifact(notify_exe);
-    run_notify.step.dependOn(b.getInstallStep());
-    run_notify.addPassthruArgs();
-
-    const notify_step = b.step("notify", "Run the glyphwire notification client (glyphwire-notify <message>)");
-    notify_step.dependOn(&run_notify.step);
-
-    // `gw-agent` -- the remote endpoint of `glyphwire --ssh <dest>`. Runs
-    // on the far host over ssh (`--stdio`), and doubles as the
-    // `SSH_ASKPASS` helper (`--askpass`). Installed alongside the shell
-    // tools; the remote box is expected to have it on PATH.
-    const agent_exe = b.addExecutable(.{
-        .name = "gw-agent",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("agent/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    agent_exe.root_module.addImport("glyphwire", glyphwire_mod);
-    b.installArtifact(agent_exe);
-
-    const run_agent = b.addRunArtifact(agent_exe);
-    run_agent.step.dependOn(b.getInstallStep());
-    run_agent.addPassthruArgs();
-
-    const agent_step = b.step("gw-agent", "Run the glyphwire remote-session agent (gw-agent --stdio)");
-    agent_step.dependOn(&run_agent.step);
-
-    // `zig build package` installs just the user-facing programs and
-    // bundled assets that ship in the Linux release tarball -- glyphwire,
-    // gw-shell, notify, demo, gw-view, gw-read, gwmd, gw-ls, zoe, gmux, salacommander, the bundled
-    // tree-sitter grammars, and assets -- without also building the test
-    // runner or the internal server/client tools that plain `zig build`
-    // pulls in. The CI packaging job
-    // (.github/workflows/linux-package.yml) drives this step.
+    // `zig build package` installs just the shipped programs and bundled
+    // assets that go in the Linux release tarball, without also building
+    // the test runner or the internal tools plain `zig build` pulls in.
+    // The CI packaging job (.github/workflows/linux-package.yml) drives
+    // it. `install-local` installs the same set under any prefix (what
+    // provision_remote and the remote-test image put on a box).
     const package_step = b.step("package", "Install the shipped programs and assets into zig-out");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, notify_exe, demo_exe, view_exe, read_exe, md_exe, ls_exe, hist_exe, zoe_exe, agent_exe, gmux_exe, sala_exe, grep_exe }) |exe| {
-        package_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
-    }
-    package_step.dependOn(&installed_assets_step.step);
-    package_step.dependOn(&installed_desktop_entry.step);
-    package_step.dependOn(&installed_desktop_icon_svg.step);
-    package_step.dependOn(&installed_desktop_icon_png.step);
-    // zoe dlopens its syntax grammars from share/glyphwire/grammars at
-    // runtime, so the packaged tree has to carry them alongside the binary.
-    package_step.dependOn(grammars_step);
+    const install_local_step = b.step("install-local", "Install the shipped programs, grammars and assets under the selected prefix");
 
-    const install_local_step = b.step("install-local", "Install glyphwire, gw-shell, gw-agent, gw-view, gw-read, gwmd, gw-ls, gw-hist, gw-grep, zoe, gmux, salacommander, grammars, and assets under the selected prefix");
-    for ([_]*std.Build.Step.Compile{ host_exe, shell_exe, agent_exe, view_exe, read_exe, md_exe, ls_exe, hist_exe, zoe_exe, gmux_exe, sala_exe, grep_exe }) |exe| {
-        install_local_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
-    }
-    install_local_step.dependOn(&installed_assets_step.step);
-    install_local_step.dependOn(&installed_desktop_entry.step);
-    install_local_step.dependOn(&installed_desktop_icon_svg.step);
-    install_local_step.dependOn(&installed_desktop_icon_png.step);
-    install_local_step.dependOn(grammars_step);
-
-    // `build_info` for every program in `program_versions`.
     const git = gitDescribe(b);
-    for ([_]*std.Build.Step.Compile{ host_exe, server_exe, shell_exe, agent_exe, ls_exe, hist_exe, grep_exe, read_exe, view_exe, md_exe, notify_exe, zoe_exe, gmux_exe, sala_exe }) |exe| {
-        addBuildInfo(b, exe, git);
+    for (apps) |app| {
+        const exe = b.addExecutable(.{
+            .name = app.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(app.root),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        for (app.imports) |name| exe.root_module.addImport(name, moduleNamed(&modules, name));
+        if (app.lua) exe.root_module.linkLibrary(lua_lib);
+        if (app.lua or app.libc) exe.root_module.link_libc = true;
+        if (app.version) |version| addBuildInfo(b, exe, version, git);
+
+        const run = b.addRunArtifact(exe);
+        if (app.install) {
+            b.installArtifact(exe);
+            run.step.dependOn(b.getInstallStep());
+        }
+        for (app.env) |env| run.setEnvironmentVariable(env.name, b.pathJoin(env.path));
+        run.addPassthruArgs();
+        b.step(app.step, app.description).dependOn(&run.step);
+
+        if (app.shipped) {
+            package_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+            install_local_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        }
+    }
+
+    // Neither step pulls in the default install step, so each needs the
+    // assets, desktop entry and icons, and zoe's grammars (it dlopens them
+    // from share/glyphwire/grammars at runtime) on its own.
+    for ([_]*std.Build.Step{ package_step, install_local_step }) |step| {
+        step.dependOn(&installed_assets_step.step);
+        step.dependOn(&installed_desktop_entry.step);
+        step.dependOn(&installed_desktop_icon_svg.step);
+        step.dependOn(&installed_desktop_icon_png.step);
+        step.dependOn(grammars_step);
     }
 }
 
 /// Gives `exe` a `build_info` module: `program` (its executable name),
-/// `version` (its line in `program_versions`), `suite_version` and `git`.
-/// `glyphwire.version` formats it. A program missing from the table
-/// is a mistake in this file, so it stops the build.
-fn addBuildInfo(b: *std.Build, exe: *std.Build.Step.Compile, git: []const u8) void {
-    const version = for (program_versions) |p| {
-        if (std.mem.eql(u8, p.name, exe.name)) break p.version;
-    } else std.debug.panic("{s} has no entry in program_versions", .{exe.name});
+/// `version` (from its `apps` row), `suite_version` and `git`.
+/// `glyphwire.version` formats it.
+fn addBuildInfo(b: *std.Build, exe: *std.Build.Step.Compile, version: []const u8, git: []const u8) void {
     const opts = b.addOptions();
     opts.addOption([]const u8, "program", exe.name);
     opts.addOption([]const u8, "version", version);

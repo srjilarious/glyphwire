@@ -5,7 +5,7 @@
 
 The numbers live in exactly one place each:
 
-  * every program's version: `program_versions` at the top of build.zig
+  * every program's version: the `.version` of each row in build.zig's `apps` table
   * the suite (release) version: `.version` in build.zig.zon
   * the protocol version: `protocol_version` in src/protocol.zig
 
@@ -37,12 +37,13 @@ def read(path):
 
 def program_versions():
     src = read("build.zig")
-    m = re.search(r"const program_versions = .*?\n\};", src, re.S)
+    m = re.search(r"const apps = .*?\n\};", src, re.S)
     if not m:
-        sys.exit("sync-versions: no program_versions table in build.zig")
-    rows = re.findall(r'\.name = "([^"]+)", \.version = "([^"]+)"', m.group(0))
+        sys.exit("sync-versions: no apps table in build.zig")
+    # Rows without a `.version` (the internal tools and demos) don't match.
+    rows = re.findall(r'\.name = "([^"]+)",\s*\.version = "([^"]+)"', m.group(0))
     if not rows:
-        sys.exit("sync-versions: program_versions has no rows")
+        sys.exit("sync-versions: build.zig's apps table has no versioned rows")
     return dict(rows)
 
 
@@ -77,7 +78,7 @@ def sync_readme(text, suite, protocol, programs):
         name = m.group(2)
         if name not in programs:
             errors.append(f"{p}: Applications row `{name}` is not in "
-                          "build.zig's program_versions")
+                          "build.zig's apps table")
             return m.group(0)
         return f"{m.group(1)}{programs[name]}{m.group(3)}"
 
@@ -100,7 +101,7 @@ def sync_guide(text, path, programs):
     def program(m):
         name = m.group(2)
         if name not in programs:
-            errors.append(f"{path}: `{name}` is not in build.zig's program_versions")
+            errors.append(f"{path}: `{name}` is not in build.zig's apps table")
             return m.group(0)
         return f"{m.group(1)}{programs[name]}"
 
