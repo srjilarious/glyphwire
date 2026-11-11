@@ -46,7 +46,7 @@ const sign_other = ui.sign_other;
 
 /// One batch for the whole frame, so the panes go from the previous
 /// state to this one in a single rendered frame rather than a band at
-/// a time (decisions.md's Batch section). Each pane is redrawn only
+/// a time. Each pane is redrawn only
 /// when its own dirty flag is set: a keystroke on the `:` line marks
 /// just the status row, leaving the buffer's syntax pass and the
 /// tree's per-entry icons untouched.

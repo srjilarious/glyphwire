@@ -370,8 +370,7 @@ pub const DeferredIcon = struct {
 /// not a float pixel multiplier. A scaled glyph is rasterized at its own
 /// true size in a dedicated atlas (`host_eng.renderer.FontAtlas.cloneAtSize`)
 /// rather than stretching the normal-size glyph's texture region, which
-/// read as blurry and lost hinting -- see decisions.md's Text scale
-/// section.
+/// read as blurry and lost hinting.
 pub const DeferredScaledGlyph = struct {
     grapheme_bytes: [glyphwire.grapheme_inline_len]u8,
     grapheme_len: u8,
@@ -394,8 +393,8 @@ pub const Renderer = struct {
     app: *App,
 
     /// Uploaded lazily, on first encountering a cell whose background
-    /// references a given image handle -- see decisions.md's Image
-    /// section. The headless core never decodes pixels; it only stores the
+    /// references a given image handle, so an image nothing draws never
+    /// costs a texture. The headless core never decodes pixels; it only stores the
     /// raw bytes `load_image` received (`Context.images`) plus IHDR-parsed
     /// dimensions.
     ///
@@ -431,7 +430,7 @@ pub const Renderer = struct {
     deferred_scaled_text: std.ArrayList(DeferredScaledGlyph) = .empty,
 
     /// Crisp, dedicated atlases for `write_text`'s `scale` -- see
-    /// `atlasForScale` and decisions.md's Text scale section. Lazily
+    /// `atlasForScale`. Lazily
     /// (re)built by cloning the default atlas (`FontAtlas.cloneAtSize`)
     /// the first time a session actually uses `.x1_5`/`.x2`/`.x3`, so a session
     /// that never does never allocates any. Null again whenever the
@@ -1553,8 +1552,8 @@ pub const Renderer = struct {
     /// One cell's portion of an image background -- the sub-rect of the
     /// source texture starting at `img.offset_x/y`, sized to whatever fits
     /// both the cell and the image's remaining pixels, never stretched
-    /// beyond the aspect-preserving `img.scale` the draw asked for
-    /// (decisions.md's Image section). Emitted into that image handle's
+    /// beyond the aspect-preserving `img.scale` the draw asked for.
+    /// Emitted into that image handle's
     /// own `images` batch.
     ///
     /// At `img.scale == 1` the cell samples one cell's worth of source
@@ -1682,8 +1681,7 @@ pub const Renderer = struct {
     /// 1:1 against whatever `atlas` was rasterized at -- a `text_scale`d
     /// cell draws from a bigger dedicated atlas (`atlasForScale`) rather
     /// than stretching this one's glyphs, so there is no separate scale
-    /// factor here. See `TextScale`'s doc comment and decisions.md's Text
-    /// scale section.
+    /// factor here. See `TextScale`'s doc comment.
     fn emitGlyphs(batch: *GlyphBatch, atlas: *host_eng.renderer.FontAtlas, text: []const u8, px: i32, py: i32, color: host_eng.Color) void {
         const pos_y = py + atlas.ascent;
         var curr_x = px;
@@ -1815,9 +1813,8 @@ pub const Renderer = struct {
 
     /// The atlas to draw a `scale`d glyph from: `default` itself for
     /// `.x1`, or a lazily-built crisp clone at that pixel size otherwise
-    /// (`host_eng.renderer.FontAtlas.cloneAtSize`) -- see decisions.md's
-    /// Text scale section for why this beats stretching `default`'s own
-    /// glyphs. Null only if the clone itself fails (a bitmap-font default
+    /// (`host_eng.renderer.FontAtlas.cloneAtSize`), which stays crisp and
+    /// hinted where stretching `default`'s own glyphs blurs. Null only if the clone itself fails (a bitmap-font default
     /// atlas rejects `cloneAtSize` the same way it rejects `setFontSize`)
     /// -- callers skip the glyph entirely rather than falling back to a
     /// blurry stretch, the same way a missing default atlas already

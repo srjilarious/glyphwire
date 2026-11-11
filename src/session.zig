@@ -30,7 +30,7 @@ const theme = core.theme;
 // The server holds exactly one `Session`. It owns every `Context` and
 // tracks which one is visible -- generalising the classic terminal
 // alt-screen (`smcup`/`rmcup`) from a single alternate buffer to N
-// independent, persistent contexts (decisions.md's Object Model). Only
+// independent, persistent contexts. Only
 // the top of the visibility stack is rendered; switching away never
 // destroys a context, so a shell's prompt and scrollback are still
 // there, untouched, when a full-screen editor's context is dismissed.

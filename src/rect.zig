@@ -9,9 +9,9 @@
 //! session's fixed cell pixel metrics but not otherwise tied to any cell
 //! boundary. Exists so a client drawing an overlay (gw-read's mokuro
 //! bubble highlight boxes) doesn't have to approximate a box out of
-//! character cells -- see decisions.md's Rect section for the rejected
-//! alternatives (box-drawing characters, a cell-anchored span like
-//! `ImageBg`). A rect is a component of the layer it's drawn on
+//! character cells. Box-drawing characters were rejected because they
+//! can only follow cell edges, and a cell-anchored span like `ImageBg`
+//! because a bubble's box doesn't line up with cells either. A rect is a component of the layer it's drawn on
 //! (`Layer.rects`), exactly like a `Table`, and is composited by
 //! glyphwire-host as its own quad batch drawn on top of everything else
 //! the layer paints (see `host/render.zig`'s `rects` batch).

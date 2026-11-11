@@ -6,8 +6,7 @@ const glyphwire = @import("glyphwire");
 
 /// Styled-text demo client: connects over GLYPHWIRE_SOCK and writes several
 /// runs with different fg/bg colors, to exercise (and visually prove) the
-/// color-rendering path end to end -- see glyphwire/docs/slice_plan.md,
-/// Milestone 8. Falls back to a plain stdout message when no glyphwire
+/// color-rendering path end to end. Falls back to a plain stdout message when no glyphwire
 /// session is available, same as client/main.zig. Built on src/client.zig
 /// rather than hand-rolled JSON, both to dogfood that library and because
 /// bufPrint-ing JSON by hand doesn't escape special characters in text.

@@ -8,8 +8,7 @@ const glyphwire = @import("glyphwire");
 /// tables side by side -- full border, ruled header with no border, and
 /// fully bare -- to visually prove `Client.createTable`'s style options.
 /// Unlike the original client-composited prototype this replaced, each
-/// table here is real server-side state (`core.Table`, decisions.md's
-/// Table section): once `tableSetRows` sends the rows, the table stays
+/// table here is real server-side state (`core.Table`): once `tableSetRows` sends the rows, the table stays
 /// visible (and could be re-sorted via `tableSetSort`) even after this
 /// process exits -- there's nothing left for it to keep alive. Falls
 /// back to a plain stdout message when no glyphwire session is

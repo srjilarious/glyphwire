@@ -18,8 +18,8 @@
 //! **Every open buffer is a `Slot`**, and the tab strip lists them. A
 //! slot holds its own editor, scroll position, redraw bookkeeping and
 //! parse tree, so switching tabs is a pointer swap (`setActive`) and one
-//! repaint -- nothing is re-read or re-parsed. See decisions.md's "zoe
-//! multiple buffers"; the strip's own geometry is `zoe/tabs.zig`.
+//! repaint -- nothing is re-read or re-parsed. The strip's own geometry
+//! is `zoe/tabs.zig`.
 //!
 //! **The two panes scroll differently, on purpose.** The tree is a layer
 //! whose *content* is the whole listing -- every entry, at its full width

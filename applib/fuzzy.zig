@@ -4,9 +4,10 @@
 //! Minimal subsequence fuzzy matching for `gw-hist`'s Ctrl+R history
 //! search: `query`'s characters just have to appear in `text` in order,
 //! the same rule fzf/McFly use in their simplest mode. Deliberately no
-//! contextual scoring (directory, frequency, recency-weighted decay) --
-//! see `docs/decisions.md`'s "Shell result pipe / Ctrl+R history search"
-//! entry for why that was left out of this round.
+//! contextual scoring (directory, frequency, recency-weighted decay):
+//! callers feed history newest-first and stable-sort ties, so recency is
+//! already the tiebreak, and `zj` set the same keep-it-simple precedent
+//! rather than growing a second, bigger ranking model.
 
 const std = @import("std");
 

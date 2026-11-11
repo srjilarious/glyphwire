@@ -5,7 +5,8 @@
 
 The numbers live in exactly one place each:
 
-  * every program's version: the `.version` of each row in build.zig's `apps` table
+  * every program's version: `.version` in each row of build.zig's
+    `apps` table
   * the suite (release) version: `.version` in build.zig.zon
   * the protocol version: `protocol_version` in src/protocol.zig
 

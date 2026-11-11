@@ -6,8 +6,8 @@ const glyphwire = @import("glyphwire");
 const build_info = @import("build_info");
 
 /// Minimal glyphwire server executable: binds a Unix domain socket and
-/// serves one auto-created `Context` to whoever connects. No
-/// `create_context` yet — see decisions.md, Object Model. `cols`/`rows`
+/// serves one auto-created `Context` to whoever connects; a client can
+/// add more with `create_context`. `cols`/`rows`
 /// are optional CLI args (not part of the wire protocol) so a caller that
 /// cares about grid size -- glyphwire-host, sizing its window to match --
 /// has a way to specify it; standalone use (tests, `zig build server`)

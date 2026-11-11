@@ -256,17 +256,20 @@ spec in the same pull request.** A protocol change that ships without a
 spec change is a bug, because other people write clients against that
 document.
 
-The four documents divide as follows:
+The two documents divide as follows:
 
 | Document | Holds |
 |---|---|
 | [`docs/protocol.md`](docs/protocol.md) | The normative spec. What an implementer must do. |
 | [`docs/api.md`](docs/api.md) | The catalog annotated with per-message implementation status and behaviour. |
-| [`docs/decisions.md`](docs/decisions.md) | *Why* each shape was chosen. Design rationale, not reference. |
-| [`docs/roadmap.md`](docs/roadmap.md) | The running implementation log. |
 
-A substantial change usually touches `decisions.md` (the reasoning) and
-`roadmap.md` (the record) as well as the code.
+There is no central design-rationale document. The *why* lives next to
+what it explains: a comment, or the `//!` module doc of the file that
+owns the behaviour, and for the protocol, the relevant section of
+`docs/protocol.md`. A central log grows too big to read and drifts from
+the code; a comment moves and dies with the code it explains.
+`scripts/check-doc-refs.py` (run by CI) fails on a pointer to the old
+`decisions.md` or `roadmap.md`.
 
 Bear in mind the protocol is CC-BY-4.0 and meant to be implemented by
 people who will never read this repository. Write for them.

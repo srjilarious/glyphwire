@@ -14,8 +14,9 @@
 //! running for either.
 //!
 //! A table is a component of the layer it's drawn on (`Layer.tables`),
-//! not a parallel object tree the way `Layer` itself is under `Context` --
-//! see decisions.md's Table section.
+//! not a parallel object tree the way `Layer` itself is under `Context`:
+//! it paints into the layer's cells, so it scrolls, clips and is culled
+//! with them.
 
 const std = @import("std");
 const core = @import("core.zig");
@@ -116,7 +117,7 @@ fn asciiFoldOrder(a: []const u8, b: []const u8) std.math.Order {
 /// sortability, and sizing. `width` is the column's content width in
 /// cells; `min_width` is a floor, same as the client-composited table
 /// prototype's `ColumnDef` (`src/table.zig`, which this supersedes as
-/// the source of table layout -- see decisions.md's Table section).
+/// the source of table layout).
 pub const TableColumn = struct {
     name: []u8,
     kind: ColumnKind = .text,

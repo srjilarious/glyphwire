@@ -8,8 +8,8 @@ const core = @import("core.zig");
 /// shared verbatim by the server side (`dispatch.zig` builds them,
 /// `server.zig` fans some out) and the client side (`client.zig` builds
 /// requests and parses responses/notifications). Keeping the one
-/// definition here is what stops the two ends from drifting -- see
-/// decisions.md's headless-first split; nothing in this module has
+/// definition here is what stops the two ends from drifting, and keeps
+/// both buildable without a window or GPU; nothing in this module has
 /// behavior, it's data and the odd string-name table only.
 ///
 /// Adding a client-to-server method: its params (and result) struct under
@@ -249,7 +249,7 @@ pub const IconBg = struct {
 
 /// One flattened cell in a `get_cells` response, row-major starting at
 /// (0,0). Exactly one of `bg`/`bg_image`/`bg_icon` is non-null, per
-/// `core.Background`'s tagged union -- see decisions.md's Cell section.
+/// `core.Background`'s tagged union.
 /// `fg_icon` is a sibling of that union, not part of it: an icon drawn
 /// *over* the background (`draw_icon`'s `foreground: true`, and every
 /// table body icon -- see `core.Cell.fg_icon`), independent of which
@@ -272,7 +272,7 @@ pub const WireCell = struct {
     /// East Asian Width role of the cell: `"lead"` = left half of a
     /// 2-cell wide character (holds the grapheme), `"spacer"` = its right
     /// half (renders nothing, carries the lead's bg + metadata), absent =
-    /// an ordinary 1-cell character. See decisions.md, Cell content.
+    /// an ordinary 1-cell character.
     wide: ?[]const u8 = null,
     /// The cell's underline style name (`core.Underline`), absent for the
     /// common `none`. Exposed -- unlike `text_scale`, which isn't -- because
@@ -1280,8 +1280,8 @@ pub const DrawImageParams = struct {
     /// original natural-size placement; `< 1.0` shrinks it (glyphwire-view
     /// asks for `target_width_px / image_width_px` so the image fits the
     /// layer's width). The client still computes `row_span`/`col_span` to
-    /// match the scaled size -- aspect-ratio-aware placement stays its job
-    /// per decisions.md. A non-positive value is treated as `1.0`.
+    /// match the scaled size -- aspect-ratio-aware placement stays its job,
+    /// since only the client knows what it wants to fit. A non-positive value is treated as `1.0`.
     scale: f32 = 1.0,
     /// Optional source sub-rectangle (`core.ImageSrcRect`) -- sprite-sheet
     /// support. All default to `0`, which is the whole image from `(0,0)`
@@ -1733,7 +1733,7 @@ pub const KeyParams = struct { key: []const u8, mods: core.Mods = .{} };
 /// `text` params: a run of committed text input, already resolved through
 /// the OS keyboard layout, dead keys and IME composition -- one or more
 /// Unicode codepoints as a UTF-8 string. Deliberately distinct from
-/// `key_down` (see decisions.md's Input model): a key event carries a
+/// `key_down`: a key event carries a
 /// physical key name for chords and navigation; this carries what the
 /// user actually typed, which for a non-US layout, an AltGr combo or a
 /// CJK IME is not derivable from the key name.
@@ -1883,8 +1883,7 @@ pub const RemoteExitParams = struct {
 /// long the host will wait for that before it exits anyway -- advisory,
 /// and a client that has nothing to flush can just ignore it. A real
 /// field (rather than an empty object) on purpose: a zero-field struct
-/// serializes as `[]`, which would fail an object parse (see
-/// decisions.md's "Zig JSON gotcha").
+/// serializes as `[]`, which would fail an object parse.
 pub const ShutdownParams = struct { grace_ms: u32 = 0 };
 
 /// `focus` params: whether the host's own window now has the keyboard.
@@ -2021,8 +2020,9 @@ pub const DispatchErrorEntry = struct {
 /// `get_errors` result: the connection's buffered failed-notification
 /// records (oldest first, at most `dispatch.error_ring_capacity`) and
 /// `dropped` -- how many were lost to a full ring since the last
-/// `get_errors`. Reading drains the ring. See decisions.md's Error
-/// reporting section.
+/// `get_errors`. Reading drains the ring. A notification has no
+/// response to carry an error, so this is how a client finds out one
+/// failed.
 pub const ErrorsResult = struct {
     errors: []const DispatchErrorEntry,
     dropped: u64,

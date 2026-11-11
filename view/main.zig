@@ -10,7 +10,7 @@ const interactive = @import("interactive.zig");
 /// gw-view: a minimal client that loads an image file (PNG, JPEG,
 /// BMP, or GIF) and draws it as a sprite spanning the cells it needs -- the
 /// first real exercise of Image support (`load_image`/`get_image_info`/
-/// `draw_image`) end to end, see docs/roadmap.md's Phase 3. The container
+/// `draw_image`) end to end. The container
 /// format is sniffed from the file's magic bytes (`detectImageFormat`),
 /// not its extension, and sent as `load_image`'s `format` so the server
 /// reads the right header; glyphwire's stb_image decodes all four.
@@ -23,7 +23,7 @@ const interactive = @import("interactive.zig");
 /// `--size full` opts back into natural pixel size (the original
 /// behavior). Either way this client still computes `row_span`/`col_span`
 /// from the *scaled* dimensions -- aspect-ratio-aware placement is the
-/// client's job per decisions.md.
+/// client's job, since only the client knows what it wants to fit.
 ///
 /// Arg parsing is zargunaught, the same library and pattern glyphwire-ls
 /// uses (`zargs.ArgParser` + `hasOption`/`optionVal`/`positional`), rather

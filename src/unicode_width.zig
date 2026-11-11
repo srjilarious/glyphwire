@@ -15,7 +15,8 @@ const std = @import("std");
 /// sorted and non-overlapping, generated from Unicode 16.0.0 by walking
 /// every codepoint's `unicodedata.east_asian_width` and coalescing the
 /// W/F runs. Ambiguous (A) is deliberately excluded -- treated as narrow,
-/// the wcwidth / non-CJK-locale default (see decisions.md, Cell content).
+/// the wcwidth / non-CJK-locale default, which is what the programs a
+/// terminal mirrors assume.
 /// Regenerate the same way against a newer Unicode when bumping.
 const wide_ranges = [_][2]u21{
     .{ 0x1100, 0x115F },   .{ 0x231A, 0x231B },   .{ 0x2329, 0x232A },
@@ -64,7 +65,7 @@ const wide_ranges = [_][2]u21{
 /// Display width, in terminal cells, of a single codepoint: 2 for East
 /// Asian Wide/Fullwidth, 1 otherwise. Not grapheme-aware -- a cluster's
 /// width is taken from its base codepoint (combining marks and ZWJ emoji
-/// sequences are still an open item, see decisions.md / UAX #29). Control
+/// sequences wait on real UAX #29 segmentation). Control
 /// bytes never reach here; `writeText` strips them first.
 pub fn codepointWidth(cp: u21) u2 {
     var lo: usize = 0;

@@ -80,8 +80,7 @@ pub const EngOptions: host_eng.EngineOptions = .{
     .rendererOpts = .{ .textRendering = true, .maxSprites = 30_000 },
     // A terminal is static most of the time: block in the event loop when
     // idle and only repaint when `App.needsRedraw` says something changed
-    // (see `redraw.zig`, `App.idleTimeoutMs`, decisions.md's "Redraw on
-    // change"). The server's wake callback (registered in `main.zig`)
+    // (see `redraw.zig`, `App.idleTimeoutMs`). The server's wake callback (registered in `main.zig`)
     // breaks the wait when a socket client mutates the grid.
     .redrawOnDemand = true,
 };
@@ -111,8 +110,7 @@ pub const Window = host_eng.input.Window;
 /// a new size.
 pub const FontRuntime = window_sizing_mod.WindowSizing.FontRuntime;
 
-/// glyphwire-host: the SDL3-windowed glyphwire renderer (Milestone 8 --
-/// see docs/slice_plan.md). Owns the `Context` and `Server` in-process --
+/// glyphwire-host: the SDL3-windowed glyphwire renderer. Owns the `Context` and `Server` in-process --
 /// it's the graphical front end, not just another client of a separately
 /// spawned server -- and reads/writes the grid directly (see
 /// `render.Renderer.render`, `Server.reportKey`/`reportMouseButton`/

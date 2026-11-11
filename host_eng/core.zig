@@ -64,8 +64,7 @@ pub const EngineOptions = struct {
     /// re-check state a background thread might have changed -- null to
     /// block until an OS event or an `Engine.wakeEventLoop` call). Off by
     /// default: a game repaints continuously. glyphwire-host turns it on --
-    /// a terminal is static most of the time. See decisions.md's "Redraw
-    /// on change".
+    /// a terminal is static most of the time.
     redrawOnDemand: bool = false,
 };
 

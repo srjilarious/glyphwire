@@ -6,8 +6,7 @@ const conn_stream = @import("conn_stream.zig");
 
 /// LSP-style framing: a `Content-Length` header, a blank line, then exactly
 /// that many body bytes. Chosen so JSON bodies never need newline-escaping
-/// and frames stay `nc -U` / `jq`-debuggable — see decisions.md, Transport &
-/// Wire Format. That is a JSON connection's framing; a MessagePack one
+/// and frames stay `nc -U` / `jq`-debuggable. That is a JSON connection's framing; a MessagePack one
 /// length-prefixes instead (see `Format`). The body itself is opaque bytes
 /// at this layer; its encoding is `codec.zig`'s concern.
 pub const FrameError = error{
@@ -150,8 +149,8 @@ pub const FrameDecoder = struct {
 
     /// Consumes exactly `n` raw bytes from the front of the buffer, not
     /// frame-parsed -- the binary side-channel's payload, following a JSON
-    /// header frame that declared the count (`{bytes: N, ...}`, see
-    /// decisions.md's Transport & Wire Format). Returns null (buffer
+    /// header frame that declared the count (`{bytes: N, ...}`), so image
+    /// bytes never pay JSON's base64 or escaping. Returns null (buffer
     /// untouched) if fewer than `n` bytes are currently buffered; caller
     /// should `feed` more and retry, mirroring how `next()` is used. Bytes
     /// past `n` are left in the buffer for whatever comes next (the

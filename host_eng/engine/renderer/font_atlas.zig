@@ -475,7 +475,7 @@ pub const FontAtlas = struct {
     /// different pixel size, with its own CPU bitmap, GL texture, and
     /// glyph cache. This is how `write_text`'s `scale` gets crisp
     /// glyphs at 1.5x/2x instead of a blurry stretch of the normal-size
-    /// texture region -- see decisions.md's Text scale section and
+    /// texture region, which reads as blurry and loses hinting -- see
     /// `host/render.zig`'s scaled-atlas cache. Each borrowed face keeps
     /// its own `face_index` (recorded on `FontFace` for exactly this),
     /// so a `.ttc` fallback clones correctly too.

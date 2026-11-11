@@ -13,10 +13,8 @@ document without reading the Zig.
 
 Related documents, which this one does not replace:
 
-- [`decisions.md`](decisions.md) — *why* each shape was chosen.
 - [`api.md`](api.md) — the message catalog annotated with per-message
   implementation status and behavioural detail.
-- [`roadmap.md`](roadmap.md) — the running implementation log.
 
 Where this document and the reference implementation disagree, the
 reference implementation is the fact and this document has a bug. Report
@@ -2062,8 +2060,6 @@ older than 0.11.0 it should `subscribe` to `"error"`, send the message as
 a notification, and check `get_errors` for `UnknownMethod`.
 
 ## 11. Design rationale in brief
-
-Fuller treatment in [`decisions.md`](decisions.md).
 
 **Why not escape sequences.** A terminal's in-band signalling conflates
 content with control: every byte of output must be scanned for control

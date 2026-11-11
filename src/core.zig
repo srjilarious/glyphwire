@@ -180,8 +180,8 @@ pub const DragPayload = struct {
 /// into that image this cell should display, and the uniform scale factor
 /// the image is drawn at. `draw_image` computes all three per cell from
 /// the draw call's anchor -- see `Layer.drawImage` -- rather than a
-/// sub-image ever being extracted or cached as its own resource
-/// (decisions.md's Image section).
+/// sub-image ever being extracted or cached as its own resource, so one
+/// loaded image backs any number of draws without copies.
 ///
 /// `offset_x`/`offset_y` are always in *source* image pixels. `scale` is
 /// `1.0` for a natural-size draw (the original behavior, and the default),
@@ -262,7 +262,7 @@ pub const VAlign = enum { start, center, end };
 /// top of whatever those neighboring cells render. Kept deliberately
 /// simple over `draw_image`'s span-marking approach because an icon is
 /// meant to always read as one complete picture, not clipped/composed
-/// per cell -- see decisions.md's Icon section.
+/// per cell.
 pub const IconBg = struct {
     handle: ImageHandle,
     scale: IconScale = .fit,
@@ -278,7 +278,7 @@ pub const IconBg = struct {
 /// A cell's background: a flat color, a reference to a loaded image tile
 /// (`draw_image`, clipped rather than stretched -- see
 /// `ImageBg`), or a reference to a loaded icon (`draw_icon`, see
-/// `IconBg`). Mutually exclusive per decisions.md.
+/// `IconBg`). Mutually exclusive: a cell has exactly one background.
 pub const Background = union(enum) {
     color: Color,
     image: ImageBg,
@@ -301,8 +301,7 @@ pub const gifDimensions = image.gifDimensions;
 /// headless core never decodes pixels -- `width`/`height` come from a
 /// fixed-offset header read per `format` (`imageDimensions`), not a real
 /// decode -- so `get_image_info` doesn't need an image-codec dependency
-/// here, and unlike an earlier idea in roadmap.md, the *client* doesn't
-/// need to supply dimensions either. Full pixel decoding stays the
+/// here, and the *client* doesn't need to supply dimensions either. Full pixel decoding stays the
 /// renderer's job (glyphwire-host, which already links zstbi), lazily on
 /// first encountering a `.image` background it hasn't uploaded yet.
 pub const ImageEntry = struct {
@@ -452,7 +451,7 @@ pub const Mods = struct {
 
 /// Inline byte capacity for a cell's grapheme cluster. This is a plain
 /// fixed buffer for the slice, not the small-string-optimized
-/// inline+overflow representation decisions.md settles on long term —
+/// inline+overflow representation a cluster of any length would need --
 /// upgrade this alongside real UAX #29 segmentation.
 pub const grapheme_inline_len = 8;
 
@@ -541,7 +540,7 @@ pub fn wrapLineCount(text: []const u8, width: usize) usize {
 /// the left ("primary") cell of a 2-cell wide character that holds the
 /// grapheme, or the right cell of such a pair which renders nothing of
 /// its own (it carries the lead's background + `metadata_id` so a click
-/// on either half resolves the same). See decisions.md, Cell content.
+/// on either half resolves the same).
 pub const CellWidth = enum(u2) { narrow, wide_lead, wide_spacer };
 
 /// A per-cell hint that the cell's glyph should be drawn larger than one
@@ -558,8 +557,7 @@ pub const CellWidth = enum(u2) { narrow, wide_lead, wide_spacer };
 /// click anywhere under it hit-tests as part of the run. The rows below
 /// are clipped at the layer's bottom (never scrolled into), and the
 /// cursor stays on the glyph's own row: reserving those rows, so later
-/// text isn't written over the block, is still the caller's job. See
-/// decisions.md's Text scale section.
+/// text isn't written over the block, is still the caller's job.
 pub const TextScale = enum { x1, x1_5, x2, x3 };
 
 /// How a selection's copied text joins a row to the one below it --
@@ -756,10 +754,9 @@ pub const PropertyName = enum {
     /// asked to set it.
     revision,
     /// Pixel-precise position relative to the layer's parent (the root
-    /// layer for every layer `create_layer` makes today -- see
-    /// decisions.md's Layer section on why position stays pixel-precise
-    /// rather than cell-snapped: smooth animation, e.g. sliding a
-    /// notification layer on/off screen, needs sub-cell steps).
+    /// layer for every layer `create_layer` makes today). Pixel-precise
+    /// rather than cell-snapped because smooth animation, e.g. sliding a
+    /// notification layer on/off screen, needs sub-cell steps.
     position,
     /// The same placement as `position`, but expressed in whole grid
     /// cells (`{row, col}`) and resolved against the session's cell
@@ -1055,9 +1052,9 @@ pub const root_layer_handle: LayerHandle = @enumFromInt(0);
 /// connection's id as the layer's first owner, `adopt_layer` adds more,
 /// and when a connection closes every layer it solely owned is culled (see
 /// `Context.removeConnectionOwnership`). A reconnecting client gets a fresh
-/// id and owns nothing from its previous connection -- deliberately, per
-/// decisions.md's "auto-restore-on-disconnect is a fresh identity"
-/// precedent. In-process callers (glyphwire-host driving the `Context`
+/// id and owns nothing from its previous connection -- deliberately: the
+/// server can't tell a reconnect from a different program, so it never
+/// hands one connection's layers to another. In-process callers (glyphwire-host driving the `Context`
 /// directly, the headless `server/main.zig`, tests) have no connection and
 /// pass no id: layers they create are never connection-owned and never
 /// auto-culled.
@@ -1194,7 +1191,7 @@ pub const Outline = @import("outline.zig").Outline;
 pub const PxPos = struct { x: f32 = 0, y: f32 = 0 };
 
 /// Cell-grid cursor position, derived from `PxPos` and the cell pixel
-/// size -- see decisions.md's Cell/Layer sections. Whoever reports it
+/// size. Whoever reports it
 /// (glyphwire-host, which owns the font/cell metrics) computes this, not
 /// the headless server -- see `InputState`'s doc comment.
 pub const CellPos = struct {

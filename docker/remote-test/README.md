@@ -1,7 +1,7 @@
 # Remote-session test container
 
 A disposable "remote box" for exercising `glyphwire --ssh <dest>`
-(see docs/decisions.md's "Remote sessions" section) without a second
+(see docs/guide/glyphwire.md) without a second
 machine: an Arch Linux container running sshd, with this tree's
 `gw-agent` / `gw-shell` / `gw-ls` / `gw-view` / `zoe` installed the same
 way `zig build install-local` installs them anywhere else.

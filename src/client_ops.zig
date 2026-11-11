@@ -213,7 +213,7 @@ pub fn Ops(comptime Self: type) type {
 
         /// `draw_icon(layer?, row?, col?, name, scale?, h_align?, v_align?,
         /// max_w?, max_h?, metadata_id?)` -- a notification. Draws a
-        /// bundled, named icon (decisions.md's Icon section; the default set
+        /// bundled, named icon (the default set
         /// is the `assets/icons/` tree, each icon named by its path there
         /// minus the `.png`) anchored at one cell, at the layer's cursor when
         /// `row`/`col` is omitted -- unlike `drawImage`, no span. `.{}` fits

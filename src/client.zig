@@ -20,8 +20,7 @@ pub const CellPos = core.CellPos;
 /// which otherwise assumes any spawned command is a plain,
 /// non-glyphwire-aware program echoing to a terminal) that this process
 /// is drawing to the grid itself over its own wire connection instead --
-/// see `connect`'s doc comment and docs/decisions.md's Discovery &
-/// connection section. A leading NUL byte makes it vanishingly unlikely a
+/// see `connect`'s doc comment. A leading NUL byte makes it vanishingly unlikely a
 /// plain program's real output would ever start with this exact sequence.
 pub const handshake_marker = "\x00glyphwire-handshake-v1\x00";
 
@@ -369,7 +368,7 @@ pub const Client = struct {
         try self.notify("attach_layer", .{ .layer = layer });
     }
 
-    /// Discovery per decisions.md: connects using `GLYPHWIRE_SOCK` from
+    /// Discovery: connects using `GLYPHWIRE_SOCK` from
     /// `environ_map`, or returns `error.NoSession` if it isn't set. Callers
     /// that want to degrade gracefully (per "never partially assume the
     /// grid is present") should treat any error from this the same way.
@@ -611,7 +610,7 @@ pub const Client = struct {
     /// `draw_image`'s placement. The image is anchored at `(row, col)`
     /// (the layer's cursor when either is null, as for `write_text`) and
     /// clipped to `row_span` x `col_span` cells rather than stretched to
-    /// fill them -- see decisions.md's Image section.
+    /// fill them, so the image keeps its aspect ratio.
     pub const DrawImageOpts = struct {
         /// null = the surface.
         layer: ?core.LayerHandle = null,
@@ -794,8 +793,7 @@ pub const Client = struct {
         try self.notify("report_mouse_move", .{ .px = px, .cell = cell });
     }
 
-    /// `subscribe(streams)` -- a request; per decisions.md's Input model,
-    /// synchronous so the caller has a clear point after which it's
+    /// `subscribe(streams)` -- a request, synchronous so the caller has a clear point after which it's
     /// guaranteed to start receiving notifications for `streams` (e.g.
     /// `.key`, `.mouse_button`) on this connection. See `InputListener`
     /// for a ready-made subscribed connection with a background reader.
@@ -807,8 +805,8 @@ pub const Client = struct {
 
     /// `load_image(format, bytes)` -- a request using the binary
     /// side-channel: the JSON header frame declares `bytes.len`, then
-    /// `bytes` follows directly on the wire (not another framed message) —
-    /// see decisions.md's Transport & Wire Format. `format` is now parsed
+    /// `bytes` follows directly on the wire (not another framed message),
+    /// so the bytes skip JSON's base64. `format` is now parsed
     /// server-side (`"png"`, `"jpeg"`/`"jpg"`, `"bmp"`, `"gif"`) to pick
     /// the header parser that measures the image; an unknown value or bytes
     /// that don't match the declared format fail the request. Returns a
@@ -941,8 +939,8 @@ pub const Client = struct {
 
     /// `create_layer(width?, height?, scrollback_rows)` -- a request.
     /// Allocates a fresh layer parented to the root, defaulting to the
-    /// context's base size when `width`/`height` is omitted -- see
-    /// decisions.md's Layer section. Returns its handle, for the
+    /// context's base size when `width`/`height` is omitted. Returns its
+    /// handle, for the
     /// `*On`/`*Layer` methods below.
     pub fn createLayer(self: *Client, width: ?usize, height: ?usize, scrollback_rows: usize) !core.LayerHandle {
         var parsed = try self.request(protocol.CreateLayerResult, "create_layer", .{
@@ -956,8 +954,7 @@ pub const Client = struct {
 
     /// `create_context(width?, height?, scrollback_rows)` -- a request.
     /// Allocates a fresh, independent full-window context (its own root
-    /// layer, split tree, layers -- see decisions.md's Object Model and
-    /// `core.Session`) and shows it immediately: an alt-screen-style
+    /// layer, split tree, layers -- see `core.Session`) and shows it immediately: an alt-screen-style
     /// model for a full-screen program that doesn't want to just layer
     /// panes over the shell's scrollback. `width`/`height` default to the
     /// visible context's current size. From here on every `layer?`-scoped
@@ -1300,7 +1297,8 @@ pub const Client = struct {
     //
     // Unlike every draw call above, a table is real server-side state
     // (`core.Table`, a component of the layer it's drawn on) that persists
-    // after this client disconnects -- see decisions.md's Table section.
+    // after this client disconnects, so a listing stays sortable after
+    // the program that drew it exits.
     // These methods are thin, ergonomic wrappers around the
     // `create_table`/`table_set_rows`/`table_set_sort`/`table_set_style`/
     // `destroy_table`/`table_get_state` wire messages: a caller (e.g.
@@ -1625,8 +1623,8 @@ pub const Client = struct {
     };
 
     /// `create_metadata(json)` -- a request. Stores `json` verbatim (the
-    /// server never parses it, only stores/returns it -- see decisions.md's
-    /// Metadata section) and returns a fresh handle that
+    /// server never parses it, only stores/returns it, so a client can
+    /// tag cells with whatever shape it likes) and returns a fresh handle that
     /// `writeText`/`drawIcon`'s `metadata_id`, `getMetadata`,
     /// or `destroyMetadata` can reference.
     pub fn createMetadata(self: *Client, json: []const u8) !core.MetadataHandle {
@@ -1889,8 +1887,7 @@ pub const Client = struct {
 
     /// Starts a `batch`: a set of sub-messages sent in one frame and
     /// applied server-side under a single lock hold, so nothing renders a
-    /// half-updated grid partway through -- see decisions.md's Batch
-    /// section, and `Batch` below for the builder API. The returned
+    /// half-updated grid partway through -- see `Batch` below for the builder API. The returned
     /// `Batch` borrows this `Client` (for the socket and `next_id`);
     /// add sub-messages, call `send` once, then `Batch.deinit`.
     pub fn batch(self: *Client) Batch {
@@ -3031,7 +3028,7 @@ pub const InputListener = struct {
         return self;
     }
 
-    /// Discovery per decisions.md, same as `Client.connectFromEnv`.
+    /// Discovery, same as `Client.connectFromEnv`.
     pub fn connectFromEnv(
         io: std.Io,
         alloc: std.mem.Allocator,

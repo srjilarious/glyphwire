@@ -4,14 +4,13 @@
 const std = @import("std");
 const glyphwire = @import("glyphwire");
 
-/// Smallest possible glyphwire-aware program (Milestone 6): checks for
+/// Smallest possible glyphwire-aware program: checks for
 /// discovery, connects if possible, sends write_text("hello") with no
 /// positioning, and exits. Falls back to printing "hello" straight to
 /// stdout — the same content a plain, non-glyphwire-aware program would
-/// produce — when discovery isn't available. Per decisions.md's Discovery
-/// & Connection: "if either check fails ... it prints its fallback
-/// message to stdout and degrades ... never partially assuming the grid
-/// is present."
+/// produce — when discovery isn't available: if either check fails it
+/// prints its fallback message to stdout and degrades, never partially
+/// assuming the grid is present.
 pub fn main(init: std.process.Init) !void {
     sendHello(init) catch return fallback(init.io);
 }

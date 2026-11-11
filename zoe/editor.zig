@@ -13,8 +13,7 @@
 //! protocol; it is exactly what a modal editor wants. Normal-mode
 //! commands *are* characters, so dispatching them off `text` makes `j`
 //! mean "down" on Dvorak and AZERTY too, while Escape and the arrows have
-//! no character to carry them and come through as keys. See decisions.md's
-//! Input model.
+//! no character to carry them and come through as keys.
 //!
 //! **This module does no IO.** `:w` doesn't write a file; it returns an
 //! `Outcome.write` and the host does the writing, then calls `markSaved`.
@@ -47,8 +46,7 @@ const Pos = buffer.Pos;
 /// operator-pending is a field on `Editor` rather than a mode because
 /// nothing outside the state machine needs to see it. Block/column visual
 /// mode is deliberately left out -- it doubles every yank/cut/paste case
-/// for a rare need, the same reason the wire's selection is linear-only
-/// (see decisions.md's Selection & clipboard section).
+/// for a rare need, the same reason the wire's selection is linear-only.
 /// `search` is the `/` and `?` prompt. It is a separate mode from
 /// `command` rather than a flag on it because the two do opposite things
 /// with what you type: a `:` line is inert until Enter, while a `/` line
@@ -3649,8 +3647,7 @@ pub const Editor = struct {
             // A *bare* `:e` re-reads this buffer from disk and throws
             // away unsaved changes, so it needs the same guard `:q` has.
             // `:e <path>` opens another buffer in another tab and
-            // abandons nothing -- see decisions.md's "zoe multiple
-            // buffers".
+            // abandons nothing.
             if (arg_opt == null and self.buf.dirty) {
                 self.setStatus("E37: No write since last change (add ! to override)", .{});
                 return .none;

@@ -1041,8 +1041,8 @@ pub fn clientSelectionAndClipboardRoundTripTest(io: std.Io, alloc: std.mem.Alloc
 }
 
 /// A layer created over a connection is culled when that connection
-/// closes without `destroy_layer` -- the crash-recovery path from
-/// decisions.md's Layer ownership & lifecycle section. Joining the server
+/// closes without `destroy_layer` -- the crash-recovery path that keeps
+/// a dead program's layers off the host's screen. Joining the server
 /// thread is the barrier: `acceptOne` only returns once `serveConnection`
 /// has fully unwound, and the disconnect cull runs in that unwind, so the
 /// assertion afterward is race-free.

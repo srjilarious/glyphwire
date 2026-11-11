@@ -110,7 +110,7 @@ pub const autocomplete_hint_color = glyphwire.Color.role(.suggestion);
 /// shell replaces its own input line with it once the child is reaped
 /// (`Prompt.readResultPipe`). Not documented to the user as a public API
 /// yet, just a convention between the shell and its own bundled tools
-/// (`gw-hist` is the first); see docs/decisions.md "Shell result pipe".
+/// (`gw-hist` is the first).
 pub const result_fd_env = "GLYPHWIRE_RESULT_FD";
 
 comptime {
@@ -259,9 +259,8 @@ pub const timelib = struct {
 pub const plColor = render.plColor;
 
 /// gw-shell: sets up discovery, then either execs into a given
-/// command (`gw-shell <command> [args...]`, unchanged from
-/// milestone 5) or, given no command, runs the interactive prompt itself
-/// -- see decisions.md, Discovery & Connection. The third form,
+/// command (`gw-shell <command> [args...]`) or, given no command, runs
+/// the interactive prompt itself. The third form,
 /// `gw-shell --embed <context>,<layer>[,<control-fd>]`, runs that same
 /// prompt inside a layer another client owns (salacommander's Ctrl+`
 /// panel) -- see `shell/embed.zig`. The fourth,
@@ -425,7 +424,7 @@ fn assertTermEnv() !void {
 
 /// Sets up its own server and discovery env vars (GLYPHWIRE_SOCK isn't
 /// already inherited -- standalone use, e.g. `zig build gw-shell -- <cmd>`
-/// with no host), exactly like the original milestone-5 launcher.
+/// with no host), exactly like the original launcher.
 /// Returns the socket path directly rather than relying on the caller to
 /// re-read `environ_map`: std.process.spawn (used by the interactive
 /// prompt path below) builds a child's environment from a snapshot taken
@@ -3380,8 +3379,10 @@ pub const Prompt = struct {
 
     /// Runs one `|`-pipeline. A single-stage pipeline naming a builtin is
     /// dispatched in-process (so `cd x && ls` works); a builtin as one
-    /// stage of a real `|` pipeline is rejected with a message (see
-    /// docs/decisions.md, Shell). Everything else -- one external command
+    /// stage of a real `|` pipeline is rejected with a message: a builtin
+    /// draws its output on the grid, which a mid-pipeline stage can't
+    /// have, and keeping the pipe executor to external processes keeps it
+    /// simple. Everything else -- one external command
     /// with redirects, or two-plus stages -- goes to `pipeexec.spawn`.
     /// Returns the last stage's exit status (bash semantics, no
     /// `pipefail`).
@@ -3921,8 +3922,7 @@ pub const Prompt = struct {
     /// name (set back or unset). Restoring in a `defer` covers a `rest`
     /// that errors. The whole line -- pipeline / `&&` chain included --
     /// runs with the assignments in effect (bash scopes them per pipeline
-    /// stage; that corner isn't worth the plumbing here -- see
-    /// docs/decisions.md).
+    /// stage; that corner isn't worth the plumbing here).
     ///
     /// Explicit `anyerror` rather than an inferred set: this and
     /// `dispatchLineText` call each other, and two inferred error sets in
@@ -4196,7 +4196,7 @@ pub const Prompt = struct {
     /// replace it -- each with the original `dir/` prefix kept. A pattern
     /// with no matches is left literally in place (bash's default,
     /// nullglob off). Only the last segment is a pattern; a wildcard in
-    /// the `dir/` part is not expanded yet (see decisions.md). Free the
+    /// the `dir/` part is not expanded yet. Free the
     /// result with `wordsplit.freeTokens`.
     pub fn expandGlobs(self: *Prompt, args: []const wordsplit.Arg) ![]const []const u8 {
         const alloc = self.client.alloc;

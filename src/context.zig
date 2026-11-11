@@ -64,9 +64,9 @@ const theme = core.theme;
 // A split tree is the host's answer to "where do the panes go". A client
 // that wants a sidebar beside a buffer beside a statusline describes the
 // arrangement once; the host computes every layer's bounds from it, keeps
-// them correct across a window resize, and owns the divider drag. See
-// decisions.md's Layer section for why this lives server-side rather than
-// each TUI re-implementing pane math.
+// them correct across a window resize, and owns the divider drag. It
+// lives server-side so each TUI doesn't re-implement pane math, and two
+// of them behave the same way.
 //
 // The tree lays out over the whole context. The **root layer is never a
 // split child** -- it is the shell's scrollback, drawn underneath at a
@@ -162,8 +162,8 @@ pub const Context = struct {
     /// Layers created via `create_layer`, keyed by handle -- the root
     /// layer isn't in here (it's always addressed as `root_layer_handle`
     /// and always exists; see that constant's doc comment). Every layer
-    /// here is parented to the root: decisions.md's Layer tree allows
-    /// deeper nesting, but nothing creates or needs a non-root parent yet,
+    /// here is parented to the root: the layer tree allows deeper
+    /// nesting, but nothing creates or needs a non-root parent yet,
     /// so that generality isn't built.
     layers: std.AutoHashMap(LayerHandle, Layer),
     /// Creation order of `layers`' entries, for compositing -- a later-
@@ -253,8 +253,7 @@ pub const Context = struct {
     /// sweeps every context at once and bumps the root's whenever
     /// anything anywhere was freed, so one number covers the session.
     image_gen: u64 = 0,
-    /// Name -> image handle, for `draw_icon` (decisions.md's Icon
-    /// section). Populated by whoever loads the bundled icon files
+    /// Name -> image handle, for `draw_icon`. Populated by whoever loads the bundled icon files
     /// (`glyphwire-host`, scanning `assets/icons/` -- see `iconName`) --
     /// empty until then, same as `images` before any `load_image` call.
     icons: std.StringHashMap(ImageHandle),
@@ -266,8 +265,8 @@ pub const Context = struct {
     nine_patch_styles: std.StringHashMap(NinePatchStyle),
     metadata: std.AutoHashMap(MetadataHandle, Metadata),
     next_metadata_handle: u32 = 1,
-    /// The session's fixed cell pixel metrics -- decisions.md's "one
-    /// monospace font + size per session" -- needed to translate a
+    /// The session's fixed cell pixel metrics (one monospace font and
+    /// size per session) -- needed to translate a
     /// `draw_image` span into per-cell pixel offsets (see
     /// `Layer.drawImage`). Defaults match glyphwire-host's current
     /// JetBrainsMono tuning (`host/main.zig`'s `cell_w`/`cell_h`); a host
@@ -555,8 +554,7 @@ pub const Context = struct {
 
     /// `create_layer`: allocates a fresh layer parented to the root,
     /// defaulting to the context's base size (the root layer's own
-    /// width/height) when `width`/`height` is omitted -- decisions.md's
-    /// Layer section. Returns its handle. A layer created with *both*
+    /// width/height) when `width`/`height` is omitted. Returns its handle. A layer created with *both*
     /// dimensions omitted tracks the context's base size on a later
     /// window resize (`Layer.tracks_context_size` / `Context.resize`);
     /// one created with an explicit size keeps that size.
@@ -1306,7 +1304,7 @@ pub const Context = struct {
     /// dimensions (which a page reader does anyway). Re-deriving those
     /// offsets here would mean tracking every span a handle was ever
     /// drawn into, and would silently repaint cells the caller may since
-    /// have cleared -- see decisions.md's Image lifecycle section.
+    /// have cleared.
     pub fn updateImage(self: *Context, handle: ImageHandle, format: ImageFormat, bytes: []const u8) !void {
         if (self.isIconHandle(handle)) return ImageResourceError.ImageIsIcon;
         const entry = self.images.getPtr(handle) orelse return ImageResourceError.UnknownImage;

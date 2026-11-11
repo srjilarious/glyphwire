@@ -16,8 +16,8 @@
 //! turns it into pixels at render time with the live cell metrics, so a
 //! font resize keeps the frame on its cells with the corners still at
 //! native size. A component of the layer it's drawn on (`Layer.nine_patches`),
-//! like `Rect`, and drawn under every cell background -- see decisions.md's
-//! Nine-patch section.
+//! like `Rect`, and drawn under every cell background, so a frame never
+//! hides the text or images inside it.
 
 const std = @import("std");
 const core = @import("core.zig");

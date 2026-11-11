@@ -126,6 +126,6 @@ again any time you want the remote caught up with a local rebuild.
 
 It needs passwordless ssh (key or agent) to the target already working --
 see the script's header comment for why. The command it prints at the
-end is what to hand `glyphwire --ssh` (see docs/decisions.md's "Remote
-sessions" section, and `docker/remote-test/` for trying the same flow
+end is what to hand `glyphwire --ssh` (see docs/guide/glyphwire.md, and
+`docker/remote-test/` for trying the same flow
 against a disposable local container instead of a real server).

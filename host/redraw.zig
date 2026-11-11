@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! The `Context`-derived half of glyphwire-host's "only draw when
-//! something changed" check (see decisions.md's "Redraw on change" and
-//! `render.zig`'s static-batch cache, which this sits on top of).
+//! something changed" check (a terminal is static most of the time, so
+//! idle frames cost nothing; see `render.zig`'s static-batch cache, which
+//! this sits on top of).
 //!
 //! `App.needsRedraw` compares a full fingerprint of everything the
 //! renderer composites -- this module covers the shared grid model, the

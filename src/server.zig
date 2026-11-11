@@ -390,8 +390,8 @@ pub const Server = struct {
     next_conn_id: std.atomic.Value(core.ConnId) = .init(1),
 
     /// Optional "the context may have changed" hook. A front end that only
-    /// draws on demand (glyphwire-host -- see decisions.md's "Redraw on
-    /// change") registers one via `setWakeCallback` so a socket client's
+    /// draws on demand (glyphwire-host, which blocks while idle since a
+    /// terminal is static most of the time) registers one via `setWakeCallback` so a socket client's
     /// dispatch, which runs on that connection's own thread, can nudge the
     /// render loop out of its wait. Left null for the headless server and
     /// for any front end that repaints every frame regardless -- the
@@ -618,8 +618,7 @@ pub const Server = struct {
                 // `load_image` / `update_image` are special. On JSON the
                 // header declares a raw byte count that follows directly
                 // on the wire, not wrapped in another frame -- see
-                // wire.zig's `readRaw` and decisions.md's binary
-                // side-channel framing -- so that payload has to be pulled
+                // wire.zig's `readRaw` -- so that payload has to be pulled
                 // off this connection's stream (and decoder buffer) before
                 // dispatch can respond. On MessagePack the bytes are
                 // inside the message already (`hdr.data`).
@@ -751,8 +750,8 @@ pub const Server = struct {
         // Cull any layer this connection solely owned. A crashed or
         // killed client's socket is closed by the kernel, so this is the
         // one path that reaps the layers a program left behind when it
-        // died without calling `destroy_layer` -- see decisions.md's
-        // Layer ownership & lifecycle section.
+        // died without calling `destroy_layer`, which would otherwise
+        // stay stuck on the host's screen.
         var culled: std.ArrayList(core.LayerHandle) = .empty;
         defer culled.deinit(alloc);
         var culled_ctx: std.ArrayList(core.ContextHandle) = .empty;

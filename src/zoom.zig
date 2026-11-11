@@ -21,8 +21,7 @@
 //! window over it (`scroll_offset`, which the host also drives from the
 //! wheel and the scrollbars). That costs one server-side cell per covered
 //! cell, i.e. it grows with the square of the zoom factor, which is why
-//! `Limits.max_scale` exists at all. See docs/decisions.md's "gw-read:
-//! zoom, pan and the oversized page layer".
+//! `Limits.max_scale` exists at all.
 
 const std = @import("std");
 

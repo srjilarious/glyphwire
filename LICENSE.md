@@ -41,7 +41,7 @@ people embed. They are GPL-3.0-or-later.
 
 | Path | |
 |---|---|
-| `docs/` | the protocol specification, design decisions, roadmap |
+| `docs/` | the protocol specification, API reference, app guides |
 | `README.md` | |
 | `site/` | the project website |
 

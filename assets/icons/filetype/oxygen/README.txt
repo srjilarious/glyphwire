@@ -13,8 +13,7 @@ pasnox/oxygen-icons-png is a dereferenced mirror of https://github.com/KDE/oxyge
 -- the upstream KDE repo stores most of these as symlinks GitHub's raw
 file server doesn't follow.
 
-draw_icon scales an icon down to fit its box, aspect-correct -- see
-decisions.md's Icon section -- so 48x48 is just the source size, not a
+draw_icon scales an icon down to fit its box, aspect-correct, so 48x48 is just the source size, not a
 requirement.
 
 License: GNU LGPL version 3, see LICENSE.txt in this directory (copied

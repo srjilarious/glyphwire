@@ -3,7 +3,7 @@ scans assets/icons/ at startup and registers every .png by its path
 under that directory minus the extension, so these are `status/error`
 and `status/slow` -- meant for `{icon:status/error}` in a
 `when = "error"` powerline segment and `{icon:status/slow}` in a
-`when = "slow"` one (see decisions.md's Shell section).
+`when = "slow"` one in shell.conf.lua's prompt.
 
 32x32 PNGs from the KDE Oxygen icon theme (https://github.com/KDE/oxygen-icons),
 same source and license as ../filetype/oxygen/ -- see ../filetype/oxygen/README.txt and

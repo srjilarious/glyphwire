@@ -13,8 +13,7 @@
 //! one is drawn. gw-read instead loads a handle per page and calls
 //! `destroy_image` on whatever falls out of this cache: the same bounded
 //! footprint, but the last `capacity` pages are a keystroke away with no
-//! re-upload. See docs/decisions.md's "gw-read: paging and the image
-//! handle LRU".
+//! re-upload.
 //!
 //! Pure: the cache never talks to a client. `put` hands the evicted entry
 //! back and the caller is the one that calls `destroy_image`, which is

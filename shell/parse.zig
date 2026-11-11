@@ -25,7 +25,8 @@ const wordsplit = @import("applib").wordsplit;
 ///   * `&>` / `&>>`       -- stdout and stderr to one file (bash shorthand
 ///                          for `> file 2>&1`).
 ///
-/// Deliberately *not* handled (see docs/decisions.md, Shell): background
+/// Deliberately *not* handled, each rejected with a message naming the
+/// construct rather than half-supported: background
 /// `&` and job control, heredocs `<<` / here-strings `<<<`, `|&`, process
 /// substitution `<(...)`, subshells `( ... )` / groups `{ ...; }`, and
 /// arbitrary fd numbers (`3>&1`). A bare `&` or a `<<` is a parse error

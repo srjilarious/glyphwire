@@ -531,8 +531,7 @@ pub const Subscriptions = struct {
 /// allocator passed to `handle`) to fan out to every *other* connection
 /// subscribed to `event`. `handle`'s caller (server.zig) owns actually
 /// doing that fan-out; `Dispatcher` itself has no knowledge of other
-/// connections, to keep it headless-testable -- see decisions.md's headless-first
-/// architecture note.
+/// connections, to keep it testable in-process with no sockets.
 pub const Broadcast = struct {
     event: PushEvent,
     body: []u8,
@@ -670,7 +669,7 @@ pub const RemoteStarter = struct {
 /// directly off the wire next, before normal frame processing can
 /// continue (the side-channel: a JSON header frame declares a byte count,
 /// then that many raw bytes follow directly on the wire, not wrapped in
-/// `Content-Length` framing — see decisions.md's Transport & Wire Format).
+/// `Content-Length` framing, so image bytes skip JSON's base64).
 /// Returns null for every other message, which the caller should route to
 /// `handle` as usual. Module-level (not a `Dispatcher` method) since it
 /// needs no `Context` access — it's pure parsing, done before dispatch.
@@ -743,8 +742,8 @@ pub fn errorCode(err: anyerror) i64 {
 /// (no `id`) rather than a request. Used by server.zig to decide whether a
 /// `Dispatcher.handle` error should just be logged or propagated: a
 /// notification has no response channel to report an error on anyway (per
-/// JSON-RPC, that's a server-side log line, not a wire message -- see
-/// decisions.md's latent-robustness-gap note), so severing the whole
+/// JSON-RPC, that's a server-side log line, not a wire message), so
+/// severing the whole
 /// connection over e.g. one `draw_icon` naming an unregistered icon would
 /// be a disproportionate failure mode. A request is answered with a
 /// JSON-RPC error response instead (`codec.errorResponse`, `errorCode`),
@@ -1296,8 +1295,7 @@ pub const Dispatcher = struct {
     /// whole batch runs under the single `ctx_mutex` hold server.zig
     /// already takes for this outer message, so nothing renders a
     /// half-updated grid partway through -- the motivating fix for
-    /// glyphwire-ls's listing visibly painting itself one row at a time
-    /// (see decisions.md's Batch section).
+    /// glyphwire-ls's listing visibly painting itself one row at a time.
     ///
     /// Best-effort, matching how server.zig already treats a standalone
     /// notification's dispatch error: a sub-message that fails to parse,
@@ -2839,7 +2837,7 @@ pub const Dispatcher = struct {
     /// `direction` -- see `core.Layer.adjacentMetadataSpan`. The shell's
     /// Ctrl+PgUp / Ctrl+PgDn scrollback-span navigation is the caller; the
     /// walk runs server-side so it never has to `get_cells` the grid to
-    /// find spans itself (decisions.md, Metadata).
+    /// find spans itself.
     fn handleFindMetadata(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const parsed = try codec.parseParams(protocol.FindMetadataParams, alloc, params_value);
         defer parsed.deinit();
@@ -2860,8 +2858,7 @@ pub const Dispatcher = struct {
 
     /// Returns a full row-major snapshot of the given layer's (default:
     /// root's) visible viewport, plus its current revision -- the
-    /// read-back path decisions.md flagged as not yet exposed over the
-    /// wire.
+    /// grid's read-back path over the wire.
     fn handleGetCells(self: *Dispatcher, alloc: std.mem.Allocator, id: std.json.Value, params_value: codec.Params) ![]u8 {
         const parsed = try codec.parseParams(protocol.GetCellsParams, alloc, params_value);
         defer parsed.deinit();
@@ -2995,8 +2992,8 @@ pub const Dispatcher = struct {
     }
 
     /// A notification from an input-capturing client (glyphwire-host, in
-    /// practice -- nothing here restricts it to a particular sender, see
-    /// decisions.md's stance on there being no auth model yet). Updates
+    /// practice -- nothing here restricts it to a particular sender).
+    /// Updates
     /// the authoritative down-set and, if the key's state actually
     /// changed, returns a `key_down`/`key_up` broadcast for other
     /// connections subscribed to `"key"`.
@@ -3182,7 +3179,7 @@ pub const Dispatcher = struct {
     /// `draw_icon`: resolves `name` against the icon catalog
     /// (`Context.iconHandle`, populated by `glyphwire-host` scanning
     /// `assets/icons/`) and draws it into exactly one cell -- an icon is
-    /// scoped to a single cell for now, per decisions.md's Icon section.
+    /// scoped to a single cell for now.
     /// `Layer.drawIcon` just needs the handle -- no dimensions/cell
     /// metrics to look up, unlike `handleDrawImage`, since an icon always
     /// scales the whole source image into the whole cell.
@@ -3282,8 +3279,8 @@ pub const Dispatcher = struct {
         layer.fillUnderline(p.row, p.col, rows, cols, ul);
     }
 
-    /// A client-side convenience for aspect-ratio-aware placement
-    /// (decisions.md: "the client's job, not the server's") — lets a
+    /// A client-side convenience for aspect-ratio-aware placement (the
+    /// client's job, not the server's) — lets a
     /// client compute how many cells an image needs without hardcoding the
     /// session's cell pixel metrics, which otherwise live only in
     /// `Context.cell_px_w`/`cell_px_h` and glyphwire-host's matching
@@ -4093,7 +4090,7 @@ pub const Dispatcher = struct {
     /// full ring since the last call -- then drains the ring. Empty and
     /// `dropped: 0` for a connection that never subscribed to `"error"`,
     /// since nothing gets recorded in that case. See
-    /// `Dispatcher.recordError` and decisions.md's Error reporting section.
+    /// `Dispatcher.recordError`.
     /// `sync`: changes nothing and answers `{}`. Messages on a connection
     /// are applied in order, so the reply means everything the client sent
     /// before it has been applied. A client ending each frame's batch with

@@ -34,8 +34,8 @@ const groupName = lsentries.groupName;
 /// shell/main.zig's `runCommand`), to exercise the shell/client path
 /// against something more than the styled-text demo. Falls back to a
 /// plain newline-per-entry stdout listing (the same content a
-/// non-glyphwire `ls` would produce) when no session is available, per
-/// decisions.md's Discovery & Connection.
+/// non-glyphwire `ls` would produce) when no session is available,
+/// never partially assuming the grid is present.
 ///
 /// The `-l` listing follows exa's column order: permission bits, size,
 /// `owner:group`, modified time, then the icon + name (the name last, and
@@ -485,8 +485,7 @@ fn maxDisplayLen(entries: []const FileEntry) usize {
 /// (`get_cell_metrics`); a host that doesn't answer leaves `max_icon_h ==
 /// 0` and every mode falls back to a one-cell `.fit`.
 ///
-/// Sends the whole listing as two batches (see decisions.md's Batch
-/// section) rather than a call per entry: pass 1 is one `batch` request
+/// Sends the whole listing as two batches rather than a call per entry: pass 1 is one `batch` request
 /// that creates every entry's metadata tag at once (nothing is drawn, so
 /// no half-painted grid is ever visible -- this just collapses N
 /// `create_metadata` round trips into one); pass 2 is one `batch`
@@ -577,8 +576,8 @@ fn writeGrid(client: *glyphwire.Client, entries: []const FileEntry, large: bool,
 
     // Pass 1: one batch request creating every entry's metadata tag.
     // Each cell an entry's block touches (icon and name) shares one
-    // metadata id -- see decisions.md's Metadata section on tagging a
-    // whole run rather than copying the same blob per cell. The blob's
+    // metadata id: a whole run is tagged once rather than the same blob
+    // copied per cell. The blob's
     // `kind` / `path` (and `mimetype`, for files) are what
     // glyphwire-shell's `activateSelectionAt` and any future context-menu
     // client read -- see `entryMetadataJson`.
@@ -760,9 +759,8 @@ const id_name_col_max = 16;
 /// Unlike the client-composited prototype's streaming `row`/`cell`/
 /// `endRow` calls (each sent over the wire immediately), every row here
 /// is built into one in-memory matrix and sent in a single
-/// `tableSetRows` call -- see decisions.md's Table section on why the
-/// table itself is now real server state rather than client-composited
-/// cells: it stays visible, and re-sortable, after this process exits,
+/// `tableSetRows` call. The table itself is real server state rather
+/// than client-composited cells because it stays visible, and re-sortable, after this process exits,
 /// which a series of one-shot draw calls could never do. `scratch`
 /// tracks every heap-allocated display string built along the way
 /// (unlike the old streaming API, a batched `tableSetRows` call means
@@ -919,7 +917,7 @@ fn writeLongTable(client: *glyphwire.Client, entries: []const FileEntry, large: 
     }
 
     // Create every entry's metadata tag in one batch request rather than
-    // one round trip per entry -- see decisions.md's Batch section. Unlike
+    // one round trip per entry. Unlike
     // `writeGrid`, the drawing here is already a single `tableSetRows`
     // call, so only the `create_metadata` fan-out needed collapsing.
     const metas = try alloc.alloc(glyphwire.MetadataHandle, entries.len);

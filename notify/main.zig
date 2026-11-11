@@ -7,8 +7,7 @@ const build_info = @import("build_info");
 
 /// glyphwire-notify: a transient notification box in the top-right corner
 /// of the screen, showing the message given on the command line. Drawn on
-/// its own layer (`create_layer`/`destroy_layer` -- see docs/decisions.md's
-/// Layer section and docs/api.md) rather than directly on the root layer
+/// its own layer (`create_layer`/`destroy_layer` -- see docs/api.md) rather than directly on the root layer
 /// the way glyphwire-demo's panel is, so it can slide in over whatever's
 /// already on screen and be torn down cleanly afterward: "killing its
 /// layer" (`destroyLayer`) is the entire cleanup, no `clear` needed to
@@ -24,8 +23,7 @@ const build_info = @import("build_info");
 /// Slides the layer in from off-screen right, holds for `hold_ms`, then
 /// slides it back off before destroying the layer and exiting -- a
 /// `set_property(layer, "position", ...)` call per animation frame, which
-/// is why the position property is pixel-precise rather than cell-snapped
-/// (decisions.md).
+/// is why the position property is pixel-precise rather than cell-snapped.
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const io = init.io;

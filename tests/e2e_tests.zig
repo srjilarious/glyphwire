@@ -48,10 +48,10 @@ fn spawnChecked(io: std.Io, options: std.process.SpawnOptions) !std.process.Chil
 /// finds a socket purely via the `GLYPHWIRE_SOCK` env var and writes several
 /// styled `write_text` runs that land correctly in the server's `Context`.
 ///
-/// Superseded milestone-7's `shellSpawnsServerAndExecsClientTest`, which
+/// Superseded the original `shellSpawnsServerAndExecsClientTest`, which
 /// spawned `glyphwire-shell` itself and waited for it to exit. That no
-/// longer applies: glyphwire-host is now the SDL3-windowed renderer (see
-/// slice_plan.md, Milestone 8) and stays open rendering the grid rather than
+/// longer applies: glyphwire-host is now the SDL3-windowed renderer and
+/// stays open rendering the grid rather than
 /// exiting after launching a child, so it can't be driven headlessly from a
 /// test. The `Server`/discovery-env-var mechanism this test cares about is
 /// unchanged, so it's exercised directly against a library-bound `Server`

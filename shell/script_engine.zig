@@ -22,7 +22,7 @@
 //!    path helpers Lua's stdlib doesn't provide.
 //!  - `defcmd(name, fn)` -- register `fn` as a builtin. Stored in a table
 //!    kept only in the Lua registry, never as a global, so a builtin
-//!    named `string` can't clobber the stdlib (see decisions.md).
+//!    named `string` can't clobber the stdlib.
 //!  - `defcomplete(name, fn)` -- register Tab completion for the command
 //!    `name` (bash's `complete -F`). `fn(ctx)` gets `ctx.words` (the
 //!    command's words before the one being completed, `words[1]` the

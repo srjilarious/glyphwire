@@ -203,8 +203,8 @@ pub const Layer = struct {
     /// which case `Context.setCellMetrics` re-derives `pos` from it on a
     /// font-size change. A pixel `set_property(position)` clears it.
     pos_cells: ?CellPos = null,
-    /// Tables painted onto this layer (`create_table`), keyed by handle --
-    /// decisions.md's Table section: a table is a component of a layer,
+    /// Tables painted onto this layer (`create_table`), keyed by handle:
+    /// a table is a component of a layer,
     /// not a parallel object tree like `Context.layers` is. A table's
     /// handle is still allocated from `Context.next_table_handle` (a
     /// single counter shared across every layer), but the `Table` value
@@ -679,7 +679,7 @@ pub const Layer = struct {
     /// content.
     ///
     /// Server-side on purpose: a client never has to round-trip the grid
-    /// with `get_cells` to scan for spans (see decisions.md, Metadata).
+    /// with `get_cells` to scan for spans.
     pub fn adjacentMetadataSpan(self: *const Layer, above: i64, col: usize, dir: MetadataSpanDir) ?MetadataSpanHit {
         if (self.width == 0) return null;
 
@@ -1166,8 +1166,8 @@ pub const Layer = struct {
 
     /// Appends `text` as grapheme clusters starting at the layer's cursor,
     /// advancing and wrapping it at the layer edge. Naive UTF-8 codepoint
-    /// splitting for now, not real grapheme segmentation (UAX #29) — see
-    /// decisions.md; swapping in the real thing later shouldn't change this
+    /// splitting for now, not real grapheme segmentation (UAX #29);
+    /// swapping in the real thing later shouldn't change this
     /// shape. `bg` is `null` for "leave whatever background is already on
     /// each cell touched" (`write_text`'s `transparent_bg: true`) rather
     /// than resetting it to `default_style.bg` -- see that field's doc
@@ -1807,8 +1807,8 @@ pub const Layer = struct {
 
     /// Marks cells in `[row, row+row_span) x [col, col+col_span)` (clamped
     /// to the layer's own bounds) as backed by `handle`'s pixels, anchored
-    /// at `(row, col)` with **no stretching** -- see decisions.md's Image
-    /// section. Each covered cell gets the pixel offset into the source
+    /// at `(row, col)` with **no stretching**, so an image never distorts
+    /// to fit a cell grid it doesn't match. Each covered cell gets the pixel offset into the source
     /// image it should display, computed from its position relative to the
     /// anchor; `img_w`/`img_h` are the image's natural pixel dimensions
     /// (from `pngDimensions`), `cell_px_w`/`cell_px_h` the session's fixed

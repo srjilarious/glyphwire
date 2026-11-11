@@ -10,7 +10,7 @@ const dispatch = glyphwire.dispatch;
 
 /// Frames `body` and feeds it through a `FrameDecoder`, returning the
 /// decoded body. Exercises wire framing + reassembly the way a real
-/// in-process harness would, without a real socket (Milestone 3).
+/// in-process harness would, without a real socket.
 fn roundTripThroughWire(alloc: std.mem.Allocator, body: []const u8) ![]u8 {
     var aw = std.Io.Writer.Allocating.init(alloc);
     defer aw.deinit();
@@ -1128,8 +1128,8 @@ pub fn drawImageScaleShrinksSourceStepAndRecordsScaleTest(io: std.Io, alloc: std
 }
 
 /// draw_image with row/col omitted anchors at the layer's current cursor
-/// -- the same convention decisions.md already documents for write_text,
-/// now actually wired in for the draw_* family too.
+/// -- the same convention write_text uses, wired in for the draw_*
+/// family too.
 pub fn drawImageOmittedRowColUsesCursorTest(io: std.Io, alloc: std.mem.Allocator) !void {
     _ = io;
     var ctx = try glyphwire.Context.init(alloc, 10, 10, 0);

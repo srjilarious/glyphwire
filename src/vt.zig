@@ -171,7 +171,8 @@ pub const Vt = struct {
 
 /// State of `Layer`'s small escape-sequence machine (see
 /// `consumeControl` / `stepEscape`). glyphwire has no full
-/// VT100/ANSI model -- it replaces that, per decisions.md -- but a plain
+/// VT100/ANSI model as its interface -- its own cell and layer messages
+/// replace in-band escapes for glyphwire-aware programs -- but a plain
 /// program mirrored onto the grid emits colour codes and simple
 /// cursor-move sequences, and drawing the raw bytes (`[31m` etc.) as
 /// garbage graphemes reads worse than acting on the common ones. So
@@ -867,8 +868,10 @@ fn stepEscape(self: *Layer, byte: u8) !void {
 /// `csi_buf[0..csi_len]` holds the parameter/intermediate bytes.
 /// Only the finals glyphwire interprets are handled; every other
 /// final returns without effect (the sequence's bytes were already
-/// kept off the grid by `stepEscape`). See `EscState` and, for the
-/// B1 screen-model finals, decisions.md's VT fallback section.
+/// kept off the grid by `stepEscape`). See `EscState`. The B1
+/// screen-model finals (scroll regions, insert/delete line and char,
+/// save/restore cursor) are here so full-screen programs on a pty draw
+/// correctly.
 fn execCsi(self: *Layer, final: u8) !void {
     const params = self.vt.csi_buf[0..self.vt.csi_len];
 

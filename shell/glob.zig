@@ -8,8 +8,8 @@ const std = @import("std");
 /// Supports `*` (any run, including empty), `?` (exactly one character),
 /// and `[...]` character classes (`[abc]`, ranges `[a-z]`, negation with
 /// a leading `!` or `^`). There is no `/` handling here on purpose: the
-/// shell only expands wildcards in the *final* path segment for now (see
-/// decisions.md), so a pattern reaching this function never contains a
+/// shell only expands wildcards in the *final* path segment for now
+/// (`ls src/*.zig` works, `ls */*.zig` stays literal), so a pattern reaching this function never contains a
 /// slash. A malformed class (`[` with no closing `]`) is treated as a
 /// literal `[`, same as bash.
 ///
